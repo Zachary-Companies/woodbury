@@ -1,7 +1,11 @@
 import { platform, homedir } from 'node:os';
 import { loadProjectContext, loadContextDirectory } from './context-loader.js';
 
-export async function buildSystemPrompt(workingDirectory: string, contextDir?: string): Promise<string> {
+export async function buildSystemPrompt(
+  workingDirectory: string,
+  contextDir?: string,
+  extensionPromptSections?: string[]
+): Promise<string> {
   const parts: string[] = [];
 
   // Identity
@@ -309,6 +313,137 @@ Each task has a tool call budget (default: 50). If a task exceeds its budget, it
 - **Let validators do the verification.** The \`test_file\` validator runs your test automatically on task completion. You do not need to manually run tests in a separate step — the system handles it. If the test fails, you will see the full output and must fix the issue.
 - The only exceptions to writing tests are trivial non-logic changes (config edits, comment-only changes, documentation).`);
 
+  // Vision Browsing & Desktop Control
+  parts.push(`
+## Vision Browsing & Desktop Control
+
+You can see the screen, control the browser, and operate the mouse and keyboard. This lets you fully interact with any GUI application.
+
+**CRITICAL:** You CANNOT see images directly — base64 data is just text to you. To see what is on screen, you MUST call \`vision_analyze\`. It captures a screenshot AND sends it to a vision AI that describes what is visible, returning a text description you can understand and act on.
+
+### Tools (in order of importance)
+1. **\`browser_query\`** — **PRECISE DOM ACCESS.** If the Woodbury Bridge Chrome extension is connected, this is your BEST tool for finding elements. Returns exact pixel coordinates, CSS selectors, text content, and element metadata from the real DOM. No guessing. Use \`browser_query(action="ping")\` to check if the extension is connected.
+2. **\`vision_analyze\`** — **YOUR EYES.** Captures the screen and sends it to a vision AI that describes what's visible. Use this when you need to see non-DOM content (desktop apps, images, visual layout). Also useful as a fallback if the Chrome extension is not connected.
+3. **\`mouse\`** — Move cursor, click, double-click, right-click, scroll, drag
+4. **\`keyboard\`** — Type text, press keys, keyboard shortcuts (Ctrl+C, etc.)
+5. **\`browser\`** — Open URLs in Chrome, close tabs, bring windows to front
+6. **\`screenshot\`** — Save a screenshot to a PNG file (for archival only — does NOT let you see the screen)
+7. **\`image_utils\`** — Convert image files to base64, crop regions, get dimensions
+
+### Browser Query (Chrome Extension) — Preferred for Web Pages
+
+When the Woodbury Bridge extension is connected, \`browser_query\` gives you **exact** DOM info:
+
+\`\`\`
+# Check connection
+browser_query(action="ping")
+
+# BEST WAY to find elements — describe what you want naturally:
+browser_query(action="find_interactive", description="Create project button")
+→ Returns: ranked candidates with confidence scores, exact coordinates,
+  page context (section, heading, siblings) so you can pick the right one
+
+# Find by text (simpler, less context)
+browser_query(action="find_element_by_text", text="Sign In")
+
+# List ALL clickable elements on the page
+browser_query(action="get_clickable_elements")
+
+# Get form fields with their selectors, labels, and current values
+browser_query(action="get_form_fields")
+
+# Click precisely by selector (triggers real browser click events)
+browser_query(action="click_element", selector="#login-btn")
+
+# Set an input value (works with React/Vue/Angular)
+browser_query(action="set_value", selector="input[name=email]", value="user@example.com")
+
+# Get page overview
+browser_query(action="get_page_info")
+\`\`\`
+
+### Disambiguating Elements — Making Judgement Calls
+
+Pages often have multiple elements with similar text (e.g. two "Create" buttons, three "Submit" links).
+When \`find_interactive\` or other search actions return multiple results, **use the context to decide**:
+
+1. **Check the nearest heading** — A "Create" button under "Projects" heading is different from one under "Teams"
+2. **Check the landmark/section** — Is it in the \`<nav>\`, \`<main>\`, \`<footer>\`, or a \`<form>\`?
+3. **Check siblings** — What's next to the element? Sibling elements reveal what section it belongs to
+4. **Check the confidence score** — Higher scores mean better text/attribute matches, but context matters more
+5. **Check the href or action** — For links, the URL reveals the target; for forms, the action reveals the purpose
+
+**Example:** User says "click the Create button"
+\`\`\`
+browser_query(action="find_interactive", description="Create button")
+→ Result #1 [HIGH]: <button> "Create" — under "Projects" (h2), in <main>
+→ Result #2 [MED]:  <button> "Create New" — under "Teams" (h2), in <aside>
+→ Result #3 [LOW]:  <a> "Create Account" — in <nav>
+\`\`\`
+If the user is on a projects page, pick #1. If they mentioned teams, pick #2. If unsure, pick the highest-ranked visible result — it's usually right.
+
+**When truly ambiguous:** Ask the user to clarify ("I found 3 Create buttons — one in Projects, one in Teams, and one in the nav. Which one?"). But only do this if the context is genuinely unclear.
+
+### MANDATORY Workflow: Query → Decide → Act → Verify
+
+When the user asks you to interact with a web page, you MUST follow this loop:
+
+\`\`\`
+Step 1: QUERY   → browser_query(action="ping") to check connection
+Step 2: FIND    → browser_query(action="find_interactive", description="...") — use natural language
+Step 3: DECIDE  → Review the ranked results and context. Pick the right element.
+Step 4: ACT     → browser_query(action="click_element", selector="...") or set_value, OR mouse(x, y)
+Step 5: VERIFY  → browser_query(action="get_page_info") or vision_analyze to check result
+Step 6: REPEAT  → If more actions needed, go back to Step 2
+\`\`\`
+
+**Fallback:** If browser_query is not available (extension not connected), fall back to the vision workflow:
+\`\`\`
+Step 1: LOOK    → vision_analyze(prompt="Describe what is on screen.")
+Step 2: LOCATE  → Extract coordinates from the vision response
+Step 3: ACT     → mouse(action="click", x=..., y=...) or keyboard(action="type", text="...")
+Step 4: VERIFY  → vision_analyze(prompt="What changed?")
+\`\`\`
+
+**IMPORTANT:** After finding elements, you MUST proceed to click/type/act. Do NOT just describe what you see and stop. The user wants you to DO things, not just look at them.
+
+### Example: Open a website and click a button
+\`\`\`
+1. browser(action="open", url="https://example.com", waitMs=5000)
+2. browser_query(action="ping")   ← check if extension is connected
+3. browser_query(action="find_element_by_text", text="Sign In")   ← get exact coordinates
+4. browser_query(action="click_element", selector="<selector from step 3>")   ← click precisely
+5. browser_query(action="get_form_fields")   ← find the login form inputs
+6. browser_query(action="set_value", selector="input[name=email]", value="user@example.com")
+7. browser_query(action="set_value", selector="input[name=password]", value="password123")
+8. browser_query(action="click_element", selector="button[type=submit]")
+9. browser_query(action="get_page_info")   ← verify login succeeded
+\`\`\`
+
+### Mouse Actions
+- \`mouse(action="move", x, y)\` — move cursor to coordinates
+- \`mouse(action="click", x, y)\` — left-click at coordinates (or current position if x/y omitted)
+- \`mouse(action="double_click", x, y)\` — double-click
+- \`mouse(action="right_click", x, y)\` — right-click (context menu)
+- \`mouse(action="scroll", scrollY=-3)\` — scroll up/down (negative=up, positive=down)
+- \`mouse(action="drag", x, y)\` — drag from current position to target
+
+### Keyboard Actions
+- \`keyboard(action="type", text="hello")\` — type a string of text
+- \`keyboard(action="press", key="enter")\` — press a single key
+- \`keyboard(action="press", key="a", ctrl=true)\` — Ctrl+A (select all)
+- \`keyboard(action="hotkey", key="c", ctrl=true)\` — Ctrl+C (copy)
+- \`keyboard(action="press", key="tab", repeat=3)\` — press Tab 3 times
+
+### Tips
+- **Prefer browser_query over vision_analyze** for web pages — it gives exact coordinates, not approximations
+- **Use vision_analyze for desktop apps** or when the Chrome extension is not connected
+- **Never call screenshot to "see" the screen** — it only saves a file
+- Use \`waitMs\`/\`delayMs\` to let the UI respond between actions
+- After acting, verify the result with \`browser_query(action="get_page_info")\` or \`vision_analyze\`
+- Use \`browser(action="focus")\` to ensure Chrome is in front before interacting
+- \`keyboard(action="press", key="escape")\` to dismiss popups/modals`);
+
   // Deliverable Packaging
   parts.push(`
 ## Deliverable Packaging
@@ -357,6 +492,14 @@ file contents, plan excerpts, constraints, conventions, file paths.
 - Subagents are independent — they can't see each other's work
 - Execute subagents write to disk; subsequent subagents see those changes
 - Keep tasks focused: one clear objective per delegation`);
+
+  // Extension-provided system prompt sections
+  if (extensionPromptSections && extensionPromptSections.length > 0) {
+    parts.push(`
+## Extension Instructions
+
+${extensionPromptSections.join('\n\n')}`);
+  }
 
   // Project context
   const projectContext = await loadProjectContext(workingDirectory);

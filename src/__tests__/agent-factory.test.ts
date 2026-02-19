@@ -18,6 +18,7 @@ jest.mock('../loop/index.js', () => ({
         metadata: { executionTime: 100, iterations: 1 }
       }),
       getAvailableTools: jest.fn().mockReturnValue(['file_read', 'bash']),
+      progressLogger: { disabled: false },
     };
     return instance;
   }),

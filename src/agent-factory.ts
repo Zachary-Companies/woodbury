@@ -3,6 +3,8 @@ import type { AgentResult } from './types';
 import { WoodburyLogger } from './logger';
 import type { WoodburyConfig } from './types';
 import { buildSystemPrompt } from './system-prompt.js';
+import { ensureBridgeServer, bridgeServer } from './bridge-server.js';
+import type { ExtensionManager } from './extension-manager.js';
 
 export interface AgentHandle {
   run(input: string, signal?: AbortSignal): Promise<AgentResult>;
@@ -15,16 +17,36 @@ export interface AgentHandle {
 
 export { type AgentResult } from './types';
 
-export async function createAgent(config: WoodburyConfig): Promise<AgentHandle> {
+export async function createAgent(
+  config: WoodburyConfig,
+  extensionManager?: ExtensionManager
+): Promise<AgentHandle> {
   const logger = new WoodburyLogger(config.verbose || false);
 
   try {
     // Create tool registry
     const toolRegistry = createDefaultToolRegistry();
 
-    // Build the comprehensive system prompt with project context
+    // Register extension tools
+    if (extensionManager) {
+      for (const { definition, handler } of extensionManager.getAllTools()) {
+        try {
+          toolRegistry.register(definition, handler);
+        } catch (err) {
+          logger.warn(`Extension tool "${definition.name}" registration failed: ${err}`);
+        }
+      }
+    }
+
+    // Start the bridge server for Chrome extension communication (non-blocking)
+    ensureBridgeServer().catch(() => {
+      // Silently ignore — browser_query tool will report the error when used
+    });
+
+    // Build the comprehensive system prompt with project context + extension prompts
     const workingDirectory = config.workingDirectory || process.cwd();
-    const systemPrompt = await buildSystemPrompt(workingDirectory, config.contextDir);
+    const extensionPrompts = extensionManager?.getAllPromptSections();
+    const systemPrompt = await buildSystemPrompt(workingDirectory, config.contextDir, extensionPrompts);
 
     // Configure agent
     const provider = getProvider(config);
@@ -50,6 +72,9 @@ export async function createAgent(config: WoodburyConfig): Promise<AgentHandle> 
       setOnToken(callback: ((token: string) => void) | undefined): void {
         (agent as any).config.onToken = callback;
         (agent as any).config.streaming = !!callback;
+        // Disable progress logger when streaming — its ANSI cursor movement
+        // is incompatible with the REPL's scroll-region terminal layout.
+        (agent as any).progressLogger.disabled = !!callback;
       },
 
       setOnToolStart(callback: ((name: string, params?: any) => void) | undefined): void {
@@ -86,7 +111,8 @@ export async function createAgent(config: WoodburyConfig): Promise<AgentHandle> 
       },
       
       async stop(): Promise<void> {
-        // Cleanup if needed
+        // Stop the bridge server
+        await bridgeServer.stop().catch(() => {});
         logger.info('Agent stopped');
       }
     };

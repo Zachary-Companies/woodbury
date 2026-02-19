@@ -49,6 +49,27 @@ export { definition as memorySaveDefinition, handler as memorySaveHandler } from
 export { definition as memoryRecallDefinition, handler as memoryRecallHandler } from './memory-recall.js';
 export { definition as preflightCheckDefinition, handler as preflightCheckHandler } from './preflight-check.js';
 
+// Flow-Frame tools (powered by flow-frame-core)
+export { ffPdfExtractDefinition, ffPdfExtractHandler } from './ff-pdf-extract.js';
+export { ffWebScrapeDefinition, ffWebScrapeHandler } from './ff-web-scrape.js';
+export { ffJsonExtractDefinition, ffJsonExtractHandler } from './ff-json-extract.js';
+export { ffPromptChainDefinition, ffPromptChainHandler } from './ff-prompt-chain.js';
+export { ffPromptOptimizeDefinition, ffPromptOptimizeHandler } from './ff-prompt-optimize.js';
+export { ffWorkflowExecuteDefinition, ffWorkflowExecuteHandler } from './ff-workflow-execute.js';
+
+// Screenshot & Vision tools (powered by flow-frame-core)
+export { ffScreenshotDefinition, ffScreenshotHandler } from './ff-screenshot.js';
+export { ffVisionDefinition, ffVisionHandler } from './ff-vision.js';
+export { ffImageUtilsDefinition, ffImageUtilsHandler } from './ff-image-utils.js';
+export { ffBrowserDefinition, ffBrowserHandler } from './ff-browser.js';
+
+// Mouse & Keyboard tools (powered by robotjs via flow-frame-core)
+export { ffMouseDefinition, ffMouseHandler } from './ff-mouse.js';
+export { ffKeyboardDefinition, ffKeyboardHandler } from './ff-keyboard.js';
+
+// Browser Bridge tool (Chrome extension via WebSocket)
+export { browserQueryDefinition, browserQueryHandler } from './browser-query.js';
+
 // Import what we need for allTools array
 import { fileReadDefinition, fileReadHandler } from './file-read.js';
 import { fileWriteDefinition, fileWriteHandler } from './file-write.js';
@@ -68,6 +89,19 @@ import { duckduckgoSearchDefinition, duckduckgoSearchHandler } from './duckduckg
 import { searxngSearchDefinition, searxngSearchHandler } from './searxng-search.js';
 import { apiSearchDefinition, apiSearchHandler } from './api-search.js';
 import { databaseQueryDefinition, databaseQueryHandler } from './database-query.js';
+import { ffPdfExtractDefinition, ffPdfExtractHandler } from './ff-pdf-extract.js';
+import { ffWebScrapeDefinition, ffWebScrapeHandler } from './ff-web-scrape.js';
+import { ffJsonExtractDefinition, ffJsonExtractHandler } from './ff-json-extract.js';
+import { ffPromptChainDefinition, ffPromptChainHandler } from './ff-prompt-chain.js';
+import { ffPromptOptimizeDefinition, ffPromptOptimizeHandler } from './ff-prompt-optimize.js';
+import { ffWorkflowExecuteDefinition, ffWorkflowExecuteHandler } from './ff-workflow-execute.js';
+import { ffScreenshotDefinition, ffScreenshotHandler } from './ff-screenshot.js';
+import { ffVisionDefinition, ffVisionHandler } from './ff-vision.js';
+import { ffImageUtilsDefinition, ffImageUtilsHandler } from './ff-image-utils.js';
+import { ffBrowserDefinition, ffBrowserHandler } from './ff-browser.js';
+import { ffMouseDefinition, ffMouseHandler } from './ff-mouse.js';
+import { ffKeyboardDefinition, ffKeyboardHandler } from './ff-keyboard.js';
+import { browserQueryDefinition, browserQueryHandler } from './browser-query.js';
 
 // All tools array for convenience
 export const allTools = [
@@ -89,4 +123,21 @@ export const allTools = [
   { definition: searxngSearchDefinition, handler: searxngSearchHandler },
   { definition: apiSearchDefinition, handler: apiSearchHandler },
   { definition: databaseQueryDefinition, handler: databaseQueryHandler },
+  // Flow-Frame tools (powered by flow-frame-core)
+  { definition: ffPdfExtractDefinition, handler: ffPdfExtractHandler },
+  { definition: ffWebScrapeDefinition, handler: ffWebScrapeHandler },
+  { definition: ffJsonExtractDefinition, handler: ffJsonExtractHandler },
+  { definition: ffPromptChainDefinition, handler: ffPromptChainHandler },
+  { definition: ffPromptOptimizeDefinition, handler: ffPromptOptimizeHandler },
+  { definition: ffWorkflowExecuteDefinition, handler: ffWorkflowExecuteHandler },
+  // Screenshot & Vision tools (powered by flow-frame-core)
+  { definition: ffScreenshotDefinition, handler: ffScreenshotHandler },
+  { definition: ffVisionDefinition, handler: ffVisionHandler },
+  { definition: ffImageUtilsDefinition, handler: ffImageUtilsHandler },
+  { definition: ffBrowserDefinition, handler: ffBrowserHandler },
+  // Mouse & Keyboard tools (powered by robotjs)
+  { definition: ffMouseDefinition, handler: ffMouseHandler },
+  { definition: ffKeyboardDefinition, handler: ffKeyboardHandler },
+  // Browser Bridge (Chrome extension via WebSocket)
+  { definition: browserQueryDefinition, handler: browserQueryHandler },
 ];

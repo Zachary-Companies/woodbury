@@ -5,7 +5,7 @@ function createChainable(prefix = ''): any {
   const fn: any = (str: string) => prefix ? `[${prefix}]${str}` : str;
   
   // Add color methods that return new chainable functions
-  const colors = ['red', 'green', 'blue', 'yellow', 'cyan', 'magenta', 'white', 'gray', 'grey', 'whiteBright', 
+  const colors = ['red', 'green', 'blue', 'yellow', 'cyan', 'magenta', 'white', 'gray', 'grey', 'whiteBright', 'visible',
                   'bgRed', 'bgGreen', 'bgBlue', 'bgYellow', 'bgCyan', 'bgMagenta', 'bgWhite', 'bgGray', 'bgGrey'];
   const modifiers = ['bold', 'dim', 'italic', 'underline', 'inverse', 'hidden', 'strikethrough'];
   

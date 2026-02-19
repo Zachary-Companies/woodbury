@@ -8,7 +8,7 @@ function createChainable(prefix = '') {
   };
   
   // Add color methods that return new chainable functions
-  const colors = ['red', 'green', 'blue', 'yellow', 'cyan', 'magenta', 'white', 'gray', 'grey', 'whiteBright', 
+  const colors = ['red', 'green', 'blue', 'yellow', 'cyan', 'magenta', 'white', 'gray', 'grey', 'whiteBright', 'visible',
                   'bgRed', 'bgGreen', 'bgBlue', 'bgYellow', 'bgCyan', 'bgMagenta', 'bgWhite', 'bgGray', 'bgGrey'];
   const modifiers = ['bold', 'dim', 'italic', 'underline', 'inverse', 'hidden', 'strikethrough'];
   

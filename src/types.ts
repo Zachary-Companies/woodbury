@@ -58,6 +58,9 @@ export interface WoodburyConfig {
   orchestrate?: boolean;
   jobsFile?: string;
   stream?: boolean;
+
+  /** Disable all extensions */
+  noExtensions?: boolean;
 }
 
 // Job orchestration types
@@ -141,6 +144,7 @@ export interface SlashCommandContext {
   workingDirectory: string;
   print: (message: string) => void;
   agent?: any;
+  extensionManager?: any;
 }
 
 // Renderer types
@@ -191,3 +195,14 @@ export function classifyError(error: any): 'network' | 'auth' | 'rate_limit' | '
   
   return 'unknown';
 }
+
+// Extension system types (re-exported for convenience)
+export type {
+  ExtensionContext,
+  ExtensionSlashCommand,
+  ExtensionCommandContext,
+  WebUIOptions,
+  WebUIHandle,
+  ExtensionLogger,
+  WoodburyExtension,
+} from './extension-api.js';

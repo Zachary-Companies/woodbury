@@ -137,9 +137,11 @@ export class ProgressLogger {
   private recentTools: string[] = [];
   private maxRecentTools = 3;
   private stopped = false; // Guard against rendering after stop
+  public disabled: boolean; // When true, all output is suppressed
 
-  constructor(verbose: boolean = false) {
-    this.verbose = verbose;
+  constructor(disabled: boolean = false) {
+    this.verbose = false;
+    this.disabled = disabled;
   }
 
   private getSpinnerChar(): string {
@@ -181,7 +183,7 @@ export class ProgressLogger {
   }
 
   private render(): void {
-    if (!this.currentState || this.stopped) return;
+    if (this.disabled || !this.currentState || this.stopped) return;
 
     const line1 = this.formatLine1(this.currentState);
     const line2 = this.formatLine2();
@@ -204,6 +206,7 @@ export class ProgressLogger {
    * Start the progress display
    */
   start(initialState?: Partial<ProgressState>): void {
+    if (this.disabled) return;
     this.stopped = false; // Reset stopped flag for reuse
     this.currentState = {
       iteration: 0,
@@ -230,6 +233,7 @@ export class ProgressLogger {
    * Update the progress state
    */
   update(state: Partial<ProgressState>): void {
+    if (this.disabled) return;
     if (!this.currentState) {
       this.start(state);
       return;
@@ -275,6 +279,7 @@ export class ProgressLogger {
    * Stop the progress display and show final state
    */
   stop(finalMessage?: string): void {
+    if (this.disabled) return;
     // Prevent any further rendering
     if (this.stopped) return;
     this.stopped = true;
@@ -307,6 +312,7 @@ export class ProgressLogger {
    * Clear the progress display completely
    */
   clear(): void {
+    if (this.disabled) return;
     this.stopped = true;
 
     if (this.spinnerInterval) {

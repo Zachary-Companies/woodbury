@@ -178,6 +178,41 @@ export const slashCommands: SlashCommand[] = [
   },
   
   {
+    name: 'extensions',
+    description: 'List loaded extensions',
+    async handler(_args: string[], ctx: SlashCommandContext) {
+      const manager = ctx.extensionManager;
+      if (!manager) {
+        ctx.print(chalk.yellow('Extension system not initialized.'));
+        ctx.print(chalk.gray('  Extensions are loaded on startup from ~/.woodbury/extensions/'));
+        return;
+      }
+
+      const summaries = manager.getExtensionSummaries();
+      if (summaries.length === 0) {
+        ctx.print(chalk.yellow('No extensions loaded.'));
+        ctx.print(chalk.gray('  Install: woodbury ext install <package-name>'));
+        ctx.print(chalk.gray('  Create:  woodbury ext create <name>'));
+        ctx.print(chalk.gray('  Local:   ~/.woodbury/extensions/<name>/'));
+        return;
+      }
+
+      ctx.print(chalk.green(`Loaded extensions (${summaries.length}):`));
+      for (const s of summaries) {
+        ctx.print(chalk.blue(`  ${s.displayName}`) + chalk.gray(` v${s.version} [${s.source}]`));
+        const parts: string[] = [];
+        if (s.tools > 0) parts.push(`${s.tools} tool(s)`);
+        if (s.commands > 0) parts.push(`${s.commands} command(s)`);
+        if (s.hasPrompt) parts.push('prompt');
+        if (s.webUIs.length > 0) parts.push(`web: ${s.webUIs.join(', ')}`);
+        if (parts.length > 0) {
+          ctx.print(chalk.gray(`    ${parts.join(' | ')}`));
+        }
+      }
+    }
+  },
+
+  {
     name: 'load',
     description: 'Load a saved conversation',
     async handler(args: string[], ctx: SlashCommandContext) {

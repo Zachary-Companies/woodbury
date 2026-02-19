@@ -8,7 +8,11 @@ import { orchestrateJobs } from './orchestrate';
 import { WoodburyLogger } from './logger';
 import { colors, icons, labels } from './colors';
 import path from 'path';
-import { promises as fs } from 'fs';
+import { existsSync, promises as fs } from 'fs';
+import { homedir } from 'os';
+import { ExtensionManager } from './extension-manager.js';
+import { EXTENSIONS_DIR, discoverExtensions } from './extension-loader.js';
+import { scaffoldExtension } from './extension-scaffold.js';
 
 const program = new Command();
 
@@ -38,7 +42,8 @@ program
   .option('--max-iterations <number>', 'Maximum agent iterations', parseInt)
   .option('--timeout <number>', 'Timeout in milliseconds', parseInt)
   .option('--safe', 'Enable safe mode (extra confirmations)')
-  .option('--no-stream', 'Disable token streaming');
+  .option('--no-stream', 'Disable token streaming')
+  .option('--no-extensions', 'Disable all extensions');
 
 // Interactive REPL command
 program
@@ -50,7 +55,23 @@ program
     const config = await buildConfig(options);
 
     try {
-      await startRepl(config);
+      // Load extensions unless disabled
+      let extensionManager: ExtensionManager | undefined;
+      if (!config.noExtensions) {
+        extensionManager = new ExtensionManager(
+          config.workingDirectory || process.cwd(),
+          config.verbose || false
+        );
+        const { loaded, errors } = await extensionManager.loadAll();
+        if (loaded.length > 0 && config.verbose) {
+          console.log(`  ${icons.success}  Extensions: ${loaded.join(', ')}`);
+        }
+        for (const e of errors) {
+          console.warn(`  ${icons.warning}  Extension "${e.name}" failed: ${e.error}`);
+        }
+      }
+
+      await startRepl(config, extensionManager);
     } catch (error) {
       console.error(`${icons.error}  ${labels.error}`, colors.error(String(error)));
       process.exit(1);
@@ -137,6 +158,101 @@ program
     }
   });
 
+// Extension management commands
+const ext = program
+  .command('ext')
+  .description('Manage extensions');
+
+ext
+  .command('list')
+  .description('List installed extensions')
+  .action(async () => {
+    const manifests = await discoverExtensions();
+    if (manifests.length === 0) {
+      console.log(colors.muted('No extensions installed.'));
+      console.log(colors.muted(`  Install from npm:  woodbury ext install <package-name>`));
+      console.log(colors.muted(`  Create new:        woodbury ext create <name>`));
+      console.log(colors.muted(`  Local directory:   ${EXTENSIONS_DIR}/<name>/`));
+      return;
+    }
+    console.log(colors.primary.bold(`Extensions (${manifests.length}):`));
+    console.log();
+    for (const m of manifests) {
+      console.log(`  ${colors.secondary(m.name)} ${colors.muted(`v${m.version}`)} ${colors.muted(`[${m.source}]`)}`);
+      if (m.description) {
+        console.log(`    ${colors.muted(m.description)}`);
+      }
+      if (m.provides.length > 0) {
+        console.log(`    ${colors.muted('Provides: ' + m.provides.join(', '))}`);
+      }
+    }
+  });
+
+ext
+  .command('install <package>')
+  .description('Install an extension from npm')
+  .action(async (packageName: string) => {
+    const { execSync } = await import('child_process');
+
+    // Ensure extensions directory exists
+    await fs.mkdir(EXTENSIONS_DIR, { recursive: true });
+
+    // Initialize package.json if it doesn't exist
+    const pkgJsonPath = path.join(EXTENSIONS_DIR, 'package.json');
+    if (!existsSync(pkgJsonPath)) {
+      await fs.writeFile(pkgJsonPath, JSON.stringify({ private: true, dependencies: {} }, null, 2));
+    }
+
+    console.log(`${icons.running}  Installing ${packageName}...`);
+    try {
+      execSync(`npm install ${packageName}`, {
+        cwd: EXTENSIONS_DIR,
+        stdio: 'inherit',
+      });
+      console.log(`${icons.success}  ${colors.success(`Installed ${packageName}`)}`);
+      console.log(colors.muted('  Restart Woodbury to activate.'));
+    } catch (error) {
+      console.error(`${icons.error}  ${colors.error(`Failed to install: ${error}`)}`);
+      process.exit(1);
+    }
+  });
+
+ext
+  .command('uninstall <package>')
+  .description('Uninstall an npm extension')
+  .action(async (packageName: string) => {
+    const { execSync } = await import('child_process');
+    console.log(`${icons.running}  Uninstalling ${packageName}...`);
+    try {
+      execSync(`npm uninstall ${packageName}`, {
+        cwd: EXTENSIONS_DIR,
+        stdio: 'inherit',
+      });
+      console.log(`${icons.success}  ${colors.success(`Uninstalled ${packageName}`)}`);
+    } catch (error) {
+      console.error(`${icons.error}  ${colors.error(`Failed to uninstall: ${error}`)}`);
+      process.exit(1);
+    }
+  });
+
+ext
+  .command('create <name>')
+  .description('Scaffold a new extension')
+  .action(async (name: string) => {
+    try {
+      const dir = await scaffoldExtension(name);
+      console.log(`${icons.success}  ${colors.success('Extension scaffolded!')}`);
+      console.log();
+      console.log(`  ${colors.muted('Directory:')} ${dir}`);
+      console.log(`  ${colors.muted('Edit:')}      ${path.join(dir, 'index.js')}`);
+      console.log();
+      console.log(colors.muted('  Restart Woodbury to activate.'));
+    } catch (error) {
+      console.error(`${icons.error}  ${colors.error(String(error))}`);
+      process.exit(1);
+    }
+  });
+
 // Default command (runs REPL if no args provided)
 if (process.argv.length === 2) {
   program.parse([...process.argv, 'repl']);
@@ -163,6 +279,7 @@ async function buildConfig(options: any): Promise<WoodburyConfig> {
     timeout: options.timeout,
     safe: options.safe || false,
     stream: options.stream !== false,  // default true unless --no-stream
+    noExtensions: options.extensions === false,  // --no-extensions flag
     orchestrate: false
   };
 

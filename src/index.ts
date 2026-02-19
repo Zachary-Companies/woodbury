@@ -15,6 +15,18 @@ export { colors, icons, labels, format, box } from './colors';
 export { ConsoleRenderer } from './renderer';
 export { WoodburyLogger, logger } from './logger';
 
+// Re-export extension API types (for extension authors: import { ... } from 'woodbury')
+export type {
+  WoodburyExtension,
+  ExtensionContext,
+  ExtensionSlashCommand,
+  ExtensionCommandContext,
+  WebUIOptions,
+  WebUIHandle,
+  ExtensionLogger,
+} from './extension-api';
+export type { ToolDefinition, ToolHandler } from './extension-api';
+
 // Main entry point
 if (require.main === module) {
   // Check if this is being run directly

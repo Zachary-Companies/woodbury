@@ -7,10 +7,8 @@ import * as os from 'os';
 
 export type LLMProvider = 'openai' | 'anthropic' | 'groq';
 
-// Load API keys from ~/.agentic-loop/.env if not already in environment
-function loadEnvFromAgenticLoop(): void {
-  const envPath = path.join(os.homedir(), '.agentic-loop', '.env');
-
+// Load API keys from .env files. Checks ~/.woodbury/.env first, falls back to ~/.agentic-loop/.env.
+function loadEnvFile(envPath: string): void {
   try {
     if (fs.existsSync(envPath)) {
       const content = fs.readFileSync(envPath, 'utf-8');
@@ -44,8 +42,18 @@ function loadEnvFromAgenticLoop(): void {
   }
 }
 
-// Load env on module initialization
-loadEnvFromAgenticLoop();
+// Load env on module initialization — ~/.woodbury/.env takes priority
+loadEnvFile(path.join(os.homedir(), '.woodbury', '.env'));
+loadEnvFile(path.join(os.homedir(), '.agentic-loop', '.env'));
+
+// Bridge standard env var names to flow-frame-core's expected names.
+// flow-frame-core uses OPEN_AI_KEY (not OPENAI_API_KEY) and GROK_API_KEY (not GROQ_API_KEY).
+if (process.env.OPENAI_API_KEY && !process.env.OPEN_AI_KEY) {
+  process.env.OPEN_AI_KEY = process.env.OPENAI_API_KEY;
+}
+if (process.env.GROQ_API_KEY && !process.env.GROK_API_KEY) {
+  process.env.GROK_API_KEY = process.env.GROQ_API_KEY;
+}
 
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant';

@@ -1,29 +1,18 @@
-import chalk from 'chalk';
 import { marked } from 'marked';
 import TerminalRenderer from 'marked-terminal';
-import { WoodburyConfig, SlashCommandContext } from './types';
+import { WoodburyConfig, SlashCommand, SlashCommandContext } from './types';
 import { logger } from './logger';
 import { createAgent, AgentHandle } from './agent-factory';
-import { colors, icons, labels, format, box } from './colors';
+import { colors, icons, labels, format, box, markdownTheme } from './colors';
 import { slashCommands } from './slash-commands.js';
 import { FileConversationManager } from './conversation.js';
 import { compactContext } from './context-compactor.js';
+import type { ExtensionManager } from './extension-manager.js';
 
-// Configure marked to render markdown in terminal
+// Configure marked to render markdown in terminal with theme-aware colors
 marked.setOptions({
   renderer: new TerminalRenderer({
-    // Code styling
-    code: chalk.hex('#A5D6FF'),
-    codespan: chalk.hex('#A5D6FF').bgHex('#1F2937'),
-    // Headings
-    heading: chalk.hex('#C4B5FD').bold,
-    // Links
-    href: chalk.hex('#60A5FA').underline,
-    // Emphasis
-    strong: chalk.bold,
-    em: chalk.italic,
-    // Block quotes
-    blockquote: chalk.hex('#9CA3AF').italic,
+    ...markdownTheme,
     // Layout
     reflowText: true,
     width: Math.min(process.stdout.columns || 80, 100),
@@ -161,16 +150,20 @@ class TerminalLayout {
 
   /**
    * Flush the current stream buffer as a completed line.
-   * Scrolls the content up and clears the stream buffer.
+   * The buffer content is already visible at the bottom of the scroll region
+   * (written char-by-char in writeRaw). We just need to scroll it up and
+   * clear the buffer so the next line starts fresh.
    */
   private flushStreamLine(): void {
     const scrollBottom = this.rows - 1;
 
-    // Move to bottom of scroll region and scroll up
+    // Move to bottom of scroll region and scroll up.
+    // The \n scrolls the existing content (already displayed) up into the
+    // scroll history. Do NOT re-write the buffer — it's already visible.
     process.stdout.write(`\x1b[${scrollBottom};1H`);
     process.stdout.write('\n');
+    // Clear the new empty line at the bottom (ready for next content)
     process.stdout.write('\x1b[2K');
-    process.stdout.write(this.streamBuffer);
 
     this.streamBuffer = '';
     this.streamCol = 0;
@@ -178,18 +171,34 @@ class TerminalLayout {
 
   /**
    * Redraw the prompt row at the bottom of the terminal.
+   * Handles long input by showing a sliding window around the cursor.
    */
   redrawPrompt(): void {
     if (!this.active) return;
+
+    const maxInputWidth = this.cols - this.promptPrefixLen;
+    let displayInput = this.currentInput;
+    let displayCursorPos = this.cursorPos;
+
+    if (displayInput.length > maxInputWidth) {
+      // Show a window of text around the cursor position
+      let start = this.cursorPos - Math.floor(maxInputWidth / 2);
+      if (start < 0) start = 0;
+      if (start + maxInputWidth > displayInput.length) {
+        start = Math.max(0, displayInput.length - maxInputWidth);
+      }
+      displayInput = displayInput.slice(start, start + maxInputWidth);
+      displayCursorPos = this.cursorPos - start;
+    }
 
     // Move to prompt row (last row)
     process.stdout.write(`\x1b[${this.rows};1H`);
     // Clear the line
     process.stdout.write('\x1b[2K');
-    // Draw prompt + current input
-    process.stdout.write(this.promptPrefix + this.currentInput);
+    // Draw prompt + visible portion of input
+    process.stdout.write(this.promptPrefix + displayInput);
     // Position cursor
-    const cursorCol = this.promptPrefixLen + this.cursorPos + 1;
+    const cursorCol = this.promptPrefixLen + displayCursorPos + 1;
     process.stdout.write(`\x1b[${this.rows};${cursorCol}H`);
   }
 
@@ -235,6 +244,7 @@ class TerminalLayout {
 export interface ReplOptions {
   config: WoodburyConfig;
   prompt?: string;
+  extensionManager?: ExtensionManager;
 }
 
 export class Repl {
@@ -270,6 +280,10 @@ export class Repl {
   // Flag for non-TTY fallback
   private isTTY: boolean;
 
+  // Extension system
+  private extensionManager?: ExtensionManager;
+  private allSlashCommands: SlashCommand[];
+
   constructor(private options: ReplOptions) {
     this.config = options.config;
     this.conversationManager = new FileConversationManager(
@@ -277,6 +291,13 @@ export class Repl {
     );
     this.layout = new TerminalLayout();
     this.isTTY = !!process.stdin.isTTY;
+    this.extensionManager = options.extensionManager;
+
+    // Merge built-in slash commands with extension-provided ones
+    this.allSlashCommands = [
+      ...slashCommands,
+      ...(this.extensionManager?.getAllCommands() || []),
+    ];
   }
 
   private print(text: string): void {
@@ -290,7 +311,7 @@ export class Repl {
   private async ensureAgent(): Promise<AgentHandle> {
     if (!this.agent) {
       this.print(`${icons.running}  ${colors.muted('Initializing agent...')}`);
-      this.agent = await createAgent(this.config);
+      this.agent = await createAgent(this.config, this.extensionManager);
       this.print(`${icons.complete}  ${colors.success('Agent ready')}`);
       this.print('');
     }
@@ -322,7 +343,7 @@ export class Repl {
     const cmdName = parts[0].toLowerCase();
     const args = parts.slice(1);
 
-    const cmd = slashCommands.find(c => c.name === cmdName);
+    const cmd = this.allSlashCommands.find(c => c.name === cmdName);
     if (!cmd) {
       this.print(`${icons.error}  ${colors.error(`Unknown command: /${cmdName}`)}`);
       this.print(colors.muted('  Type /help to see available commands'));
@@ -336,7 +357,8 @@ export class Repl {
         getTools: () => this.agent!.getTools(),
         stop: () => this.agent!.stop()
       } : undefined,
-      print: (msg: string) => this.print(msg)
+      print: (msg: string) => this.print(msg),
+      extensionManager: this.extensionManager
     };
 
     try {
@@ -700,14 +722,17 @@ export class Repl {
 
       const messageWithHistory = this.buildConversationContext(trimmed);
 
-      // Enable streaming: print tokens as they arrive, filtering XML tags
+      // Enable streaming: only show content inside <final_answer> tags.
+      // Intermediate iterations (reasoning, tool calls) are suppressed to avoid
+      // duplicate/repeated output when the agent does multiple iterations.
       let headerPrinted = false;
       let isStreaming = false;
       let tagBuffer = '';
       let insideTag = false;
+      let insideFinalAnswer = false;
+      let insideToolCall = false;
 
       agent.setOnToken((token: string) => {
-        // Buffer and strip XML tags (<tool_call>, <final_answer>, etc.)
         for (const char of token) {
           if (char === '<') {
             insideTag = true;
@@ -718,8 +743,36 @@ export class Repl {
             tagBuffer += char;
             if (char === '>') {
               insideTag = false;
-              // Check if it's a known XML tag — if not, flush the buffer as content
-              if (!/^<\/?(tool_call|name|parameters|final_answer|tool_result)[^>]*>$/.test(tagBuffer)) {
+
+              // Detect opening/closing of known XML blocks
+              if (/^<final_answer>$/i.test(tagBuffer)) {
+                insideFinalAnswer = true;
+                tagBuffer = '';
+                continue;
+              }
+              if (/^<\/final_answer>$/i.test(tagBuffer)) {
+                insideFinalAnswer = false;
+                tagBuffer = '';
+                continue;
+              }
+              if (/^<tool_call>$/i.test(tagBuffer)) {
+                insideToolCall = true;
+                tagBuffer = '';
+                continue;
+              }
+              if (/^<\/tool_call>$/i.test(tagBuffer)) {
+                insideToolCall = false;
+                tagBuffer = '';
+                continue;
+              }
+              // Other known XML tags (name, parameters, tool_result) — suppress
+              if (/^<\/?(name|parameters|tool_result)[^>]*>$/.test(tagBuffer)) {
+                tagBuffer = '';
+                continue;
+              }
+
+              // Unknown tag — if we're inside final_answer, flush it as content
+              if (insideFinalAnswer && !insideToolCall) {
                 if (!headerPrinted) {
                   this.print(`${icons.assistant}  ${labels.woodbury}`);
                   this.printDivider('light');
@@ -734,15 +787,17 @@ export class Repl {
             continue;
           }
 
-          // Regular content — stream it character by character
-          if (!headerPrinted) {
-            this.print(`${icons.assistant}  ${labels.woodbury}`);
-            this.printDivider('light');
-            this.print('');
-            headerPrinted = true;
-            isStreaming = true;
+          // Regular content — only stream if inside <final_answer>
+          if (insideFinalAnswer && !insideToolCall) {
+            if (!headerPrinted) {
+              this.print(`${icons.assistant}  ${labels.woodbury}`);
+              this.printDivider('light');
+              this.print('');
+              headerPrinted = true;
+              isStreaming = true;
+            }
+            this.printRaw(char);
           }
-          this.printRaw(char);
         }
       });
 
@@ -928,6 +983,11 @@ export class Repl {
 
     await this.conversationManager.save();
 
+    // Deactivate all extensions (close web servers, etc.)
+    if (this.extensionManager) {
+      await this.extensionManager.deactivateAll();
+    }
+
     // Teardown layout before printing goodbye
     this.layout.teardown();
 
@@ -960,8 +1020,11 @@ export class Repl {
   }
 }
 
-export async function startRepl(config: WoodburyConfig): Promise<void> {
-  const repl = new Repl({ config });
+export async function startRepl(
+  config: WoodburyConfig,
+  extensionManager?: ExtensionManager
+): Promise<void> {
+  const repl = new Repl({ config, extensionManager });
   return repl.start();
 }
 

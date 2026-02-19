@@ -1,23 +1,14 @@
-import chalk from 'chalk';
 import { marked } from 'marked';
 import TerminalRenderer from 'marked-terminal';
 import type { Renderer, RunStats, TerminalRenderer as ITerminalRenderer } from './types';
-import { colors, icons, labels, format } from './colors';
+import { colors, icons, labels, format, markdownTheme } from './colors';
 
 export type { Renderer, RunStats, TerminalRenderer } from './types';
 
-// Configure marked for terminal output with custom theme
+// Configure marked for terminal output with theme-aware colors
 marked.setOptions({
   renderer: new TerminalRenderer({
-    // Code blocks
-    code: chalk.hex('#A5D6FF'),
-    codespan: chalk.hex('#A5D6FF').bgHex('#1F2937'),
-    // Headings
-    heading: chalk.hex('#C4B5FD').bold,
-    // Links
-    href: chalk.hex('#60A5FA').underline,
-    // Lists
-    listitem: chalk.white,
+    ...markdownTheme,
     // Tables
     tableOptions: {
       chars: {
@@ -27,13 +18,6 @@ marked.setOptions({
         right: '│', 'right-mid': '┤', middle: '│'
       }
     },
-    // Emphasis
-    strong: chalk.bold,
-    em: chalk.italic,
-    // Block quotes
-    blockquote: chalk.hex('#9CA3AF').italic,
-    // Horizontal rule
-    hr: chalk.hex('#4B5563'),
     // Other
     reflowText: true,
     width: Math.min(process.stdout.columns || 80, 100),

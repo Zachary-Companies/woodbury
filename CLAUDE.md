@@ -38,6 +38,33 @@ Woodbury is an interactive AI coding assistant CLI built on the agentic loop emb
 | `src/slash-commands.ts` | Slash command registry and handlers (`/help`, `/exit`, `/clear`, etc.) |
 | `src/marked-terminal.d.ts` | Type declaration for `marked-terminal` package |
 
+### Extension System
+- Extensions live in `~/.woodbury/extensions/` (local dirs) and `~/.woodbury/extensions/node_modules/woodbury-ext-*` (npm)
+- Each extension has `package.json` with a `"woodbury"` field containing `name`, `displayName`, `description`, `provides`
+- Extensions export `activate(ctx)` and optionally `deactivate()`
+- The `ExtensionContext` provides: `registerTool()`, `registerCommand()`, `addSystemPrompt()`, `serveWebUI()`, `workingDirectory`, `log`, `bridgeServer`
+
+| File | Purpose |
+|------|---------|
+| `src/extension-api.ts` | Public types for extension authors (`WoodburyExtension`, `ExtensionContext`, etc.) |
+| `src/extension-loader.ts` | Discovers extensions from local dirs + npm packages, validates manifests |
+| `src/extension-manager.ts` | Lifecycle coordinator: load, activate, aggregate tools/commands/prompts, serve web UIs, deactivate |
+| `src/extension-scaffold.ts` | `woodbury ext create` generates starter extension with all four capabilities |
+
+**Extension data flow:**
+1. `cli.ts` creates `ExtensionManager` → calls `loadAll()` → discovers + activates all extensions
+2. `ExtensionManager` is passed to `startRepl()` → merges extension commands with built-in slash commands
+3. `createAgent()` in `agent-factory.ts` receives `ExtensionManager` → registers extension tools in `ToolRegistry` → passes extension prompt sections to `buildSystemPrompt()`
+4. `system-prompt.ts` appends `## Extension Instructions` section with all extension prompt additions
+5. On exit, `repl.ts` calls `extensionManager.deactivateAll()` to clean up web servers and call `deactivate()`
+
+**Extension CLI subcommands** (in `cli.ts`):
+- `woodbury ext list` — discover and list extensions
+- `woodbury ext create <name>` — scaffold via `extension-scaffold.ts`
+- `woodbury ext install <pkg>` — `npm install` in `~/.woodbury/extensions/`
+- `woodbury ext uninstall <pkg>` — `npm uninstall` in `~/.woodbury/extensions/`
+- `--no-extensions` flag disables all extension loading
+
 ## Build & Run
 
 ```bash
@@ -57,9 +84,28 @@ npm run dev            # tsc --watch
 - `marked` + `marked-terminal` — Markdown rendering in terminal
 - `commander` — CLI argument parsing
 
+## Testing
+
+- **Framework:** Jest (primary, `src/__tests__/`) + Vitest (root `__tests__/` integration tests)
+- **Config:** `jest.config.js` (ts-jest preset, node env, `.js` extension mapping)
+- **Mocks:** `src/__tests__/setup-mocks.js` (pre-framework, mocks chalk/marked-terminal/ora) + `src/__tests__/setup.ts` (post-framework, same mocks + process.exit)
+- **Run:** `npm test` (all), `npx jest <file>` (single), `npm run test:coverage` (with coverage)
+
+Extension-specific test files:
+| File | Tests |
+|------|-------|
+| `src/__tests__/extension-scaffold.test.ts` | Name validation, directory creation, package.json generation, index.js scaffolding |
+| `src/__tests__/extension-loader.test.ts` | Discovery from local/npm/scoped dirs, manifest parsing, skipping invalid extensions |
+| `src/__tests__/extension-manager.test.ts` | Lifecycle (loadAll, activate, deactivate), context API (tools, commands, prompts, web UIs), aggregation |
+| `src/__tests__/extension-agent-factory.test.ts` | Tool registration in ToolRegistry, prompt section passthrough, error handling |
+
 ## Conventions
 
 - The `ToolRegistry` is constructed manually in `agent-factory.ts` (not via `createAgentWithDefaultTools`) so we keep a reference to it for the `/tools` slash command
 - `allowDangerousTools` defaults to `true` (developer power tool); `--safe` flag disables it
 - The renderer pauses the ora spinner before printing tool call output, then resumes it
 - Ctrl+C during agent execution aborts via `AbortController`; at idle prompt, double Ctrl+C exits
+- Extensions use CJS `module.exports` for compatibility (entry points are dynamically imported via `file://` URL)
+- Extension tool names should be prefixed with the extension name (underscored): `social_post`, `social_draft`
+- The chalk mock in test setup includes `visible` in the chainable colors list (needed for theme-aware text colors)
+- The Agent mock in `agent-factory.test.ts` must include `progressLogger: { disabled: false }` since `setOnToken()` toggles it
