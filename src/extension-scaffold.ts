@@ -11,6 +11,7 @@
 
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { execSync } from 'node:child_process';
 import { EXTENSIONS_DIR } from './extension-loader.js';
 
 /**
@@ -336,6 +337,8 @@ export async function scaffoldExtension(
     .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
     .join(' ');
 
+  const envVarPrefix = name.replace(/-/g, '_').toUpperCase();
+
   await writeFile(
     join(dir, 'package.json'),
     JSON.stringify(
@@ -348,11 +351,46 @@ export async function scaffoldExtension(
           displayName,
           description: `Woodbury extension: ${displayName}`,
           provides: ['tools', 'commands', 'prompts', 'webui'],
+          env: {
+            [`${envVarPrefix}_API_KEY`]: {
+              required: false,
+              description: `API key for ${displayName}`,
+            },
+          },
         },
       },
       null,
       2
     ) + '\n'
+  );
+
+  // .env.example — placeholder keys for extension configuration
+  await writeFile(
+    join(dir, '.env.example'),
+    `# ${displayName} Extension Environment Variables
+# Copy this file to .env and fill in your values:
+#   cp .env.example .env
+#
+# These keys are loaded automatically and available via ctx.env in your extension.
+
+# API key for ${displayName} (set required: true in package.json woodbury.env to enforce)
+# ${envVarPrefix}_API_KEY=your-key-here
+`
+  );
+
+  // .gitignore — exclude secrets and node_modules
+  await writeFile(
+    join(dir, '.gitignore'),
+    `# Secrets — never commit API keys
+.env
+
+# Dependencies
+node_modules/
+
+# Build artifacts
+dist/
+*.tgz
+`
   );
 
   // Generate appropriate index.js
@@ -447,6 +485,11 @@ async function generateStandardIndexJs(
 /** @type {{ activate: Function, deactivate?: Function }} */
 module.exports = {
   async activate(ctx) {
+    // ─── ENVIRONMENT ─────────────────────────────────────────
+    // Extension env vars are loaded from ~/.woodbury/extensions/${name}/.env
+    // and available via ctx.env. Declare required keys in package.json woodbury.env.
+    // const apiKey = ctx.env.${name.replace(/-/g, '_').toUpperCase()}_API_KEY;
+
     // ─── TOOLS ───────────────────────────────────────────────
     // Tools are capabilities the AI agent can call during conversations.
 
@@ -467,6 +510,8 @@ module.exports = {
         dangerous: false,
       },
       async (params) => {
+        // Access extension-specific env vars via ctx.env (loaded from .env file)
+        // const apiKey = ctx.env.${name.replace(/-/g, '_').toUpperCase()}_API_KEY;
         return \`Hello from ${displayName}! You said: \${params.message}\`;
       }
     );
@@ -573,6 +618,11 @@ function loadSiteKnowledge(extDir) {
 /** @type {{ activate: Function, deactivate?: Function }} */
 module.exports = {
   async activate(ctx) {
+    // ─── ENVIRONMENT ─────────────────────────────────────────
+    // Extension env vars are loaded from ~/.woodbury/extensions/${name}/.env
+    // and available via ctx.env. Declare required keys in package.json woodbury.env.
+    // const apiKey = ctx.env.${name.replace(/-/g, '_').toUpperCase()}_API_KEY;
+
     // ─── SITE KNOWLEDGE ──────────────────────────────────────
     // Load research docs into the system prompt so the agent
     // knows about the site's structure, selectors, and quirks.
@@ -690,4 +740,105 @@ async function generateSiteKnowledge(dir: string): Promise<void> {
   for (const [filename, content] of Object.entries(templates)) {
     await writeFile(join(knowledgeDir, filename), content);
   }
+}
+
+// ────────────────────────────────────────────────────────────────
+//  Git + GitHub helpers
+// ────────────────────────────────────────────────────────────────
+
+/**
+ * Check if a CLI tool is available on the system PATH.
+ */
+export function isToolInstalled(tool: string): boolean {
+  try {
+    execSync(`which ${tool}`, { stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Attempt to install the GitHub CLI (`gh`) via Homebrew.
+ * Returns true if installation succeeds or `gh` is already present.
+ */
+export function ensureGhInstalled(): boolean {
+  if (isToolInstalled('gh')) return true;
+
+  // Try Homebrew (macOS / Linux with Homebrew)
+  if (isToolInstalled('brew')) {
+    try {
+      execSync('brew install gh', { stdio: 'inherit' });
+      return isToolInstalled('gh');
+    } catch {
+      return false;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Initialize a git repository in the given directory, commit all files,
+ * and optionally create a GitHub remote and push.
+ *
+ * @returns An object describing what was done.
+ */
+export function initGitRepo(
+  dir: string,
+  opts?: { pushToGitHub?: boolean; repoVisibility?: 'public' | 'private' }
+): { initialized: boolean; pushed: boolean; repoUrl?: string; error?: string } {
+  const result = { initialized: false, pushed: false } as {
+    initialized: boolean;
+    pushed: boolean;
+    repoUrl?: string;
+    error?: string;
+  };
+
+  // git init + initial commit
+  if (!isToolInstalled('git')) {
+    result.error = 'git is not installed';
+    return result;
+  }
+
+  try {
+    execSync('git init', { cwd: dir, stdio: 'ignore' });
+    execSync('git add -A', { cwd: dir, stdio: 'ignore' });
+    execSync('git commit -m "Initial scaffold from woodbury ext create"', {
+      cwd: dir,
+      stdio: 'ignore',
+    });
+    result.initialized = true;
+  } catch (err) {
+    result.error = `git init/commit failed: ${err}`;
+    return result;
+  }
+
+  // GitHub push (optional)
+  if (!opts?.pushToGitHub) return result;
+
+  if (!ensureGhInstalled()) {
+    result.error =
+      'GitHub CLI (gh) is not installed and could not be installed automatically. ' +
+      'Install it manually: https://cli.github.com/';
+    return result;
+  }
+
+  const visibility = opts.repoVisibility || 'private';
+
+  try {
+    // gh repo create reads the directory name and creates a GitHub repo
+    const output = execSync(
+      `gh repo create --source . --${visibility} --push`,
+      { cwd: dir, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'] }
+    );
+    // gh prints the repo URL to stdout
+    const repoUrl = output.trim().split('\n').pop()?.trim();
+    result.pushed = true;
+    result.repoUrl = repoUrl || undefined;
+  } catch (err: any) {
+    result.error = `gh repo create failed: ${err.stderr || err.message || err}`;
+  }
+
+  return result;
 }

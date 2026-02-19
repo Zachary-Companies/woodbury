@@ -13,6 +13,7 @@
 import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { execSync } from 'node:child_process';
 
 // We need to mock EXTENSIONS_DIR before importing scaffoldExtension
 let testDir: string;
@@ -23,7 +24,7 @@ jest.mock('../extension-loader.js', () => ({
   },
 }));
 
-import { scaffoldExtension } from '../extension-scaffold';
+import { scaffoldExtension, isToolInstalled, initGitRepo, ensureGhInstalled } from '../extension-scaffold';
 
 describe('scaffoldExtension', () => {
   beforeEach(async () => {
@@ -290,6 +291,89 @@ describe('scaffoldExtension', () => {
     });
   });
 
+  describe('.env.example', () => {
+    it('should create a .env.example file', async () => {
+      const dir = await scaffoldExtension('test-ext');
+      const stat = await fs.stat(join(dir, '.env.example'));
+      expect(stat.isFile()).toBe(true);
+    });
+
+    it('should contain the extension name as env var prefix', async () => {
+      const dir = await scaffoldExtension('social-media');
+      const content = await fs.readFile(join(dir, '.env.example'), 'utf-8');
+      expect(content).toContain('SOCIAL_MEDIA_API_KEY');
+    });
+
+    it('should contain instructions for copying to .env', async () => {
+      const dir = await scaffoldExtension('test-ext');
+      const content = await fs.readFile(join(dir, '.env.example'), 'utf-8');
+      expect(content).toContain('cp .env.example .env');
+    });
+
+    it('should also be created with --web flag', async () => {
+      const dir = await scaffoldExtension('test-ext', { webNavigation: true });
+      const stat = await fs.stat(join(dir, '.env.example'));
+      expect(stat.isFile()).toBe(true);
+    });
+  });
+
+  describe('package.json woodbury.env field', () => {
+    it('should include env declarations in woodbury field', async () => {
+      const dir = await scaffoldExtension('test-ext');
+      const raw = await fs.readFile(join(dir, 'package.json'), 'utf-8');
+      const pkg = JSON.parse(raw);
+      expect(pkg.woodbury.env).toBeDefined();
+      expect(Object.keys(pkg.woodbury.env).length).toBeGreaterThan(0);
+    });
+
+    it('should use uppercase underscored name as key prefix', async () => {
+      const dir = await scaffoldExtension('social-media');
+      const raw = await fs.readFile(join(dir, 'package.json'), 'utf-8');
+      const pkg = JSON.parse(raw);
+      expect(pkg.woodbury.env).toHaveProperty('SOCIAL_MEDIA_API_KEY');
+    });
+  });
+
+  describe('index.js ctx.env usage', () => {
+    it('should show ctx.env pattern in generated index.js', async () => {
+      const dir = await scaffoldExtension('test-ext');
+      const content = await fs.readFile(join(dir, 'index.js'), 'utf-8');
+      expect(content).toContain('ctx.env');
+    });
+
+    it('should show ctx.env pattern in --web generated index.js', async () => {
+      const dir = await scaffoldExtension('test-ext', { webNavigation: true });
+      const content = await fs.readFile(join(dir, 'index.js'), 'utf-8');
+      expect(content).toContain('ctx.env');
+    });
+  });
+
+  describe('.gitignore', () => {
+    it('should create a .gitignore file', async () => {
+      const dir = await scaffoldExtension('test-ext');
+      const stat = await fs.stat(join(dir, '.gitignore'));
+      expect(stat.isFile()).toBe(true);
+    });
+
+    it('should exclude .env (secrets)', async () => {
+      const dir = await scaffoldExtension('test-ext');
+      const content = await fs.readFile(join(dir, '.gitignore'), 'utf-8');
+      expect(content).toContain('.env');
+    });
+
+    it('should exclude node_modules/', async () => {
+      const dir = await scaffoldExtension('test-ext');
+      const content = await fs.readFile(join(dir, '.gitignore'), 'utf-8');
+      expect(content).toContain('node_modules/');
+    });
+
+    it('should be created with --web flag too', async () => {
+      const dir = await scaffoldExtension('test-ext', { webNavigation: true });
+      const stat = await fs.stat(join(dir, '.gitignore'));
+      expect(stat.isFile()).toBe(true);
+    });
+  });
+
   describe('web/index.html', () => {
     it('should create a web/index.html file', async () => {
       const dir = await scaffoldExtension('test-ext');
@@ -315,5 +399,94 @@ describe('scaffoldExtension', () => {
       expect(content).toContain('<!DOCTYPE html>');
       expect(content).toContain('</html>');
     });
+  });
+});
+
+describe('isToolInstalled', () => {
+  it('should return true for a tool that exists (node)', () => {
+    expect(isToolInstalled('node')).toBe(true);
+  });
+
+  it('should return false for a tool that does not exist', () => {
+    expect(isToolInstalled('nonexistent-tool-xyz-12345')).toBe(false);
+  });
+});
+
+describe('initGitRepo', () => {
+  let repoDir: string;
+
+  beforeEach(async () => {
+    repoDir = await fs.mkdtemp(join(tmpdir(), 'woodbury-git-test-'));
+    // Create a minimal file so there's something to commit
+    await fs.writeFile(join(repoDir, 'README.md'), '# Test\n');
+  });
+
+  afterEach(async () => {
+    try {
+      await fs.rm(repoDir, { recursive: true, force: true });
+    } catch {}
+  });
+
+  it('should initialize a git repo and create an initial commit', () => {
+    const result = initGitRepo(repoDir);
+    expect(result.initialized).toBe(true);
+    expect(result.error).toBeUndefined();
+
+    // Verify git log has a commit
+    const log = execSync('git log --oneline', { cwd: repoDir, encoding: 'utf-8' });
+    expect(log).toContain('Initial scaffold');
+  });
+
+  it('should track all files in the initial commit', () => {
+    initGitRepo(repoDir);
+    const files = execSync('git ls-files', { cwd: repoDir, encoding: 'utf-8' });
+    expect(files.trim()).toContain('README.md');
+  });
+
+  it('should not push when pushToGitHub is false', () => {
+    const result = initGitRepo(repoDir, { pushToGitHub: false });
+    expect(result.initialized).toBe(true);
+    expect(result.pushed).toBe(false);
+  });
+
+  it('should not push by default (no opts)', () => {
+    const result = initGitRepo(repoDir);
+    expect(result.pushed).toBe(false);
+  });
+
+  it('should work with a scaffolded extension directory', async () => {
+    // Use the real scaffold output
+    const extDir = join(repoDir, 'my-ext');
+    // Mock EXTENSIONS_DIR won't apply here since scaffold uses the import,
+    // but we can manually create the scaffold-like structure
+    await fs.mkdir(extDir, { recursive: true });
+    await fs.writeFile(join(extDir, 'package.json'), '{"name":"test"}');
+    await fs.writeFile(join(extDir, 'index.js'), 'module.exports = {}');
+    await fs.writeFile(join(extDir, '.gitignore'), '.env\nnode_modules/\n');
+    await fs.writeFile(join(extDir, '.env.example'), '# example\n');
+
+    const result = initGitRepo(extDir);
+    expect(result.initialized).toBe(true);
+
+    // .gitignore should be committed
+    const files = execSync('git ls-files', { cwd: extDir, encoding: 'utf-8' });
+    expect(files).toContain('.gitignore');
+    expect(files).toContain('.env.example');
+    expect(files).toContain('package.json');
+    expect(files).toContain('index.js');
+  });
+
+  it('should respect .gitignore and not track .env files', async () => {
+    // Create a .gitignore that excludes .env
+    await fs.writeFile(join(repoDir, '.gitignore'), '.env\n');
+    await fs.writeFile(join(repoDir, '.env'), 'SECRET=value\n');
+
+    const result = initGitRepo(repoDir);
+    expect(result.initialized).toBe(true);
+
+    // .env should NOT be tracked
+    const files = execSync('git ls-files', { cwd: repoDir, encoding: 'utf-8' });
+    expect(files).not.toContain('.env');
+    expect(files).toContain('.gitignore');
   });
 });

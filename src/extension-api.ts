@@ -38,6 +38,13 @@ export interface ExtensionContext {
     send(action: string, params?: Record<string, any>): Promise<any>;
     readonly isConnected: boolean;
   };
+
+  /**
+   * Per-extension environment variables loaded from the extension's .env file.
+   * This object is frozen (read-only). Extensions only see their own keys.
+   * Declare expected keys in the "woodbury.env" field of package.json.
+   */
+  readonly env: Readonly<Record<string, string>>;
 }
 
 /**

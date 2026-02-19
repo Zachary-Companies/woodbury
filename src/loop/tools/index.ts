@@ -70,6 +70,9 @@ export { ffKeyboardDefinition, ffKeyboardHandler } from './ff-keyboard.js';
 // Browser Bridge tool (Chrome extension via WebSocket)
 export { browserQueryDefinition, browserQueryHandler } from './browser-query.js';
 
+// AI Image Generation tools
+export { nanobananaTool } from './nanobanana.js';
+
 // Import what we need for allTools array
 import { fileReadDefinition, fileReadHandler } from './file-read.js';
 import { fileWriteDefinition, fileWriteHandler } from './file-write.js';
@@ -102,6 +105,16 @@ import { ffBrowserDefinition, ffBrowserHandler } from './ff-browser.js';
 import { ffMouseDefinition, ffMouseHandler } from './ff-mouse.js';
 import { ffKeyboardDefinition, ffKeyboardHandler } from './ff-keyboard.js';
 import { browserQueryDefinition, browserQueryHandler } from './browser-query.js';
+import { nanobananaTool } from './nanobanana.js';
+
+// Tool definition type
+export interface ToolDefinition {
+  name: string;
+  description: string;
+  parameters: import('zod').ZodType<unknown>;
+  execute: (params: unknown, context?: { workingDirectory?: string }) => Promise<string>;
+  dangerous?: boolean;
+}
 
 // All tools array for convenience
 export const allTools = [
@@ -140,4 +153,6 @@ export const allTools = [
   { definition: ffKeyboardDefinition, handler: ffKeyboardHandler },
   // Browser Bridge (Chrome extension via WebSocket)
   { definition: browserQueryDefinition, handler: browserQueryHandler },
+  // AI Image Generation
+  { definition: nanobananaTool, handler: nanobananaTool.execute },
 ];

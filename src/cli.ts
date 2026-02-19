@@ -11,8 +11,9 @@ import path from 'path';
 import { existsSync, promises as fs } from 'fs';
 import { homedir } from 'os';
 import { ExtensionManager } from './extension-manager.js';
-import { EXTENSIONS_DIR, discoverExtensions } from './extension-loader.js';
-import { scaffoldExtension } from './extension-scaffold.js';
+import { EXTENSIONS_DIR, discoverExtensions, parseEnvFile } from './extension-loader.js';
+import { scaffoldExtension, initGitRepo, ensureGhInstalled, isToolInstalled } from './extension-scaffold.js';
+import { startDashboard, type DashboardHandle } from './config-dashboard.js';
 
 const program = new Command();
 
@@ -71,7 +72,18 @@ program
         }
       }
 
-      await startRepl(config, extensionManager);
+      // Start config dashboard
+      let dashboard: DashboardHandle | undefined;
+      if (!config.noExtensions) {
+        try {
+          dashboard = await startDashboard(config.verbose || false);
+          config.dashboardUrl = dashboard.url;
+        } catch (err) {
+          console.warn(`  ${icons.warning}  Dashboard failed to start: ${err}`);
+        }
+      }
+
+      await startRepl(config, extensionManager, dashboard);
     } catch (error) {
       console.error(`${icons.error}  ${labels.error}`, colors.error(String(error)));
       process.exit(1);
@@ -239,7 +251,10 @@ ext
   .command('create <name>')
   .description('Scaffold a new extension')
   .option('--web', 'Include site-knowledge templates for web-navigation extensions')
-  .action(async (name: string, cmdOpts: { web?: boolean }) => {
+  .option('--no-git', 'Skip git repository initialization')
+  .option('--github', 'Create a GitHub repository and push (implies --git)')
+  .option('--public', 'Make the GitHub repository public (default: private)')
+  .action(async (name: string, cmdOpts: { web?: boolean; git?: boolean; github?: boolean; public?: boolean }) => {
     try {
       const dir = await scaffoldExtension(name, { webNavigation: cmdOpts.web });
       console.log(`${icons.success}  ${colors.success('Extension scaffolded!')}`);
@@ -251,10 +266,247 @@ ext
         console.log();
         console.log(colors.muted('  Fill in site-knowledge/*.md files before building tools.'));
       }
+
+      // Git initialization (default: on, unless --no-git)
+      const shouldGit = cmdOpts.git !== false || cmdOpts.github;
+      if (shouldGit) {
+        console.log();
+        const gitResult = initGitRepo(dir, {
+          pushToGitHub: cmdOpts.github,
+          repoVisibility: cmdOpts.public ? 'public' : 'private',
+        });
+
+        if (gitResult.initialized) {
+          console.log(`${icons.success}  ${colors.success('Git repository initialized')}`);
+        } else if (gitResult.error) {
+          console.warn(`${icons.warning}  ${colors.warning(`Git init skipped: ${gitResult.error}`)}`);
+        }
+
+        if (gitResult.pushed && gitResult.repoUrl) {
+          console.log(`${icons.success}  ${colors.success(`Pushed to GitHub: ${gitResult.repoUrl}`)}`);
+        } else if (cmdOpts.github && gitResult.error) {
+          console.warn(`${icons.warning}  ${colors.warning(gitResult.error)}`);
+        }
+      }
+
       console.log();
       console.log(colors.muted('  Restart Woodbury to activate.'));
     } catch (error) {
       console.error(`${icons.error}  ${colors.error(String(error))}`);
+      process.exit(1);
+    }
+  });
+
+ext
+  .command('configure <name>')
+  .description('View and configure extension environment variables')
+  .action(async (name: string) => {
+    const manifests = await discoverExtensions();
+    const manifest = manifests.find((m) => m.name === name);
+    if (!manifest) {
+      console.error(`${icons.error}  Extension "${name}" not found.`);
+      if (manifests.length > 0) {
+        console.log(colors.muted('  Available extensions:'));
+        for (const m of manifests) {
+          console.log(colors.muted(`    ${m.name}`));
+        }
+      }
+      process.exit(1);
+    }
+
+    const envFilePath = path.join(manifest.directory, '.env');
+    const envExamplePath = path.join(manifest.directory, '.env.example');
+
+    // Load current .env if it exists
+    let currentEnv: Record<string, string> = {};
+    try {
+      const content = await fs.readFile(envFilePath, 'utf-8');
+      currentEnv = parseEnvFile(content);
+    } catch {
+      // No .env file yet
+    }
+
+    // Show declared env vars and their status
+    const declarations = manifest.envDeclarations;
+    const declKeys = Object.keys(declarations);
+
+    if (declKeys.length === 0 && Object.keys(currentEnv).length === 0) {
+      console.log(colors.muted(`Extension "${name}" has no declared environment variables.`));
+      console.log(colors.muted(`  .env file: ${envFilePath}`));
+      return;
+    }
+
+    console.log(colors.primary.bold(`${manifest.displayName} Configuration`));
+    console.log();
+
+    if (declKeys.length > 0) {
+      console.log(colors.secondary('Declared variables:'));
+      for (const key of declKeys) {
+        const decl = declarations[key];
+        const isSet = !!currentEnv[key];
+        const reqLabel = decl.required ? colors.error('[required]') : colors.muted('[optional]');
+        const statusIcon = isSet ? icons.success : (decl.required ? icons.error : icons.warning);
+        const statusText = isSet ? colors.success('set') : colors.warning('not set');
+        console.log(`  ${statusIcon}  ${key} ${reqLabel} — ${statusText}`);
+        if (decl.description) {
+          console.log(`      ${colors.muted(decl.description)}`);
+        }
+      }
+    }
+
+    // Show any extra keys in .env that aren't declared
+    const extraKeys = Object.keys(currentEnv).filter((k) => !declarations[k]);
+    if (extraKeys.length > 0) {
+      console.log();
+      console.log(colors.secondary('Additional variables in .env:'));
+      for (const key of extraKeys) {
+        console.log(`  ${icons.success}  ${key} — ${colors.success('set')}`);
+      }
+    }
+
+    console.log();
+    console.log(colors.muted(`  .env file: ${envFilePath}`));
+    if (existsSync(envExamplePath)) {
+      console.log(colors.muted(`  .env.example: ${envExamplePath}`));
+    }
+    if (!existsSync(envFilePath) && existsSync(envExamplePath)) {
+      console.log();
+      console.log(colors.muted(`  To get started: cp "${envExamplePath}" "${envFilePath}"`));
+    }
+  });
+
+ext
+  .command('link <path>')
+  .description('Link a local extension directory (symlink)')
+  .action(async (extPath: string) => {
+    const resolvedPath = path.resolve(extPath);
+
+    // Validate the path exists and has a package.json with woodbury field
+    try {
+      const pkgRaw = await fs.readFile(path.join(resolvedPath, 'package.json'), 'utf-8');
+      const pkg = JSON.parse(pkgRaw);
+      if (!pkg.woodbury?.name) {
+        console.error(`${icons.error}  ${colors.error('No woodbury.name field in package.json')}`);
+        console.log(colors.muted('  The package.json at this path must have a "woodbury" field with a "name".'));
+        process.exit(1);
+      }
+
+      const extName = pkg.woodbury.name;
+      const linkPath = path.join(EXTENSIONS_DIR, extName);
+
+      // Ensure extensions directory exists
+      await fs.mkdir(EXTENSIONS_DIR, { recursive: true });
+
+      // Remove existing link/dir if present
+      try {
+        const stat = await fs.lstat(linkPath);
+        if (stat.isSymbolicLink() || stat.isDirectory()) {
+          await fs.rm(linkPath, { recursive: true });
+        }
+      } catch {
+        // Doesn't exist — that's fine
+      }
+
+      // Create symlink
+      await fs.symlink(resolvedPath, linkPath);
+      console.log(`${icons.success}  ${colors.success(`Linked "${extName}"`)}`);
+      console.log();
+      console.log(`  ${colors.muted('Source:')} ${resolvedPath}`);
+      console.log(`  ${colors.muted('Link:')}   ${linkPath}`);
+      console.log();
+      console.log(colors.muted('  Restart Woodbury to activate.'));
+      if (pkg.woodbury.env && Object.keys(pkg.woodbury.env).length > 0) {
+        console.log(colors.muted(`  Configure env: woodbury ext configure ${extName}`));
+      }
+    } catch (error: any) {
+      if (error.code === 'ENOENT') {
+        console.error(`${icons.error}  ${colors.error(`Path not found: ${resolvedPath}`)}`);
+      } else {
+        console.error(`${icons.error}  ${colors.error(String(error))}`);
+      }
+      process.exit(1);
+    }
+  });
+
+ext
+  .command('install-git <url>')
+  .description('Install an extension from a git repository')
+  .action(async (url: string) => {
+    const { execSync } = await import('child_process');
+
+    // Extract repo name from URL (handles .git suffix and trailing slashes)
+    const repoName = path.basename(url.replace(/\.git$/, '').replace(/\/$/, ''));
+    if (!repoName) {
+      console.error(`${icons.error}  ${colors.error('Could not determine repository name from URL')}`);
+      process.exit(1);
+    }
+
+    // Ensure extensions directory exists
+    await fs.mkdir(EXTENSIONS_DIR, { recursive: true });
+
+    const cloneDir = path.join(EXTENSIONS_DIR, repoName);
+
+    // Check if directory already exists
+    if (existsSync(cloneDir)) {
+      console.error(`${icons.error}  ${colors.error(`Directory already exists: ${cloneDir}`)}`);
+      console.log(colors.muted(`  Remove it first or use a different name.`));
+      process.exit(1);
+    }
+
+    console.log(`${icons.running}  Cloning ${url}...`);
+    try {
+      execSync(`git clone "${url}" "${cloneDir}"`, { stdio: 'inherit' });
+    } catch (error) {
+      console.error(`${icons.error}  ${colors.error(`Failed to clone: ${error}`)}`);
+      process.exit(1);
+    }
+
+    // Check for package.json with woodbury field
+    const pkgPath = path.join(cloneDir, 'package.json');
+    if (!existsSync(pkgPath)) {
+      console.error(`${icons.error}  ${colors.error('Cloned repository has no package.json')}`);
+      process.exit(1);
+    }
+
+    try {
+      const pkgRaw = await fs.readFile(pkgPath, 'utf-8');
+      const pkg = JSON.parse(pkgRaw);
+
+      if (!pkg.woodbury?.name) {
+        console.warn(`${icons.warning}  ${colors.warning('No woodbury field in package.json — this may not be a Woodbury extension')}`);
+      }
+
+      // Install npm dependencies if package has them
+      if (pkg.dependencies && Object.keys(pkg.dependencies).length > 0) {
+        console.log(`${icons.running}  Installing dependencies...`);
+        try {
+          execSync('npm install', { cwd: cloneDir, stdio: 'inherit' });
+        } catch {
+          console.warn(`${icons.warning}  ${colors.warning('npm install failed — extension may not work correctly')}`);
+        }
+      }
+
+      // Run build if there's a build script
+      if (pkg.scripts?.build) {
+        console.log(`${icons.running}  Building extension...`);
+        try {
+          execSync('npm run build', { cwd: cloneDir, stdio: 'inherit' });
+        } catch {
+          console.warn(`${icons.warning}  ${colors.warning('Build failed — extension may not work correctly')}`);
+        }
+      }
+
+      const extName = pkg.woodbury?.name || repoName;
+      console.log(`${icons.success}  ${colors.success(`Installed "${extName}" from git`)}`);
+      console.log();
+      console.log(`  ${colors.muted('Directory:')} ${cloneDir}`);
+      console.log();
+      console.log(colors.muted('  Restart Woodbury to activate.'));
+      if (pkg.woodbury?.env && Object.keys(pkg.woodbury.env).length > 0) {
+        console.log(colors.muted(`  Configure env: woodbury ext configure ${extName}`));
+      }
+    } catch (error) {
+      console.error(`${icons.error}  ${colors.error(`Failed to read package.json: ${error}`)}`);
       process.exit(1);
     }
   });
@@ -296,25 +548,15 @@ async function buildConfig(options: any): Promise<WoodburyConfig> {
     groq: process.env.GROQ_API_KEY
   };
 
-  // Also check ~/.woodbury/.env for keys
+  // Also check ~/.woodbury/.env for keys (uses shared parseEnvFile utility)
   try {
     const homeEnvPath = path.join(require('os').homedir(), '.woodbury', '.env');
     const envContent = await fs.readFile(homeEnvPath, 'utf-8');
-    for (const line of envContent.split('\n')) {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith('#')) continue;
-      const eqIdx = trimmed.indexOf('=');
-      if (eqIdx <= 0) continue;
-      const key = trimmed.slice(0, eqIdx).trim();
-      let value = trimmed.slice(eqIdx + 1).trim();
-      if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
-        value = value.slice(1, -1);
-      }
-      if (!value) continue;
-      if (key === 'ANTHROPIC_API_KEY' && !config.apiKeys!.anthropic) config.apiKeys!.anthropic = value;
-      if (key === 'OPENAI_API_KEY' && !config.apiKeys!.openai) config.apiKeys!.openai = value;
-      if (key === 'GROQ_API_KEY' && !config.apiKeys!.groq) config.apiKeys!.groq = value;
-    }
+    const homeEnv = parseEnvFile(envContent);
+
+    if (homeEnv.ANTHROPIC_API_KEY && !config.apiKeys!.anthropic) config.apiKeys!.anthropic = homeEnv.ANTHROPIC_API_KEY;
+    if (homeEnv.OPENAI_API_KEY && !config.apiKeys!.openai) config.apiKeys!.openai = homeEnv.OPENAI_API_KEY;
+    if (homeEnv.GROQ_API_KEY && !config.apiKeys!.groq) config.apiKeys!.groq = homeEnv.GROQ_API_KEY;
   } catch {
     // No ~/.woodbury/.env, that's fine
   }

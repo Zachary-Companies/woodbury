@@ -213,6 +213,19 @@ export const slashCommands: SlashCommand[] = [
   },
 
   {
+    name: 'dashboard',
+    description: 'Show config dashboard URL',
+    async handler(_args: string[], ctx: SlashCommandContext) {
+      if (ctx.config.dashboardUrl) {
+        ctx.print(chalk.green('Config dashboard: ') + chalk.blue(ctx.config.dashboardUrl));
+      } else {
+        ctx.print(chalk.yellow('Config dashboard is not running.'));
+        ctx.print(chalk.gray('  It starts automatically unless --no-extensions is used.'));
+      }
+    }
+  },
+
+  {
     name: 'load',
     description: 'Load a saved conversation',
     async handler(args: string[], ctx: SlashCommandContext) {

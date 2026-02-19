@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Woodbury Config Dashboard</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #0f172a;
+      color: #e2e8f0;
+      min-height: 100vh;
+      display: flex;
+    }
+
+    /* ── Sidebar ─────────────────────────────────────── */
+    .sidebar {
+      width: 280px;
+      min-width: 280px;
+      background: #1e293b;
+      border-right: 1px solid #334155;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      position: sticky;
+      top: 0;
+    }
+
+    .sidebar-header {
+      padding: 1.25rem;
+      border-bottom: 1px solid #334155;
+    }
+
+    .sidebar-header h1 {
+      font-size: 1.1rem;
+      color: #7c3aed;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .sidebar-header p {
+      font-size: 0.75rem;
+      color: #64748b;
+      margin-top: 0.25rem;
+    }
+
+    .ext-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 0.5rem;
+    }
+
+    .ext-item {
+      padding: 0.75rem;
+      border-radius: 6px;
+      cursor: pointer;
+      margin-bottom: 2px;
+      transition: background 0.15s;
+    }
+
+    .ext-item:hover { background: #334155; }
+    .ext-item.active { background: #7c3aed22; border: 1px solid #7c3aed44; }
+
+    .ext-item-name {
+      font-size: 0.875rem;
+      font-weight: 600;
+      color: #e2e8f0;
+    }
+
+    .ext-item-meta {
+      font-size: 0.7rem;
+      color: #64748b;
+      margin-top: 2px;
+    }
+
+    .ext-item-badges {
+      display: flex;
+      gap: 4px;
+      margin-top: 4px;
+    }
+
+    .badge {
+      font-size: 0.6rem;
+      padding: 1px 6px;
+      border-radius: 9999px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.02em;
+    }
+
+    .badge-ok { background: #10b98133; color: #10b981; }
+    .badge-missing { background: #ef444433; color: #ef4444; }
+    .badge-partial { background: #f59e0b33; color: #f59e0b; }
+
+    /* ── Main ────────────────────────────────────────── */
+    .main {
+      flex: 1;
+      padding: 2rem;
+      overflow-y: auto;
+      height: 100vh;
+    }
+
+    .empty-state {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 60vh;
+      color: #64748b;
+      text-align: center;
+    }
+
+    .empty-state-icon { font-size: 3rem; margin-bottom: 1rem; }
+    .empty-state h2 { font-size: 1.25rem; color: #94a3b8; margin-bottom: 0.5rem; }
+    .empty-state p { font-size: 0.875rem; }
+
+    .ext-header {
+      margin-bottom: 1.5rem;
+      padding-bottom: 1rem;
+      border-bottom: 1px solid #334155;
+    }
+
+    .ext-header h2 {
+      font-size: 1.5rem;
+      color: #e2e8f0;
+    }
+
+    .ext-header-meta {
+      font-size: 0.8rem;
+      color: #64748b;
+      margin-top: 0.25rem;
+    }
+
+    .restart-notice {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 6px;
+      padding: 0.75rem 1rem;
+      margin-bottom: 1.5rem;
+      font-size: 0.8rem;
+      color: #94a3b8;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    /* ── Env var form ────────────────────────────────── */
+    .var-card {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      padding: 1rem 1.25rem;
+      margin-bottom: 0.75rem;
+    }
+
+    .var-header {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin-bottom: 0.5rem;
+    }
+
+    .var-name {
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: #06b6d4;
+    }
+
+    .var-badge {
+      font-size: 0.6rem;
+      padding: 1px 6px;
+      border-radius: 9999px;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+
+    .var-badge-required { background: #ef444433; color: #ef4444; }
+    .var-badge-optional { background: #64748b33; color: #64748b; }
+    .var-badge-set { background: #10b98133; color: #10b981; }
+    .var-badge-unset { background: #f59e0b33; color: #f59e0b; }
+
+    .var-description {
+      font-size: 0.75rem;
+      color: #94a3b8;
+      margin-bottom: 0.5rem;
+    }
+
+    .var-input-row {
+      display: flex;
+      gap: 0.5rem;
+      align-items: center;
+    }
+
+    .var-input {
+      flex: 1;
+      background: #0f172a;
+      border: 1px solid #334155;
+      border-radius: 4px;
+      padding: 0.5rem 0.75rem;
+      color: #e2e8f0;
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      font-size: 0.8rem;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+
+    .var-input:focus { border-color: #7c3aed; }
+    .var-input::placeholder { color: #475569; }
+
+    .btn-toggle {
+      background: #334155;
+      border: none;
+      border-radius: 4px;
+      padding: 0.5rem;
+      cursor: pointer;
+      color: #94a3b8;
+      font-size: 0.85rem;
+      transition: background 0.15s;
+    }
+
+    .btn-toggle:hover { background: #475569; }
+
+    .btn-clear {
+      background: none;
+      border: 1px solid #334155;
+      border-radius: 4px;
+      padding: 0.5rem;
+      cursor: pointer;
+      color: #ef4444;
+      font-size: 0.75rem;
+      transition: background 0.15s;
+    }
+
+    .btn-clear:hover { background: #ef444422; }
+
+    /* ── Save button ─────────────────────────────────── */
+    .save-row {
+      margin-top: 1.5rem;
+      display: flex;
+      gap: 0.75rem;
+      align-items: center;
+    }
+
+    .btn-save {
+      background: #7c3aed;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      padding: 0.6rem 1.5rem;
+      font-size: 0.875rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+
+    .btn-save:hover { background: #6d28d9; }
+    .btn-save:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    .save-status {
+      font-size: 0.8rem;
+      color: #94a3b8;
+    }
+
+    /* ── Toast ────────────────────────────────────────── */
+    .toast-container {
+      position: fixed;
+      top: 1rem;
+      right: 1rem;
+      z-index: 1000;
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+
+    .toast {
+      padding: 0.75rem 1rem;
+      border-radius: 6px;
+      font-size: 0.8rem;
+      font-weight: 500;
+      animation: toast-in 0.2s ease;
+      min-width: 250px;
+    }
+
+    .toast-success { background: #10b981; color: white; }
+    .toast-error { background: #ef4444; color: white; }
+
+    @keyframes toast-in {
+      from { opacity: 0; transform: translateY(-10px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    /* ── Loading ──────────────────────────────────────── */
+    .loading {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 60vh;
+      color: #64748b;
+    }
+
+    .spinner {
+      width: 24px;
+      height: 24px;
+      border: 3px solid #334155;
+      border-top-color: #7c3aed;
+      border-radius: 50%;
+      animation: spin 0.6s linear infinite;
+      margin-right: 0.75rem;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div class="sidebar">
+    <div class="sidebar-header">
+      <h1>Woodbury Config</h1>
+      <p>Extension API Key Management</p>
+    </div>
+    <div class="ext-list" id="ext-list">
+      <div class="loading"><div class="spinner"></div> Loading...</div>
+    </div>
+  </div>
+
+  <div class="main" id="main">
+    <div class="empty-state">
+      <div class="empty-state-icon">&#x1f511;</div>
+      <h2>Extension Config Dashboard</h2>
+      <p>Select an extension from the sidebar to manage its API keys.</p>
+    </div>
+  </div>
+
+  <div class="toast-container" id="toast-container"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

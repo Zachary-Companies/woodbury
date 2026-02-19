@@ -21,6 +21,7 @@ import type {
 import {
   discoverExtensions,
   loadExtension,
+  parseEnvFile,
   type ExtensionManifest,
 } from './extension-loader.js';
 import { bridgeServer } from './bridge-server.js';
@@ -107,6 +108,34 @@ export class ExtensionManager {
   private async activate(manifest: ExtensionManifest): Promise<void> {
     const { module } = await loadExtension(manifest);
 
+    // ── Load per-extension .env file ──────────────────────────
+    let extensionEnv: Record<string, string> = {};
+    const envFilePath = join(manifest.directory, '.env');
+    try {
+      const envContent = await readFile(envFilePath, 'utf-8');
+      extensionEnv = parseEnvFile(envContent);
+    } catch {
+      // No .env file — that's fine, extensionEnv stays empty
+    }
+
+    // Validate required env vars declared in package.json
+    const missing: string[] = [];
+    for (const [key, decl] of Object.entries(manifest.envDeclarations)) {
+      if (decl.required && !extensionEnv[key]) {
+        missing.push(key);
+      }
+    }
+    if (missing.length > 0) {
+      const envPath = join(manifest.directory, '.env');
+      console.warn(
+        `[ext:${manifest.name}] Missing required env var(s): ${missing.join(', ')}. ` +
+        `Add them to ${envPath} or run: woodbury ext configure ${manifest.name}`
+      );
+    }
+
+    // Freeze so extensions cannot mutate their env
+    const frozenEnv = Object.freeze({ ...extensionEnv });
+
     const record: ExtensionRecord = {
       manifest,
       module,
@@ -165,6 +194,8 @@ export class ExtensionManager {
           return bridgeServer.isConnected;
         },
       },
+
+      env: frozenEnv,
     };
 
     await module.activate(context);

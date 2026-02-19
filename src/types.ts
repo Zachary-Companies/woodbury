@@ -61,6 +61,9 @@ export interface WoodburyConfig {
 
   /** Disable all extensions */
   noExtensions?: boolean;
+
+  /** URL of the running config dashboard (set at runtime) */
+  dashboardUrl?: string;
 }
 
 // Job orchestration types

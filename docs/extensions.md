@@ -15,7 +15,15 @@ Extensions add new capabilities to Woodbury without modifying core code. An exte
 woodbury ext create my-first
 ```
 
-This scaffolds a starter extension at `~/.woodbury/extensions/my-first/` with examples of all four capabilities. Restart Woodbury to activate it.
+This scaffolds a starter extension at `~/.woodbury/extensions/my-first/` with examples of all four capabilities, initializes a git repo with an initial commit, and generates a `.gitignore` that excludes `.env` and `node_modules/`. Restart Woodbury to activate it.
+
+To also push to GitHub:
+
+```bash
+woodbury ext create my-first --github
+```
+
+This uses `gh` (GitHub CLI) to create a private repo and push. Add `--public` for a public repo. If `gh` isn't installed, Woodbury will attempt to install it via Homebrew.
 
 ### Verify it loaded
 
@@ -45,6 +53,9 @@ An extension is a directory with a `package.json` and a JavaScript entry point:
 ~/.woodbury/extensions/my-ext/
   package.json        # Metadata + woodbury field
   index.js            # Entry point (activate/deactivate)
+  .gitignore          # Excludes .env, node_modules/, dist/
+  .env.example        # Template for environment variables
+  .env                # Your actual secrets (git-ignored)
   web/                # Optional: static files for web UI
     index.html
   lib/                # Optional: additional modules
@@ -336,9 +347,15 @@ woodbury ext uninstall woodbury-ext-social
 | Command | Description |
 |---------|-------------|
 | `woodbury ext list` | List all installed extensions |
-| `woodbury ext create <name>` | Scaffold a new extension |
+| `woodbury ext create <name>` | Scaffold a new extension (auto-inits git repo) |
 | `woodbury ext create <name> --web` | Scaffold with site-knowledge templates for web navigation |
+| `woodbury ext create <name> --github` | Scaffold, init git, create GitHub repo, and push |
+| `woodbury ext create <name> --github --public` | Same as above with a public GitHub repo |
+| `woodbury ext create <name> --no-git` | Scaffold without git initialization |
 | `woodbury ext install <package>` | Install from npm |
+| `woodbury ext install-git <url>` | Install from a git repository |
+| `woodbury ext link <path>` | Symlink a local directory |
+| `woodbury ext configure <name>` | View/check env var status |
 | `woodbury ext uninstall <package>` | Uninstall an npm extension |
 | `woodbury --no-extensions` | Start without loading any extensions |
 
@@ -393,9 +410,131 @@ In the REPL:
 
 ### Error Handling
 
-- Handle missing API keys gracefully. Check `process.env` and throw clear errors.
+- Handle missing API keys gracefully. Check `ctx.env` and return clear error messages.
 - Don't crash on network failures. Return error messages the agent can act on.
 - Clean up in `deactivate()`. Close connections, stop timers, release ports.
+
+## Environment Variables & Secrets
+
+Each extension gets its own isolated `.env` file. Extensions access their keys through `ctx.env` — a frozen, read-only object containing only that extension's keys. Extensions cannot see each other's secrets.
+
+### Declaring Environment Variables
+
+In your extension's `package.json`, declare what keys your extension expects:
+
+```json
+{
+  "woodbury": {
+    "name": "social-media",
+    "env": {
+      "SOCIAL_MEDIA_API_KEY": {
+        "required": true,
+        "description": "API key for the social media service"
+      },
+      "SOCIAL_MEDIA_WEBHOOK_URL": {
+        "required": false,
+        "description": "Optional webhook URL for notifications"
+      }
+    }
+  }
+}
+```
+
+### Setting Environment Variables
+
+Create a `.env` file in your extension directory:
+
+```
+# ~/.woodbury/extensions/social-media/.env
+SOCIAL_MEDIA_API_KEY=sk-abc123xyz
+SOCIAL_MEDIA_WEBHOOK_URL=https://hooks.example.com/notify
+```
+
+Or copy from the generated template:
+
+```bash
+cp ~/.woodbury/extensions/social-media/.env.example ~/.woodbury/extensions/social-media/.env
+```
+
+### Accessing Environment Variables
+
+In your extension's `activate()` function, use `ctx.env`:
+
+```javascript
+module.exports = {
+  async activate(ctx) {
+    const apiKey = ctx.env.SOCIAL_MEDIA_API_KEY;
+    if (!apiKey) {
+      ctx.log.warn('No API key set. Run: woodbury ext configure social-media');
+      return;
+    }
+    // Use apiKey...
+  }
+};
+```
+
+### Checking Configuration
+
+Use `woodbury ext configure <name>` to see which keys are set:
+
+```bash
+woodbury ext configure social-media
+```
+
+### How Isolation Works
+
+- Each extension's `.env` is loaded from its own directory
+- `ctx.env` is frozen (`Object.freeze()`) — read-only at runtime
+- Extensions only see their own keys, never another extension's
+- Missing required keys produce a warning but don't block loading
+
+### Best Practices
+
+- **Never commit `.env` files.** Add `.env` to `.gitignore`.
+- **Always include `.env.example`.** The scaffold generates one.
+- **Check keys at use-time.** Don't crash in `activate()` — check when the tool is called.
+- **Prefix key names.** Use `SOCIAL_MEDIA_API_KEY`, not just `API_KEY`.
+
+## Installation Methods
+
+Woodbury supports three ways to install extensions:
+
+### npm Packages
+
+```bash
+woodbury ext install woodbury-ext-social-media
+```
+
+Installs from npm into `~/.woodbury/extensions/node_modules/`.
+
+### Git Repositories
+
+```bash
+woodbury ext install-git https://github.com/user/woodbury-ext-social-media.git
+```
+
+Clones the repo, runs `npm install` if needed, runs `npm run build` if a build script exists.
+
+### Symlink (Local Development)
+
+```bash
+woodbury ext link /path/to/my-extension
+```
+
+Creates a symlink from `~/.woodbury/extensions/<name>` to your local directory. Edit in place and restart Woodbury.
+
+### After Installation
+
+```bash
+# Configure env vars
+woodbury ext configure <name>
+
+# Restart Woodbury to activate
+woodbury
+
+# Verify
+/extensions
+```
 
 ## Site Research Phase (Web-Navigation Extensions)
 

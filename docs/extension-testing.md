@@ -446,6 +446,56 @@ describe('system prompt', () => {
 });
 ```
 
+## Testing Environment Variables
+
+### Mocking ctx.env
+
+Test tool handlers with mock environment variables:
+
+```javascript
+describe('tool with API key', () => {
+  it('should use the API key from ctx.env', async () => {
+    const tools = [];
+    const ctx = createMockContext({ tools });
+    ctx.env = Object.freeze({ MY_API_KEY: 'test-key-123' });
+
+    await ext.activate(ctx);
+
+    const tool = tools.find(t => t.definition.name === 'my_ext_fetch');
+    const result = await tool.handler({ query: 'test' });
+    expect(result).toContain('success');
+  });
+
+  it('should return error when API key is missing', async () => {
+    const tools = [];
+    const ctx = createMockContext({ tools });
+    ctx.env = Object.freeze({});
+
+    await ext.activate(ctx);
+
+    const tool = tools.find(t => t.definition.name === 'my_ext_fetch');
+    const result = await tool.handler({ query: 'test' });
+    expect(result).toContain('API key not configured');
+  });
+});
+```
+
+### Testing env Isolation
+
+Verify extensions only see their own keys:
+
+```javascript
+it('should not have access to other extension keys', async () => {
+  const ctx = createMockContext();
+  ctx.env = Object.freeze({ MY_EXT_KEY: 'value' });
+
+  await ext.activate(ctx);
+
+  expect(ctx.env.OTHER_EXT_SECRET).toBeUndefined();
+  expect(Object.isFrozen(ctx.env)).toBe(true);
+});
+```
+
 ## Testing Site Knowledge (--web Extensions)
 
 Extensions created with `--web` need additional testing to verify site-knowledge loading works correctly.

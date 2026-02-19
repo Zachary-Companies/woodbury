@@ -8,11 +8,17 @@
  * Each extension must have a package.json with a "woodbury" field.
  */
 
-import { readdir, readFile, access } from 'node:fs/promises';
+import { readdir, readFile, access, stat } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { existsSync } from 'node:fs';
 import type { WoodburyExtension } from './extension-api.js';
+
+/** Declaration of an environment variable expected by an extension */
+export interface EnvVarDeclaration {
+  required: boolean;
+  description: string;
+}
 
 /** Metadata parsed from an extension's package.json */
 export interface ExtensionManifest {
@@ -34,6 +40,8 @@ export interface ExtensionManifest {
   source: 'local' | 'npm';
   /** Absolute path to the extension root directory */
   directory: string;
+  /** Declared environment variables from woodbury.env field in package.json */
+  envDeclarations: Record<string, EnvVarDeclaration>;
 }
 
 /** A loaded extension with its manifest and module */
@@ -49,6 +57,23 @@ export const EXTENSIONS_DIR = join(homedir(), '.woodbury', 'extensions');
 const NPM_PREFIX = 'woodbury-ext-';
 
 /**
+ * Check if an entry is a directory (follows symlinks).
+ */
+async function isDirectoryEntry(entry: { name: string; isDirectory(): boolean; isSymbolicLink(): boolean }, parentDir: string): Promise<boolean> {
+  if (entry.isDirectory()) return true;
+  if (entry.isSymbolicLink()) {
+    try {
+      const fullPath = join(parentDir, entry.name);
+      const stats = await stat(fullPath); // stat follows symlinks
+      return stats.isDirectory();
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
+/**
  * Discover all extension manifests without loading them.
  * Scans both local directories and npm packages.
  */
@@ -60,7 +85,9 @@ export async function discoverExtensions(): Promise<ExtensionManifest[]> {
     try {
       const entries = await readdir(EXTENSIONS_DIR, { withFileTypes: true });
       for (const entry of entries) {
-        if (!entry.isDirectory() || entry.name === 'node_modules') continue;
+        if (entry.name === 'node_modules') continue;
+        const isDir = await isDirectoryEntry(entry, EXTENSIONS_DIR);
+        if (!isDir) continue;
         const dir = join(EXTENSIONS_DIR, entry.name);
         const manifest = await readManifest(dir, 'local');
         if (manifest) manifests.push(manifest);
@@ -76,7 +103,8 @@ export async function discoverExtensions(): Promise<ExtensionManifest[]> {
     try {
       const entries = await readdir(npmDir, { withFileTypes: true });
       for (const entry of entries) {
-        if (!entry.isDirectory()) continue;
+        const isDir = await isDirectoryEntry(entry, npmDir);
+        if (!isDir) continue;
 
         if (entry.name.startsWith('@')) {
           // Scoped packages: @scope/woodbury-ext-*
@@ -84,7 +112,8 @@ export async function discoverExtensions(): Promise<ExtensionManifest[]> {
           try {
             const scopeEntries = await readdir(scopeDir, { withFileTypes: true });
             for (const scopeEntry of scopeEntries) {
-              if (scopeEntry.isDirectory() && scopeEntry.name.startsWith(NPM_PREFIX)) {
+              const isScopeDir = await isDirectoryEntry(scopeEntry, scopeDir);
+              if (isScopeDir && scopeEntry.name.startsWith(NPM_PREFIX)) {
                 const dir = join(scopeDir, scopeEntry.name);
                 const manifest = await readManifest(dir, 'npm');
                 if (manifest) manifests.push(manifest);
@@ -130,6 +159,19 @@ async function readManifest(
     // Verify entry point exists
     await access(entryPoint);
 
+    // Parse env declarations from woodbury.env field
+    const envDeclarations: Record<string, EnvVarDeclaration> = {};
+    if (wb.env && typeof wb.env === 'object') {
+      for (const [key, decl] of Object.entries(wb.env)) {
+        if (decl && typeof decl === 'object') {
+          envDeclarations[key] = {
+            required: (decl as any).required === true,
+            description: (decl as any).description || '',
+          };
+        }
+      }
+    }
+
     return {
       packageName: pkg.name || wb.name,
       name: wb.name,
@@ -140,6 +182,7 @@ async function readManifest(
       entryPoint,
       source,
       directory: dir,
+      envDeclarations,
     };
   } catch {
     return null; // Skip malformed extensions silently
@@ -170,4 +213,51 @@ export async function loadExtension(
   }
 
   return { manifest, module: extension };
+}
+
+/**
+ * Parse a .env file content string into a key-value record.
+ * Handles comments (#), blank lines, quoted values (single/double),
+ * whitespace trimming, and equals signs within values.
+ */
+export function parseEnvFile(content: string): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const line of content.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const eqIdx = trimmed.indexOf('=');
+    if (eqIdx <= 0) continue;
+    const key = trimmed.slice(0, eqIdx).trim();
+    let value = trimmed.slice(eqIdx + 1).trim();
+    // Strip surrounding quotes
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+    if (!value) continue;
+    env[key] = value;
+  }
+  return env;
+}
+
+/**
+ * Serialize a key-value record into .env file content.
+ * Inverse of parseEnvFile(). Quotes values containing special characters.
+ */
+export function writeEnvFile(vars: Record<string, string>): string {
+  return (
+    Object.entries(vars)
+      .filter(([, v]) => v !== '') // skip empty values (matches parseEnvFile behavior)
+      .map(([k, v]) => {
+        // Quote values containing spaces, #, =, or quotes
+        if (/[\s#="']/.test(v)) {
+          const escaped = v.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+          return `${k}="${escaped}"`;
+        }
+        return `${k}=${v}`;
+      })
+      .join('\n') + '\n'
+  );
 }

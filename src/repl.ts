@@ -8,6 +8,7 @@ import { slashCommands } from './slash-commands.js';
 import { FileConversationManager } from './conversation.js';
 import { compactContext } from './context-compactor.js';
 import type { ExtensionManager } from './extension-manager.js';
+import type { DashboardHandle } from './config-dashboard.js';
 
 // Configure marked to render markdown in terminal with theme-aware colors
 marked.setOptions({
@@ -245,6 +246,7 @@ export interface ReplOptions {
   config: WoodburyConfig;
   prompt?: string;
   extensionManager?: ExtensionManager;
+  dashboardHandle?: DashboardHandle;
 }
 
 export class Repl {
@@ -422,8 +424,8 @@ export class Repl {
         this.abortController.abort();
         this.abortController = null;
       } else {
-        // Double Ctrl+C to exit
-        if (now - this.lastCtrlCTime < 500) {
+        // Double Ctrl+C to exit — 2 second window
+        if (now - this.lastCtrlCTime < 2000) {
           this.stop();
           return;
         }
@@ -917,6 +919,9 @@ export class Repl {
     this.print(colors.primary.bold('  └─────────────────────────────────────────┘'));
     this.print('');
     this.print(colors.muted('  Type ') + colors.secondary('/help') + colors.muted(' for commands, or ') + colors.secondary('exit') + colors.muted(' to quit.'));
+    if (this.config.dashboardUrl) {
+      this.print(colors.muted('  Config: ') + colors.secondary(this.config.dashboardUrl));
+    }
     this.print('');
     this.printDivider('heavy');
     this.print('');
@@ -983,6 +988,11 @@ export class Repl {
 
     await this.conversationManager.save();
 
+    // Close config dashboard
+    if (this.options.dashboardHandle) {
+      await this.options.dashboardHandle.close();
+    }
+
     // Deactivate all extensions (close web servers, etc.)
     if (this.extensionManager) {
       await this.extensionManager.deactivateAll();
@@ -1022,9 +1032,10 @@ export class Repl {
 
 export async function startRepl(
   config: WoodburyConfig,
-  extensionManager?: ExtensionManager
+  extensionManager?: ExtensionManager,
+  dashboardHandle?: DashboardHandle
 ): Promise<void> {
-  const repl = new Repl({ config, extensionManager });
+  const repl = new Repl({ config, extensionManager, dashboardHandle });
   return repl.start();
 }
 

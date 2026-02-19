@@ -47,12 +47,12 @@ Woodbury is an interactive AI coding assistant CLI built on the agentic loop emb
 | File | Purpose |
 |------|---------|
 | `src/extension-api.ts` | Public types for extension authors (`WoodburyExtension`, `ExtensionContext`, etc.) |
-| `src/extension-loader.ts` | Discovers extensions from local dirs + npm packages, validates manifests |
-| `src/extension-manager.ts` | Lifecycle coordinator: load, activate, aggregate tools/commands/prompts, serve web UIs, deactivate |
-| `src/extension-scaffold.ts` | `woodbury ext create` generates starter extension with all four capabilities |
+| `src/extension-loader.ts` | Discovers extensions, validates manifests, `parseEnvFile()` utility, `EnvVarDeclaration` + `envDeclarations` on manifest |
+| `src/extension-manager.ts` | Lifecycle coordinator: load, activate (incl. `.env` loading → frozen `ctx.env`), aggregate tools/commands/prompts, serve web UIs, deactivate |
+| `src/extension-scaffold.ts` | `woodbury ext create` generates starter extension with all four capabilities; `initGitRepo()`, `ensureGhInstalled()`, `isToolInstalled()` helpers for git + GitHub integration |
 
 **Extension data flow:**
-1. `cli.ts` creates `ExtensionManager` → calls `loadAll()` → discovers + activates all extensions
+1. `cli.ts` creates `ExtensionManager` → calls `loadAll()` → discovers + activates all extensions (during activation, reads `<ext-dir>/.env`, validates against `woodbury.env` declarations, provides frozen `ctx.env`)
 2. `ExtensionManager` is passed to `startRepl()` → merges extension commands with built-in slash commands
 3. `createAgent()` in `agent-factory.ts` receives `ExtensionManager` → registers extension tools in `ToolRegistry` → passes extension prompt sections to `buildSystemPrompt()`
 4. `system-prompt.ts` appends `## Extension Instructions` section with all extension prompt additions
@@ -60,10 +60,16 @@ Woodbury is an interactive AI coding assistant CLI built on the agentic loop emb
 
 **Extension CLI subcommands** (in `cli.ts`):
 - `woodbury ext list` — discover and list extensions
-- `woodbury ext create <name>` — scaffold via `extension-scaffold.ts`
+- `woodbury ext create <name>` — scaffold via `extension-scaffold.ts` (auto-inits git repo, generates `.gitignore`)
 - `woodbury ext create <name> --web` — scaffold with `site-knowledge/` templates for web-navigation extensions
+- `woodbury ext create <name> --github` — scaffold + init git + create GitHub repo + push (uses `gh` CLI; installs via brew if missing)
+- `woodbury ext create <name> --github --public` — same as above with public repo
+- `woodbury ext create <name> --no-git` — scaffold without git initialization
 - `woodbury ext install <pkg>` — `npm install` in `~/.woodbury/extensions/`
+- `woodbury ext install-git <url>` — git clone into `~/.woodbury/extensions/<name>/`, runs npm install + build if needed
+- `woodbury ext link <path>` — symlink local extension directory into `~/.woodbury/extensions/`
 - `woodbury ext uninstall <pkg>` — `npm uninstall` in `~/.woodbury/extensions/`
+- `woodbury ext configure <name>` — show/check env var status for an extension
 - `--no-extensions` flag disables all extension loading
 
 **Site Knowledge Pattern (Web-Navigation Extensions):**
@@ -102,7 +108,7 @@ npm run dev            # tsc --watch
 Extension-specific test files:
 | File | Tests |
 |------|-------|
-| `src/__tests__/extension-scaffold.test.ts` | Name validation, directory creation, package.json generation, index.js scaffolding, `--web` site-knowledge templates |
+| `src/__tests__/extension-scaffold.test.ts` | Name validation, directory creation, package.json generation, index.js scaffolding, `--web` site-knowledge templates, `.gitignore` generation, `isToolInstalled()`, `initGitRepo()` git init + commit + `.gitignore` respect |
 | `src/__tests__/extension-loader.test.ts` | Discovery from local/npm/scoped dirs, manifest parsing, skipping invalid extensions |
 | `src/__tests__/extension-manager.test.ts` | Lifecycle (loadAll, activate, deactivate), context API (tools, commands, prompts, web UIs), aggregation |
 | `src/__tests__/extension-agent-factory.test.ts` | Tool registration in ToolRegistry, prompt section passthrough, error handling |

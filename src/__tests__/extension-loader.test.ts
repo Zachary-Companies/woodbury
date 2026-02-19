@@ -32,7 +32,7 @@ jest.mock('node:os', () => ({
   homedir: () => TEST_HOME,
 }));
 
-import { discoverExtensions, loadExtension, EXTENSIONS_DIR } from '../extension-loader';
+import { discoverExtensions, loadExtension, parseEnvFile, EXTENSIONS_DIR } from '../extension-loader';
 
 /**
  * Helper: create a minimal valid extension in a directory.
@@ -234,6 +234,125 @@ describe('extension-loader', () => {
     });
   });
 
+  describe('parseEnvFile', () => {
+    it('should parse KEY=VALUE pairs', () => {
+      const result = parseEnvFile('FOO=bar\nBAZ=qux');
+      expect(result).toEqual({ FOO: 'bar', BAZ: 'qux' });
+    });
+
+    it('should skip blank lines and comments', () => {
+      const result = parseEnvFile('# comment\n\nFOO=bar\n  # another\nBAZ=qux');
+      expect(result).toEqual({ FOO: 'bar', BAZ: 'qux' });
+    });
+
+    it('should strip surrounding double quotes', () => {
+      const result = parseEnvFile('FOO="hello world"');
+      expect(result).toEqual({ FOO: 'hello world' });
+    });
+
+    it('should strip surrounding single quotes', () => {
+      const result = parseEnvFile("FOO='hello world'");
+      expect(result).toEqual({ FOO: 'hello world' });
+    });
+
+    it('should skip lines without = sign', () => {
+      const result = parseEnvFile('BADLINE\nFOO=bar');
+      expect(result).toEqual({ FOO: 'bar' });
+    });
+
+    it('should handle = in value', () => {
+      const result = parseEnvFile('FOO=bar=baz');
+      expect(result).toEqual({ FOO: 'bar=baz' });
+    });
+
+    it('should skip empty values', () => {
+      const result = parseEnvFile('FOO=\nBAR=baz');
+      expect(result).toEqual({ BAR: 'baz' });
+    });
+
+    it('should return empty object for empty content', () => {
+      const result = parseEnvFile('');
+      expect(result).toEqual({});
+    });
+
+    it('should trim whitespace around keys and values', () => {
+      const result = parseEnvFile('  FOO  =  bar  ');
+      expect(result).toEqual({ FOO: 'bar' });
+    });
+  });
+
+  describe('envDeclarations parsing', () => {
+    beforeEach(async () => {
+      try {
+        await fs.rm(TEST_EXT_DIR, { recursive: true, force: true });
+      } catch {}
+      await fs.mkdir(TEST_EXT_DIR, { recursive: true });
+    });
+
+    it('should parse woodbury.env declarations from package.json', async () => {
+      const extDir = join(TEST_EXT_DIR, 'env-ext');
+      await fs.mkdir(extDir, { recursive: true });
+      await fs.writeFile(join(extDir, 'package.json'), JSON.stringify({
+        name: 'woodbury-ext-env-ext',
+        version: '1.0.0',
+        main: 'index.js',
+        woodbury: {
+          name: 'env-ext',
+          displayName: 'Env Ext',
+          provides: ['tools'],
+          env: {
+            MY_KEY: { required: true, description: 'A required key' },
+            OTHER: { required: false, description: 'Optional' },
+          },
+        },
+      }));
+      await fs.writeFile(join(extDir, 'index.js'), 'module.exports = { async activate() {} };');
+
+      const manifests = await discoverExtensions();
+      expect(manifests).toHaveLength(1);
+      expect(manifests[0].envDeclarations).toEqual({
+        MY_KEY: { required: true, description: 'A required key' },
+        OTHER: { required: false, description: 'Optional' },
+      });
+    });
+
+    it('should default envDeclarations to empty when no env field', async () => {
+      await createExtension(join(TEST_EXT_DIR, 'no-env'), { name: 'no-env' });
+
+      const manifests = await discoverExtensions();
+      expect(manifests).toHaveLength(1);
+      expect(manifests[0].envDeclarations).toEqual({});
+    });
+
+    it('should ignore malformed env entries', async () => {
+      const extDir = join(TEST_EXT_DIR, 'bad-env');
+      await fs.mkdir(extDir, { recursive: true });
+      await fs.writeFile(join(extDir, 'package.json'), JSON.stringify({
+        name: 'woodbury-ext-bad-env',
+        version: '1.0.0',
+        main: 'index.js',
+        woodbury: {
+          name: 'bad-env',
+          displayName: 'Bad Env',
+          provides: ['tools'],
+          env: {
+            GOOD_KEY: { required: true, description: 'Valid' },
+            BAD_KEY: 'not-an-object',
+            NULL_KEY: null,
+          },
+        },
+      }));
+      await fs.writeFile(join(extDir, 'index.js'), 'module.exports = { async activate() {} };');
+
+      const manifests = await discoverExtensions();
+      expect(manifests).toHaveLength(1);
+      // Only GOOD_KEY should be parsed
+      expect(manifests[0].envDeclarations).toEqual({
+        GOOD_KEY: { required: true, description: 'Valid' },
+      });
+    });
+  });
+
   describe('loadExtension', () => {
     // Note: loadExtension uses dynamic import() with file:// URLs which Jest
     // cannot resolve. These tests verify the function's contract but are
@@ -264,6 +383,7 @@ describe('extension-loader', () => {
         entryPoint: join(extDir, 'nonexistent.js'),
         source: 'local' as const,
         directory: extDir,
+        envDeclarations: {},
       };
 
       // Should throw because the file doesn't exist

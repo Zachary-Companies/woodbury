@@ -32,6 +32,21 @@ const mockLoadExtension = jest.fn();
 jest.mock('../extension-loader.js', () => ({
   discoverExtensions: (...args: any[]) => mockDiscoverExtensions(...args),
   loadExtension: (...args: any[]) => mockLoadExtension(...args),
+  parseEnvFile: jest.requireActual('../extension-loader.js').parseEnvFile ?? ((content: string) => {
+    const env: Record<string, string> = {};
+    for (const line of content.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      const eqIdx = trimmed.indexOf('=');
+      if (eqIdx <= 0) continue;
+      const key = trimmed.slice(0, eqIdx).trim();
+      let value = trimmed.slice(eqIdx + 1).trim();
+      if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) value = value.slice(1, -1);
+      if (!value) continue;
+      env[key] = value;
+    }
+    return env;
+  }),
   EXTENSIONS_DIR: '/tmp/woodbury-test-ext',
 }));
 
@@ -50,6 +65,7 @@ function makeManifest(name: string, overrides?: Partial<ExtensionManifest>): Ext
     entryPoint: `/fake/path/${name}/index.js`,
     source: 'local',
     directory: `/fake/path/${name}`,
+    envDeclarations: {},
     ...overrides,
   };
 }
@@ -518,6 +534,159 @@ describe('ExtensionManager', () => {
       await manager.loadAll();
       await manager.deactivateAll();
       expect(manager.hasExtensions()).toBe(false);
+    });
+  });
+
+  describe('ExtensionContext — env', () => {
+    it('should provide an empty frozen env when no .env file exists', async () => {
+      const manifest = makeManifest('noenv');
+      let capturedEnv: any;
+
+      mockDiscoverExtensions.mockResolvedValue([manifest]);
+      mockLoadExtension.mockResolvedValue({
+        manifest,
+        module: {
+          activate: (ctx: ExtensionContext) => {
+            capturedEnv = ctx.env;
+          },
+        },
+      });
+
+      await manager.loadAll();
+      expect(capturedEnv).toBeDefined();
+      expect(Object.keys(capturedEnv)).toHaveLength(0);
+      expect(Object.isFrozen(capturedEnv)).toBe(true);
+    });
+
+    it('should load env vars from .env file in extension directory', async () => {
+      // Create a real temp dir with a .env file
+      const { promises: fsPromises } = require('node:fs');
+      const tmpDir = await fsPromises.mkdtemp(join(require('node:os').tmpdir(), 'wb-env-'));
+      await fsPromises.writeFile(join(tmpDir, '.env'), 'MY_KEY=secret123\nOTHER_KEY=value456\n');
+
+      const manifest = makeManifest('envext', { directory: tmpDir });
+      let capturedEnv: any;
+
+      mockDiscoverExtensions.mockResolvedValue([manifest]);
+      mockLoadExtension.mockResolvedValue({
+        manifest,
+        module: {
+          activate: (ctx: ExtensionContext) => {
+            capturedEnv = ctx.env;
+          },
+        },
+      });
+
+      try {
+        await manager.loadAll();
+        expect(capturedEnv.MY_KEY).toBe('secret123');
+        expect(capturedEnv.OTHER_KEY).toBe('value456');
+        expect(Object.isFrozen(capturedEnv)).toBe(true);
+      } finally {
+        await manager.deactivateAll();
+        await fsPromises.rm(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it('should not expose env vars from one extension to another', async () => {
+      const { promises: fsPromises } = require('node:fs');
+      const tmpA = await fsPromises.mkdtemp(join(require('node:os').tmpdir(), 'wb-envA-'));
+      const tmpB = await fsPromises.mkdtemp(join(require('node:os').tmpdir(), 'wb-envB-'));
+      await fsPromises.writeFile(join(tmpA, '.env'), 'SECRET_A=alpha\n');
+      await fsPromises.writeFile(join(tmpB, '.env'), 'SECRET_B=beta\n');
+
+      const mA = makeManifest('ext-a', { directory: tmpA });
+      const mB = makeManifest('ext-b', { directory: tmpB });
+
+      let envA: any, envB: any;
+
+      mockDiscoverExtensions.mockResolvedValue([mA, mB]);
+      mockLoadExtension
+        .mockResolvedValueOnce({
+          manifest: mA,
+          module: {
+            activate: (ctx: ExtensionContext) => { envA = ctx.env; },
+          },
+        })
+        .mockResolvedValueOnce({
+          manifest: mB,
+          module: {
+            activate: (ctx: ExtensionContext) => { envB = ctx.env; },
+          },
+        });
+
+      try {
+        await manager.loadAll();
+
+        // Extension A should only see its own key
+        expect(envA.SECRET_A).toBe('alpha');
+        expect(envA.SECRET_B).toBeUndefined();
+
+        // Extension B should only see its own key
+        expect(envB.SECRET_B).toBe('beta');
+        expect(envB.SECRET_A).toBeUndefined();
+      } finally {
+        await manager.deactivateAll();
+        await fsPromises.rm(tmpA, { recursive: true, force: true });
+        await fsPromises.rm(tmpB, { recursive: true, force: true });
+      }
+    });
+
+    it('should warn on missing required env vars but still activate', async () => {
+      const manifest = makeManifest('reqenv', {
+        envDeclarations: {
+          REQUIRED_KEY: { required: true, description: 'A required key' },
+        },
+      });
+
+      const warnSpy = jest.spyOn(console, 'warn').mockImplementation();
+
+      mockDiscoverExtensions.mockResolvedValue([manifest]);
+      mockLoadExtension.mockResolvedValue({
+        manifest,
+        module: { activate: jest.fn() },
+      });
+
+      const result = await manager.loadAll();
+      expect(result.loaded).toEqual(['reqenv']);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('REQUIRED_KEY')
+      );
+      warnSpy.mockRestore();
+    });
+
+    it('should not warn when all required env vars are present', async () => {
+      const { promises: fsPromises } = require('node:fs');
+      const tmpDir = await fsPromises.mkdtemp(join(require('node:os').tmpdir(), 'wb-envreq-'));
+      await fsPromises.writeFile(join(tmpDir, '.env'), 'REQUIRED_KEY=present\n');
+
+      const manifest = makeManifest('reqok', {
+        directory: tmpDir,
+        envDeclarations: {
+          REQUIRED_KEY: { required: true, description: 'A required key' },
+        },
+      });
+
+      const warnSpy = jest.spyOn(console, 'warn').mockImplementation();
+
+      mockDiscoverExtensions.mockResolvedValue([manifest]);
+      mockLoadExtension.mockResolvedValue({
+        manifest,
+        module: { activate: jest.fn() },
+      });
+
+      try {
+        await manager.loadAll();
+        // Should NOT have warned about missing keys for this extension
+        const calls = warnSpy.mock.calls.filter(
+          (c) => String(c[0]).includes('REQUIRED_KEY')
+        );
+        expect(calls).toHaveLength(0);
+      } finally {
+        warnSpy.mockRestore();
+        await manager.deactivateAll();
+        await fsPromises.rm(tmpDir, { recursive: true, force: true });
+      }
     });
   });
 

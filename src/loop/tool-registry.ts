@@ -98,16 +98,20 @@ export class ToolRegistry {
       }
       
       docs += '**Parameters:**\n';
-      const props = tool.definition.parameters.properties;
-      const required = tool.definition.parameters.required || [];
-      
-      for (const [name, prop] of Object.entries(props)) {
-        const isRequired = required.includes(name);
-        const propDef = prop as any;
-        docs += `- \`${name}\` (${propDef.type})${isRequired ? ' **required**' : ' *optional*'}: ${propDef.description}\n`;
-        if (propDef.default !== undefined) {
-          docs += `  - Default: \`${JSON.stringify(propDef.default)}\`\n`;
+      const props = tool.definition.parameters?.properties;
+      const required = tool.definition.parameters?.required || [];
+
+      if (props && typeof props === 'object') {
+        for (const [name, prop] of Object.entries(props)) {
+          const isRequired = required.includes(name);
+          const propDef = prop as any;
+          docs += `- \`${name}\` (${propDef.type})${isRequired ? ' **required**' : ' *optional*'}: ${propDef.description}\n`;
+          if (propDef.default !== undefined) {
+            docs += `  - Default: \`${JSON.stringify(propDef.default)}\`\n`;
+          }
         }
+      } else {
+        docs += '*(schema-defined parameters)*\n';
       }
       
       docs += '\n';
@@ -131,8 +135,13 @@ export class ToolRegistry {
     }
 
     const { definition } = tool;
-    const required = definition.parameters.required || [];
-    const properties = definition.parameters.properties;
+    const required = definition.parameters?.required || [];
+    const properties = definition.parameters?.properties;
+
+    // Skip validation for non-standard parameter schemas (e.g. Zod)
+    if (!properties || typeof properties !== 'object') {
+      return { valid: true };
+    }
 
     // Check required parameters
     for (const requiredParam of required) {
