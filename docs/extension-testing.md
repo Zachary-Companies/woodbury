@@ -446,6 +446,117 @@ describe('system prompt', () => {
 });
 ```
 
+## Testing Site Knowledge (--web Extensions)
+
+Extensions created with `--web` need additional testing to verify site-knowledge loading works correctly.
+
+### Selector Verification
+
+Test that documented selectors still match the live site:
+
+```javascript
+describe('selector verification', () => {
+  it('should find login button on the login page', async () => {
+    // Use web_crawl_rendered or bridgeServer to check selectors
+    const ctx = createMockContext();
+    ctx.bridgeServer = {
+      send: jest.fn().mockResolvedValue({
+        found: true,
+        element: { tag: 'button', text: 'Sign In' }
+      }),
+      get isConnected() { return true; },
+    };
+
+    // Test that selectors from selectors.md actually match
+    const result = await ctx.bridgeServer.send('find_element_by_text', {
+      text: 'Sign In'
+    });
+    expect(result.found).toBe(true);
+  });
+});
+```
+
+### Site Knowledge Loading
+
+Test that knowledge files are properly read and injected into the system prompt:
+
+```javascript
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+
+describe('site-knowledge loading', () => {
+  let extDir;
+
+  beforeEach(() => {
+    extDir = fs.mkdtempSync(path.join(os.tmpdir(), 'web-ext-test-'));
+    const knowledgeDir = path.join(extDir, 'site-knowledge');
+    fs.mkdirSync(knowledgeDir, { recursive: true });
+  });
+
+  afterEach(() => {
+    fs.rmSync(extDir, { recursive: true, force: true });
+  });
+
+  it('should load non-empty .md files into system prompt', async () => {
+    const knowledgeDir = path.join(extDir, 'site-knowledge');
+    fs.writeFileSync(path.join(knowledgeDir, 'site-map.md'), '# Site Map\n\n## Pages\n...');
+    fs.writeFileSync(path.join(knowledgeDir, 'selectors.md'), '# Selectors\n\n## Key Elements\n...');
+    fs.writeFileSync(path.join(knowledgeDir, 'empty.md'), '');  // empty — should be skipped
+
+    const prompts = [];
+    const ctx = createMockContext({ prompts });
+
+    // Copy the generated index.js to the temp dir and load it
+    // (or test loadSiteKnowledge directly if extracted as a module)
+
+    // Verify non-empty files are loaded
+    // Verify empty files are skipped
+    expect(prompts.length).toBeGreaterThan(0);
+    const fullPrompt = prompts.join('\n');
+    expect(fullPrompt).toContain('Site Map');
+    expect(fullPrompt).toContain('Selectors');
+  });
+
+  it('should handle missing site-knowledge/ directory gracefully', async () => {
+    // Remove the knowledge directory
+    fs.rmSync(path.join(extDir, 'site-knowledge'), { recursive: true, force: true });
+
+    const prompts = [];
+    const ctx = createMockContext({ prompts });
+
+    // Activate should not throw — it should just log a warning
+    // and proceed without adding site knowledge to the prompt
+  });
+});
+```
+
+### /knowledge Command
+
+Test that the `/knowledge` subcommand correctly lists files:
+
+```javascript
+describe('/my-site knowledge command', () => {
+  it('should list knowledge files with status', async () => {
+    const output = [];
+    const cmdCtx = {
+      workingDirectory: '/tmp',
+      print: (msg) => output.push(msg),
+    };
+
+    const commands = [];
+    const ctx = createMockContext({ commands });
+    await ext.activate(ctx);
+
+    const cmd = commands.find(c => c.name === 'my-site');
+    await cmd.handler(['knowledge'], cmdCtx);
+
+    expect(output.some(line => line.includes('site-map.md'))).toBe(true);
+    expect(output.some(line => line.includes('✓'))).toBe(true);
+  });
+});
+```
+
 ## Testing Checklist
 
 Before publishing or sharing an extension, verify:
@@ -463,6 +574,16 @@ Before publishing or sharing an extension, verify:
 - [ ] Tool names don't collide with built-in tools (`file_read`, `file_write`, `shell_execute`, etc.)
 - [ ] Unit tests pass for all tool handlers
 - [ ] Integration test passes with mock ExtensionContext
+
+### Additional Checklist for `--web` Extensions
+
+- [ ] All six site-knowledge template files exist and are non-empty
+- [ ] `index.js` loads site-knowledge files into the system prompt
+- [ ] The `/knowledge` subcommand lists files with correct status
+- [ ] Missing `site-knowledge/` directory doesn't crash the extension
+- [ ] Empty `.md` files are gracefully skipped
+- [ ] Selectors in `selectors.md` match the current live site
+- [ ] Auth flow in `auth-flow.md` reflects the current login process
 
 ## Existing Test Files
 

@@ -4,6 +4,8 @@
 
 These notes document the successful approach for interacting with web pages using the woodbury agent tools.
 
+**Updated:** Now uses **flow-frame-core** for cross-platform mouse/keyboard control.
+
 ---
 
 ## Key Tools Used
@@ -28,19 +30,36 @@ Used for:
 - Bringing Chrome to foreground: `browser(action="focus")`
 - The `waitMs` parameter is crucial — wait for page load!
 
-### 3. `mouse` — Click Actions
+### 3. `mouse` — Click Actions (powered by flow-frame-core)
 
-Used for clicking at specific coordinates:
+**Coordinate-based clicking:**
 ```
 mouse(action="click", x=96, y=157)
 ```
 
-### 4. `keyboard` — Text Input
+**Element-position-based clicking (flow-frame style):**
+```
+mouse(action="click", position={left: 100, top: 200, width: 80, height: 30})
+```
 
-Used for typing text and pressing keys:
+The `position` parameter accepts element bounds from `browser_query`. Flow-frame-core automatically:
+- Centers the click within the element
+- Compensates for Chrome's UI offset (tabs, address bar)
+- Uses smooth mouse movement on macOS/Linux
+
+**Desktop app mode (no Chrome offset):**
+```
+mouse(action="click", position={...}, forDesktop=true)
+```
+
+### 4. `keyboard` — Text Input (powered by flow-frame-core)
+
 ```
 keyboard(action="type", text="your text here")
 keyboard(action="press", key="enter")
+keyboard(action="press", key="a", ctrl=true)  # Ctrl+A / Cmd+A
+keyboard(action="hotkey", key="c", ctrl=true) # Ctrl+C / Cmd+C
+keyboard(action="clear")  # NEW: Select all + delete
 ```
 
 ---
@@ -59,9 +78,10 @@ When typing into a text field on a webpage from the terminal, the **focus** matt
 ```
 1. browser(action="focus")           # Switch focus TO Chrome
 2. browser_query(action="click_element", selector="#input-field")  # Click the input to focus it
-3. keyboard(action="type", text="...")  # Type the text
-4. keyboard(action="press", key="enter") # Submit if needed
-5. browser(action="focus", appName="Terminal")  # Return focus to Terminal
+3. keyboard(action="clear")          # Clear any existing text (NEW!)
+4. keyboard(action="type", text="...")  # Type the text
+5. keyboard(action="press", key="enter") # Submit if needed
+6. browser(action="focus", appName="Terminal")  # Return focus to Terminal
 ```
 
 **This "focus sandwich" is essential for any text input workflow!**
@@ -107,8 +127,9 @@ When typing into a text field on a webpage from the terminal, the **focus** matt
    browser_query(action="click_element", selector="#desktop_input_bar")
    ```
 
-7. **Type the prompt:**
+7. **Clear any existing text and type the prompt:**
    ```
+   keyboard(action="clear")
    keyboard(action="type", text="a red corvette sports car...")
    ```
 
@@ -121,6 +142,35 @@ When typing into a text field on a webpage from the terminal, the **focus** matt
    ```
    browser(action="focus", appName="Terminal")
    ```
+
+---
+
+## Flow-Frame-Core Integration
+
+The mouse and keyboard tools now use **flow-frame-core** operations under the hood:
+
+| Woodbury Tool | Flow-Frame-Core Function |
+|---------------|-------------------------|
+| `mouse(action="move", ...)` | `moveMouse()` / `moveMouseDesktop()` |
+| `mouse(action="click", ...)` | `mouseClick()` |
+| `mouse(action="scroll", ...)` | `scroll()` |
+| `keyboard(action="press", ctrl=true, ...)` | `pressKey()` |
+| `keyboard(action="hotkey", ...)` | `typeText()` |
+| `keyboard(action="clear")` | `clearAllText()` |
+
+### Chrome Offset Handling
+
+Flow-frame-core knows about Chrome's UI:
+```javascript
+const chrome_offsets = { x: 1, y: 125 }  // tabs + address bar
+```
+
+When you pass a `position` object (element bounds), flow-frame:
+1. Calculates the center of the element
+2. Adds Chrome offsets automatically
+3. Uses smooth mouse movement on macOS/Linux
+
+Set `forDesktop=true` to skip Chrome offsets for desktop apps.
 
 ---
 
@@ -157,6 +207,9 @@ browser_query(action="click_element", selector="#button-id")
 
 # Fallback: Use coordinates
 mouse(action="click", x=100, y=200)
+
+# Flow-frame style: Use element position
+mouse(action="click", position={left: 100, top: 200, width: 80, height: 30})
 ```
 
 ### 6. Form Input Strategy
@@ -167,7 +220,8 @@ browser_query(action="set_value", selector="input[name=email]", value="user@exam
 # For simple forms or when set_value doesn't work:
 1. Focus the window
 2. Click the input
-3. Use keyboard(action="type", ...)
+3. Use keyboard(action="clear")  # Clear existing text
+4. Use keyboard(action="type", ...)
 ```
 
 ---
@@ -211,9 +265,11 @@ browser(action="focus")
 
 # 5. Fill each field
 browser_query(action="click_element", selector="input[name=email]")
+keyboard(action="clear")
 keyboard(action="type", text="user@example.com")
 
 browser_query(action="click_element", selector="input[name=password]")
+keyboard(action="clear")
 keyboard(action="type", text="secretpassword")
 
 # 6. Submit
@@ -229,4 +285,5 @@ browser_query(action="get_page_info")
 ---
 
 *Last updated: 2026-02-19*
+*Now using flow-frame-core for cross-platform mouse/keyboard control*
 *Context: Successfully entered Midjourney prompt by using the focus sandwich technique*

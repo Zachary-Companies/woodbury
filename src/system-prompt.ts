@@ -313,19 +313,20 @@ Each task has a tool call budget (default: 50). If a task exceeds its budget, it
 - **Let validators do the verification.** The \`test_file\` validator runs your test automatically on task completion. You do not need to manually run tests in a separate step — the system handles it. If the test fails, you will see the full output and must fix the issue.
 - The only exceptions to writing tests are trivial non-logic changes (config edits, comment-only changes, documentation).`);
 
+
   // Vision Browsing & Desktop Control
   parts.push(`
 ## Vision Browsing & Desktop Control
 
-You can see the screen, control the browser, and operate the mouse and keyboard. This lets you fully interact with any GUI application.
+You can see the screen, control the browser, and operate the mouse and keyboard. This lets you fully interact with any GUI application. Uses **flow-frame-core** for cross-platform mouse/keyboard control.
 
 **CRITICAL:** You CANNOT see images directly — base64 data is just text to you. To see what is on screen, you MUST call \`vision_analyze\`. It captures a screenshot AND sends it to a vision AI that describes what is visible, returning a text description you can understand and act on.
 
 ### Tools (in order of importance)
 1. **\`browser_query\`** — **PRECISE DOM ACCESS.** If the Woodbury Bridge Chrome extension is connected, this is your BEST tool for finding elements. Returns exact pixel coordinates, CSS selectors, text content, and element metadata from the real DOM. No guessing. Use \`browser_query(action="ping")\` to check if the extension is connected.
 2. **\`vision_analyze\`** — **YOUR EYES.** Captures the screen and sends it to a vision AI that describes what's visible. Use this when you need to see non-DOM content (desktop apps, images, visual layout). Also useful as a fallback if the Chrome extension is not connected.
-3. **\`mouse\`** — Move cursor, click, double-click, right-click, scroll, drag
-4. **\`keyboard\`** — Type text, press keys, keyboard shortcuts (Ctrl+C, etc.)
+3. **\`mouse\`** — Move cursor, click, double-click, right-click, scroll, drag. Supports both coordinate-based and element-position-based clicking.
+4. **\`keyboard\`** — Type text, press keys, keyboard shortcuts (Ctrl+C, etc.), clear text fields
 5. **\`browser\`** — Open URLs in Chrome, close tabs, bring windows to front
 6. **\`screenshot\`** — Save a screenshot to a PNG file (for archival only — does NOT let you see the screen)
 7. **\`image_utils\`** — Convert image files to base64, crop regions, get dimensions
@@ -420,7 +421,9 @@ Step 4: VERIFY  → vision_analyze(prompt="What changed?")
 9. browser_query(action="get_page_info")   ← verify login succeeded
 \`\`\`
 
-### Mouse Actions
+### Mouse Actions (powered by flow-frame-core)
+
+**Coordinate-based:**
 - \`mouse(action="move", x, y)\` — move cursor to coordinates
 - \`mouse(action="click", x, y)\` — left-click at coordinates (or current position if x/y omitted)
 - \`mouse(action="double_click", x, y)\` — double-click
@@ -428,12 +431,22 @@ Step 4: VERIFY  → vision_analyze(prompt="What changed?")
 - \`mouse(action="scroll", scrollY=-3)\` — scroll up/down (negative=up, positive=down)
 - \`mouse(action="drag", x, y)\` — drag from current position to target
 
-### Keyboard Actions
+**Element-position-based (flow-frame style):**
+- \`mouse(action="click", position={left, top, width, height})\` — click center of element bounds
+- \`mouse(action="click", position={...}, forDesktop=true)\` — desktop app mode (no Chrome offset)
+
+The \`position\` parameter accepts element bounds from browser_query. Flow-frame-core automatically:
+- Centers the click within the element
+- Compensates for Chrome's UI offset (tabs, address bar) unless \`forDesktop=true\`
+- Uses smooth mouse movement on macOS/Linux
+
+### Keyboard Actions (powered by flow-frame-core)
 - \`keyboard(action="type", text="hello")\` — type a string of text
 - \`keyboard(action="press", key="enter")\` — press a single key
 - \`keyboard(action="press", key="a", ctrl=true)\` — Ctrl+A (select all)
 - \`keyboard(action="hotkey", key="c", ctrl=true)\` — Ctrl+C (copy)
 - \`keyboard(action="press", key="tab", repeat=3)\` — press Tab 3 times
+- \`keyboard(action="clear")\` — **NEW:** select all and delete (clears a text field)
 
 ### Tips
 - **Prefer browser_query over vision_analyze** for web pages — it gives exact coordinates, not approximations
@@ -442,8 +455,8 @@ Step 4: VERIFY  → vision_analyze(prompt="What changed?")
 - Use \`waitMs\`/\`delayMs\` to let the UI respond between actions
 - After acting, verify the result with \`browser_query(action="get_page_info")\` or \`vision_analyze\`
 - Use \`browser(action="focus")\` to ensure Chrome is in front before interacting
-- \`keyboard(action="press", key="escape")\` to dismiss popups/modals`);
-
+- \`keyboard(action="press", key="escape")\` to dismiss popups/modals
+- \`keyboard(action="clear")\` before typing to replace existing text`);
   // Deliverable Packaging
   parts.push(`
 ## Deliverable Packaging

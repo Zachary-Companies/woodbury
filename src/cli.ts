@@ -238,13 +238,19 @@ ext
 ext
   .command('create <name>')
   .description('Scaffold a new extension')
-  .action(async (name: string) => {
+  .option('--web', 'Include site-knowledge templates for web-navigation extensions')
+  .action(async (name: string, cmdOpts: { web?: boolean }) => {
     try {
-      const dir = await scaffoldExtension(name);
+      const dir = await scaffoldExtension(name, { webNavigation: cmdOpts.web });
       console.log(`${icons.success}  ${colors.success('Extension scaffolded!')}`);
       console.log();
       console.log(`  ${colors.muted('Directory:')} ${dir}`);
       console.log(`  ${colors.muted('Edit:')}      ${path.join(dir, 'index.js')}`);
+      if (cmdOpts.web) {
+        console.log(`  ${colors.muted('Knowledge:')} ${path.join(dir, 'site-knowledge')}`);
+        console.log();
+        console.log(colors.muted('  Fill in site-knowledge/*.md files before building tools.'));
+      }
       console.log();
       console.log(colors.muted('  Restart Woodbury to activate.'));
     } catch (error) {

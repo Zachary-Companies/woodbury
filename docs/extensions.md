@@ -337,6 +337,7 @@ woodbury ext uninstall woodbury-ext-social
 |---------|-------------|
 | `woodbury ext list` | List all installed extensions |
 | `woodbury ext create <name>` | Scaffold a new extension |
+| `woodbury ext create <name> --web` | Scaffold with site-knowledge templates for web navigation |
 | `woodbury ext install <package>` | Install from npm |
 | `woodbury ext uninstall <package>` | Uninstall an npm extension |
 | `woodbury --no-extensions` | Start without loading any extensions |
@@ -395,6 +396,136 @@ In the REPL:
 - Handle missing API keys gracefully. Check `process.env` and throw clear errors.
 - Don't crash on network failures. Return error messages the agent can act on.
 - Clean up in `deactivate()`. Close connections, stop timers, release ports.
+
+## Site Research Phase (Web-Navigation Extensions)
+
+When building an extension that navigates and automates a website (e.g., posting to Twitter, managing a Shopify store, scraping data from a dashboard), **research the site first** before writing any automation code. Woodbury provides a `--web` scaffold variant that creates a structured research directory alongside the standard extension files.
+
+### Getting Started
+
+```bash
+woodbury ext create my-site --web
+```
+
+This creates the standard extension files **plus** a `site-knowledge/` directory:
+
+```
+~/.woodbury/extensions/my-site/
+  package.json
+  index.js              # Loads site-knowledge into system prompt
+  web/
+    index.html
+  site-knowledge/       # ← Research templates
+    site-map.md         # Pages, navigation, URL patterns
+    selectors.md        # CSS selectors, DOM structure
+    auth-flow.md        # Login, sessions, tokens
+    api-endpoints.md    # REST/GraphQL endpoints, rate limits
+    forms.md            # Form fields, validation, submission
+    quirks.md           # Timing issues, workarounds, gotchas
+```
+
+The generated `index.js` automatically reads all `.md` files from `site-knowledge/` and injects them into the agent's system prompt at activation time. This means once you fill in the research, Woodbury knows the site inside and out.
+
+### Research Workflow
+
+Work through the knowledge files in order. Each template includes tables to fill in and example Woodbury commands to use for research.
+
+#### Step 1: Site Map (`site-map.md`)
+
+Map out the pages and navigation structure:
+
+```
+# In the Woodbury REPL, crawl the site:
+> Crawl https://example.com and list all the links you find
+> Now render https://example.com/app with JavaScript and map the SPA routes
+```
+
+Fill in the Primary Pages table with URLs, purposes, and navigation flows.
+
+#### Step 2: Selectors (`selectors.md`)
+
+Document the CSS selectors for elements you need to interact with:
+
+```
+> Render https://example.com/login and find all interactive elements
+> What data-testid attributes are used on the dashboard page?
+```
+
+Prefer stable selectors: `data-testid`, `aria-label`, `id` over class names or tag hierarchies.
+
+#### Step 3: Auth Flow (`auth-flow.md`)
+
+Document the authentication process:
+
+```
+> Render the login page and describe all form fields
+> Fetch https://example.com/.well-known/openid-configuration
+```
+
+Record session management details: cookie vs JWT, session duration, refresh mechanism.
+
+#### Step 4: API Endpoints (`api-endpoints.md`)
+
+Discover and document API endpoints the site uses:
+
+```
+> Fetch https://example.com/api/posts with a GET request
+> What API endpoints does the dashboard page call?
+```
+
+Record request/response patterns, auth requirements, and rate limits.
+
+#### Step 5: Forms (`forms.md`)
+
+Document form structures and validation rules:
+
+```
+> Render the create-post page and list all form fields
+> What validation rules does the registration form have?
+```
+
+Record field types, required flags, character limits, and submission behavior.
+
+#### Step 6: Quirks (`quirks.md`)
+
+Document timing issues, workarounds, and browser-specific gotchas:
+
+```
+> How long does the dashboard take to fully render?
+> Does the site use any anti-bot protection?
+```
+
+This is the "lessons learned" file — update it as you discover issues during development.
+
+### How Site Knowledge Gets Loaded
+
+The `--web` scaffold generates an `index.js` that:
+
+1. Reads all `.md` files from `site-knowledge/` using `fs.readdirSync` + `fs.readFileSync`
+2. Filters out empty files
+3. Concatenates non-empty files with `---` separators
+4. Passes the combined knowledge to `ctx.addSystemPrompt()`
+
+This means the agent has full access to your research on every interaction. When you update a knowledge file, restart Woodbury to reload it.
+
+### Managing Site Knowledge
+
+The `--web` scaffold includes a `/knowledge` slash command:
+
+```
+# In the REPL:
+/my-site knowledge
+```
+
+This lists all site-knowledge files with a checkmark (✓) for non-empty files and `(empty)` for files that haven't been filled in yet.
+
+### Tips for Effective Research
+
+- **Iterate:** Research is not a one-time activity. Update knowledge files as the site changes.
+- **Keep it concise:** The system prompt has a token budget. Focus on actionable information.
+- **Use stable selectors:** Prefer `data-testid` and `id` over class names that change with CSS updates.
+- **Document dates:** Note when research was last verified, especially for API endpoints and selectors.
+- **Test incrementally:** Fill in one knowledge file at a time, restart Woodbury, and verify the agent uses the information correctly.
 
 ## Example: Social Media Extension
 

@@ -128,6 +128,28 @@ function getGroqClient(apiKey?: string): Groq {
   return clientCache.get(cacheKey) as Groq;
 }
 
+/**
+ * Ensure conversation messages start with a user message (Anthropic API requirement).
+ * If needed, synthesizes a context-aware placeholder rather than a generic "Hello".
+ */
+function ensureUserFirst(messages: ChatMessage[]): ChatMessage[] {
+  if (messages.length === 0) {
+    // Empty conversation — synthesize a minimal user message
+    return [{ role: 'user', content: '[Starting conversation]' }];
+  }
+  
+  if (messages[0].role === 'user') {
+    return messages;
+  }
+  
+  // First message is 'assistant' — prepend a context placeholder
+  // This should be rare; it usually means conversation state got corrupted
+  return [
+    { role: 'user', content: '[Continuing conversation]' },
+    ...messages
+  ];
+}
+
 // ── Streaming variants ─────────────────────────────────────
 
 async function streamOpenAI(
@@ -167,11 +189,10 @@ async function streamAnthropic(
 ): Promise<LLMResponse> {
   const client = getAnthropicClient(options?.apiKey);
   const systemMessage = messages.find(m => m.role === 'system');
-  const conversationMessages = messages.filter(m => m.role !== 'system');
+  let conversationMessages = messages.filter(m => m.role !== 'system');
 
-  if (conversationMessages.length === 0 || conversationMessages[0].role !== 'user') {
-    conversationMessages.unshift({ role: 'user', content: 'Hello' });
-  }
+  // Ensure first message is from user (Anthropic requirement)
+  conversationMessages = ensureUserFirst(conversationMessages);
 
   const stream = client.messages.stream({
     model,
@@ -263,12 +284,10 @@ async function runAnthropic(messages: ChatMessage[], model: string, options?: Pa
 
   // Extract system message and user/assistant messages
   const systemMessage = messages.find(m => m.role === 'system');
-  const conversationMessages = messages.filter(m => m.role !== 'system');
+  let conversationMessages = messages.filter(m => m.role !== 'system');
 
   // Ensure first message is from user (Anthropic requirement)
-  if (conversationMessages.length === 0 || conversationMessages[0].role !== 'user') {
-    conversationMessages.unshift({ role: 'user', content: 'Hello' });
-  }
+  conversationMessages = ensureUserFirst(conversationMessages);
 
   const response = await client.messages.create({
     model,

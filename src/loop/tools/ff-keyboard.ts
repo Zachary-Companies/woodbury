@@ -2,15 +2,15 @@ import { ToolDefinition, ToolHandler, ToolContext } from '../types.js';
 
 export const ffKeyboardDefinition: ToolDefinition = {
   name: 'keyboard',
-  description: 'Control the keyboard: type text, press individual keys, or use keyboard shortcuts (Ctrl+C, Cmd+V, etc.). Use with screenshot/vision_analyze to interact with focused UI elements. Requires robotjs.',
+  description: 'Control the keyboard: type text, press individual keys, or use keyboard shortcuts (Ctrl+C, Cmd+V, etc.). Use with screenshot/vision_analyze to interact with focused UI elements. Uses flow-frame-core for cross-platform keyboard control.',
   dangerous: true,
   parameters: {
     type: 'object',
     properties: {
       action: {
         type: 'string',
-        description: 'Keyboard action: "type" types a string of text, "press" presses a single key with optional modifiers, "hotkey" presses a keyboard shortcut',
-        enum: ['type', 'press', 'hotkey']
+        description: 'Keyboard action: "type" types a string of text, "press" presses a single key with optional modifiers, "hotkey" presses a keyboard shortcut, "clear" selects all and deletes (Cmd/Ctrl+A then Delete)',
+        enum: ['type', 'press', 'hotkey', 'clear']
       },
       text: {
         type: 'string',
@@ -56,33 +56,27 @@ export const ffKeyboardHandler: ToolHandler = async (params: any, context?: Tool
     throw new Error('action parameter is required');
   }
 
+  // Import flow-frame-core operations
+  let flowFrameOps: any;
   let robot: any;
+  try {
+    flowFrameOps = await import('flow-frame-core/dist/operations.js');
+  } catch (err: any) {
+    throw new Error(`Failed to load flow-frame-core operations: ${err.message}`);
+  }
+
   try {
     robot = (await import('robotjs')).default || (await import('robotjs'));
   } catch (err: any) {
-    throw new Error(`Failed to load robotjs. Make sure robotjs is installed: ${err.message}`);
+    throw new Error(`Failed to load robotjs: ${err.message}`);
   }
 
   const delayMs = params.delayMs ?? 300;
   const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-  // Build modifiers array for robotjs
-  const buildModifiers = (): string[] => {
-    const mods: string[] = [];
-    const os = require('os');
-    const isMac = os.platform() === 'darwin';
-
-    if (params.ctrl) {
-      mods.push(isMac ? 'command' : 'control');
-    }
-    if (params.shift) {
-      mods.push('shift');
-    }
-    if (params.alt) {
-      mods.push(isMac ? 'option' : 'alt');
-    }
-    return mods;
-  };
+  // Check if we're on Windows using flow-frame's isWindows
+  const isWindows = flowFrameOps.isWindows();
+  const isMac = process.platform === 'darwin';
 
   try {
     if (action === 'type') {
@@ -101,13 +95,21 @@ export const ffKeyboardHandler: ToolHandler = async (params: any, context?: Tool
       if (!params.key) {
         throw new Error('key parameter is required for action="press"');
       }
-      const modifiers = buildModifiers();
+      
+      // Use flow-frame's typeText/pressKey for key presses with modifiers
       const repeat = params.repeat || 1;
-
+      
       for (let i = 0; i < repeat; i++) {
-        if (modifiers.length > 0) {
-          robot.keyTap(params.key.toLowerCase(), modifiers);
+        if (params.ctrl || params.shift || params.alt) {
+          // Use flow-frame's pressKey which handles modifier toggling properly
+          await flowFrameOps.pressKey({
+            keys: params.key.toLowerCase(),
+            ctrl: params.ctrl || false,
+            shift: params.shift || false,
+            alt: params.alt || false
+          });
         } else {
+          // Simple key tap without modifiers
           robot.keyTap(params.key.toLowerCase());
         }
         if (repeat > 1 && i < repeat - 1) {
@@ -116,6 +118,10 @@ export const ffKeyboardHandler: ToolHandler = async (params: any, context?: Tool
       }
       await wait(delayMs);
 
+      const modifiers: string[] = [];
+      if (params.ctrl) modifiers.push(isMac ? 'Cmd' : 'Ctrl');
+      if (params.shift) modifiers.push('Shift');
+      if (params.alt) modifiers.push(isMac ? 'Option' : 'Alt');
       const modStr = modifiers.length > 0 ? modifiers.join('+') + '+' : '';
       const repeatStr = repeat > 1 ? ` (×${repeat})` : '';
       return `# Keyboard: Pressed\n\n- Key: ${modStr}${params.key}${repeatStr}`;
@@ -124,19 +130,34 @@ export const ffKeyboardHandler: ToolHandler = async (params: any, context?: Tool
       if (!params.key) {
         throw new Error('key parameter is required for action="hotkey"');
       }
-      const modifiers = buildModifiers();
-      if (modifiers.length === 0) {
-        // If no modifiers specified for hotkey, default to Ctrl/Cmd
-        const os = require('os');
-        modifiers.push(os.platform() === 'darwin' ? 'command' : 'control');
-      }
-      robot.keyTap(params.key.toLowerCase(), modifiers);
+      
+      // Use flow-frame's typeText for hotkeys (it handles Cmd/Ctrl properly)
+      await flowFrameOps.typeText({
+        keys: params.key.toLowerCase(),
+        ctrl: params.ctrl !== false, // Default to true for hotkeys
+        shift: params.shift || false,
+        alt: params.alt || false
+      });
       await wait(delayMs);
 
+      const modifiers: string[] = [];
+      if (params.ctrl !== false) modifiers.push(isMac ? 'Cmd' : 'Ctrl');
+      if (params.shift) modifiers.push('Shift');
+      if (params.alt) modifiers.push(isMac ? 'Option' : 'Alt');
       return `# Keyboard: Hotkey\n\n- Shortcut: ${modifiers.join('+')}+${params.key}`;
 
+    } else if (action === 'clear') {
+      // Use flow-frame pattern: Cmd/Ctrl+A to select all, then Delete
+      const modifier = isMac ? 'command' : 'control';
+      robot.setKeyboardDelay(50);
+      robot.keyTap('a', modifier);
+      await wait(50);
+      robot.keyTap('delete');
+      await wait(delayMs);
+      return `# Keyboard: Cleared\n\n- Action: Selected all text (${isMac ? 'Cmd' : 'Ctrl'}+A) and deleted`;
+
     } else {
-      throw new Error(`Unknown action: "${action}". Valid: type, press, hotkey`);
+      throw new Error(`Unknown action: "${action}". Valid: type, press, hotkey, clear`);
     }
   } catch (err: any) {
     if (err.message.startsWith('Unknown action') || err.message.includes('required')) throw err;

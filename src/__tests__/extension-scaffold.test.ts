@@ -207,6 +207,89 @@ describe('scaffoldExtension', () => {
     });
   });
 
+  describe('site-knowledge (--web flag)', () => {
+    it('should not create site-knowledge/ without --web flag', async () => {
+      const dir = await scaffoldExtension('test-ext');
+      await expect(
+        fs.stat(join(dir, 'site-knowledge'))
+      ).rejects.toThrow();
+    });
+
+    it('should create site-knowledge/ directory with --web flag', async () => {
+      const dir = await scaffoldExtension('test-ext', { webNavigation: true });
+      const stat = await fs.stat(join(dir, 'site-knowledge'));
+      expect(stat.isDirectory()).toBe(true);
+    });
+
+    it('should create all six template files', async () => {
+      const dir = await scaffoldExtension('test-ext', { webNavigation: true });
+      const expectedFiles = [
+        'api-endpoints.md',
+        'auth-flow.md',
+        'forms.md',
+        'quirks.md',
+        'selectors.md',
+        'site-map.md',
+      ];
+      const files = await fs.readdir(join(dir, 'site-knowledge'));
+      expect(files.sort()).toEqual(expectedFiles);
+    });
+
+    it('should create non-empty template files with markdown headers', async () => {
+      const dir = await scaffoldExtension('test-ext', { webNavigation: true });
+      const knowledgeDir = join(dir, 'site-knowledge');
+      const files = await fs.readdir(knowledgeDir);
+      for (const file of files) {
+        const content = await fs.readFile(join(knowledgeDir, file), 'utf-8');
+        expect(content.length).toBeGreaterThan(0);
+        expect(content).toMatch(/^# /); // starts with a markdown header
+      }
+    });
+
+    it('should generate index.js that loads site-knowledge files', async () => {
+      const dir = await scaffoldExtension('test-ext', { webNavigation: true });
+      const content = await fs.readFile(join(dir, 'index.js'), 'utf-8');
+      expect(content).toContain('loadSiteKnowledge');
+      expect(content).toContain('site-knowledge');
+      expect(content).toContain("readdirSync");
+      expect(content).toContain("readFileSync");
+    });
+
+    it('should generate index.js with navigation tool example', async () => {
+      const dir = await scaffoldExtension('test-ext', { webNavigation: true });
+      const content = await fs.readFile(join(dir, 'index.js'), 'utf-8');
+      expect(content).toContain('test_ext_navigate');
+      expect(content).not.toContain('test_ext_hello');
+    });
+
+    it('should generate index.js with /knowledge subcommand', async () => {
+      const dir = await scaffoldExtension('test-ext', { webNavigation: true });
+      const content = await fs.readFile(join(dir, 'index.js'), 'utf-8');
+      expect(content).toContain("'knowledge'");
+      expect(content).toContain('Site knowledge files:');
+    });
+
+    it('should generate index.js with addSystemPrompt for site knowledge', async () => {
+      const dir = await scaffoldExtension('test-ext', { webNavigation: true });
+      const content = await fs.readFile(join(dir, 'index.js'), 'utf-8');
+      expect(content).toContain('ctx.addSystemPrompt');
+      expect(content).toContain('Site Knowledge');
+    });
+
+    it('should still create web/index.html with --web flag', async () => {
+      const dir = await scaffoldExtension('test-ext', { webNavigation: true });
+      const stat = await fs.stat(join(dir, 'web', 'index.html'));
+      expect(stat.isFile()).toBe(true);
+    });
+
+    it('should still create package.json with --web flag', async () => {
+      const dir = await scaffoldExtension('test-ext', { webNavigation: true });
+      const raw = await fs.readFile(join(dir, 'package.json'), 'utf-8');
+      const pkg = JSON.parse(raw);
+      expect(pkg.woodbury.name).toBe('test-ext');
+    });
+  });
+
   describe('web/index.html', () => {
     it('should create a web/index.html file', async () => {
       const dir = await scaffoldExtension('test-ext');

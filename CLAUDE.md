@@ -61,9 +61,17 @@ Woodbury is an interactive AI coding assistant CLI built on the agentic loop emb
 **Extension CLI subcommands** (in `cli.ts`):
 - `woodbury ext list` — discover and list extensions
 - `woodbury ext create <name>` — scaffold via `extension-scaffold.ts`
+- `woodbury ext create <name> --web` — scaffold with `site-knowledge/` templates for web-navigation extensions
 - `woodbury ext install <pkg>` — `npm install` in `~/.woodbury/extensions/`
 - `woodbury ext uninstall <pkg>` — `npm uninstall` in `~/.woodbury/extensions/`
 - `--no-extensions` flag disables all extension loading
+
+**Site Knowledge Pattern (Web-Navigation Extensions):**
+- `scaffoldExtension(name, { webNavigation: true })` creates a `site-knowledge/` directory with 6 template files: `site-map.md`, `selectors.md`, `auth-flow.md`, `api-endpoints.md`, `forms.md`, `quirks.md`
+- The `--web` variant generates an alternate `index.js` that reads `site-knowledge/*.md` files at activation and injects them via `addSystemPrompt()`
+- The alternate index.js also scaffolds a `_navigate` tool (instead of `_hello`) and a `/knowledge` subcommand
+- `ScaffoldOptions` interface in `extension-scaffold.ts` has `webNavigation?: boolean`
+- Template files are structured markdown with tables and "Research Commands Used" sections
 
 ## Build & Run
 
@@ -94,7 +102,7 @@ npm run dev            # tsc --watch
 Extension-specific test files:
 | File | Tests |
 |------|-------|
-| `src/__tests__/extension-scaffold.test.ts` | Name validation, directory creation, package.json generation, index.js scaffolding |
+| `src/__tests__/extension-scaffold.test.ts` | Name validation, directory creation, package.json generation, index.js scaffolding, `--web` site-knowledge templates |
 | `src/__tests__/extension-loader.test.ts` | Discovery from local/npm/scoped dirs, manifest parsing, skipping invalid extensions |
 | `src/__tests__/extension-manager.test.ts` | Lifecycle (loadAll, activate, deactivate), context API (tools, commands, prompts, web UIs), aggregation |
 | `src/__tests__/extension-agent-factory.test.ts` | Tool registration in ToolRegistry, prompt section passthrough, error handling |
