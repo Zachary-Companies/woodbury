@@ -1,0 +1,74 @@
+[
+  {
+    "id": "user-1771459055160",
+    "timestamp": "2026-02-18T23:57:35.160Z",
+    "role": "user",
+    "content": "are you there"
+  },
+  {
+    "id": "assistant-1771459055160",
+    "timestamp": "2026-02-18T23:57:35.160Z",
+    "role": "assistant",
+    "content": ""
+  },
+  {
+    "id": "user-1771459130341",
+    "timestamp": "2026-02-18T23:58:50.341Z",
+    "role": "user",
+    "content": "are you there"
+  },
+  {
+    "id": "assistant-1771459130341",
+    "timestamp": "2026-02-18T23:58:50.341Z",
+    "role": "assistant",
+    "content": "Yes, I'm here! How can I help you today?"
+  },
+  {
+    "id": "user-1771459251973",
+    "timestamp": "2026-02-19T00:00:51.973Z",
+    "role": "user",
+    "content": "whats up"
+  },
+  {
+    "id": "assistant-1771459251973",
+    "timestamp": "2026-02-19T00:00:51.973Z",
+    "role": "assistant",
+    "content": "Not much! Just here and ready to help. What can I do for you today? Need help with some code, files, or a project?"
+  },
+  {
+    "id": "user-1771459353488",
+    "timestamp": "2026-02-19T00:02:33.488Z",
+    "role": "user",
+    "content": "are you there"
+  },
+  {
+    "id": "assistant-1771459353488",
+    "timestamp": "2026-02-19T00:02:33.488Z",
+    "role": "assistant",
+    "content": "Yes, I'm here! Ready to help whenever you need. What would you like to work on?"
+  },
+  {
+    "id": "user-1771459369951",
+    "timestamp": "2026-02-19T00:02:49.951Z",
+    "role": "user",
+    "content": "what do you know about yourself"
+  },
+  {
+    "id": "assistant-1771459369951",
+    "timestamp": "2026-02-19T00:02:49.951Z",
+    "role": "assistant",
+    "content": "I'm **Woodbury**, an AI coding assistant running in your terminal. Here's what I know about myself:\n\n**Core purpose:** I help with software engineering tasks — reading/writing files, running commands, debugging, refactoring, and answering code questions.\n\n**My environment right now:**\n- Platform: macOS (darwin)\n- Working directory: `/Users/andrewporter/Documents/GitHub/woodbury`\n- Shell: zsh\n\n**Key capabilities:**\n- **File operations** — read, write, search files and directories\n- **Code execution** — run JavaScript/TypeScript (Node), Python, shell commands\n- **Git** — version control operations\n- **Testing** — run Jest, Vitest, pytest\n- **Web tools** — fetch URLs, crawl pages, search (DuckDuckGo, Google, etc.)\n- **Database queries** — SQLite, PostgreSQL, DynamoDB\n- **Task management** — I have a built-in system for planning and tracking multi-step work\n- **Delegation** — I can spawn subagents for complex tasks\n- **Memory** — I can save and recall knowledge across sessions\n\n**My philosophy:**\n- Be concise (terminal output should be scannable)\n- Use tools to *do* things, not just explain how\n- Write tests first for code tasks\n- Never expose secrets or credentials\n\nI'm designed to be a practical, hands-on assistant that actually executes work rather than just describing it. What would you like to tackle?"
+  },
+  {
+    "id": "user-1771459381741",
+    "timestamp": "2026-02-19T00:03:01.741Z",
+    "role": "user",
+    "content": "cool bye"
+  },
+  {
+    "id": "assistant-1771459381741",
+    "timestamp": "2026-02-19T00:03:01.741Z",
+    "role": "assistant",
+    "content": "See you later! Feel free to come back anytime you need help. 👋"
+  }
+]
