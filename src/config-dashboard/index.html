@@ -94,6 +94,7 @@
     .badge-ok { background: #10b98133; color: #10b981; }
     .badge-missing { background: #ef444433; color: #ef4444; }
     .badge-partial { background: #f59e0b33; color: #f59e0b; }
+    .badge-webui { background: #06b6d433; color: #06b6d4; }
 
     /* ── Main ────────────────────────────────────────── */
     .main {
@@ -457,6 +458,87 @@
     }
 
     .btn-modal-select:hover { background: #6d28d9; }
+
+    /* ── Web UI Section ────────────────────────────────── */
+    .webui-section {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      padding: 1rem 1.25rem;
+      margin-bottom: 1.5rem;
+    }
+
+    .webui-section-header {
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: #94a3b8;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 0.75rem;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .webui-link-row {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      padding: 0.5rem 0;
+    }
+
+    .webui-link-row + .webui-link-row {
+      border-top: 1px solid #334155;
+    }
+
+    .webui-url {
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      font-size: 0.8rem;
+      color: #64748b;
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .btn-launch {
+      background: #10b981;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      padding: 0.5rem 1.25rem;
+      font-size: 0.8rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s;
+      white-space: nowrap;
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+    }
+
+    .btn-launch:hover { background: #059669; }
+
+    .webui-status {
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      font-size: 0.7rem;
+      color: #10b981;
+    }
+
+    .webui-status-dot {
+      width: 6px;
+      height: 6px;
+      background: #10b981;
+      border-radius: 50%;
+      animation: pulse 2s ease-in-out infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.4; }
+    }
 
     /* ── Loading ──────────────────────────────────────── */
     .loading {

@@ -775,7 +775,27 @@ Beyond simple text fields, web forms have many special input types that require 
 4. Click the target day cell
 \`\`\`
 
-**File uploads:** Click the file input or "Upload" button, then the OS file dialog opens — use \`vision_analyze\` to navigate it.
+**File uploads — OS File Dialog (macOS Finder / Windows Explorer):**
+
+When a file input or "Upload" button triggers the native OS file selection dialog, use the \`file_dialog\` tool — it handles the entire sequence automatically (⌘⇧G → paste path → confirm on macOS, or direct path entry on Windows).
+
+\`\`\`
+1. Click the file input / "Upload" button in the browser
+   → The OS file dialog opens
+
+2. Use the file_dialog tool with the FULL ABSOLUTE path:
+   file_dialog(filePath="/Users/name/Documents/photo.jpg")
+   → The tool navigates the OS dialog and selects the file automatically
+
+3. Verify the file was accepted:
+   browser_query(action="get_page_info") or vision_analyze(prompt="Was the file uploaded?")
+\`\`\`
+
+**Important:**
+- ⚠️ The OS dialog must already be open BEFORE calling \`file_dialog\` — click the upload button first
+- ⚠️ Use FULL ABSOLUTE paths — do NOT use \`~\` (tilde) or relative paths
+- ⚠️ Do NOT use \`browser_query\` to interact with the OS dialog — it is outside the browser DOM
+- ✅ Use \`vision_analyze\` if you need to see the current state of the file dialog before or after
 
 **Dropdown selects (\`<select>\` elements):**
 \`\`\`

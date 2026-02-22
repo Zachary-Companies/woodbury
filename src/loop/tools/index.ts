@@ -66,6 +66,7 @@ export { ffBrowserDefinition, ffBrowserHandler } from './ff-browser.js';
 // Mouse & Keyboard tools (powered by robotjs via flow-frame-core)
 export { ffMouseDefinition, ffMouseHandler } from './ff-mouse.js';
 export { ffKeyboardDefinition, ffKeyboardHandler } from './ff-keyboard.js';
+export { ffFileDialogDefinition, ffFileDialogHandler } from './ff-file-dialog.js';
 
 // Browser Bridge tool (Chrome extension via WebSocket)
 export { browserQueryDefinition, browserQueryHandler } from './browser-query.js';
@@ -104,6 +105,7 @@ import { ffImageUtilsDefinition, ffImageUtilsHandler } from './ff-image-utils.js
 import { ffBrowserDefinition, ffBrowserHandler } from './ff-browser.js';
 import { ffMouseDefinition, ffMouseHandler } from './ff-mouse.js';
 import { ffKeyboardDefinition, ffKeyboardHandler } from './ff-keyboard.js';
+import { ffFileDialogDefinition, ffFileDialogHandler } from './ff-file-dialog.js';
 import { browserQueryDefinition, browserQueryHandler } from './browser-query.js';
 import { nanobananaTool } from './nanobanana.js';
 
@@ -151,6 +153,7 @@ export const allTools = [
   // Mouse & Keyboard tools (powered by robotjs)
   { definition: ffMouseDefinition, handler: ffMouseHandler },
   { definition: ffKeyboardDefinition, handler: ffKeyboardHandler },
+  { definition: ffFileDialogDefinition, handler: ffFileDialogHandler },
   // Browser Bridge (Chrome extension via WebSocket)
   { definition: browserQueryDefinition, handler: browserQueryHandler },
   // AI Image Generation

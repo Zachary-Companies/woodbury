@@ -100,7 +100,7 @@ program
       if (!config.noExtensions) {
         try {
           const doneDash = debugLog.time('dashboard', 'Starting config dashboard');
-          dashboard = await startDashboard(config.verbose || false);
+          dashboard = await startDashboard(config.verbose || false, extensionManager);
           config.dashboardUrl = dashboard.url;
           doneDash();
           debugLog.info('dashboard', 'Dashboard running', { url: dashboard.url, port: dashboard.port });

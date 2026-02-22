@@ -27,6 +27,7 @@ import {
   writeEnvFile,
   type ExtensionManifest,
 } from './extension-loader.js';
+import type { ExtensionManager } from './extension-manager.js';
 import { debugLog } from './debug-log.js';
 
 // ────────────────────────────────────────────────────────────────
@@ -101,7 +102,7 @@ function sendJson(res: ServerResponse, status: number, data: any): void {
 // ────────────────────────────────────────────────────────────────
 
 /** Build the env status response for a single extension */
-async function getExtensionEnvStatus(manifest: ExtensionManifest) {
+async function getExtensionEnvStatus(manifest: ExtensionManifest, extensionManager?: ExtensionManager) {
   // Read current .env
   let currentEnv: Record<string, string> = {};
   try {
@@ -135,6 +136,28 @@ async function getExtensionEnvStatus(manifest: ExtensionManifest) {
       maskedValue: maskValue(value),
     }));
 
+  // Get web UI URLs from the running extension manager
+  let webUIs: string[] = [];
+  if (extensionManager) {
+    const summaries = extensionManager.getExtensionSummaries();
+    const summary = summaries.find(s => s.name === manifest.name);
+    if (summary) {
+      webUIs = summary.webUIs;
+    }
+  }
+
+  // Check for external web app status (e.g., social-scheduler writes its own status file)
+  try {
+    const statusPath = join(manifest.directory, '.webui-status.json');
+    const statusContent = await readFile(statusPath, 'utf-8');
+    const status = JSON.parse(statusContent);
+    if (status.url && !webUIs.includes(status.url)) {
+      webUIs.push(status.url);
+    }
+  } catch {
+    // No status file — that's fine
+  }
+
   return {
     name: manifest.name,
     displayName: manifest.displayName,
@@ -143,6 +166,7 @@ async function getExtensionEnvStatus(manifest: ExtensionManifest) {
     source: manifest.source,
     directory: manifest.directory,
     vars: [...vars, ...extraVars],
+    webUIs,
   };
 }
 
@@ -151,7 +175,8 @@ async function getExtensionEnvStatus(manifest: ExtensionManifest) {
 // ────────────────────────────────────────────────────────────────
 
 export async function startDashboard(
-  verbose: boolean = false
+  verbose: boolean = false,
+  extensionManager?: ExtensionManager
 ): Promise<DashboardHandle> {
   // Static files are copied to dist/config-dashboard/ by the postbuild script
   const staticDir = join(__dirname, 'config-dashboard');
@@ -183,7 +208,7 @@ export async function startDashboard(
       try {
         const manifests = await discoverExtensions();
         const extensions = await Promise.all(
-          manifests.map((m) => getExtensionEnvStatus(m))
+          manifests.map((m) => getExtensionEnvStatus(m, extensionManager))
         );
         sendJson(res, 200, { extensions });
       } catch (err) {
@@ -203,7 +228,7 @@ export async function startDashboard(
           sendJson(res, 404, { error: `Extension "${name}" not found` });
           return;
         }
-        const status = await getExtensionEnvStatus(manifest);
+        const status = await getExtensionEnvStatus(manifest, extensionManager);
         sendJson(res, 200, status);
       } catch (err) {
         sendJson(res, 500, { error: String(err) });
@@ -270,7 +295,7 @@ export async function startDashboard(
         });
 
         // Return updated status
-        const status = await getExtensionEnvStatus(manifest);
+        const status = await getExtensionEnvStatus(manifest, extensionManager);
         sendJson(res, 200, { success: true, ...status });
       } catch (err) {
         sendJson(res, 500, { error: String(err) });

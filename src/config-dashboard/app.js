@@ -95,10 +95,14 @@ function renderSidebar() {
   list.innerHTML = extensions.map(ext => {
     const badge = getExtBadge(ext);
     const active = selectedExtension === ext.name ? ' active' : '';
+    const hasWebUI = (ext.webUIs || []).length > 0;
     return '<div class="ext-item' + active + '" data-name="' + ext.name + '">' +
       '<div class="ext-item-name">' + escHtml(ext.displayName || ext.name) + '</div>' +
       '<div class="ext-item-meta">v' + escHtml(ext.version) + ' &middot; ' + escHtml(ext.source) + '</div>' +
-      '<div class="ext-item-badges"><span class="badge ' + badge.cls + '">' + badge.text + '</span></div>' +
+      '<div class="ext-item-badges">' +
+        '<span class="badge ' + badge.cls + '">' + badge.text + '</span>' +
+        (hasWebUI ? '<span class="badge badge-webui">&#x1f310; Web UI</span>' : '') +
+      '</div>' +
     '</div>';
   }).join('');
 
@@ -144,6 +148,25 @@ function renderExtension(ext) {
   html += escHtml(ext.description || '') + '<br>';
   html += '<code style="color:#475569;font-size:0.7rem;">' + escHtml(ext.directory) + '</code>';
   html += '</div></div>';
+
+  // Web UI section (if extension has web UIs)
+  const webUIs = ext.webUIs || [];
+  if (webUIs.length > 0) {
+    html += '<div class="webui-section">';
+    html += '<div class="webui-section-header">';
+    html += '<span>&#x1f310;</span> Web Dashboard';
+    html += '</div>';
+    for (const url of webUIs) {
+      html += '<div class="webui-link-row">';
+      html += '<div class="webui-status"><span class="webui-status-dot"></span> Running</div>';
+      html += '<span class="webui-url">' + escHtml(url) + '</span>';
+      html += '<button class="btn-launch" data-url="' + escAttr(url) + '">';
+      html += '&#x1f680; Open Dashboard';
+      html += '</button>';
+      html += '</div>';
+    }
+    html += '</div>';
+  }
 
   // Restart notice
   html += '<div class="restart-notice">';
@@ -207,6 +230,13 @@ function renderExtension(ext) {
   }
 
   main.innerHTML = html;
+
+  // Wire up launch buttons (web UI links)
+  main.querySelectorAll('.btn-launch').forEach(btn => {
+    btn.addEventListener('click', () => {
+      window.open(btn.dataset.url, '_blank');
+    });
+  });
 
   // Wire up toggle buttons (secret-type vars)
   main.querySelectorAll('.btn-toggle').forEach(btn => {
