@@ -11,7 +11,7 @@ export interface AgentConfig {
   maxRetries?: number;
   enabledTools?: string[];
   // Additional properties found in usage
-  provider?: 'openai' | 'anthropic' | 'groq';
+  provider?: 'openai' | 'anthropic' | 'groq' | 'claude-code';
   model?: string;
   apiKey?: string;
   baseURL?: string;
@@ -163,7 +163,7 @@ export interface SubagentConfig {
   type: SubagentType;
   task: string;
   context: string;
-  provider?: 'openai' | 'anthropic' | 'groq';
+  provider?: 'openai' | 'anthropic' | 'groq' | 'claude-code';
   model?: string;
   apiKey?: string;
   timeout?: number;

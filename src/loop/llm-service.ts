@@ -1,11 +1,12 @@
 import OpenAI from 'openai';
 import Anthropic from '@anthropic-ai/sdk';
 import Groq from 'groq-sdk';
+import { execFile, spawn } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 
-export type LLMProvider = 'openai' | 'anthropic' | 'groq';
+export type LLMProvider = 'openai' | 'anthropic' | 'groq' | 'claude-code';
 
 // Load API keys from .env files. Checks ~/.woodbury/.env first, falls back to ~/.agentic-loop/.env.
 function loadEnvFile(envPath: string): void {
@@ -252,6 +253,240 @@ async function streamGroq(
   return response;
 }
 
+// ── Claude Code CLI variants ───────────────────────────────
+
+/**
+ * Resolve the path to the `claude` CLI binary.
+ * Checks PATH first, then falls back to the Claude desktop app install location
+ * (~/Library/Application Support/Claude/claude-code/<version>/claude on macOS).
+ */
+let cachedClaudePath: string | null = null;
+
+function resolveClaudeBinary(): string {
+  if (cachedClaudePath) return cachedClaudePath;
+
+  // First, check if `claude` is on PATH via which/where
+  try {
+    const { execFileSync } = require('child_process') as typeof import('child_process');
+    const result = execFileSync(process.platform === 'win32' ? 'where' : 'which', ['claude'], {
+      encoding: 'utf-8',
+      timeout: 5000
+    }).trim();
+    if (result) {
+      cachedClaudePath = result.split('\n')[0];
+      return cachedClaudePath;
+    }
+  } catch {
+    // Not on PATH, continue to fallback
+  }
+
+  // macOS: ~/Library/Application Support/Claude/claude-code/<version>/claude
+  if (process.platform === 'darwin') {
+    const claudeCodeDir = path.join(os.homedir(), 'Library', 'Application Support', 'Claude', 'claude-code');
+    try {
+      const versions = fs.readdirSync(claudeCodeDir)
+        .filter(d => /^\d/.test(d))
+        .sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
+      if (versions.length > 0) {
+        const binary = path.join(claudeCodeDir, versions[0], 'claude');
+        if (fs.existsSync(binary)) {
+          cachedClaudePath = binary;
+          return cachedClaudePath;
+        }
+      }
+    } catch {
+      // Directory doesn't exist
+    }
+  }
+
+  // Fallback: just try 'claude' and let the OS resolve it
+  cachedClaudePath = 'claude';
+  return cachedClaudePath;
+}
+
+/**
+ * Extract the user's actual prompt from the messages array.
+ * Claude Code has its own system prompt and tools, so we skip Woodbury's
+ * system prompt and tool definitions — just send the user/assistant conversation.
+ */
+function messagesToPrompt(messages: ChatMessage[]): string {
+  // Skip system messages entirely — Claude Code has its own system prompt
+  const conversation = messages.filter(m => m.role !== 'system');
+
+  // If there's only one user message, just return its content directly
+  if (conversation.length === 1 && conversation[0].role === 'user') {
+    return conversation[0].content;
+  }
+
+  // Multi-turn: wrap in role tags to preserve conversation structure
+  let prompt = '';
+  for (const msg of conversation) {
+    prompt += `<${msg.role}>\n${msg.content}\n</${msg.role}>\n\n`;
+  }
+  return prompt.trim();
+}
+
+/**
+ * Extract token usage from Claude Code JSON response.
+ */
+function parseClaudeCodeUsage(parsed: any): LLMResponse['usage'] {
+  const usage = parsed.usage;
+  if (!usage) return undefined;
+  const input = (usage.input_tokens || 0) + (usage.cache_read_input_tokens || 0) + (usage.cache_creation_input_tokens || 0);
+  const output = usage.output_tokens || 0;
+  return {
+    promptTokens: input,
+    completionTokens: output,
+    totalTokens: input + output
+  };
+}
+
+async function runClaudeCode(
+  messages: ChatMessage[], model: string, options?: Partial<RunPromptOptions>
+): Promise<LLMResponse> {
+  const prompt = messagesToPrompt(messages);
+  const claudeBin = resolveClaudeBinary();
+  const env = { ...process.env };
+  delete env.CLAUDECODE;
+
+  // Write prompt to a temp file to avoid shell escaping issues with large prompts
+  const tmpFile = path.join(os.tmpdir(), `woodbury-prompt-${Date.now()}.txt`);
+  fs.writeFileSync(tmpFile, prompt, 'utf-8');
+
+  return new Promise((resolve, reject) => {
+    const cmd = `cat ${JSON.stringify(tmpFile)} | ${JSON.stringify(claudeBin)} -p --output-format json`;
+    const child = spawn('sh', ['-c', cmd], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env
+    });
+
+    let stdout = '';
+    let stderr = '';
+
+    child.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString(); });
+    child.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString(); });
+
+    child.on('error', (err) => {
+      fs.unlinkSync(tmpFile);
+      reject(new Error(`Failed to spawn claude CLI: ${err.message}`));
+    });
+
+    child.on('close', (code) => {
+      try { fs.unlinkSync(tmpFile); } catch {}
+
+      if (code !== 0) {
+        return reject(new Error(`claude CLI failed (exit ${code}): ${stderr || stdout}`));
+      }
+
+      try {
+        const parsed = JSON.parse(stdout);
+        resolve({
+          content: parsed.result || '',
+          usage: parseClaudeCodeUsage(parsed)
+        });
+      } catch {
+        resolve({
+          content: stdout.trim(),
+          usage: undefined
+        });
+      }
+    });
+  });
+}
+
+async function streamClaudeCode(
+  messages: ChatMessage[], model: string,
+  callbacks: StreamCallbacks, options?: Partial<RunPromptOptions>
+): Promise<LLMResponse> {
+  const prompt = messagesToPrompt(messages);
+  const claudeBin = resolveClaudeBinary();
+  const env = { ...process.env };
+  delete env.CLAUDECODE;
+
+  // Write prompt to a temp file to avoid shell escaping issues with large prompts
+  const tmpFile = path.join(os.tmpdir(), `woodbury-prompt-${Date.now()}.txt`);
+  fs.writeFileSync(tmpFile, prompt, 'utf-8');
+
+  return new Promise((resolve, reject) => {
+    const cmd = `cat ${JSON.stringify(tmpFile)} | ${JSON.stringify(claudeBin)} -p --output-format stream-json`;
+    const child = spawn('sh', ['-c', cmd], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env
+    });
+
+    let content = '';
+    let buffer = '';
+
+    child.stdout.on('data', (chunk: Buffer) => {
+      buffer += chunk.toString();
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+
+        try {
+          const event = JSON.parse(trimmed);
+
+          if (event.type === 'assistant' && event.message?.content) {
+            for (const block of event.message.content) {
+              if (block.type === 'text' && block.text) {
+                content += block.text;
+                callbacks.onToken?.(block.text);
+              }
+            }
+          }
+
+          if (event.type === 'content_block_delta' && event.delta?.text) {
+            content += event.delta.text;
+            callbacks.onToken?.(event.delta.text);
+          }
+
+          if (event.type === 'result' && event.result) {
+            if (!content) {
+              content = event.result;
+              callbacks.onToken?.(event.result);
+            }
+          }
+        } catch {
+          // Skip unparseable lines
+        }
+      }
+    });
+
+    child.stderr.on('data', () => {});
+
+    child.on('error', (err) => {
+      try { fs.unlinkSync(tmpFile); } catch {}
+      reject(new Error(`Failed to spawn claude CLI: ${err.message}`));
+    });
+
+    child.on('close', (code) => {
+      try { fs.unlinkSync(tmpFile); } catch {}
+
+      if (buffer.trim()) {
+        try {
+          const event = JSON.parse(buffer.trim());
+          if (event.type === 'result' && event.result && !content) {
+            content = event.result;
+            callbacks.onToken?.(event.result);
+          }
+        } catch {}
+      }
+
+      if (code !== 0 && !content) {
+        reject(new Error(`claude CLI exited with code ${code}`));
+        return;
+      }
+
+      const response: LLMResponse = { content, usage: undefined };
+      callbacks.onDone?.(response);
+      resolve(response);
+    });
+  });
+}
+
 // ── Non-streaming variants ─────────────────────────────────
 
 async function runOpenAI(messages: ChatMessage[], model: string, options?: Partial<RunPromptOptions>): Promise<LLMResponse> {
@@ -379,6 +614,8 @@ export async function runPrompt(
       return runAnthropic(messages, model, options);
     case 'groq':
       return runGroq(messages, model, options);
+    case 'claude-code':
+      return runClaudeCode(messages, model, options);
     default:
       throw new Error(`Unknown LLM provider: ${provider}`);
   }
@@ -403,6 +640,8 @@ export async function runPromptStream(
       return streamAnthropic(messages, model, callbacks, options);
     case 'groq':
       return streamGroq(messages, model, callbacks, options);
+    case 'claude-code':
+      return streamClaudeCode(messages, model, callbacks, options);
     default:
       throw new Error(`Unknown LLM provider: ${provider}`);
   }

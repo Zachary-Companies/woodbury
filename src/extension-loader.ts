@@ -218,8 +218,8 @@ async function readManifest(
 export async function loadExtension(
   manifest: ExtensionManifest
 ): Promise<LoadedExtension> {
-  // Use file:// URL for dynamic import (required for absolute paths in ESM)
-  const importPath = `file://${manifest.entryPoint}`;
+  // Use absolute path for require (TS compiles dynamic import to require for Node16 module)
+  const importPath = manifest.entryPoint;
   debugLog.debug('ext-loader', `Loading extension module: ${manifest.name}`, { importPath });
   const mod = await import(importPath);
 

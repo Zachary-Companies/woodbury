@@ -23,7 +23,7 @@ export interface AgentResult {
 // Local Agent configuration for compatibility
 export interface LocalAgentConfig {
   name: string;
-  provider: 'openai' | 'anthropic' | 'groq';
+  provider: 'openai' | 'anthropic' | 'groq' | 'claude-code';
   model: string;
   temperature?: number;
   maxTokens?: number;
@@ -34,7 +34,7 @@ export interface LocalAgentConfig {
 export interface WoodburyConfig {
   // Core properties
   model?: string;
-  provider?: 'openai' | 'anthropic' | 'groq';
+  provider?: 'openai' | 'anthropic' | 'groq' | 'claude-code';
   temperature?: number;
   maxTokens?: number;
   systemPrompt?: string;

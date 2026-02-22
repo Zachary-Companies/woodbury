@@ -27,7 +27,7 @@ try {
   // Fallback version
 }
 
-const VALID_PROVIDERS = ['openai', 'anthropic', 'groq'] as const;
+const VALID_PROVIDERS = ['openai', 'anthropic', 'groq', 'claude-code'] as const;
 
 program
   .name('woodbury')
@@ -38,7 +38,7 @@ program
 program
   .option('-v, --verbose', 'Enable verbose logging')
   .option('-m, --model <model>', 'LLM model to use')
-  .option('-p, --provider <provider>', 'LLM provider (openai, anthropic, groq)')
+  .option('-p, --provider <provider>', 'LLM provider (openai, anthropic, groq, claude-code)')
   .option('--working-directory <path>', 'Set working directory')
   .option('--context-dir <path>', 'Set context directory')
   .option('--max-iterations <number>', 'Maximum agent iterations', parseInt)
@@ -545,8 +545,14 @@ ext
     }
   });
 
-// Default command (runs REPL if no args provided)
-if (process.argv.length === 2) {
+// Default command (runs REPL if no subcommand provided)
+// Check if any of the args (after node + script) is a known subcommand
+const knownCommands = program.commands.map(c => [c.name(), ...c.aliases()]).flat();
+const userArgs = process.argv.slice(2);
+const hasSubcommand = userArgs.some(arg => knownCommands.includes(arg));
+
+if (!hasSubcommand) {
+  // Only options/flags given (e.g. --provider claude-code), default to repl
   program.parse([...process.argv, 'repl']);
 } else {
   program.parse();

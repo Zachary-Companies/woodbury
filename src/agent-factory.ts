@@ -67,7 +67,7 @@ export async function createAgent(
 
     // Configure agent
     const provider = getProvider(config);
-    const apiKey = config.apiKeys?.[provider] || '';
+    const apiKey = provider === 'claude-code' ? '' : (config.apiKeys?.[provider] || '');
     const agentConfig: AgentConfig = {
       name: 'woodbury-agent',
       provider,
@@ -164,7 +164,7 @@ export async function createAgent(
   }
 }
 
-function getProvider(config: WoodburyConfig): 'openai' | 'anthropic' | 'groq' {
+function getProvider(config: WoodburyConfig): 'openai' | 'anthropic' | 'groq' | 'claude-code' {
   // If explicitly specified, use it
   if (config.provider) {
     return config.provider;
@@ -185,7 +185,7 @@ function getProvider(config: WoodburyConfig): 'openai' | 'anthropic' | 'groq' {
   return 'anthropic';
 }
 
-function getDefaultModel(provider: 'openai' | 'anthropic' | 'groq'): string {
+function getDefaultModel(provider: 'openai' | 'anthropic' | 'groq' | 'claude-code'): string {
   switch (provider) {
     case 'anthropic':
       return 'claude-opus-4-5-20251101';
@@ -193,6 +193,8 @@ function getDefaultModel(provider: 'openai' | 'anthropic' | 'groq'): string {
       return 'gpt-4';
     case 'groq':
       return 'llama-3.1-70b-versatile';
+    case 'claude-code':
+      return 'claude-sonnet-4-5-20250514';
     default:
       return 'claude-opus-4-5-20251101';
   }
