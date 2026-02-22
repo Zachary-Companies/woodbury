@@ -1,5 +1,35 @@
 import { ToolDefinition, ToolHandler, ToolContext } from '../types.js';
 
+// Cached Chrome offset — fetched from bridge server on first use, then reused
+let cachedChromeOffset: { x: number; y: number } | null = null;
+let lastOffsetFetchTime = 0;
+const OFFSET_CACHE_TTL = 30000; // Re-fetch every 30s in case window moves/resizes
+
+async function getDynamicChromeOffset(): Promise<{ x: number; y: number } | null> {
+  const now = Date.now();
+  if (cachedChromeOffset && (now - lastOffsetFetchTime) < OFFSET_CACHE_TTL) {
+    return cachedChromeOffset;
+  }
+
+  try {
+    const { bridgeServer } = await import('../../bridge-server.js');
+    if (!bridgeServer.isConnected) return null;
+
+    const result = await bridgeServer.send('ping', {});
+    if (result?.chromeOffset) {
+      cachedChromeOffset = {
+        x: result.chromeOffset.chromeUIWidth ?? 1,
+        y: result.chromeOffset.chromeUIHeight ?? 125
+      };
+      lastOffsetFetchTime = now;
+      return cachedChromeOffset;
+    }
+  } catch {
+    // Bridge not available — fall through to null
+  }
+  return null;
+}
+
 export const ffMouseDefinition: ToolDefinition = {
   name: 'mouse',
   description: 'Control the mouse cursor: move to coordinates, click, double-click, scroll, or drag. Use with the screenshot and vision_analyze tools to interact with GUI elements — take a screenshot, identify element positions with vision, then click/type at those coordinates. Uses flow-frame-core for cross-platform mouse control.',
@@ -54,6 +84,14 @@ export const ffMouseDefinition: ToolDefinition = {
         type: 'boolean',
         description: 'If true, use desktop mode (no Chrome offset compensation). Default: false (assumes Chrome browser).',
         default: false
+      },
+      chromeOffsetY: {
+        type: 'number',
+        description: 'Override the Chrome UI offset Y value (default: 125). Set this to chromeOffset.chromeUIHeight from browser_query for accurate positioning. Only used with position parameter when forDesktop=false.'
+      },
+      chromeOffsetX: {
+        type: 'number',
+        description: 'Override the Chrome UI offset X value (default: 1). Set this to chromeOffset.chromeUIWidth from browser_query for accurate positioning. Only used with position parameter when forDesktop=false.'
       }
     },
     required: ['action']
@@ -94,11 +132,40 @@ export const ffMouseHandler: ToolHandler = async (params: any, context?: ToolCon
         throw new Error('position object must have left, top, width, height as numbers');
       }
 
-      // Use flow-frame's moveMouse or moveMouseDesktop based on forDesktop flag
+      // Determine Chrome offset: explicit param > auto-detected > hardcoded fallback
+      let offsetSource = 'hardcoded (y=125)';
+      let offsetX = 1;
+      let offsetY = 125;
+
       if (params.forDesktop) {
+        // Desktop mode: no Chrome offset, click center of element
         await flowFrameOps.moveMouseDesktop(params.position);
+        offsetSource = 'desktop (no offset)';
       } else {
-        await flowFrameOps.moveMouse(params.position);
+        // Try to get accurate offset: explicit params first, then auto-detect from bridge
+        if (params.chromeOffsetY !== undefined || params.chromeOffsetX !== undefined) {
+          offsetX = params.chromeOffsetX ?? 1;
+          offsetY = params.chromeOffsetY ?? 125;
+          offsetSource = `explicit (y=${offsetY})`;
+        } else {
+          // Auto-detect from bridge server
+          const dynamicOffset = await getDynamicChromeOffset();
+          if (dynamicOffset) {
+            offsetX = dynamicOffset.x;
+            offsetY = dynamicOffset.y;
+            offsetSource = `auto-detected (y=${offsetY})`;
+          }
+          // else: fall through with hardcoded defaults
+        }
+
+        // Calculate target position: element center + chrome offset
+        const targetX = left + offsetX + (width / 2);
+        const targetY = top + offsetY + (height / 2);
+        if (flowFrameOps.isWindows()) {
+          robot.moveMouse(targetX, targetY);
+        } else {
+          robot.moveMouseSmooth(targetX, targetY);
+        }
       }
 
       if (action === 'click') {
@@ -114,7 +181,7 @@ export const ffMouseHandler: ToolHandler = async (params: any, context?: ToolCon
       await wait(delayMs);
       const pos = robot.getMousePos();
       const actionLabel = action === 'move' ? 'Moved' : action === 'click' ? 'Clicked' : action === 'double_click' ? 'Double-Clicked' : 'Right-Clicked';
-      return `# Mouse: ${actionLabel} (element position)\n\n- Element bounds: left=${left}, top=${top}, width=${width}, height=${height}\n- Current position: (${pos.x}, ${pos.y})\n- Mode: ${params.forDesktop ? 'desktop' : 'browser (with Chrome offsets)'}`;
+      return `# Mouse: ${actionLabel} (element position)\n\n- Element bounds: left=${left}, top=${top}, width=${width}, height=${height}\n- Current position: (${pos.x}, ${pos.y})\n- Chrome offset: ${offsetSource}`;
     }
 
     // Handle x/y coordinate-based actions

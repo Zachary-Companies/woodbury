@@ -367,7 +367,7 @@ Before touching ANY browser tool, classify the user's request:
 ### Tools (in order of importance)
 1. **\`browser_query\`** — **DOM QUERY TOOL (read-only).** Use ONLY for locating and inspecting elements: find_interactive, find_elements, find_element_by_text, get_clickable_elements, get_form_fields, get_page_info, get_page_structure, get_page_text, get_element_info, wait_for_element. Returns exact pixel coordinates, CSS selectors, and element metadata. **DO NOT use click_element or set_value actions** — use mouse and keyboard instead.
 2. **\`vision_analyze\`** — **YOUR EYES.** Captures the screen and sends it to a vision AI that describes what's visible. Use when browser_query is unavailable or for desktop apps.
-3. **\`mouse\`** — **PRIMARY ACTION TOOL.** After finding an element with browser_query, click at its coordinates: \`mouse(action="click", x=<bounds.x>, y=<bounds.y>)\`. Also: double-click, right-click, scroll, drag.
+3. **\`mouse\`** — **PRIMARY ACTION TOOL.** After finding an element with browser_query, click using its bounds: \`mouse(action="click", position={left: <bounds.left>, top: <bounds.top>, width: <bounds.width>, height: <bounds.height>})\`. This auto-compensates for Chrome's UI offset (tabs, address bar). Also: double-click, right-click, scroll, drag.
 4. **\`keyboard\`** — **PRIMARY INPUT TOOL.** After clicking a field, type into it: \`keyboard(action="type", text="...")\`. Also: press keys, shortcuts, clear fields.
 5. **\`browser\`** — Open URLs in Chrome, close tabs, bring windows to front
 6. **\`screenshot\`** — Save a screenshot to a PNG file (for archival only — does NOT let you see the screen)
@@ -400,12 +400,14 @@ browser_query(action="get_form_fields")
 browser_query(action="get_page_info")
 \`\`\`
 
-**After finding an element, use its coordinates with mouse/keyboard:**
+**After finding an element, use its bounds with mouse (auto-compensates for Chrome offset):**
 \`\`\`
 browser_query(action="find_interactive", description="Login button")
-→ Result: bounds.x=500, bounds.y=300
-mouse(action="click", x=500, y=300)
+→ Result: bounds = {left: 450, top: 280, width: 100, height: 40, x: 500, y: 300}
+mouse(action="click", position={left: 450, top: 280, width: 100, height: 40})
 \`\`\`
+**IMPORTANT:** Always use \`position={left, top, width, height}\` from the bounds — NOT \`x=, y=\`.
+Raw x/y coordinates do NOT account for Chrome's tab bar and address bar, so clicks will land too high (on the OS menu bar).
 
 ### Disambiguating Elements — Making Judgement Calls
 
@@ -586,8 +588,9 @@ Step 2: CLEAR   → Check for overlays BEFORE interacting. If a modal, cookie ba
                   is covering the page, DISMISS IT FIRST (see Overlay Handling above).
 Step 3: FIND    → browser_query(action="find_interactive", description="...") — use natural language.
                   Read the aria-label and role of each result to understand what elements actually do.
-Step 4: DECIDE  → Review the ranked results and context. Pick the right element. Note its coordinates.
-Step 5: ACT     → mouse(action="click", x=<element.bounds.x>, y=<element.bounds.y>) to click
+Step 4: DECIDE  → Review the ranked results and context. Pick the right element. Note its bounds.
+Step 5: ACT     → mouse(action="click", position={left: <bounds.left>, top: <bounds.top>, width: <bounds.width>, height: <bounds.height>})
+                  ALWAYS use position={...} from bounds — NEVER raw x=, y= for browser elements.
                   For text input: click the field first, then keyboard(action="type", text="...")
                   For clearing a field: keyboard(action="clear") then keyboard(action="type", text="...")
 Step 6: VERIFY  → browser_query(action="get_page_info") + browser_query(action="get_page_structure")
@@ -600,7 +603,7 @@ Step 7: REPEAT  → If more actions needed, go back to Step 2
 - **DO NOT open duplicate tabs.** Before navigating to a URL, check if the browser is already on that site. If so, navigate within the existing tab (click links, use the address bar) instead of opening a new one. Only open a new tab if no relevant page is open.
 - **Switch tabs instead of opening new ones.** If the target page is open but not the active tab, use tab-switching techniques (see Tab Management below) to activate it.
 - NEVER use \`browser_query(action="click_element")\` or \`browser_query(action="set_value")\`. These actions exist in the tool but you MUST NOT use them.
-- ALWAYS use the coordinates from browser_query results to feed into \`mouse(action="click", x=..., y=...)\`
+- **ALWAYS use \`position={left, top, width, height}\`** from browser_query bounds — NEVER \`x=, y=\` for browser elements. Raw x/y skips Chrome offset compensation and clicks land on the OS menu bar instead of the page.
 - For form inputs: mouse-click the field first, then \`keyboard(action="type", text="...")\` to enter text
 - For dropdowns/selects: mouse-click to open, then mouse-click the option
 - Add \`delayMs\` between actions to let the UI respond
@@ -612,6 +615,7 @@ Step 7: REPEAT  → If more actions needed, go back to Step 2
 Step 1: LOOK    → vision_analyze(prompt="Describe what is on screen.")
 Step 2: LOCATE  → Extract coordinates from the vision response
 Step 3: ACT     → mouse(action="click", x=..., y=...) or keyboard(action="type", text="...")
+                  (x/y is OK here — vision_analyze returns screen-absolute coordinates, not viewport-relative)
 Step 4: VERIFY  → vision_analyze(prompt="What changed?")
 \`\`\`
 
@@ -622,15 +626,15 @@ Step 4: VERIFY  → vision_analyze(prompt="What changed?")
 1.  browser_query(action="get_page_info")   ← check what page is currently open
     → If already on example.com, skip to step 3. Otherwise:
 2.  browser(action="open", url="https://example.com", waitMs=5000)   ← only if not already there
-3.  browser_query(action="find_interactive", description="Sign In button")   ← get coordinates
-4.  mouse(action="click", x=<bounds.x>, y=<bounds.y>)   ← click at coordinates from step 3
-5.  browser_query(action="get_form_fields")   ← find login inputs and their coordinates
-6.  mouse(action="click", x=<email.bounds.x>, y=<email.bounds.y>)   ← click email field
+3.  browser_query(action="find_interactive", description="Sign In button")   ← get bounds
+4.  mouse(action="click", position={left: <bounds.left>, top: <bounds.top>, width: <bounds.width>, height: <bounds.height>})
+5.  browser_query(action="get_form_fields")   ← find login inputs and their bounds
+6.  mouse(action="click", position={left: <email.left>, top: <email.top>, width: <email.width>, height: <email.height>})
 7.  keyboard(action="type", text="user@example.com")   ← type into focused field
-8.  mouse(action="click", x=<password.bounds.x>, y=<password.bounds.y>)   ← click password field
+8.  mouse(action="click", position={left: <pass.left>, top: <pass.top>, width: <pass.width>, height: <pass.height>})
 9.  keyboard(action="type", text="password123")   ← type password
 10. browser_query(action="find_interactive", description="Submit button")   ← find submit
-11. mouse(action="click", x=<submit.bounds.x>, y=<submit.bounds.y>)   ← click submit
+11. mouse(action="click", position={left: <submit.left>, top: <submit.top>, width: <submit.width>, height: <submit.height>})
 12. browser_query(action="get_page_info")   ← verify login succeeded
 \`\`\`
 
@@ -652,22 +656,46 @@ Step 4: VERIFY  → vision_analyze(prompt="What changed?")
 
 ### Mouse Actions (powered by flow-frame-core)
 
-**Coordinate-based:**
-- \`mouse(action="move", x, y)\` — move cursor to coordinates
-- \`mouse(action="click", x, y)\` — left-click at coordinates (or current position if x/y omitted)
-- \`mouse(action="double_click", x, y)\` — double-click
-- \`mouse(action="right_click", x, y)\` — right-click (context menu)
+**⭐ Element-position-based (USE THIS for browser elements):**
+- \`mouse(action="click", position={left, top, width, height})\` — click center of element bounds. **Auto-adds Chrome offset.**
+- \`mouse(action="double_click", position={left, top, width, height})\` — double-click with Chrome offset
+- \`mouse(action="right_click", position={left, top, width, height})\` — right-click with Chrome offset
+- \`mouse(action="click", position={...}, forDesktop=true)\` — desktop app mode (NO Chrome offset)
+
+The \`position\` parameter accepts element bounds directly from browser_query. Flow-frame-core automatically:
+- Centers the click within the element
+- Compensates for Chrome's UI offset (~125px default for tabs + address bar) unless \`forDesktop=true\`
+- Uses smooth mouse movement on macOS/Linux
+
+**🎯 Dynamic Chrome Offset (MOST ACCURATE):**
+The default offset (125px) can be wrong if bookmarks bar is visible, display scaling differs, etc.
+For precise clicks, use the dynamically measured offset from \`browser_query(action="ping")\` or \`get_page_info\`:
+\`\`\`
+browser_query(action="ping")
+→ Chrome Offset: chromeUIHeight=145px   ← actual measured value
+
+mouse(action="click", position={left, top, width, height}, chromeOffsetY=145)
+\`\`\`
+Pass \`chromeOffsetY\` (and optionally \`chromeOffsetX\`) to override the hardcoded default with the real measured value.
+
+**Alternative: Screen-absolute coordinates**
+browser_query also returns \`screenX\` and \`screenY\` on element bounds — these are true screen-absolute coordinates that already account for window position AND Chrome UI. You can use these directly with raw x/y:
+\`\`\`
+browser_query(action="find_interactive", description="Submit button")
+→ Screen coords: (850, 520)   ← already includes Chrome offset + window position
+
+mouse(action="click", x=850, y=520)   ← works correctly with screenX/screenY
+\`\`\`
+
+**Raw coordinate-based (for vision_analyze, screenX/screenY, or desktop apps):**
+- \`mouse(action="move", x, y)\` — move cursor to screen coordinates
+- \`mouse(action="click", x, y)\` — left-click at screen coordinates (NO Chrome offset added)
+- \`mouse(action="double_click", x, y)\` — double-click at screen coordinates
+- \`mouse(action="right_click", x, y)\` — right-click at screen coordinates
 - \`mouse(action="scroll", scrollY=-3)\` — scroll up/down (negative=up, positive=down)
 - \`mouse(action="drag", x, y)\` — drag from current position to target
 
-**Element-position-based (flow-frame style):**
-- \`mouse(action="click", position={left, top, width, height})\` — click center of element bounds
-- \`mouse(action="click", position={...}, forDesktop=true)\` — desktop app mode (no Chrome offset)
-
-The \`position\` parameter accepts element bounds from browser_query. Flow-frame-core automatically:
-- Centers the click within the element
-- Compensates for Chrome's UI offset (tabs, address bar) unless \`forDesktop=true\`
-- Uses smooth mouse movement on macOS/Linux
+⚠️ **NEVER use raw x/y with viewport-relative coordinates** (bounds.x, bounds.y, bounds.left, bounds.top) — these don't include Chrome's tab bar and address bar height. Use \`position={...}\` or \`screenX/screenY\` instead.
 
 ### Keyboard Actions (powered by flow-frame-core)
 - \`keyboard(action="type", text="hello")\` — type a string of text
@@ -802,8 +830,8 @@ browser_query(action="scroll_to_element", selector="<element-selector>")
 browser_query(action="find_interactive", description="...")
 → Now the element should have visible: true and correct on-screen coordinates
 
-# Then click:
-mouse(action="click", x=<updated.bounds.x>, y=<updated.bounds.y>)
+# Then click using position (auto-compensates for Chrome offset):
+mouse(action="click", position={left: <bounds.left>, top: <bounds.top>, width: <bounds.width>, height: <bounds.height>})
 \`\`\`
 
 **Viewport gotchas:**

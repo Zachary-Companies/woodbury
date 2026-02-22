@@ -159,6 +159,15 @@ function formatResult(action: string, data: any): string {
       lines.push('');
       if (data.url) lines.push(`- **URL:** ${data.url}`);
       if (data.title) lines.push(`- **Title:** ${data.title}`);
+      if (data.chromeOffset) {
+        lines.push('');
+        lines.push('### Chrome Offset (for mouse positioning)');
+        lines.push(`- **Chrome UI Height:** ${data.chromeOffset.chromeUIHeight}px (use as chromeOffsetY)`);
+        lines.push(`- **Chrome UI Width:** ${data.chromeOffset.chromeUIWidth}px (use as chromeOffsetX)`);
+        lines.push(`- **Window Position:** (${data.chromeOffset.windowX}, ${data.chromeOffset.windowY})`);
+        lines.push(`- **Total Offset to Content:** x=${data.chromeOffset.totalOffsetX}, y=${data.chromeOffset.totalOffsetY}`);
+        lines.push(`- **Device Pixel Ratio:** ${data.chromeOffset.devicePixelRatio}`);
+      }
       break;
 
     case 'get_page_info':
@@ -180,6 +189,13 @@ function formatResult(action: string, data: any): string {
         for (const h of data.headings) {
           lines.push(`- ${h.level}: ${h.text}`);
         }
+      }
+      if (data.chromeOffset) {
+        lines.push('');
+        lines.push('### Chrome Offset (for mouse positioning)');
+        lines.push(`- **Chrome UI Height:** ${data.chromeOffset.chromeUIHeight}px (use as chromeOffsetY)`);
+        lines.push(`- **Chrome UI Width:** ${data.chromeOffset.chromeUIWidth}px (use as chromeOffsetX)`);
+        lines.push(`- **Screen:** ${data.chromeOffset.screenWidth}x${data.chromeOffset.screenHeight} @ ${data.chromeOffset.devicePixelRatio}x`);
       }
       break;
 
@@ -339,7 +355,10 @@ function formatRankedElement(el: any): string {
   parts.push(`### #${rank} [${confEmoji}] ${label}`);
 
   if (el.bounds) {
-    parts.push(`- **Click at:** (${el.bounds.x}, ${el.bounds.y}) | **Size:** ${el.bounds.width}x${el.bounds.height}`);
+    parts.push(`- **Position:** left=${el.bounds.left}, top=${el.bounds.top}, width=${el.bounds.width}, height=${el.bounds.height}`);
+    if (el.bounds.screenX !== undefined && el.bounds.screenY !== undefined) {
+      parts.push(`- **Screen coords:** (${el.bounds.screenX}, ${el.bounds.screenY})`);
+    }
     if (!el.bounds.visible) parts.push(`- **Visible:** No (off-screen)`);
   }
 
@@ -393,8 +412,10 @@ function formatElement(el: any): string {
   parts.push(`- ${label}`);
 
   if (el.bounds) {
-    parts.push(`  - **Click at:** (${el.bounds.x}, ${el.bounds.y})`);
-    parts.push(`  - **Size:** ${el.bounds.width}x${el.bounds.height}`);
+    parts.push(`  - **Position:** left=${el.bounds.left}, top=${el.bounds.top}, width=${el.bounds.width}, height=${el.bounds.height}`);
+    if (el.bounds.screenX !== undefined && el.bounds.screenY !== undefined) {
+      parts.push(`  - **Screen coords:** (${el.bounds.screenX}, ${el.bounds.screenY})`);
+    }
     if (!el.bounds.visible) parts.push(`  - **Visible:** No (off-screen)`);
   }
 
@@ -430,7 +451,10 @@ function formatFormField(field: any): string {
   parts.push(`- \`<${tag}${type}${name}>\`${placeholder}`);
 
   if (field.bounds) {
-    parts.push(`  - **Click at:** (${field.bounds.x}, ${field.bounds.y})`);
+    parts.push(`  - **Position:** left=${field.bounds.left}, top=${field.bounds.top}, width=${field.bounds.width}, height=${field.bounds.height}`);
+    if (field.bounds.screenX !== undefined && field.bounds.screenY !== undefined) {
+      parts.push(`  - **Screen coords:** (${field.bounds.screenX}, ${field.bounds.screenY})`);
+    }
   }
   if (field.selector) {
     parts.push(`  - **Selector:** \`${field.selector}\``);

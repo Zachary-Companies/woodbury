@@ -26,7 +26,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 async function handleAction(action, params) {
   switch (action) {
     case 'ping':
-      return { pong: true, url: location.href, title: document.title };
+      return {
+        pong: true,
+        url: location.href,
+        title: document.title,
+        chromeOffset: getChromeOffset()
+      };
 
     case 'find_elements':
       return findElements(params);
@@ -80,11 +85,65 @@ async function handleAction(action, params) {
 
 // ── Helpers ──────────────────────────────────────────────────
 
+/**
+ * Calculate the Chrome browser UI offset (tabs + address bar height).
+ * This is the difference between the outer window and the inner viewport.
+ * Used to convert viewport-relative coordinates to screen-absolute coordinates.
+ */
+function getChromeOffset() {
+  // outerHeight includes Chrome UI (title bar, tabs, address bar, bookmarks bar)
+  // innerHeight is just the viewport (page content area)
+  // The difference is the Chrome UI height
+  const chromeUIHeight = window.outerHeight - window.innerHeight;
+
+  // outerWidth vs innerWidth gives horizontal offset (usually minimal)
+  const chromeUIWidth = window.outerWidth - window.innerWidth;
+
+  // screenX/screenY give the window's position on the physical screen
+  // screenTop/screenLeft are aliases that work in more browsers
+  const windowX = window.screenX || window.screenLeft || 0;
+  const windowY = window.screenY || window.screenTop || 0;
+
+  // devicePixelRatio matters for Retina/HiDPI displays
+  const dpr = window.devicePixelRatio || 1;
+
+  return {
+    // The Chrome UI height in CSS pixels (tabs + address bar + bookmarks bar)
+    chromeUIHeight,
+    // Horizontal chrome offset (usually 0 or 1)
+    chromeUIWidth: Math.round(chromeUIWidth / 2),
+    // Chrome window position on screen
+    windowX,
+    windowY,
+    // Total offset from screen top to viewport content
+    // This is what you add to viewport-relative coords to get screen-absolute coords
+    totalOffsetX: windowX + Math.round(chromeUIWidth / 2),
+    totalOffsetY: windowY + chromeUIHeight,
+    // Display info
+    devicePixelRatio: dpr,
+    screenWidth: window.screen.width,
+    screenHeight: window.screen.height,
+    innerWidth: window.innerWidth,
+    innerHeight: window.innerHeight,
+    outerWidth: window.outerWidth,
+    outerHeight: window.outerHeight
+  };
+}
+
 function getBoundingInfo(el) {
   const rect = el.getBoundingClientRect();
+
+  // Calculate screen-absolute position using Chrome offset
+  const chromeUIHeight = window.outerHeight - window.innerHeight;
+  const chromeUIWidthHalf = Math.round((window.outerWidth - window.innerWidth) / 2);
+  const windowX = window.screenX || window.screenLeft || 0;
+  const windowY = window.screenY || window.screenTop || 0;
+
   return {
+    // Viewport-relative center point
     x: Math.round(rect.left + rect.width / 2),
     y: Math.round(rect.top + rect.height / 2),
+    // Viewport-relative edges
     left: Math.round(rect.left),
     top: Math.round(rect.top),
     right: Math.round(rect.right),
@@ -94,6 +153,9 @@ function getBoundingInfo(el) {
     // Absolute position (accounting for scroll)
     absX: Math.round(rect.left + window.scrollX + rect.width / 2),
     absY: Math.round(rect.top + window.scrollY + rect.height / 2),
+    // Screen-absolute position (accounting for Chrome UI and window position)
+    screenX: Math.round(windowX + chromeUIWidthHalf + rect.left + rect.width / 2),
+    screenY: Math.round(windowY + chromeUIHeight + rect.top + rect.height / 2),
     visible: rect.width > 0 && rect.height > 0 &&
              rect.top < window.innerHeight && rect.bottom > 0 &&
              rect.left < window.innerWidth && rect.right > 0
@@ -1032,7 +1094,8 @@ function getPageInfo() {
     images: document.querySelectorAll('img').length,
     headings: Array.from(document.querySelectorAll('h1, h2, h3'))
       .slice(0, 10)
-      .map(h => ({ level: h.tagName, text: h.textContent.trim().substring(0, 80) }))
+      .map(h => ({ level: h.tagName, text: h.textContent.trim().substring(0, 80) })),
+    chromeOffset: getChromeOffset()
   };
 }
 
