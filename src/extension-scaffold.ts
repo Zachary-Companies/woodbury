@@ -309,6 +309,47 @@ web_fetch { "url": "https://example.com/api/posts", "method": "HEAD" }
 \`\`\`
 `;
 
+const TASK_NOTES_TEMPLATE = `# Task Notes & Procedures
+
+> Completed procedures, lessons learned, and reusable workflows.
+> The agent auto-populates this file after successfully completing web tasks.
+
+## Completed Procedures
+
+<!-- The agent appends new procedures here after each successful web task -->
+
+### [Example] Task Name
+- **Date:** YYYY-MM-DD
+- **Status:** Success / Partial / Failed
+
+#### Steps
+1. Navigate to \`/page\`
+2. Find element: \`browser_query(action="find_interactive", description="...")\`
+3. Click at coordinates: \`mouse(action="click", x=..., y=...)\`
+4. Type into field: \`keyboard(action="type", text="...")\`
+
+#### What Worked
+- Reliable selectors: \`[data-testid="login"]\`, \`#username\`
+- Timing: wait 2000ms after form submit for redirect
+
+#### What Didn't Work
+- Fragile selector \`.btn-primary:nth-child(2)\` broke after UI update
+- Race condition: need to wait for modal animation before clicking
+
+#### Timing & Waits
+| After Action | Wait Required | Why |
+|-------------|---------------|-----|
+| Page nav | 3000ms | SPA render |
+| Form submit | 2000ms | API response + redirect |
+| Modal open | 500ms | CSS animation |
+
+#### Reliable vs Fragile Selectors
+| Element | Reliable | Fragile | Notes |
+|---------|----------|---------|-------|
+| Login btn | \`[data-testid="login"]\` | \`.btn-primary:nth-child(2)\` | data-testid is stable |
+| Email input | \`#email\` | \`input[type="email"]\` | ID is more specific |
+`;
+
 // ────────────────────────────────────────────────────────────────
 //  Scaffold generator
 // ────────────────────────────────────────────────────────────────
@@ -356,6 +397,11 @@ export async function scaffoldExtension(
               required: false,
               description: `API key for ${displayName}`,
             },
+            [`${envVarPrefix}_OUTPUT_DIR`]: {
+              required: false,
+              description: `Output directory for ${displayName}`,
+              type: 'path',
+            },
           },
         },
       },
@@ -371,10 +417,19 @@ export async function scaffoldExtension(
 # Copy this file to .env and fill in your values:
 #   cp .env.example .env
 #
+# Or use the Woodbury config dashboard (type /dashboard in the REPL to get the URL).
+# The dashboard provides a web UI for managing all extension settings.
+#
 # These keys are loaded automatically and available via ctx.env in your extension.
+# Declare them in package.json under woodbury.env with:
+#   required: true/false, description: "...", type: "string" (default) or "path"
+# The "path" type shows a folder picker in the dashboard instead of a password input.
 
 # API key for ${displayName} (set required: true in package.json woodbury.env to enforce)
 # ${envVarPrefix}_API_KEY=your-key-here
+
+# Output directory (type: "path" in package.json gives this a folder picker in the dashboard)
+# ${envVarPrefix}_OUTPUT_DIR=/path/to/output
 `
   );
 
@@ -485,10 +540,23 @@ async function generateStandardIndexJs(
 /** @type {{ activate: Function, deactivate?: Function }} */
 module.exports = {
   async activate(ctx) {
-    // ─── ENVIRONMENT ─────────────────────────────────────────
-    // Extension env vars are loaded from ~/.woodbury/extensions/${name}/.env
-    // and available via ctx.env. Declare required keys in package.json woodbury.env.
+    // ─── CONFIGURATION ───────────────────────────────────────
+    // Each extension has its own .env file at ~/.woodbury/extensions/${name}/.env
+    // Values are available via ctx.env (frozen, read-only, scoped to this extension).
+    //
+    // Declare expected vars in package.json under woodbury.env:
+    //   "required": true/false  — whether the extension needs it to function
+    //   "description": "..."    — shown in the config dashboard
+    //   "type": "string"        — password-masked input (default, for API keys/secrets)
+    //   "type": "path"          — text input with Browse button (for directory paths)
+    //
+    // Users can set values via:
+    //   1. Config dashboard (type /dashboard in the REPL)
+    //   2. Editing .env directly: ~/.woodbury/extensions/${name}/.env
+    //   3. CLI: woodbury ext configure ${name}
+    //
     // const apiKey = ctx.env.${name.replace(/-/g, '_').toUpperCase()}_API_KEY;
+    // const outputDir = ctx.env.${name.replace(/-/g, '_').toUpperCase()}_OUTPUT_DIR;
 
     // ─── TOOLS ───────────────────────────────────────────────
     // Tools are capabilities the AI agent can call during conversations.
@@ -618,10 +686,23 @@ function loadSiteKnowledge(extDir) {
 /** @type {{ activate: Function, deactivate?: Function }} */
 module.exports = {
   async activate(ctx) {
-    // ─── ENVIRONMENT ─────────────────────────────────────────
-    // Extension env vars are loaded from ~/.woodbury/extensions/${name}/.env
-    // and available via ctx.env. Declare required keys in package.json woodbury.env.
+    // ─── CONFIGURATION ───────────────────────────────────────
+    // Each extension has its own .env file at ~/.woodbury/extensions/${name}/.env
+    // Values are available via ctx.env (frozen, read-only, scoped to this extension).
+    //
+    // Declare expected vars in package.json under woodbury.env:
+    //   "required": true/false  — whether the extension needs it to function
+    //   "description": "..."    — shown in the config dashboard
+    //   "type": "string"        — password-masked input (default, for API keys/secrets)
+    //   "type": "path"          — text input with Browse button (for directory paths)
+    //
+    // Users can set values via:
+    //   1. Config dashboard (type /dashboard in the REPL)
+    //   2. Editing .env directly: ~/.woodbury/extensions/${name}/.env
+    //   3. CLI: woodbury ext configure ${name}
+    //
     // const apiKey = ctx.env.${name.replace(/-/g, '_').toUpperCase()}_API_KEY;
+    // const outputDir = ctx.env.${name.replace(/-/g, '_').toUpperCase()}_OUTPUT_DIR;
 
     // ─── SITE KNOWLEDGE ──────────────────────────────────────
     // Load research docs into the system prompt so the agent
@@ -735,6 +816,7 @@ async function generateSiteKnowledge(dir: string): Promise<void> {
     'api-endpoints.md': API_ENDPOINTS_TEMPLATE,
     'forms.md': FORMS_TEMPLATE,
     'quirks.md': QUIRKS_TEMPLATE,
+    'task-notes.md': TASK_NOTES_TEMPLATE,
   };
 
   for (const [filename, content] of Object.entries(templates)) {

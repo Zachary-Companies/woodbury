@@ -9,6 +9,10 @@
 let extensions = [];
 let selectedExtension = null;
 
+// Folder picker state
+let folderPickerTarget = null; // input element name to fill
+let folderPickerCurrentDir = '';
+
 // ── DOM Helpers ──────────────────────────────────────────────
 
 function $(sel) { return document.querySelector(sel); }
@@ -56,6 +60,16 @@ async function saveExtensionEnv(name, vars) {
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || 'Save failed');
   return data;
+}
+
+async function browseDirs(dirPath) {
+  const res = await fetch('/api/browse', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path: dirPath || undefined }),
+  });
+  if (!res.ok) throw new Error('Failed to browse');
+  return res.json();
 }
 
 // ── Sidebar ──────────────────────────────────────────────────
@@ -143,6 +157,8 @@ function renderExtension(ext) {
   } else {
     // Var cards
     for (const v of vars) {
+      const isPath = v.type === 'path';
+
       html += '<div class="var-card" data-var="' + escAttr(v.name) + '">';
       html += '<div class="var-header">';
       html += '<span class="var-name">' + escHtml(v.name) + '</span>';
@@ -159,12 +175,25 @@ function renderExtension(ext) {
       }
 
       html += '<div class="var-input-row">';
-      html += '<input class="var-input" type="password" name="' + escAttr(v.name) + '"';
-      html += ' placeholder="' + (v.maskedValue ? escAttr(v.maskedValue) : 'Enter value...') + '"';
-      html += ' autocomplete="off">';
-      html += '<button class="btn-toggle" title="Toggle visibility" data-for="' + escAttr(v.name) + '">&#x1f441;</button>';
+
+      if (isPath) {
+        // Path-type: text input (not password) + Browse button
+        const currentValue = v.rawValue || '';
+        html += '<input class="var-input" type="text" name="' + escAttr(v.name) + '"';
+        html += ' value="' + escAttr(currentValue) + '"';
+        html += ' placeholder="' + (currentValue ? escAttr(currentValue) : '/path/to/folder') + '"';
+        html += ' autocomplete="off">';
+        html += '<button class="btn-browse" data-for="' + escAttr(v.name) + '" title="Browse folders">Browse</button>';
+      } else {
+        // Secret-type: password input + toggle
+        html += '<input class="var-input" type="password" name="' + escAttr(v.name) + '"';
+        html += ' placeholder="' + (v.maskedValue ? escAttr(v.maskedValue) : 'Enter value...') + '"';
+        html += ' autocomplete="off">';
+        html += '<button class="btn-toggle" title="Toggle visibility" data-for="' + escAttr(v.name) + '">&#x1f441;</button>';
+      }
+
       if (v.isSet) {
-        html += '<button class="btn-clear" title="Remove this key" data-clear="' + escAttr(v.name) + '">&#x2715;</button>';
+        html += '<button class="btn-clear" title="Remove this value" data-clear="' + escAttr(v.name) + '">&#x2715;</button>';
       }
       html += '</div>';
       html += '</div>';
@@ -179,13 +208,23 @@ function renderExtension(ext) {
 
   main.innerHTML = html;
 
-  // Wire up toggle buttons
+  // Wire up toggle buttons (secret-type vars)
   main.querySelectorAll('.btn-toggle').forEach(btn => {
     btn.addEventListener('click', () => {
       const input = main.querySelector('input[name="' + btn.dataset.for + '"]');
       if (input) {
         input.type = input.type === 'password' ? 'text' : 'password';
       }
+    });
+  });
+
+  // Wire up browse buttons (path-type vars)
+  main.querySelectorAll('.btn-browse').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const inputName = btn.dataset.for;
+      const input = main.querySelector('input[name="' + inputName + '"]');
+      const startDir = (input && input.value.trim()) || '';
+      openFolderPicker(inputName, startDir);
     });
   });
 
@@ -231,9 +270,11 @@ function renderExtension(ext) {
 
       try {
         await saveExtensionEnv(ext.name, vars);
-        toast(count + ' key(s) saved', 'success');
-        // Clear inputs and refresh
-        inputs.forEach(input => { input.value = ''; });
+        toast(count + ' value(s) saved', 'success');
+        // Clear secret inputs only (not path inputs that show their value)
+        inputs.forEach(input => {
+          if (input.type === 'password') input.value = '';
+        });
         await fetchExtensions();
         selectExtension(ext.name);
       } catch (err) {
@@ -245,6 +286,89 @@ function renderExtension(ext) {
     });
   }
 }
+
+// ── Folder Picker ─────────────────────────────────────────────
+
+async function openFolderPicker(inputName, startDir) {
+  folderPickerTarget = inputName;
+  const modal = $('#folder-modal');
+  modal.classList.add('open');
+
+  await navigateToDir(startDir || '');
+}
+
+function closeFolderPicker() {
+  const modal = $('#folder-modal');
+  modal.classList.remove('open');
+  folderPickerTarget = null;
+}
+
+async function navigateToDir(dirPath) {
+  const dirsEl = $('#modal-dirs');
+  dirsEl.innerHTML = '<div class="dir-empty">Loading...</div>';
+
+  try {
+    const data = await browseDirs(dirPath);
+    folderPickerCurrentDir = data.current;
+    $('#modal-path').textContent = data.current;
+
+    if (data.dirs.length === 0) {
+      dirsEl.innerHTML = '<div class="dir-empty">No subdirectories</div>';
+    } else {
+      dirsEl.innerHTML = data.dirs.map(d =>
+        '<div class="dir-item" data-path="' + escAttr(d.path) + '">' +
+        '<span class="dir-icon">&#x1f4c1;</span>' +
+        escHtml(d.name) +
+        '</div>'
+      ).join('');
+
+      // Click to navigate into subdirectory
+      dirsEl.querySelectorAll('.dir-item').forEach(el => {
+        el.addEventListener('click', () => navigateToDir(el.dataset.path));
+      });
+    }
+  } catch (err) {
+    dirsEl.innerHTML = '<div class="dir-empty" style="color:#ef4444;">Cannot read directory</div>';
+  }
+}
+
+// Folder picker event listeners
+document.addEventListener('DOMContentLoaded', () => {
+  // Close modal
+  $('#modal-close').addEventListener('click', closeFolderPicker);
+  $('#modal-cancel').addEventListener('click', closeFolderPicker);
+
+  // Go up to parent
+  $('#btn-parent').addEventListener('click', async () => {
+    const data = await browseDirs(folderPickerCurrentDir);
+    if (data.parent && data.parent !== data.current) {
+      await navigateToDir(data.parent);
+    }
+  });
+
+  // Select current folder
+  $('#modal-select').addEventListener('click', () => {
+    if (folderPickerTarget && folderPickerCurrentDir) {
+      const input = document.querySelector('input[name="' + folderPickerTarget + '"]');
+      if (input) {
+        input.value = folderPickerCurrentDir;
+      }
+      closeFolderPicker();
+    }
+  });
+
+  // Close on overlay click
+  $('#folder-modal').addEventListener('click', (e) => {
+    if (e.target === e.currentTarget) closeFolderPicker();
+  });
+
+  // Close on Escape
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && $('#folder-modal').classList.contains('open')) {
+      closeFolderPicker();
+    }
+  });
+});
 
 // ── Utilities ────────────────────────────────────────────────
 

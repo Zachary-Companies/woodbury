@@ -9,6 +9,7 @@ import { FileConversationManager } from './conversation.js';
 import { compactContext } from './context-compactor.js';
 import type { ExtensionManager } from './extension-manager.js';
 import type { DashboardHandle } from './config-dashboard.js';
+import { debugLog } from './debug-log.js';
 
 // Configure marked to render markdown in terminal with theme-aware colors
 marked.setOptions({
@@ -312,8 +313,11 @@ export class Repl {
 
   private async ensureAgent(): Promise<AgentHandle> {
     if (!this.agent) {
+      debugLog.info('repl', 'Initializing agent (first use)');
       this.print(`${icons.running}  ${colors.muted('Initializing agent...')}`);
+      const doneAgent = debugLog.time('repl', 'Agent initialization');
       this.agent = await createAgent(this.config, this.extensionManager);
+      doneAgent();
       this.print(`${icons.complete}  ${colors.success('Agent ready')}`);
       this.print('');
     }
@@ -347,10 +351,13 @@ export class Repl {
 
     const cmd = this.allSlashCommands.find(c => c.name === cmdName);
     if (!cmd) {
+      debugLog.warn('repl', `Unknown slash command: /${cmdName}`);
       this.print(`${icons.error}  ${colors.error(`Unknown command: /${cmdName}`)}`);
       this.print(colors.muted('  Type /help to see available commands'));
       return true;
     }
+
+    debugLog.info('repl', `Executing slash command: /${cmdName}`, { args });
 
     const ctx: SlashCommandContext = {
       config: this.config,
@@ -706,6 +713,7 @@ export class Repl {
     }
 
     try {
+      debugLog.info('repl', 'Processing user input', { length: trimmed.length, preview: trimmed.slice(0, 100) });
       logger.debug('Processing REPL input', { input: trimmed });
 
       this.print('');
@@ -841,6 +849,14 @@ export class Repl {
         content: result.content
       });
 
+      debugLog.info('repl', 'Response complete', {
+        duration: `${duration}ms`,
+        iterations: result.metadata?.iterations,
+        toolCalls: result.toolCalls?.length || 0,
+        streamed: isStreaming,
+        contentLength: result.content?.length || 0,
+      });
+
       if (this.config.verbose && result.metadata) {
         this.print('');
         this.printDivider('dots');
@@ -860,10 +876,15 @@ export class Repl {
       this.abortController = null;
 
       if (error instanceof Error && error.name === 'AbortError') {
+        debugLog.info('repl', 'Request aborted by user (Ctrl+C)');
         this.print('');
         this.print(`${icons.warning}  ${colors.warning('Request aborted')}`);
         this.print('');
       } else {
+        debugLog.error('repl', 'REPL execution error', {
+          error: error instanceof Error ? error.message : String(error),
+          stack: error instanceof Error ? error.stack : undefined,
+        });
         logger.error('REPL execution error:', error);
         this.print('');
         this.print(`${icons.error}  ${labels.error}`);
@@ -929,8 +950,11 @@ export class Repl {
 
   async start(): Promise<void> {
     await this.conversationManager.load();
+    const turns = this.conversationManager.getTurns();
+    debugLog.info('repl', 'Conversation history loaded', { turns: turns.length });
 
     this.running = true;
+    debugLog.info('repl', 'REPL started', { isTTY: this.isTTY, slashCommands: this.allSlashCommands.map(c => c.name) });
     logger.info('Starting Woodbury REPL. Type "exit" or "quit" to stop.');
 
     if (this.isTTY) {
@@ -984,9 +1008,13 @@ export class Repl {
   async stop(): Promise<void> {
     if (!this.running) return;
 
+    debugLog.section('SHUTDOWN');
+    debugLog.info('repl', 'REPL stopping');
+
     this.running = false;
 
     await this.conversationManager.save();
+    debugLog.info('repl', 'Conversation saved');
 
     // Close config dashboard
     if (this.options.dashboardHandle) {
@@ -995,6 +1023,7 @@ export class Repl {
 
     // Deactivate all extensions (close web servers, etc.)
     if (this.extensionManager) {
+      debugLog.info('repl', 'Deactivating extensions');
       await this.extensionManager.deactivateAll();
     }
 
@@ -1011,6 +1040,7 @@ export class Repl {
     }
     process.stdin.pause();
 
+    debugLog.info('repl', 'REPL stopped — goodbye');
     logger.info('Stopping Woodbury REPL');
     console.log();
     console.log(`${icons.success}  ${colors.primary('Goodbye! Thanks for using Woodbury.')}`);

@@ -35,7 +35,8 @@ Woodbury is an interactive AI coding assistant CLI built on the agentic loop emb
 | `src/conversation.ts` | Multi-turn history manager with `<conversation_history>` packing |
 | `src/renderer.ts` | Terminal output (chalk, ora spinner, marked-terminal markdown rendering) |
 | `src/logger.ts` | Logger implementation that routes to renderer (verbose-aware) |
-| `src/slash-commands.ts` | Slash command registry and handlers (`/help`, `/exit`, `/clear`, etc.) |
+| `src/debug-log.ts` | File-based debug logging to `~/.woodbury/logs/` (activated by `--debug` or `WOODBURY_DEBUG=1`) |
+| `src/slash-commands.ts` | Slash command registry and handlers (`/help`, `/exit`, `/clear`, `/log`, etc.) |
 | `src/marked-terminal.d.ts` | Type declaration for `marked-terminal` package |
 
 ### Extension System
@@ -47,16 +48,29 @@ Woodbury is an interactive AI coding assistant CLI built on the agentic loop emb
 | File | Purpose |
 |------|---------|
 | `src/extension-api.ts` | Public types for extension authors (`WoodburyExtension`, `ExtensionContext`, etc.) |
-| `src/extension-loader.ts` | Discovers extensions, validates manifests, `parseEnvFile()` utility, `EnvVarDeclaration` + `envDeclarations` on manifest |
+| `src/extension-loader.ts` | Discovers extensions, validates manifests, `parseEnvFile()` / `writeEnvFile()` utilities, `EnvVarDeclaration` (with `type?: 'string' \| 'path'`) + `envDeclarations` on manifest |
 | `src/extension-manager.ts` | Lifecycle coordinator: load, activate (incl. `.env` loading → frozen `ctx.env`), aggregate tools/commands/prompts, serve web UIs, deactivate |
 | `src/extension-scaffold.ts` | `woodbury ext create` generates starter extension with all four capabilities; `initGitRepo()`, `ensureGhInstalled()`, `isToolInstalled()` helpers for git + GitHub integration |
+| `src/config-dashboard.ts` | Built-in web dashboard for managing extension env vars; `startDashboard()`, `maskValue()`, `DashboardHandle`; API routes: GET/PUT extensions env, POST browse dirs |
+| `src/config-dashboard/` | Static HTML/JS for the dashboard SPA (dark theme, folder picker modal); copied to `dist/` by `postbuild` script |
 
 **Extension data flow:**
 1. `cli.ts` creates `ExtensionManager` → calls `loadAll()` → discovers + activates all extensions (during activation, reads `<ext-dir>/.env`, validates against `woodbury.env` declarations, provides frozen `ctx.env`)
-2. `ExtensionManager` is passed to `startRepl()` → merges extension commands with built-in slash commands
-3. `createAgent()` in `agent-factory.ts` receives `ExtensionManager` → registers extension tools in `ToolRegistry` → passes extension prompt sections to `buildSystemPrompt()`
-4. `system-prompt.ts` appends `## Extension Instructions` section with all extension prompt additions
-5. On exit, `repl.ts` calls `extensionManager.deactivateAll()` to clean up web servers and call `deactivate()`
+2. `cli.ts` starts config dashboard (`startDashboard()`) → passes `DashboardHandle` to `startRepl()`
+3. `ExtensionManager` is passed to `startRepl()` → merges extension commands with built-in slash commands
+4. `createAgent()` in `agent-factory.ts` receives `ExtensionManager` → registers extension tools in `ToolRegistry` → passes extension prompt sections to `buildSystemPrompt()`
+5. `system-prompt.ts` appends `## Extension Configuration` (dashboard awareness) + `## Extension Instructions` sections
+6. On exit, `repl.ts` closes dashboard handle, then calls `extensionManager.deactivateAll()`
+
+**Config dashboard flow:**
+1. `startDashboard()` creates HTTP server on `127.0.0.1:0` (auto-port)
+2. API routes call `discoverExtensions()` per-request for fresh data
+3. `GET /api/extensions` → list all extensions with env var status (masked values)
+4. `GET /api/extensions/:name/env` → single extension's env status
+5. `PUT /api/extensions/:name/env` → merge new values into `.env` file (empty = delete)
+6. `POST /api/browse` → list subdirectories for the folder picker
+7. Static files served from `dist/config-dashboard/` (copied by `postbuild`)
+8. `EnvVarDeclaration.type` controls dashboard UI: `'string'` → password input, `'path'` → text input + Browse button
 
 **Extension CLI subcommands** (in `cli.ts`):
 - `woodbury ext list` — discover and list extensions
@@ -90,6 +104,25 @@ npm run start          # Run dist/index.js directly
 npm run dev            # tsc --watch
 ```
 
+## Debug Logging
+
+Woodbury has file-based debug logging that writes timestamped entries to `~/.woodbury/logs/`.
+
+**Activate:** `woodbury --debug` or `WOODBURY_DEBUG=1 woodbury`
+
+**Log location:** `~/.woodbury/logs/woodbury-<YYYY-MM-DD>-<HHmmss>.log`
+
+**View in REPL:** `/log` (shows path + last 20 lines), `/log 50` (last 50 lines)
+
+**What's logged:**
+- Startup: config, provider, model, API key status
+- Extensions: discovery, loading, activation, env var status
+- Agent: tool registry, system prompt, each run (timing, iterations, tool calls)
+- REPL: user input, slash commands, errors, abort, shutdown
+- Dashboard: API requests, env var updates
+
+**Implementation:** `src/debug-log.ts` exports a `debugLog` singleton. Auto-rotates (keeps 10 files, max 10 MB each). All logging is no-op when disabled — zero overhead in normal use.
+
 ## Dependencies
 
 - `src/loop/` — Agent core with all 14 tools (embedded locally)
@@ -112,6 +145,7 @@ Extension-specific test files:
 | `src/__tests__/extension-loader.test.ts` | Discovery from local/npm/scoped dirs, manifest parsing, skipping invalid extensions |
 | `src/__tests__/extension-manager.test.ts` | Lifecycle (loadAll, activate, deactivate), context API (tools, commands, prompts, web UIs), aggregation |
 | `src/__tests__/extension-agent-factory.test.ts` | Tool registration in ToolRegistry, prompt section passthrough, error handling |
+| `src/__tests__/config-dashboard.test.ts` | `writeEnvFile()` serialization/round-trip, `maskValue()`, dashboard server start/stop, all API routes (GET/PUT extensions, browse dirs), env var merge/delete |
 
 ## Conventions
 

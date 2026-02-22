@@ -222,7 +222,7 @@ describe('scaffoldExtension', () => {
       expect(stat.isDirectory()).toBe(true);
     });
 
-    it('should create all six template files', async () => {
+    it('should create all seven template files', async () => {
       const dir = await scaffoldExtension('test-ext', { webNavigation: true });
       const expectedFiles = [
         'api-endpoints.md',
@@ -231,6 +231,7 @@ describe('scaffoldExtension', () => {
         'quirks.md',
         'selectors.md',
         'site-map.md',
+        'task-notes.md',
       ];
       const files = await fs.readdir(join(dir, 'site-knowledge'));
       expect(files.sort()).toEqual(expectedFiles);

@@ -2,6 +2,8 @@ import chalk from 'chalk';
 import { SlashCommand, SlashCommandContext } from './types';
 import { promises as fs } from 'fs';
 import path from 'path';
+import { discoverExtensions, parseEnvFile } from './extension-loader.js';
+import { debugLog } from './debug-log.js';
 
 export { type SlashCommand, type SlashCommandContext } from './types';
 
@@ -87,7 +89,7 @@ export const slashCommands: SlashCommand[] = [
   
   {
     name: 'config', 
-    description: 'Show configuration details',
+    description: 'Show configuration details including extensions',
     async handler(args: string[], ctx: SlashCommandContext) {
       if (args.length > 0 && args[0] === '--json') {
         // Show full config as JSON (but mask API keys)
@@ -102,7 +104,8 @@ export const slashCommands: SlashCommand[] = [
         ctx.print(JSON.stringify(safeConfig, null, 2));
       } else {
         // Show human-readable config
-        ctx.print(chalk.green('Configuration:'));
+        ctx.print(chalk.green.bold('Configuration'));
+        ctx.print('');
         ctx.print(chalk.blue('  Model: ') + (ctx.config.model || 'default'));
         ctx.print(chalk.blue('  Working Directory: ') + ctx.workingDirectory);
         ctx.print(chalk.blue('  Verbose: ') + (ctx.config.verbose ? 'enabled' : 'disabled'));
@@ -116,6 +119,90 @@ export const slashCommands: SlashCommand[] = [
             .filter(([, value]) => value)
             .map(([key]) => key);
           ctx.print(chalk.blue('  API Keys: ') + (configuredKeys.length > 0 ? configuredKeys.join(', ') : 'none'));
+        }
+
+        // Show dashboard URL if available
+        if (ctx.config.dashboardUrl) {
+          ctx.print('');
+          ctx.print(chalk.green.bold('Config Dashboard'));
+          ctx.print(chalk.blue('  URL: ') + ctx.config.dashboardUrl);
+        }
+
+        // Show extensions and their env var status
+        ctx.print('');
+        ctx.print(chalk.green.bold('Extensions'));
+        
+        try {
+          const manifests = await discoverExtensions();
+          
+          if (manifests.length === 0) {
+            ctx.print(chalk.gray('  No extensions installed.'));
+            ctx.print(chalk.gray('  Install: woodbury ext install <package-name>'));
+            ctx.print(chalk.gray('  Create:  woodbury ext create <name>'));
+          } else {
+            for (const m of manifests) {
+              // Check env var status for this extension
+              let envStatus = '';
+              const declKeys = Object.keys(m.envDeclarations);
+              
+              if (declKeys.length > 0) {
+                // Read extension's .env file
+                let currentEnv: Record<string, string> = {};
+                try {
+                  const envContent = await fs.readFile(path.join(m.directory, '.env'), 'utf-8');
+                  currentEnv = parseEnvFile(envContent);
+                } catch {
+                  // No .env file
+                }
+                
+                const setCount = declKeys.filter(k => !!currentEnv[k]).length;
+                const requiredMissing = declKeys.filter(k => m.envDeclarations[k].required && !currentEnv[k]);
+                
+                if (requiredMissing.length > 0) {
+                  envStatus = chalk.red(` [${requiredMissing.length} missing]`);
+                } else if (setCount === declKeys.length) {
+                  envStatus = chalk.green(' [all keys set]');
+                } else {
+                  envStatus = chalk.yellow(` [${setCount}/${declKeys.length} set]`);
+                }
+              }
+              
+              ctx.print(chalk.blue(`  ${m.displayName}`) + chalk.gray(` v${m.version}`) + envStatus);
+              
+              // Show provides
+              if (m.provides.length > 0) {
+                ctx.print(chalk.gray(`    Provides: ${m.provides.join(', ')}`));
+              }
+              
+              // Show env vars if any
+              if (declKeys.length > 0) {
+                // Read extension's .env file again for detailed status
+                let currentEnv: Record<string, string> = {};
+                try {
+                  const envContent = await fs.readFile(path.join(m.directory, '.env'), 'utf-8');
+                  currentEnv = parseEnvFile(envContent);
+                } catch {
+                  // No .env file
+                }
+                
+                for (const key of declKeys) {
+                  const decl = m.envDeclarations[key];
+                  const isSet = !!currentEnv[key];
+                  const reqLabel = decl.required ? chalk.red('[required]') : chalk.gray('[optional]');
+                  const statusIcon = isSet ? chalk.green('✓') : (decl.required ? chalk.red('✗') : chalk.yellow('○'));
+                  ctx.print(chalk.gray(`    ${statusIcon} ${key} ${reqLabel}`));
+                }
+              }
+            }
+            
+            ctx.print('');
+            ctx.print(chalk.gray('  Configure: woodbury ext configure <name>'));
+            if (ctx.config.dashboardUrl) {
+              ctx.print(chalk.gray('  Dashboard: ') + ctx.config.dashboardUrl);
+            }
+          }
+        } catch (error) {
+          ctx.print(chalk.red(`  Failed to load extensions: ${error}`));
         }
       }
     }
@@ -221,6 +308,46 @@ export const slashCommands: SlashCommand[] = [
       } else {
         ctx.print(chalk.yellow('Config dashboard is not running.'));
         ctx.print(chalk.gray('  It starts automatically unless --no-extensions is used.'));
+      }
+    }
+  },
+
+  {
+    name: 'log',
+    description: 'Show debug log file path and recent entries',
+    async handler(args: string[], ctx: SlashCommandContext) {
+      if (!debugLog.isEnabled) {
+        ctx.print(chalk.yellow('Debug logging is not enabled.'));
+        ctx.print(chalk.gray('  Start with: woodbury --debug'));
+        ctx.print(chalk.gray('  Or set:     WOODBURY_DEBUG=1'));
+        return;
+      }
+
+      ctx.print(chalk.green.bold('Debug Log'));
+      ctx.print(chalk.blue('  File: ') + debugLog.filePath);
+      ctx.print(chalk.blue('  Dir:  ') + debugLog.logsDir);
+      ctx.print('');
+
+      // Show the tail of the log file
+      const tailLines = parseInt(args[0]) || 20;
+      try {
+        const content = await fs.readFile(debugLog.filePath, 'utf-8');
+        const lines = content.split('\n');
+        const tail = lines.slice(-tailLines).join('\n');
+        ctx.print(chalk.gray(`  Last ${Math.min(tailLines, lines.length)} lines:`));
+        ctx.print(chalk.gray('  ' + '─'.repeat(50)));
+        for (const line of tail.split('\n')) {
+          // Colorize log levels
+          let colored = line;
+          if (line.includes(' ERROR ')) colored = chalk.red(line);
+          else if (line.includes(' WARN  ')) colored = chalk.yellow(line);
+          else if (line.includes(' INFO  ')) colored = chalk.gray(line);
+          else if (line.includes(' DEBUG ')) colored = chalk.dim(line);
+          else colored = chalk.gray(line);
+          ctx.print('  ' + colored);
+        }
+      } catch (err) {
+        ctx.print(chalk.red(`  Could not read log file: ${err}`));
       }
     }
   },

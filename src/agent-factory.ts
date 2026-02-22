@@ -5,6 +5,7 @@ import type { WoodburyConfig } from './types';
 import { buildSystemPrompt } from './system-prompt.js';
 import { ensureBridgeServer, bridgeServer } from './bridge-server.js';
 import type { ExtensionManager } from './extension-manager.js';
+import { debugLog } from './debug-log.js';
 
 export interface AgentHandle {
   run(input: string, signal?: AbortSignal): Promise<AgentResult>;
@@ -25,28 +26,44 @@ export async function createAgent(
 
   try {
     // Create tool registry
+    const doneRegistry = debugLog.time('agent', 'Creating tool registry');
     const toolRegistry = createDefaultToolRegistry();
+    doneRegistry();
+
+    const defaultToolCount = toolRegistry.getAll?.()?.length || 0;
+    debugLog.info('agent', 'Default tools registered', { count: defaultToolCount });
 
     // Register extension tools
     if (extensionManager) {
-      for (const { definition, handler } of extensionManager.getAllTools()) {
+      const extTools = extensionManager.getAllTools();
+      debugLog.info('agent', `Registering ${extTools.length} extension tool(s)`);
+      for (const { definition, handler } of extTools) {
         try {
           toolRegistry.register(definition, handler);
+          debugLog.debug('agent', `Registered extension tool: ${definition.name}`);
         } catch (err) {
+          debugLog.error('agent', `Extension tool "${definition.name}" registration failed`, { error: String(err) });
           logger.warn(`Extension tool "${definition.name}" registration failed: ${err}`);
         }
       }
     }
 
     // Start the bridge server for Chrome extension communication (non-blocking)
-    ensureBridgeServer().catch(() => {
-      // Silently ignore — browser_query tool will report the error when used
+    debugLog.debug('agent', 'Starting bridge server (non-blocking)');
+    ensureBridgeServer().catch((err) => {
+      debugLog.warn('agent', 'Bridge server failed to start', { error: String(err) });
     });
 
     // Build the comprehensive system prompt with project context + extension prompts
     const workingDirectory = config.workingDirectory || process.cwd();
     const extensionPrompts = extensionManager?.getAllPromptSections();
+    const donePrompt = debugLog.time('agent', 'Building system prompt');
     const systemPrompt = await buildSystemPrompt(workingDirectory, config.contextDir, extensionPrompts);
+    donePrompt();
+    debugLog.info('agent', 'System prompt built', {
+      length: systemPrompt.length,
+      extensionPromptCount: extensionPrompts?.length || 0,
+    });
 
     // Configure agent
     const provider = getProvider(config);
@@ -65,8 +82,19 @@ export async function createAgent(
       streaming: config.stream !== false
     };
 
+    debugLog.info('agent', 'Agent config', {
+      provider: agentConfig.provider,
+      model: agentConfig.model,
+      maxIterations: agentConfig.maxIterations,
+      timeout: agentConfig.timeout,
+      streaming: agentConfig.streaming,
+      allowDangerousTools: agentConfig.allowDangerousTools,
+      hasApiKey: !!apiKey,
+    });
+
     // Create agent with config and tool registry
     const agent = new Agent(agentConfig, toolRegistry);
+    debugLog.info('agent', 'Agent created successfully');
 
     return {
       setOnToken(callback: ((token: string) => void) | undefined): void {
@@ -87,13 +115,23 @@ export async function createAgent(
 
       async run(input: string, signal?: AbortSignal): Promise<AgentResult> {
         try {
+          const inputPreview = input.slice(0, 200) + (input.length > 200 ? '...' : '');
+          debugLog.info('agent.run', 'Agent run starting', { inputLength: input.length, preview: inputPreview });
           logger.info(`Running agent with input: ${input.slice(0, 100)}...`);
           const startTime = Date.now();
 
           const result = await agent.run(input, signal);
 
           const endTime = Date.now();
-          logger.info(`Agent completed in ${endTime - startTime}ms`);
+          const elapsed = endTime - startTime;
+          debugLog.info('agent.run', 'Agent run completed', {
+            elapsed: `${elapsed}ms`,
+            success: result.success,
+            iterations: result.metadata?.iterations,
+            toolCalls: result.toolCalls?.length || 0,
+            contentLength: result.content?.length || 0,
+          });
+          logger.info(`Agent completed in ${elapsed}ms`);
 
           if (result.metadata) {
             logger.info(`Iterations: ${result.metadata.iterations}`);
@@ -101,6 +139,10 @@ export async function createAgent(
 
           return result;
         } catch (error) {
+          debugLog.error('agent.run', 'Agent execution failed', {
+            error: error instanceof Error ? error.message : String(error),
+            stack: error instanceof Error ? error.stack : undefined,
+          });
           logger.error('Agent execution failed:', error);
           throw error;
         }

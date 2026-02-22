@@ -62,6 +62,9 @@ export interface WoodburyConfig {
   /** Disable all extensions */
   noExtensions?: boolean;
 
+  /** Enable debug logging to ~/.woodbury/logs/ */
+  debug?: boolean;
+
   /** URL of the running config dashboard (set at runtime) */
   dashboardUrl?: string;
 }

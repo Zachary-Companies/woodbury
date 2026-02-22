@@ -2,17 +2,18 @@
  * Nano Banana - Google Gemini Image Generation Tool
  * 
  * Generate and edit images using Google's Gemini image models.
- * Requires GEMINI_API_KEY environment variable.
+ * Requires GEMINI_API_KEY environment variable or extension config.
  */
 
 import { z } from 'zod';
 import { ToolDefinition } from './index.js';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as os from 'os';
 
 const MODELS = {
-  flash: 'gemini-2.5-flash-image',
-  pro: 'gemini-3-pro-image-preview',
+  flash: 'gemini-2.0-flash-exp-image-generation',
+  pro: 'gemini-2.5-flash-image',
 } as const;
 
 const ASPECT_RATIOS = ['1:1', '2:3', '3:2', '3:4', '4:3', '4:5', '5:4', '9:16', '16:9', '21:9'] as const;
@@ -29,7 +30,7 @@ export const nanobananaSchema = z.object({
     'For action="edit": Path to the image file to edit, or base64 data URL. Required for editing.'
   ),
   model: z.enum(['flash', 'pro']).optional().default('flash').describe(
-    'Model to use: "flash" (gemini-2.5-flash-image, fast/cheap ~$0.04/image) or "pro" (gemini-3-pro-image-preview, 4K support, complex prompts ~$0.13-0.24/image). Default: flash'
+    'Model to use: "flash" (gemini-2.0-flash-exp, fast/cheap ~$0.04/image) or "pro" (gemini-2.5-flash, higher quality ~$0.13-0.24/image). Default: flash'
   ),
   aspectRatio: z.enum(ASPECT_RATIOS).optional().default('1:1').describe(
     'Aspect ratio for generated image. Options: 1:1, 2:3, 3:2, 3:4, 4:3, 4:5, 5:4, 9:16, 16:9, 21:9. Default: 1:1'
@@ -44,10 +45,68 @@ export const nanobananaSchema = z.object({
 
 export type NanoBananaParams = z.infer<typeof nanobananaSchema>;
 
+/**
+ * Get the Gemini API key from environment or extension config
+ */
+function getApiKey(): string | undefined {
+  // First check process environment
+  if (process.env.GEMINI_API_KEY) {
+    return process.env.GEMINI_API_KEY;
+  }
+
+  // Then check the extension's .env file
+  const extensionEnvPaths = [
+    path.join(os.homedir(), '.woodbury', 'extensions', 'woodbury-ext-nanobanana', '.env'),
+    path.join(os.homedir(), '.woodbury', 'extensions', 'nanobanana', '.env'),
+  ];
+
+  for (const envPath of extensionEnvPaths) {
+    if (fs.existsSync(envPath)) {
+      try {
+        const content = fs.readFileSync(envPath, 'utf-8');
+        const match = content.match(/^GEMINI_API_KEY=(.+)$/m);
+        if (match && match[1]) {
+          return match[1].trim();
+        }
+      } catch {
+        // Continue to next path
+      }
+    }
+  }
+
+  return undefined;
+}
+
+/**
+ * Get the default output directory from extension config
+ */
+function getOutputDir(): string | undefined {
+  const extensionEnvPaths = [
+    path.join(os.homedir(), '.woodbury', 'extensions', 'woodbury-ext-nanobanana', '.env'),
+    path.join(os.homedir(), '.woodbury', 'extensions', 'nanobanana', '.env'),
+  ];
+
+  for (const envPath of extensionEnvPaths) {
+    if (fs.existsSync(envPath)) {
+      try {
+        const content = fs.readFileSync(envPath, 'utf-8');
+        const match = content.match(/^IMAGE_OUTPUT_DIR=(.+)$/m);
+        if (match && match[1]) {
+          return match[1].trim();
+        }
+      } catch {
+        // Continue to next path
+      }
+    }
+  }
+
+  return undefined;
+}
+
 async function loadImageAsBase64(imagePath: string): Promise<{ data: string; mimeType: string }> {
   // Check if it's already a data URL
   if (imagePath.startsWith('data:')) {
-    const match = imagePath.match(/^data:([^;]+);base64,(.+)$/);
+    const match = imagePath.match(/^data:([^;]+);base64,(.+)$/s);
     if (match) {
       return { mimeType: match[1], data: match[2] };
     }
@@ -100,11 +159,11 @@ export async function nanobanana(
   params: NanoBananaParams,
   workingDirectory: string
 ): Promise<string> {
-  const apiKey = process.env.GEMINI_API_KEY;
+  const apiKey = getApiKey();
   if (!apiKey) {
     return JSON.stringify({
       success: false,
-      error: 'GEMINI_API_KEY environment variable not set. Get an API key at https://aistudio.google.com/app/apikey',
+      error: 'GEMINI_API_KEY not found. Set it in environment or in ~/.woodbury/extensions/woodbury-ext-nanobanana/.env. Get an API key at https://aistudio.google.com/app/apikey',
     });
   }
 
@@ -148,15 +207,7 @@ export async function nanobanana(
   // Build generation config
   const generationConfig: Record<string, unknown> = {
     responseModalities: ['TEXT', 'IMAGE'],
-    imageConfig: {
-      aspectRatio: aspectRatio,
-    },
   };
-
-  // Add image size for Pro model
-  if (model === 'pro' && imageSize) {
-    (generationConfig.imageConfig as Record<string, unknown>).imageSize = imageSize;
-  }
 
   const requestBody = {
     contents: [{ parts }],
@@ -216,7 +267,17 @@ export async function nanobanana(
     if (imageData) {
       // Determine output path
       const ext = imageMimeType === 'image/jpeg' ? '.jpg' : '.png';
-      const filename = outputPath || `nanobanana_${Date.now()}${ext}`;
+      const defaultOutputDir = getOutputDir();
+      let filename: string;
+      
+      if (outputPath) {
+        filename = outputPath;
+      } else if (defaultOutputDir) {
+        filename = path.join(defaultOutputDir, `nanobanana_${Date.now()}${ext}`);
+      } else {
+        filename = `nanobanana_${Date.now()}${ext}`;
+      }
+      
       const fullPath = path.isAbsolute(filename) 
         ? filename 
         : path.resolve(workingDirectory, filename);

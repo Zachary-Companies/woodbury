@@ -364,6 +364,7 @@ In the REPL:
 | Command | Description |
 |---------|-------------|
 | `/extensions` | Show loaded extensions with tools, commands, and web UIs |
+| `/dashboard` | Show the config dashboard URL |
 
 ## Extension Lifecycle
 
@@ -440,9 +441,64 @@ In your extension's `package.json`, declare what keys your extension expects:
 }
 ```
 
-### Setting Environment Variables
+### Variable Types
 
-Create a `.env` file in your extension directory:
+Each env var declaration supports an optional `type` field that controls how the config dashboard renders the input:
+
+| Type | Dashboard UI | Use For |
+|------|-------------|---------|
+| `"string"` (default) | Password-masked input with visibility toggle | API keys, secrets, tokens |
+| `"path"` | Text input with **Browse** button and folder picker | Directory paths, output folders |
+
+Example with a path-type variable:
+
+```json
+{
+  "woodbury": {
+    "name": "image-gen",
+    "env": {
+      "API_KEY": {
+        "required": true,
+        "description": "Image generation API key"
+      },
+      "OUTPUT_DIR": {
+        "required": false,
+        "description": "Folder to save generated images",
+        "type": "path"
+      }
+    }
+  }
+}
+```
+
+Path-type variables show their full value in the dashboard (since paths aren't secrets) and include a Browse button that opens an interactive folder picker for navigating the local filesystem.
+
+### Config Dashboard
+
+Woodbury includes a built-in config dashboard — a local web UI for managing extension configuration. It starts automatically on launch and its URL is shown in the REPL banner.
+
+**Opening the dashboard:**
+- The URL appears in the startup banner (e.g. `Config: http://127.0.0.1:43210`)
+- Type `/dashboard` in the REPL to see the URL at any time
+
+**What you can do:**
+- See all installed extensions and their declared environment variables
+- View set/missing status for each variable (with badge indicators)
+- Set or update values — API keys are masked, paths are shown in full
+- Remove values (click the ✕ button)
+- Browse folders for path-type variables using the built-in folder picker
+- Changes are saved to each extension's `.env` file
+
+**After making changes:** Restart Woodbury so extensions reload with the new values.
+
+**Security:**
+- The dashboard binds to `127.0.0.1` only (not accessible from the network)
+- API key values are masked (first 4 + last 4 characters shown, rest asterisked)
+- The dashboard is disabled when `--no-extensions` is used
+
+### Setting Environment Variables Manually
+
+You can also edit `.env` files directly instead of using the dashboard:
 
 ```
 # ~/.woodbury/extensions/social-media/.env
@@ -473,7 +529,7 @@ module.exports = {
 };
 ```
 
-### Checking Configuration
+### Checking Configuration via CLI
 
 Use `woodbury ext configure <name>` to see which keys are set:
 
@@ -490,10 +546,11 @@ woodbury ext configure social-media
 
 ### Best Practices
 
-- **Never commit `.env` files.** Add `.env` to `.gitignore`.
+- **Never commit `.env` files.** Add `.env` to `.gitignore`. The scaffold does this automatically.
 - **Always include `.env.example`.** The scaffold generates one.
-- **Check keys at use-time.** Don't crash in `activate()` — check when the tool is called.
+- **Check keys at use-time.** Don't crash in `activate()` — check when the tool is called and return a helpful error pointing to the dashboard.
 - **Prefix key names.** Use `SOCIAL_MEDIA_API_KEY`, not just `API_KEY`.
+- **Use `type: "path"` for directory settings.** This gives users a folder picker in the dashboard instead of a plain text field.
 
 ## Installation Methods
 

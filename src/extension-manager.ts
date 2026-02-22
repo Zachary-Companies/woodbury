@@ -25,6 +25,7 @@ import {
   type ExtensionManifest,
 } from './extension-loader.js';
 import { bridgeServer } from './bridge-server.js';
+import { debugLog } from './debug-log.js';
 
 /** Record of a loaded and activated extension */
 export interface ExtensionRecord {
@@ -83,22 +84,31 @@ export class ExtensionManager {
     loaded: string[];
     errors: Array<{ name: string; error: string }>;
   }> {
+    debugLog.info('ext-mgr', 'Loading all extensions');
     const manifests = await discoverExtensions();
     const loaded: string[] = [];
     const errors: Array<{ name: string; error: string }> = [];
 
     for (const manifest of manifests) {
       try {
+        const doneActivate = debugLog.time('ext-mgr', `Activating "${manifest.name}"`);
         await this.activate(manifest);
+        doneActivate();
         loaded.push(manifest.name);
       } catch (err) {
+        const errorMsg = err instanceof Error ? err.message : String(err);
+        debugLog.error('ext-mgr', `Failed to activate "${manifest.name}"`, {
+          error: errorMsg,
+          stack: err instanceof Error ? err.stack : undefined,
+        });
         errors.push({
           name: manifest.name,
-          error: err instanceof Error ? err.message : String(err),
+          error: errorMsg,
         });
       }
     }
 
+    debugLog.info('ext-mgr', 'All extensions processed', { loaded, errorCount: errors.length });
     return { loaded, errors };
   }
 
@@ -106,6 +116,10 @@ export class ExtensionManager {
    * Activate a single extension from its manifest.
    */
   private async activate(manifest: ExtensionManifest): Promise<void> {
+    debugLog.debug('ext-mgr', `Loading extension module: ${manifest.name}`, {
+      entryPoint: manifest.entryPoint,
+      source: manifest.source,
+    });
     const { module } = await loadExtension(manifest);
 
     // ── Load per-extension .env file ──────────────────────────
@@ -114,8 +128,11 @@ export class ExtensionManager {
     try {
       const envContent = await readFile(envFilePath, 'utf-8');
       extensionEnv = parseEnvFile(envContent);
+      debugLog.debug('ext-mgr', `Loaded .env for "${manifest.name}"`, {
+        keysFound: Object.keys(extensionEnv),
+      });
     } catch {
-      // No .env file — that's fine, extensionEnv stays empty
+      debugLog.debug('ext-mgr', `No .env file for "${manifest.name}"`);
     }
 
     // Validate required env vars declared in package.json
@@ -127,6 +144,7 @@ export class ExtensionManager {
     }
     if (missing.length > 0) {
       const envPath = join(manifest.directory, '.env');
+      debugLog.warn('ext-mgr', `Extension "${manifest.name}" missing required env vars`, { missing });
       console.warn(
         `[ext:${manifest.name}] Missing required env var(s): ${missing.join(', ')}. ` +
         `Add them to ${envPath} or run: woodbury ext configure ${manifest.name}`
@@ -200,6 +218,13 @@ export class ExtensionManager {
 
     await module.activate(context);
     this.extensions.set(manifest.name, record);
+
+    debugLog.info('ext-mgr', `Extension "${manifest.name}" activated`, {
+      tools: record.tools.map(t => t.definition.name),
+      commands: record.commands.map(c => c.name),
+      promptSections: record.promptSections.length,
+      webServers: record.webServers.length,
+    });
   }
 
   /**
@@ -208,6 +233,7 @@ export class ExtensionManager {
   async deactivate(name: string): Promise<void> {
     const record = this.extensions.get(name);
     if (!record) return;
+    debugLog.debug('ext-mgr', `Deactivating extension: ${name}`);
 
     // Close web servers
     for (const server of record.webServers) {

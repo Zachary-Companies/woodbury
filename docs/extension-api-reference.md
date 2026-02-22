@@ -279,6 +279,62 @@ Access to the Chrome extension bridge for browser automation.
 
 ---
 
+### env
+
+```typescript
+env: Readonly<Record<string, string>>
+```
+
+A frozen, read-only object containing the extension's environment variables loaded from its `.env` file. Each extension only sees its own keys — never another extension's.
+
+```javascript
+const apiKey = ctx.env.MY_API_KEY;     // string or undefined
+const outDir = ctx.env.OUTPUT_DIR;     // string or undefined
+```
+
+Extensions declare expected variables in `package.json` under `woodbury.env`:
+
+```json
+{
+  "woodbury": {
+    "env": {
+      "MY_API_KEY": {
+        "required": true,
+        "description": "API key for the service"
+      },
+      "OUTPUT_DIR": {
+        "required": false,
+        "description": "Directory to save output files",
+        "type": "path"
+      }
+    }
+  }
+}
+```
+
+#### EnvVarDeclaration
+
+```typescript
+interface EnvVarDeclaration {
+  required: boolean;
+  description: string;
+  type?: 'string' | 'path';
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `required` | boolean | — | Whether the variable must be set for the extension to function |
+| `description` | string | — | Human-readable description shown in the config dashboard and `ext configure` |
+| `type` | `'string'` \| `'path'` | `'string'` | Controls how the config dashboard renders the input. `'string'` shows a password-masked input. `'path'` shows a text input with a Browse button and folder picker. |
+
+Users can set these values through:
+1. The **config dashboard** (local web UI, URL shown in banner and via `/dashboard`)
+2. Editing `~/.woodbury/extensions/<name>/.env` directly
+3. Running `woodbury ext configure <name>` to check status
+
+---
+
 ## ExtensionManifest
 
 Internal type used by the loader. Included here for reference when working on the extension system.
@@ -294,6 +350,7 @@ interface ExtensionManifest {
   entryPoint: string;      // Absolute path to the JS entry point
   source: 'local' | 'npm'; // Where the extension was discovered
   directory: string;       // Absolute path to the extension root
+  envDeclarations: Record<string, EnvVarDeclaration>; // Declared env vars from package.json
 }
 ```
 

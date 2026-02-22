@@ -18,14 +18,16 @@ import {
   type IncomingMessage,
   type ServerResponse,
 } from 'node:http';
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile, writeFile, readdir, stat } from 'node:fs/promises';
 import { join, extname } from 'node:path';
+import { homedir } from 'node:os';
 import {
   discoverExtensions,
   parseEnvFile,
   writeEnvFile,
   type ExtensionManifest,
 } from './extension-loader.js';
+import { debugLog } from './debug-log.js';
 
 // ────────────────────────────────────────────────────────────────
 //  Public types
@@ -114,8 +116,11 @@ async function getExtensionEnvStatus(manifest: ExtensionManifest) {
     name: key,
     description: decl.description,
     required: decl.required,
+    type: decl.type || 'string',
     isSet: !!currentEnv[key],
     maskedValue: currentEnv[key] ? maskValue(currentEnv[key]) : null,
+    // For path-type vars, also send the raw value (not secret data)
+    ...(decl.type === 'path' && currentEnv[key] ? { rawValue: currentEnv[key] } : {}),
   }));
 
   // Include any extra vars in .env not declared in manifest
@@ -165,6 +170,11 @@ export async function startDashboard(
 
     const url = new URL(req.url || '/', `http://${req.headers.host}`);
     const pathname = url.pathname;
+
+    // Log API requests (skip static file requests for brevity)
+    if (pathname.startsWith('/api/')) {
+      debugLog.debug('dashboard', `${req.method} ${pathname}`);
+    }
 
     // ── API Routes ───────────────────────────────────────────
 
@@ -254,12 +264,45 @@ export async function startDashboard(
         // Write back
         const envContent = writeEnvFile(merged);
         await writeFile(envFilePath, envContent, 'utf-8');
+        debugLog.info('dashboard', `Updated env for "${name}"`, {
+          keysSet: Object.keys(merged),
+          envFile: envFilePath,
+        });
 
         // Return updated status
         const status = await getExtensionEnvStatus(manifest);
         sendJson(res, 200, { success: true, ...status });
       } catch (err) {
         sendJson(res, 500, { error: String(err) });
+      }
+      return;
+    }
+
+    // POST /api/browse — list directories for folder picker
+    if (req.method === 'POST' && pathname === '/api/browse') {
+      try {
+        const body = await readBody(req);
+        const dir = body?.path || homedir();
+
+        const entries = await readdir(dir, { withFileTypes: true });
+        const dirs: Array<{ name: string; path: string }> = [];
+        for (const entry of entries) {
+          // Skip hidden dirs and node_modules
+          if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
+          try {
+            const fullPath = join(dir, entry.name);
+            const stats = await stat(fullPath);
+            if (stats.isDirectory()) {
+              dirs.push({ name: entry.name, path: fullPath });
+            }
+          } catch {
+            // Skip unreadable entries
+          }
+        }
+        dirs.sort((a, b) => a.name.localeCompare(b.name));
+        sendJson(res, 200, { current: dir, parent: join(dir, '..'), dirs });
+      } catch (err) {
+        sendJson(res, 400, { error: `Cannot read directory: ${err}` });
       }
       return;
     }

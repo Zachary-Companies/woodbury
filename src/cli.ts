@@ -14,6 +14,7 @@ import { ExtensionManager } from './extension-manager.js';
 import { EXTENSIONS_DIR, discoverExtensions, parseEnvFile } from './extension-loader.js';
 import { scaffoldExtension, initGitRepo, ensureGhInstalled, isToolInstalled } from './extension-scaffold.js';
 import { startDashboard, type DashboardHandle } from './config-dashboard.js';
+import { debugLog } from './debug-log.js';
 
 const program = new Command();
 
@@ -44,7 +45,8 @@ program
   .option('--timeout <number>', 'Timeout in milliseconds', parseInt)
   .option('--safe', 'Enable safe mode (extra confirmations)')
   .option('--no-stream', 'Disable token streaming')
-  .option('--no-extensions', 'Disable all extensions');
+  .option('--no-extensions', 'Disable all extensions')
+  .option('--debug', 'Enable debug logging to ~/.woodbury/logs/');
 
 // Interactive REPL command
 program
@@ -55,36 +57,68 @@ program
     const options = program.opts();
     const config = await buildConfig(options);
 
+    // Initialize debug logging
+    debugLog.init(config.debug || false);
+    debugLog.section('STARTUP');
+    debugLog.info('startup', 'Woodbury starting', {
+      version,
+      provider: config.provider || '(auto-detect)',
+      model: config.model || '(default)',
+      workingDirectory: config.workingDirectory,
+      verbose: config.verbose,
+      safe: config.safe,
+      stream: config.stream,
+      noExtensions: config.noExtensions,
+    });
+
     try {
       // Load extensions unless disabled
       let extensionManager: ExtensionManager | undefined;
       if (!config.noExtensions) {
+        debugLog.section('EXTENSIONS');
+        const doneExt = debugLog.time('extensions', 'Loading extensions');
         extensionManager = new ExtensionManager(
           config.workingDirectory || process.cwd(),
           config.verbose || false
         );
         const { loaded, errors } = await extensionManager.loadAll();
+        doneExt();
+        debugLog.info('extensions', 'Extension load complete', { loaded, errorCount: errors.length });
         if (loaded.length > 0 && config.verbose) {
           console.log(`  ${icons.success}  Extensions: ${loaded.join(', ')}`);
         }
         for (const e of errors) {
+          debugLog.error('extensions', `Extension "${e.name}" failed to load`, { error: e.error });
           console.warn(`  ${icons.warning}  Extension "${e.name}" failed: ${e.error}`);
         }
+      } else {
+        debugLog.info('startup', 'Extensions disabled via --no-extensions');
       }
 
       // Start config dashboard
       let dashboard: DashboardHandle | undefined;
       if (!config.noExtensions) {
         try {
+          const doneDash = debugLog.time('dashboard', 'Starting config dashboard');
           dashboard = await startDashboard(config.verbose || false);
           config.dashboardUrl = dashboard.url;
+          doneDash();
+          debugLog.info('dashboard', 'Dashboard running', { url: dashboard.url, port: dashboard.port });
         } catch (err) {
+          debugLog.error('dashboard', 'Dashboard failed to start', { error: String(err) });
           console.warn(`  ${icons.warning}  Dashboard failed to start: ${err}`);
         }
       }
 
+      if (debugLog.isEnabled) {
+        console.log(colors.muted(`  Debug log: ${debugLog.filePath}`));
+      }
+
+      debugLog.section('REPL');
+      debugLog.info('repl', 'Starting REPL');
       await startRepl(config, extensionManager, dashboard);
     } catch (error) {
+      debugLog.error('startup', 'Fatal startup error', { error: String(error), stack: error instanceof Error ? error.stack : undefined });
       console.error(`${icons.error}  ${labels.error}`, colors.error(String(error)));
       process.exit(1);
     }
@@ -538,6 +572,7 @@ async function buildConfig(options: any): Promise<WoodburyConfig> {
     safe: options.safe || false,
     stream: options.stream !== false,  // default true unless --no-stream
     noExtensions: options.extensions === false,  // --no-extensions flag
+    debug: options.debug || !!process.env.WOODBURY_DEBUG,
     orchestrate: false
   };
 

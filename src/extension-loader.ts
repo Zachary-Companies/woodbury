@@ -13,11 +13,14 @@ import { join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { existsSync } from 'node:fs';
 import type { WoodburyExtension } from './extension-api.js';
+import { debugLog } from './debug-log.js';
 
 /** Declaration of an environment variable expected by an extension */
 export interface EnvVarDeclaration {
   required: boolean;
   description: string;
+  /** Optional type hint for the dashboard UI. 'path' shows a folder picker. */
+  type?: 'string' | 'path';
 }
 
 /** Metadata parsed from an extension's package.json */
@@ -79,22 +82,36 @@ async function isDirectoryEntry(entry: { name: string; isDirectory(): boolean; i
  */
 export async function discoverExtensions(): Promise<ExtensionManifest[]> {
   const manifests: ExtensionManifest[] = [];
+  debugLog.debug('ext-loader', 'Discovering extensions', { dir: EXTENSIONS_DIR });
 
   // 1. Local extensions: ~/.woodbury/extensions/<name>/
   if (existsSync(EXTENSIONS_DIR)) {
     try {
       const entries = await readdir(EXTENSIONS_DIR, { withFileTypes: true });
+      debugLog.debug('ext-loader', `Scanning local extensions dir`, { entries: entries.map(e => e.name) });
       for (const entry of entries) {
         if (entry.name === 'node_modules') continue;
         const isDir = await isDirectoryEntry(entry, EXTENSIONS_DIR);
         if (!isDir) continue;
         const dir = join(EXTENSIONS_DIR, entry.name);
         const manifest = await readManifest(dir, 'local');
-        if (manifest) manifests.push(manifest);
+        if (manifest) {
+          debugLog.debug('ext-loader', `Discovered local extension: ${manifest.name}`, {
+            displayName: manifest.displayName,
+            entryPoint: manifest.entryPoint,
+            provides: manifest.provides,
+            envVars: Object.keys(manifest.envDeclarations),
+          });
+          manifests.push(manifest);
+        } else {
+          debugLog.debug('ext-loader', `Skipped "${entry.name}" — no valid woodbury manifest`);
+        }
       }
-    } catch {
-      // Extensions directory not readable — skip
+    } catch (err) {
+      debugLog.warn('ext-loader', 'Extensions directory not readable', { error: String(err) });
     }
+  } else {
+    debugLog.debug('ext-loader', 'Extensions directory does not exist');
   }
 
   // 2. npm extensions: ~/.woodbury/extensions/node_modules/woodbury-ext-*
@@ -133,6 +150,9 @@ export async function discoverExtensions(): Promise<ExtensionManifest[]> {
     }
   }
 
+  debugLog.info('ext-loader', `Discovery complete: ${manifests.length} extension(s) found`, {
+    names: manifests.map(m => m.name),
+  });
   return manifests;
 }
 
@@ -164,9 +184,11 @@ async function readManifest(
     if (wb.env && typeof wb.env === 'object') {
       for (const [key, decl] of Object.entries(wb.env)) {
         if (decl && typeof decl === 'object') {
+          const declType = (decl as any).type;
           envDeclarations[key] = {
             required: (decl as any).required === true,
             description: (decl as any).description || '',
+            ...(declType === 'path' ? { type: 'path' as const } : {}),
           };
         }
       }
@@ -198,6 +220,7 @@ export async function loadExtension(
 ): Promise<LoadedExtension> {
   // Use file:// URL for dynamic import (required for absolute paths in ESM)
   const importPath = `file://${manifest.entryPoint}`;
+  debugLog.debug('ext-loader', `Loading extension module: ${manifest.name}`, { importPath });
   const mod = await import(importPath);
 
   // Support both default export and named activate export
@@ -207,11 +230,16 @@ export async function loadExtension(
     null as any;
 
   if (!extension || typeof extension.activate !== 'function') {
+    debugLog.error('ext-loader', `Extension "${manifest.name}" has no activate() function`, {
+      exports: Object.keys(mod),
+      hasDefault: !!mod.default,
+    });
     throw new Error(
       `Extension "${manifest.name}" does not export an activate() function`
     );
   }
 
+  debugLog.debug('ext-loader', `Extension module loaded: ${manifest.name}`);
   return { manifest, module: extension };
 }
 
