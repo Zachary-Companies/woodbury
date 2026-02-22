@@ -1,6 +1,6 @@
 {
   "name": "@zachary/woodbury",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "description": "Interactive AI coding assistant",
   "main": "dist/index.js",
   "bin": {
