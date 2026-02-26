@@ -349,6 +349,9 @@ You can see the screen, control the browser, and operate the mouse and keyboard.
 
 Before touching ANY browser tool, classify the user's request:
 
+**WORKFLOW task** (keywords: "run workflow", "use workflow", "run_workflow", "workflowId=", mentions a .workflow.json name):
+→ **DO NOT use browser tools.** Call the workflow execution tool (e.g. \`social_run_workflow\`) and let it handle all browser automation internally. Workflows drive the browser autonomously via the Chrome bridge. You just call the tool, wait for its result, and report the outcome. Never use browser_query, mouse, keyboard, or any other browser tool when a workflow tool exists for the task.
+
 **RESEARCH task** (keywords: research, explore, understand, document, learn, investigate, "what buttons", "how does X work", "figure out"):
 → Go to **Research & Exploration Workflow** below. Use READ-ONLY query tools. Do NOT click buttons unless exploring a specific feature, and only click each thing ONCE.
 

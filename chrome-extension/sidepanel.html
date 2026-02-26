@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Woodbury Debug</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #0f172a;
+      color: #e2e8f0;
+      font-size: 13px;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow-y: auto;
+    }
+
+    /* ── Empty state ── */
+    .empty-state {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      color: #64748b;
+      text-align: center;
+      padding: 2rem;
+    }
+    .empty-state-icon { font-size: 2.5rem; margin-bottom: 0.75rem; opacity: 0.5; }
+    .empty-state-text { font-size: 0.85rem; line-height: 1.5; }
+
+    /* ── Header ── */
+    .dbg-header {
+      padding: 0.75rem 1rem;
+      background: #1e293b;
+      border-bottom: 1px solid #334155;
+      flex-shrink: 0;
+    }
+    .dbg-header-title {
+      font-size: 0.85rem;
+      font-weight: 700;
+      color: #e2e8f0;
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+    }
+    .dbg-header-count {
+      font-size: 0.7rem;
+      color: #64748b;
+      font-weight: 400;
+      margin-top: 2px;
+    }
+
+    /* ── Controls ── */
+    .dbg-controls {
+      display: flex;
+      gap: 0.4rem;
+      padding: 0.6rem 1rem;
+      border-bottom: 1px solid #1e293b;
+      flex-shrink: 0;
+    }
+    .dbg-controls button {
+      padding: 0.4rem 0.7rem;
+      border: 1px solid transparent;
+      border-radius: 6px;
+      font-size: 0.72rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s, opacity 0.15s;
+      font-family: inherit;
+    }
+    .dbg-controls button:hover { opacity: 0.85; }
+    .dbg-controls button:disabled { opacity: 0.4; cursor: not-allowed; }
+    .btn-next { background: #3b82f6; color: #fff; }
+    .btn-run-all { background: #1e293b; color: #e2e8f0; border-color: #334155; }
+    .btn-exit { background: transparent; color: #ef4444; border-color: #ef4444; }
+
+    /* ── Step list ── */
+    .dbg-step-list {
+      flex: 1;
+      overflow-y: auto;
+      border-bottom: 1px solid #1e293b;
+    }
+    .dbg-step {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.5rem 0.75rem;
+      font-size: 0.75rem;
+      border-bottom: 1px solid #1e293b;
+      color: #64748b;
+      transition: background 0.2s, border-color 0.2s;
+      cursor: default;
+    }
+    .dbg-step:last-child { border-bottom: none; }
+    .dbg-step-current {
+      background: rgba(59, 130, 246, 0.1);
+      border-left: 3px solid #3b82f6;
+      color: #e2e8f0;
+    }
+    .dbg-step-completed { color: #86efac; }
+    .dbg-step-failed { color: #fca5a5; }
+    .dbg-step-pending { color: #64748b; }
+    .dbg-step-selected {
+      background: rgba(59, 130, 246, 0.15);
+      border-left: 3px solid #60a5fa;
+      color: #e2e8f0;
+    }
+    .dbg-step-selected .dbg-step-num {
+      background: #2563eb;
+      color: #fff;
+      box-shadow: 0 0 0 2px rgba(96, 165, 250, 0.4);
+    }
+    .dbg-step-num {
+      min-width: 22px;
+      height: 22px;
+      border-radius: 50%;
+      background: #1e293b;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.6rem;
+      font-weight: 700;
+      color: #94a3b8;
+      flex-shrink: 0;
+    }
+    .dbg-step-current .dbg-step-num { background: #3b82f6; color: #fff; }
+    .dbg-step-completed .dbg-step-num { background: #166534; color: #86efac; }
+    .dbg-step-failed .dbg-step-num { background: #7f1d1d; color: #fca5a5; }
+    .dbg-step-icon { width: 18px; text-align: center; flex-shrink: 0; }
+    .dbg-step-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .dbg-step-status { margin-left: auto; font-size: 0.65rem; }
+
+    /* ── Coord info ── */
+    .dbg-coord {
+      flex-shrink: 1;
+      overflow-y: auto;
+      background: #020617;
+      padding: 0.75rem 1rem;
+      font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+      font-size: 0.7rem;
+    }
+    .dbg-coord-title {
+      font-size: 0.75rem;
+      font-weight: 600;
+      color: #e2e8f0;
+      margin-bottom: 0.4rem;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    }
+    .dbg-coord-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 0.15rem 0;
+      border-bottom: 1px solid #0f172a;
+    }
+    .dbg-coord-row:last-child { border-bottom: none; }
+    .dbg-coord-label { color: #64748b; }
+    .dbg-coord-value { color: #7dd3fc; font-weight: 500; }
+    .dbg-coord-error { color: #ef4444; font-size: 0.65rem; margin-top: 0.3rem; word-break: break-word; }
+
+    /* ── Editable position inputs ── */
+    .dbg-coord-edit-row { align-items: center; }
+    .dbg-coord-edit { display: flex; align-items: center; gap: 2px; }
+    .dbg-coord-input {
+      width: 52px;
+      padding: 2px 4px;
+      border: 1px solid #334155;
+      border-radius: 3px;
+      background: #1e293b;
+      color: #7dd3fc;
+      font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+      font-size: 0.68rem;
+      font-weight: 500;
+      text-align: right;
+      outline: none;
+    }
+    .dbg-coord-input:focus { border-color: #3b82f6; }
+    .dbg-save-btn {
+      margin-left: 4px;
+      padding: 2px 6px;
+      border: 1px solid #334155;
+      border-radius: 3px;
+      background: #1e293b;
+      color: #94a3b8;
+      font-size: 0.62rem;
+      font-weight: 600;
+      cursor: pointer;
+      font-family: inherit;
+      transition: background 0.15s, color 0.15s;
+    }
+    .dbg-save-btn:hover { background: #334155; color: #e2e8f0; }
+    .dbg-save-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .dbg-wait-input { width: 60px; }
+
+    /* ── Verify click section ── */
+    .dbg-verify-section {
+      margin-top: 6px;
+      padding-top: 6px;
+      border-top: 1px solid #1e293b;
+    }
+    .dbg-verify-label {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      color: #94a3b8;
+      font-size: 0.65rem;
+      cursor: pointer;
+    }
+    .dbg-verify-label input[type="checkbox"] {
+      accent-color: #3b82f6;
+      margin: 0;
+    }
+    .dbg-verify-input { width: 52px; }
+
+    /* ── Toast / status bar ── */
+    .dbg-status {
+      padding: 0.5rem 1rem;
+      font-size: 0.7rem;
+      color: #94a3b8;
+      background: #1e293b;
+      border-top: 1px solid #334155;
+      flex-shrink: 0;
+      text-align: center;
+    }
+    .dbg-status-success { color: #22c55e; }
+    .dbg-status-error { color: #ef4444; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <div class="empty-state">
+      <div class="empty-state-icon">&#x1f50d;</div>
+      <div class="empty-state-text">
+        No debug session active.<br>
+        Start a debug session from the<br>Woodbury Dashboard.
+      </div>
+    </div>
+  </div>
+  <script src="sidepanel.js"></script>
+</body>
+</html>

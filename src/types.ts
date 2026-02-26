@@ -67,6 +67,9 @@ export interface WoodburyConfig {
 
   /** URL of the running config dashboard (set at runtime) */
   dashboardUrl?: string;
+
+  /** URL of the running go-links proxy (set at runtime) */
+  goLinksUrl?: string;
 }
 
 // Job orchestration types
@@ -211,4 +214,6 @@ export type {
   WebUIHandle,
   ExtensionLogger,
   WoodburyExtension,
+  BackgroundTaskHandler,
+  BackgroundTaskOptions,
 } from './extension-api.js';

@@ -7,8 +7,15 @@
     "activeTab",
     "tabs",
     "scripting",
-    "alarms"
+    "alarms",
+    "debugger",
+    "sidePanel",
+    "storage",
+    "downloads"
   ],
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
   "host_permissions": [
     "<all_urls>"
   ],

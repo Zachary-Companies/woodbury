@@ -20,6 +20,8 @@ import { EXTENSIONS_DIR } from './extension-loader.js';
 export interface ScaffoldOptions {
   /** Include site-knowledge templates for web-navigation extensions */
   webNavigation?: boolean;
+  /** Include workflow templates for workflow-based automation extensions */
+  workflow?: boolean;
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -449,7 +451,12 @@ dist/
   );
 
   // Generate appropriate index.js
-  if (options?.webNavigation) {
+  if (options?.workflow) {
+    // Workflow variant includes both site-knowledge AND workflow templates
+    await generateWorkflowIndexJs(dir, name, displayName);
+    await generateSiteKnowledge(dir);
+    await generateWorkflowTemplates(dir, name, displayName);
+  } else if (options?.webNavigation) {
     await generateWebNavigationIndexJs(dir, name, displayName);
     await generateSiteKnowledge(dir);
   } else {
@@ -822,6 +829,287 @@ async function generateSiteKnowledge(dir: string): Promise<void> {
   for (const [filename, content] of Object.entries(templates)) {
     await writeFile(join(knowledgeDir, filename), content);
   }
+}
+
+// ────────────────────────────────────────────────────────────────
+//  Workflow index.js (--workflow scaffold)
+// ────────────────────────────────────────────────────────────────
+
+async function generateWorkflowIndexJs(
+  dir: string,
+  name: string,
+  displayName: string
+): Promise<void> {
+  await writeFile(
+    join(dir, 'index.js'),
+    `const fs = require('fs');
+const path = require('path');
+
+/**
+ * ${displayName} — Woodbury Workflow Extension
+ *
+ * This extension uses recorded browser workflows for automation.
+ * Workflows are .workflow.json files in the workflows/ directory.
+ * Site knowledge files provide context for troubleshooting.
+ *
+ * Workflow files define step sequences: navigate, click, type, wait,
+ * assert, download, etc. Each step has CSS selectors with fallbacks,
+ * variable substitution ({{varName}}), and pre/postconditions.
+ *
+ * Usage:
+ *   1. Create .workflow.json files in workflows/ (or record them)
+ *   2. Restart Woodbury — each workflow becomes a callable tool
+ *   3. The agent can call tools like ${name.replace(/-/g, '_')}_<workflow-id>
+ */
+
+/** Load all non-empty .md files from site-knowledge/ */
+function loadSiteKnowledge(extDir) {
+  const knowledgeDir = path.join(extDir, 'site-knowledge');
+  const sections = [];
+  try {
+    const files = fs.readdirSync(knowledgeDir).filter(f => f.endsWith('.md')).sort();
+    for (const file of files) {
+      const content = fs.readFileSync(path.join(knowledgeDir, file), 'utf-8').trim();
+      if (content) sections.push(content);
+    }
+  } catch { /* no site-knowledge dir */ }
+  return sections;
+}
+
+/** Load all .workflow.json files from workflows/ */
+function loadWorkflows(extDir) {
+  const workflowDir = path.join(extDir, 'workflows');
+  const workflows = [];
+  try {
+    const files = fs.readdirSync(workflowDir).filter(f => f.endsWith('.workflow.json'));
+    for (const file of files) {
+      try {
+        const content = fs.readFileSync(path.join(workflowDir, file), 'utf-8');
+        const wf = JSON.parse(content);
+        if (wf.id && wf.name && Array.isArray(wf.steps)) {
+          wf._filePath = path.join(workflowDir, file);
+          workflows.push(wf);
+        }
+      } catch { /* skip invalid */ }
+    }
+  } catch { /* no workflows dir */ }
+  return workflows;
+}
+
+/** @type {{ activate: Function, deactivate?: Function }} */
+module.exports = {
+  async activate(ctx) {
+    // ─── SITE KNOWLEDGE ──────────────────────────────────────
+    const knowledgeSections = loadSiteKnowledge(__dirname);
+    if (knowledgeSections.length > 0) {
+      ctx.addSystemPrompt(
+        \`## ${displayName} — Site Knowledge\\n\\n\` +
+        knowledgeSections.join('\\n\\n---\\n\\n')
+      );
+      ctx.log.info(\`Loaded \${knowledgeSections.length} site-knowledge file(s)\`);
+    }
+
+    // ─── WORKFLOWS ───────────────────────────────────────────
+    const workflows = loadWorkflows(__dirname);
+    ctx.log.info(\`Discovered \${workflows.length} workflow(s)\`);
+
+    for (const wf of workflows) {
+      // Build tool parameters from workflow variable declarations
+      const properties = {};
+      const required = [];
+
+      for (const v of (wf.variables || [])) {
+        properties[v.name] = {
+          type: v.type || 'string',
+          description: v.description || v.name,
+        };
+        if (v.required) required.push(v.name);
+      }
+
+      ctx.registerTool(
+        {
+          name: '${name.replace(/-/g, '_')}_' + wf.id.replace(/-/g, '_'),
+          description: wf.description || \`Run the \${wf.name} workflow on \${wf.site}\`,
+          parameters: {
+            type: 'object',
+            properties,
+            required,
+          },
+          dangerous: true,
+        },
+        async (params) => {
+          // Use the built-in workflow_play tool via bridge server
+          // This is a wrapper that provides typed parameters
+          try {
+            const { WorkflowExecutor } = await import(
+              path.join(process.cwd(), 'dist', 'workflow', 'executor.js')
+            );
+
+            const executor = new WorkflowExecutor(ctx.bridgeServer, {
+              variables: params,
+              stopOnFailure: true,
+            });
+            executor.setWorkflowDir(path.dirname(wf._filePath));
+
+            const result = await executor.execute(wf);
+
+            if (result.success) {
+              return \`Workflow "\${wf.name}" completed successfully. \` +
+                \`\${result.stepsExecuted}/\${result.stepsTotal} steps executed in \${result.durationMs}ms.\`;
+            } else {
+              return \`Workflow "\${wf.name}" failed: \${result.error}. \` +
+                \`\${result.stepsExecuted}/\${result.stepsTotal} steps executed.\`;
+            }
+          } catch (err) {
+            return \`Workflow execution error: \${err.message || err}\`;
+          }
+        }
+      );
+
+      ctx.log.info(\`Registered workflow tool: ${name.replace(/-/g, '_')}_\${wf.id.replace(/-/g, '_')}\`);
+    }
+
+    // ─── SYSTEM PROMPT ───────────────────────────────────────
+    if (workflows.length > 0) {
+      const toolList = workflows.map(wf => {
+        const vars = (wf.variables || []).map(v =>
+          \`    - \\\`\${v.name}\\\` (\${v.type || 'string'}\${v.required ? ', required' : ''}): \${v.description}\`
+        ).join('\\n');
+        return \`- \\\`${name.replace(/-/g, '_')}_\${wf.id.replace(/-/g, '_')}\\\` — \${wf.description}\\n\${vars}\`;
+      }).join('\\n');
+
+      ctx.addSystemPrompt(\`## ${displayName} — Workflow Tools\\n\\n\` +
+        \`The following workflow automation tools are available:\\n\${toolList}\\n\\n\` +
+        \`These tools execute recorded browser workflows with step-by-step validation. \` +
+        \`Each step checks preconditions (page URL, element existence) before acting.\`);
+    }
+
+    // ─── SLASH COMMANDS ──────────────────────────────────────
+    ctx.registerCommand({
+      name: '${name}',
+      description: '${displayName} commands',
+      async handler(args, cmdCtx) {
+        if (args[0] === 'knowledge') {
+          const knowledgeDir = path.join(__dirname, 'site-knowledge');
+          try {
+            const files = fs.readdirSync(knowledgeDir).filter(f => f.endsWith('.md'));
+            if (files.length === 0) {
+              cmdCtx.print('No site-knowledge files found.');
+            } else {
+              cmdCtx.print('Site knowledge files:');
+              for (const f of files) {
+                const content = fs.readFileSync(path.join(knowledgeDir, f), 'utf-8').trim();
+                cmdCtx.print(\`  \${content ? '\\u2713' : '(empty)'} \${f}\`);
+              }
+            }
+          } catch { cmdCtx.print('site-knowledge/ directory not found.'); }
+        } else if (args[0] === 'workflows') {
+          if (workflows.length === 0) {
+            cmdCtx.print('No workflows found in workflows/ directory.');
+          } else {
+            cmdCtx.print(\`Workflows (\${workflows.length}):\`);
+            for (const wf of workflows) {
+              cmdCtx.print(\`  \\u2713 \${wf.name} (id: \${wf.id}) — \${wf.description}\`);
+              for (const v of (wf.variables || [])) {
+                cmdCtx.print(\`      \${v.required ? '*' : ' '} \${v.name}: \${v.description}\`);
+              }
+            }
+          }
+        } else if (args[0] === 'status') {
+          cmdCtx.print('${displayName} extension is active!');
+          cmdCtx.print(\`Site knowledge: \${knowledgeSections.length} file(s)\`);
+          cmdCtx.print(\`Workflows: \${workflows.length} workflow(s)\`);
+        } else {
+          cmdCtx.print('Usage:');
+          cmdCtx.print('  /${name} knowledge   - List site-knowledge files');
+          cmdCtx.print('  /${name} workflows   - List registered workflows');
+          cmdCtx.print('  /${name} status      - Show extension status');
+        }
+      },
+    });
+
+    ctx.log.info('${displayName} extension activated');
+  },
+
+  async deactivate() {
+    // Clean up
+  },
+};
+`
+  );
+}
+
+// ────────────────────────────────────────────────────────────────
+//  Workflow template files
+// ────────────────────────────────────────────────────────────────
+
+async function generateWorkflowTemplates(
+  dir: string,
+  name: string,
+  displayName: string
+): Promise<void> {
+  const workflowDir = join(dir, 'workflows');
+  await mkdir(workflowDir, { recursive: true });
+
+  const exampleWorkflow = {
+    version: '1.0',
+    id: 'example',
+    name: `Example ${displayName} Workflow`,
+    description: `An example workflow for ${displayName}. Replace with your own steps.`,
+    site: 'example.com',
+    variables: [
+      {
+        name: 'message',
+        description: 'Text to type into the form',
+        type: 'string',
+        required: true,
+      },
+    ],
+    steps: [
+      {
+        id: 'nav',
+        label: 'Navigate to site',
+        type: 'navigate',
+        url: 'https://example.com',
+        waitMs: 2000,
+        postconditions: [
+          { type: 'url_contains', substring: 'example.com' },
+        ],
+      },
+      {
+        id: 'check_loaded',
+        label: 'Verify page loaded',
+        type: 'assert',
+        condition: {
+          type: 'element_exists',
+          target: { selector: 'h1' },
+        },
+        errorMessage: 'Page did not load — h1 element not found',
+      },
+      {
+        id: 'click_link',
+        label: 'Click More Information link',
+        type: 'click',
+        target: {
+          selector: 'a[href="https://www.iana.org/domains/example"]',
+          textContent: 'More information',
+          description: 'More information link on example.com',
+          expectedBounds: { left: 100, top: 200, width: 150, height: 20, tolerance: 100 },
+        },
+        delayAfterMs: 1000,
+      },
+    ],
+    metadata: {
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      recordedBy: 'manual',
+    },
+  };
+
+  await writeFile(
+    join(workflowDir, 'example.workflow.json'),
+    JSON.stringify(exampleWorkflow, null, 2) + '\n'
+  );
 }
 
 // ────────────────────────────────────────────────────────────────

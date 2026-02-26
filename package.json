@@ -8,7 +8,7 @@
   },
   "scripts": {
     "build": "tsc",
-    "postbuild": "rm -rf dist/config-dashboard && cp -r src/config-dashboard dist/config-dashboard",
+    "postbuild": "chmod +x dist/index.js && rm -rf dist/config-dashboard && cp -r src/config-dashboard dist/config-dashboard",
     "clean": "rimraf dist",
     "watch": "tsc --watch",
     "test": "jest",

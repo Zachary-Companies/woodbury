@@ -9,7 +9,9 @@ import { FileConversationManager } from './conversation.js';
 import { compactContext } from './context-compactor.js';
 import type { ExtensionManager } from './extension-manager.js';
 import type { DashboardHandle } from './config-dashboard.js';
+import { GO_HOSTNAME, type GoLinksHandle } from './go-links.js';
 import { debugLog } from './debug-log.js';
+import { ensureBridgeServer } from './bridge-server.js';
 
 // Configure marked to render markdown in terminal with theme-aware colors
 marked.setOptions({
@@ -248,6 +250,7 @@ export interface ReplOptions {
   prompt?: string;
   extensionManager?: ExtensionManager;
   dashboardHandle?: DashboardHandle;
+  goLinksHandle?: GoLinksHandle;
 }
 
 export class Repl {
@@ -286,6 +289,11 @@ export class Repl {
   // Extension system
   private extensionManager?: ExtensionManager;
   private allSlashCommands: SlashCommand[];
+
+  // Background task message queue
+  private pendingBackgroundMessages: Array<{ message: string; extensionName: string }> = [];
+  private backgroundWakeResolve: (() => void) | null = null;
+  private agentRunning: boolean = false;
 
   constructor(private options: ReplOptions) {
     this.config = options.config;
@@ -408,6 +416,29 @@ export class Repl {
       this.savedInput = '';
       this.layout.updateInput('', 0);
     });
+  }
+
+  /**
+   * Wait for a background task to produce a message.
+   * Resolves when backgroundWakeResolve is called.
+   */
+  private waitForBackgroundWake(): Promise<void> {
+    return new Promise((resolve) => {
+      this.backgroundWakeResolve = resolve;
+    });
+  }
+
+  /**
+   * Called by the extension manager when a background task produces a message.
+   */
+  private onBackgroundMessage(message: string, extensionName: string): void {
+    this.pendingBackgroundMessages.push({ message, extensionName });
+    // Wake the main loop if it's waiting
+    if (this.backgroundWakeResolve) {
+      const resolve = this.backgroundWakeResolve;
+      this.backgroundWakeResolve = null;
+      resolve();
+    }
   }
 
   /**
@@ -941,7 +972,8 @@ export class Repl {
     this.print('');
     this.print(colors.muted('  Type ') + colors.secondary('/help') + colors.muted(' for commands, or ') + colors.secondary('exit') + colors.muted(' to quit.'));
     if (this.config.dashboardUrl) {
-      this.print(colors.muted('  Config: ') + colors.secondary(this.config.dashboardUrl));
+      const goUrl = this.config.goLinksUrl ? `${colors.secondary(`${GO_HOSTNAME}/config`)} ${colors.muted('→')} ` : '';
+      this.print(colors.muted('  Config: ') + goUrl + colors.secondary(this.config.dashboardUrl));
     }
     this.print('');
     this.printDivider('heavy');
@@ -949,6 +981,12 @@ export class Repl {
   }
 
   async start(): Promise<void> {
+    // Start bridge server early so Chrome extension can connect immediately
+    // (don't wait for first agent creation)
+    ensureBridgeServer().catch((err) => {
+      debugLog.warn('repl', 'Bridge server failed to start at REPL init', { error: String(err) });
+    });
+
     await this.conversationManager.load();
     const turns = this.conversationManager.getTurns();
     debugLog.info('repl', 'Conversation history loaded', { turns: turns.length });
@@ -974,11 +1012,63 @@ export class Repl {
       // Handle resize
       process.stdout.on('resize', () => this.layout.onResize());
 
-      // Main input loop
+      // Wire background task messages
+      if (this.extensionManager) {
+        this.extensionManager.setOnBackgroundMessage(
+          (msg, ext) => this.onBackgroundMessage(msg, ext)
+        );
+        this.extensionManager.startBackgroundTasks();
+        debugLog.info('repl', 'Background tasks started');
+      }
+
+      // Main input loop with background task support
       while (this.running) {
-        const input = await this.waitForInput();
+        // Drain any pending background messages first
+        while (this.pendingBackgroundMessages.length > 0 && this.running) {
+          const { message, extensionName } = this.pendingBackgroundMessages.shift()!;
+          debugLog.info('repl', `Processing background message from ${extensionName}`, {
+            preview: message.slice(0, 100),
+          });
+          this.print('');
+          this.print(`${icons.running}  ${colors.muted(`[${extensionName}] Background task`)}`);
+          this.agentRunning = true;
+          await this.processInput(message);
+          this.agentRunning = false;
+        }
+
         if (!this.running) break;
-        await this.processInput(input);
+
+        // Wait for either user input or a background wake signal
+        const inputPromise = this.waitForInput();
+        const bgWakePromise = this.waitForBackgroundWake();
+
+        const winner = await Promise.race([
+          inputPromise.then(input => ({ type: 'input' as const, input })),
+          bgWakePromise.then(() => ({ type: 'background' as const, input: '' })),
+        ]);
+
+        if (!this.running) break;
+
+        if (winner.type === 'input') {
+          // Cancel the background wake since user input won
+          this.backgroundWakeResolve = null;
+          this.agentRunning = true;
+          await this.processInput(winner.input);
+          this.agentRunning = false;
+        } else {
+          // Background wake won — cancel the pending input wait so the user's
+          // input state is preserved. The inputResolve stays set; when the
+          // background message finishes processing, the loop will call
+          // waitForInput() which resets it. But the user's typed characters
+          // in currentInput are lost on reset. To avoid this, we DON'T call
+          // waitForInput() again — instead we reuse the existing promise.
+          // However, Promise.race already consumed the shape. The simplest
+          // approach: clear inputResolve so handleKeypress Enter does nothing
+          // for the stale promise, then loop back. The user's partial input
+          // is visually preserved (currentInput stays) and the next
+          // waitForInput() call will reset it properly.
+          this.inputResolve = null;
+        }
       }
     } else {
       // Non-TTY fallback: read from stdin line by line
@@ -1013,12 +1103,29 @@ export class Repl {
 
     this.running = false;
 
+    // Stop background tasks
+    if (this.extensionManager) {
+      this.extensionManager.stopBackgroundTasks();
+    }
+    // Wake the background wait so the main loop can exit
+    if (this.backgroundWakeResolve) {
+      const resolve = this.backgroundWakeResolve;
+      this.backgroundWakeResolve = null;
+      resolve();
+    }
+    this.pendingBackgroundMessages = [];
+
     await this.conversationManager.save();
     debugLog.info('repl', 'Conversation saved');
 
     // Close config dashboard
     if (this.options.dashboardHandle) {
       await this.options.dashboardHandle.close();
+    }
+
+    // Close go-links proxy
+    if (this.options.goLinksHandle) {
+      await this.options.goLinksHandle.close();
     }
 
     // Deactivate all extensions (close web servers, etc.)
@@ -1063,9 +1170,10 @@ export class Repl {
 export async function startRepl(
   config: WoodburyConfig,
   extensionManager?: ExtensionManager,
-  dashboardHandle?: DashboardHandle
+  dashboardHandle?: DashboardHandle,
+  goLinksHandle?: GoLinksHandle
 ): Promise<void> {
-  const repl = new Repl({ config, extensionManager, dashboardHandle });
+  const repl = new Repl({ config, extensionManager, dashboardHandle, goLinksHandle });
   return repl.start();
 }
 

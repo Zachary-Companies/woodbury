@@ -86,6 +86,70 @@ export interface StreamCallbacks {
   onDone?: (response: LLMResponse) => void;
 }
 
+// ── Repetition detection ──────────────────────────────────
+// Detects when the LLM gets stuck in a degenerate repetition loop
+// (e.g. repeating the same sentence 8+ times). When detected, the
+// stream is aborted and the repeated tail is trimmed.
+
+class RepetitionDetector {
+  private buffer = '';
+  private readonly minPhraseLen = 40;   // minimum chars for a "phrase"
+  private readonly maxRepetitions = 3;  // abort after this many repeats
+
+  /** Feed new text. Returns true if repetition detected. */
+  feed(text: string): boolean {
+    this.buffer += text;
+    // Only check periodically (every ~200 chars) for performance
+    if (this.buffer.length < this.minPhraseLen * this.maxRepetitions) return false;
+    return this.detectRepetition();
+  }
+
+  /** Trim repeated tail from content and return clean version */
+  trimRepeated(content: string): string {
+    // Try phrase lengths from long to short
+    for (let len = Math.min(300, Math.floor(content.length / 3)); len >= this.minPhraseLen; len--) {
+      // Check if the content ends with repeated copies of a phrase
+      const tail = content.slice(-len);
+      let count = 0;
+      let pos = content.length;
+      while (pos >= len) {
+        const segment = content.slice(pos - len, pos);
+        if (segment === tail) {
+          count++;
+          pos -= len;
+        } else {
+          break;
+        }
+      }
+      if (count >= this.maxRepetitions) {
+        // Keep one copy, trim the rest
+        return content.slice(0, pos + len).trimEnd();
+      }
+    }
+    return content;
+  }
+
+  private detectRepetition(): boolean {
+    const buf = this.buffer;
+    // Check if the tail of the buffer is a repeated phrase
+    for (let len = this.minPhraseLen; len <= Math.min(300, Math.floor(buf.length / 3)); len++) {
+      const phrase = buf.slice(-len);
+      let count = 0;
+      let pos = buf.length;
+      while (pos >= len) {
+        if (buf.slice(pos - len, pos) === phrase) {
+          count++;
+          pos -= len;
+        } else {
+          break;
+        }
+      }
+      if (count >= this.maxRepetitions) return true;
+    }
+    return false;
+  }
+}
+
 // Client cache to avoid recreating clients
 const clientCache = new Map<string, OpenAI | Anthropic | Groq>();
 
@@ -168,16 +232,24 @@ async function streamOpenAI(
 
   let content = '';
   let usage: LLMResponse['usage'] | undefined;
+  const detector = new RepetitionDetector();
 
   for await (const chunk of stream) {
     const delta = chunk.choices?.[0]?.delta?.content;
     if (delta) {
       content += delta;
       callbacks.onToken?.(delta);
+      if (detector.feed(delta)) {
+        // Repetition detected — break out of the stream
+        break;
+      }
     }
     // OpenAI sends usage in the final chunk when stream_options.include_usage is set,
     // but for simplicity we estimate from the non-stream response later
   }
+
+  // Trim repeated tail if detected
+  content = detector.trimRepeated(content);
 
   const response: LLMResponse = { content, usage };
   callbacks.onDone?.(response);
@@ -206,19 +278,36 @@ async function streamAnthropic(
   });
 
   let content = '';
+  const detector = new RepetitionDetector();
+  let aborted = false;
 
   stream.on('text', (text: string) => {
+    if (aborted) return;
     content += text;
     callbacks.onToken?.(text);
+    if (detector.feed(text)) {
+      aborted = true;
+      stream.abort();
+    }
   });
 
-  const finalMessage = await stream.finalMessage();
+  let usage: LLMResponse['usage'] | undefined;
+  try {
+    const finalMessage = await stream.finalMessage();
+    usage = {
+      promptTokens: finalMessage.usage.input_tokens,
+      completionTokens: finalMessage.usage.output_tokens,
+      totalTokens: finalMessage.usage.input_tokens + finalMessage.usage.output_tokens
+    };
+  } catch (err: any) {
+    // stream.abort() causes finalMessage() to reject — that's expected
+    if (!aborted) throw err;
+  }
 
-  const usage = {
-    promptTokens: finalMessage.usage.input_tokens,
-    completionTokens: finalMessage.usage.output_tokens,
-    totalTokens: finalMessage.usage.input_tokens + finalMessage.usage.output_tokens
-  };
+  // Trim repeated tail if we aborted due to repetition
+  if (aborted) {
+    content = detector.trimRepeated(content);
+  }
 
   const response: LLMResponse = { content, usage };
   callbacks.onDone?.(response);
@@ -239,14 +328,20 @@ async function streamGroq(
   });
 
   let content = '';
+  const detector = new RepetitionDetector();
 
   for await (const chunk of stream) {
     const delta = chunk.choices?.[0]?.delta?.content;
     if (delta) {
       content += delta;
       callbacks.onToken?.(delta);
+      if (detector.feed(delta)) {
+        break;
+      }
     }
   }
+
+  content = detector.trimRepeated(content);
 
   const response: LLMResponse = { content };
   callbacks.onDone?.(response);
@@ -416,13 +511,17 @@ async function streamClaudeCode(
 
     let content = '';
     let buffer = '';
+    const detector = new RepetitionDetector();
+    let abortedRepetition = false;
 
     child.stdout.on('data', (chunk: Buffer) => {
+      if (abortedRepetition) return;
       buffer += chunk.toString();
       const lines = buffer.split('\n');
       buffer = lines.pop() || '';
 
       for (const line of lines) {
+        if (abortedRepetition) break;
         const trimmed = line.trim();
         if (!trimmed) continue;
 
@@ -434,6 +533,11 @@ async function streamClaudeCode(
               if (block.type === 'text' && block.text) {
                 content += block.text;
                 callbacks.onToken?.(block.text);
+                if (detector.feed(block.text)) {
+                  abortedRepetition = true;
+                  child.kill();
+                  break;
+                }
               }
             }
           }
@@ -441,6 +545,10 @@ async function streamClaudeCode(
           if (event.type === 'content_block_delta' && event.delta?.text) {
             content += event.delta.text;
             callbacks.onToken?.(event.delta.text);
+            if (detector.feed(event.delta.text)) {
+              abortedRepetition = true;
+              child.kill();
+            }
           }
 
           if (event.type === 'result' && event.result) {
@@ -475,9 +583,13 @@ async function streamClaudeCode(
         } catch {}
       }
 
-      if (code !== 0 && !content) {
+      if (code !== 0 && !content && !abortedRepetition) {
         reject(new Error(`claude CLI exited with code ${code}`));
         return;
+      }
+
+      if (abortedRepetition) {
+        content = detector.trimRepeated(content);
       }
 
       const response: LLMResponse = { content, usage: undefined };

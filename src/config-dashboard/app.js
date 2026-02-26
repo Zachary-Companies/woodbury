@@ -412,5 +412,48 @@ function escAttr(str) {
   return str.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
+// ── Nav Tabs ─────────────────────────────────────────────────
+
+let currentTab = 'config';
+
+function switchTab(tab) {
+  currentTab = tab;
+
+  // Update tab buttons
+  document.querySelectorAll('.nav-tab').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.tab === tab);
+  });
+
+  // Toggle sidebar panels
+  document.querySelectorAll('[data-panel]').forEach(panel => {
+    panel.style.display = panel.dataset.panel === tab ? '' : 'none';
+  });
+
+  // Show appropriate empty state or content
+  const main = $('#main');
+
+  if (tab === 'config') {
+    selectedExtension = null;
+    main.innerHTML =
+      '<div class="empty-state">' +
+      '<div class="empty-state-icon">&#x1f511;</div>' +
+      '<h2>Extension Config Dashboard</h2>' +
+      '<p>Select an extension from the sidebar to manage its API keys.</p>' +
+      '</div>';
+  } else if (tab === 'workflows') {
+    selectedExtension = null;
+    // Workflows module handles its own rendering
+    if (typeof initWorkflows === 'function') {
+      initWorkflows();
+    }
+  }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  document.querySelectorAll('.nav-tab').forEach(btn => {
+    btn.addEventListener('click', () => switchTab(btn.dataset.tab));
+  });
+});
+
 // ── Init ─────────────────────────────────────────────────────
 fetchExtensions();

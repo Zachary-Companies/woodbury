@@ -8,6 +8,19 @@
  * actual DOM work and returns results.
  */
 
+// Guard against duplicate injection — when content script is re-injected via
+// executeScript (e.g. after navigation), we want to preserve recording state
+// and avoid orphaned event listeners. We use a window-level flag to detect this.
+if (window.__woodburyContentScriptLoaded) {
+  // Already loaded. Don't re-register listeners. But do NOT block — the script
+  // just stops defining new things because all the functions below use
+  // `function` declarations which get hoisted but are harmless to re-declare.
+  console.log('[Woodbury Bridge] Content script already loaded, skipping re-init');
+}
+
+if (!window.__woodburyContentScriptLoaded) {
+  window.__woodburyContentScriptLoaded = true;
+
 // ── Message listener ─────────────────────────────────────────
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -78,6 +91,38 @@ async function handleAction(action, params) {
     case 'wait_for_element':
       return waitForElement(params);
 
+    case 'detect_spinners':
+      return detectSpinners(params);
+
+    case 'set_recording_mode':
+      console.log('[Woodbury REC:content] set_recording_mode', params, 'current recordingActive:', recordingActive);
+      if (params?.enabled) {
+        startRecording();
+      } else {
+        stopRecording();
+      }
+      console.log('[Woodbury REC:content] recordingActive after:', recordingActive);
+      return { recording: recordingActive };
+
+    // ── Workflow Debug Overlay ───────────────────────────────
+    case 'show_debug_overlay':
+      return showDebugOverlay(params);
+
+    case 'update_debug_step':
+      return updateDebugStep(params);
+
+    case 'hide_debug_overlay':
+      return hideDebugOverlay();
+
+    case 'update_debug_marker':
+      return updateDebugMarker(params);
+
+    case 'select_debug_marker':
+      return selectDebugMarker(params);
+
+    case 'get_element_at_point':
+      return getElementAtPoint(params);
+
     default:
       throw new Error(`Unknown action: ${action}`);
   }
@@ -110,14 +155,17 @@ function getChromeOffset() {
   return {
     // The Chrome UI height in CSS pixels (tabs + address bar + bookmarks bar)
     chromeUIHeight,
-    // Horizontal chrome offset (usually 0 or 1)
-    chromeUIWidth: Math.round(chromeUIWidth / 2),
+    // Total horizontal chrome difference (includes scrollbar, side panel, etc.)
+    chromeUIWidth,
     // Chrome window position on screen
     windowX,
     windowY,
-    // Total offset from screen top to viewport content
-    // This is what you add to viewport-relative coords to get screen-absolute coords
-    totalOffsetX: windowX + Math.round(chromeUIWidth / 2),
+    // Total offset from screen origin to viewport content origin.
+    // This is what you add to viewport-relative coords to get screen-absolute coords.
+    // X: On modern Chrome there is no left viewport border — the viewport starts at
+    // the window's left edge. Side panel and scrollbar are on the RIGHT, so they
+    // don't affect the left offset. (The old chromeUIWidth/2 broke when side panel was open.)
+    totalOffsetX: windowX,
     totalOffsetY: windowY + chromeUIHeight,
     // Display info
     devicePixelRatio: dpr,
@@ -135,7 +183,6 @@ function getBoundingInfo(el) {
 
   // Calculate screen-absolute position using Chrome offset
   const chromeUIHeight = window.outerHeight - window.innerHeight;
-  const chromeUIWidthHalf = Math.round((window.outerWidth - window.innerWidth) / 2);
   const windowX = window.screenX || window.screenLeft || 0;
   const windowY = window.screenY || window.screenTop || 0;
 
@@ -153,8 +200,8 @@ function getBoundingInfo(el) {
     // Absolute position (accounting for scroll)
     absX: Math.round(rect.left + window.scrollX + rect.width / 2),
     absY: Math.round(rect.top + window.scrollY + rect.height / 2),
-    // Screen-absolute position (accounting for Chrome UI and window position)
-    screenX: Math.round(windowX + chromeUIWidthHalf + rect.left + rect.width / 2),
+    // Screen-absolute position (viewport left edge = window left edge on modern Chrome)
+    screenX: Math.round(windowX + rect.left + rect.width / 2),
     screenY: Math.round(windowY + chromeUIHeight + rect.top + rect.height / 2),
     visible: rect.width > 0 && rect.height > 0 &&
              rect.top < window.innerHeight && rect.bottom > 0 &&
@@ -1169,5 +1216,642 @@ function waitForElement({ selector, timeout = 10000, interval = 200 }) {
   });
 }
 
+// ── Spinner / Loading Animation Detection ──────────────────────
+//
+// Scans visible DOM elements for CSS animations, spinner classes,
+// aria attributes, and animated SVGs that indicate loading state.
+//
+
+function detectSpinners({ limit = 20 } = {}) {
+  const spinners = [];
+  const seen = new Set();
+
+  // Pattern for known spinner animation names
+  const spinnerAnimPattern = /spin|rotate|pulse|loading|bounce|progress|indeterminate|ripple|ring|dash|shimmer|skeleton/i;
+  // Pattern for known non-spinner animations (filter out)
+  const nonSpinnerAnimPattern = /blink|cursor|caret|fade-?in|slide|appear|tooltip|dropdown|collapse|expand|modal/i;
+  // Pattern for spinner class names
+  const spinnerClassPattern = /\b(spinner|loader|loading|progress|spin|rotating|pulsing|circular|skeleton|shimmer)\b/i;
+
+  const allElements = document.querySelectorAll('*');
+
+  for (const el of allElements) {
+    if (spinners.length >= limit) break;
+    if (seen.has(el)) continue;
+
+    const style = window.getComputedStyle(el);
+
+    // Skip invisible elements
+    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') continue;
+
+    const rect = el.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) continue;
+    // Skip off-screen elements
+    if (rect.bottom < 0 || rect.top > window.innerHeight) continue;
+    if (rect.right < 0 || rect.left > window.innerWidth) continue;
+
+    let isSpinner = false;
+    let detectionMethod = '';
+
+    // Strategy 1: CSS animation-name matches known spinner patterns
+    const animName = style.animationName || '';
+    if (animName && animName !== 'none') {
+      if (spinnerAnimPattern.test(animName)) {
+        isSpinner = true;
+        detectionMethod = 'animation:' + animName;
+      }
+    }
+
+    // Strategy 2: Infinite animation (even if name doesn't match spinner pattern)
+    if (!isSpinner && animName && animName !== 'none') {
+      const iterCount = style.animationIterationCount || '';
+      if (iterCount === 'infinite') {
+        // Has infinite animation — likely a loading indicator
+        // But filter out known non-spinner animations
+        if (!nonSpinnerAnimPattern.test(animName)) {
+          isSpinner = true;
+          detectionMethod = 'infinite-animation:' + animName;
+        }
+      }
+    }
+
+    // Strategy 3: Class name matches spinner patterns + has active animation
+    if (!isSpinner) {
+      const className = (typeof el.className === 'string') ? el.className : '';
+      if (spinnerClassPattern.test(className)) {
+        // Only count as spinner if it has an active animation or meaningful transition
+        const hasAnimation = animName && animName !== 'none';
+        const hasTransform = style.transform && style.transform !== 'none';
+        if (hasAnimation || hasTransform) {
+          isSpinner = true;
+          const match = className.match(spinnerClassPattern);
+          detectionMethod = 'class:' + (match ? match[0] : 'unknown');
+        }
+      }
+    }
+
+    // Strategy 4: aria-busy="true" or role="progressbar"
+    if (!isSpinner) {
+      if (el.getAttribute('aria-busy') === 'true') {
+        isSpinner = true;
+        detectionMethod = 'aria-busy';
+      } else if (el.getAttribute('role') === 'progressbar') {
+        isSpinner = true;
+        detectionMethod = 'role:progressbar';
+      }
+    }
+
+    // Strategy 5: SVG with <animate> or <animateTransform> children
+    if (!isSpinner) {
+      const svgRoot = el.tagName.toLowerCase() === 'svg' ? el : null;
+      if (svgRoot && !seen.has(svgRoot)) {
+        const hasAnimate = svgRoot.querySelector('animate, animateTransform, animateMotion');
+        if (hasAnimate) {
+          isSpinner = true;
+          detectionMethod = 'svg-animate';
+          seen.add(svgRoot);
+        }
+      }
+    }
+
+    if (isSpinner && !seen.has(el)) {
+      seen.add(el);
+      const desc = describeElement(el);
+      spinners.push({
+        tag: desc.tag,
+        id: desc.id,
+        classes: desc.classes,
+        text: desc.text,
+        ariaLabel: desc.ariaLabel,
+        role: desc.role,
+        selector: desc.selector,
+        bounds: getBoundingInfo(el),
+        detectionMethod: detectionMethod,
+      });
+    }
+  }
+
+  return {
+    spinners: spinners,
+    count: spinners.length,
+    timestamp: Date.now(),
+  };
+}
+
+// ── Recording Mode ─────────────────────────────────────────────
+//
+// When recording mode is active, DOM events (click, input, keydown,
+// navigation) are captured with element metadata and sent back to
+// the Woodbury bridge server as recording_event messages.
+//
+
+let recordingActive = false;
+
+/**
+ * Build multiple selectors for an element (primary + fallbacks).
+ */
+function buildSelectorSet(el) {
+  const selectors = [];
+
+  // 1. ID-based (most stable)
+  if (el.id) {
+    selectors.push(`#${CSS.escape(el.id)}`);
+  }
+
+  // 2. data-testid (commonly stable in test-instrumented apps)
+  const testId = el.getAttribute('data-testid');
+  if (testId) {
+    selectors.push(`[data-testid="${CSS.escape(testId)}"]`);
+  }
+
+  // 3. Unique aria-label
+  const ariaLabel = el.getAttribute('aria-label');
+  if (ariaLabel) {
+    const tag = el.tagName.toLowerCase();
+    const sel = `${tag}[aria-label="${CSS.escape(ariaLabel)}"]`;
+    try {
+      if (document.querySelectorAll(sel).length === 1) {
+        selectors.push(sel);
+      }
+    } catch { /* invalid selector */ }
+  }
+
+  // 4. Tag + classes (medium stability)
+  if (el.className && typeof el.className === 'string') {
+    const classes = el.className.trim().split(/\s+/).filter(c => c.length > 0);
+    if (classes.length > 0 && classes.length <= 4) {
+      const tag = el.tagName.toLowerCase();
+      const sel = `${tag}.${classes.map(c => CSS.escape(c)).join('.')}`;
+      try {
+        if (document.querySelectorAll(sel).length <= 3) {
+          selectors.push(sel);
+        }
+      } catch { /* invalid selector */ }
+    }
+  }
+
+  // 5. nth-of-type path (least stable, last resort)
+  const pathSel = buildUniqueSelector(el);
+  if (pathSel && !selectors.includes(pathSel)) {
+    selectors.push(pathSel);
+  }
+
+  return selectors;
+}
+
+/**
+ * Capture element metadata for a recording event.
+ */
+function captureElementMeta(el) {
+  const selectors = buildSelectorSet(el);
+  const rect = el.getBoundingClientRect();
+
+  // Viewport dimensions for percentage-based positioning
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  const centerX = rect.left + rect.width / 2;
+  const centerY = rect.top + rect.height / 2;
+
+  // Capture contextual information for disambiguating similar elements
+  const context = getElementContext(el);
+
+  // Count how many siblings have the same visible text (helps identify nth-of-type)
+  const myText = getDirectText(el).trim().toLowerCase();
+  let nthWithSameText = 0;
+  let totalWithSameText = 0;
+  if (myText) {
+    const tag = el.tagName.toLowerCase();
+    try {
+      const sameTagEls = document.querySelectorAll(tag);
+      for (const sib of sameTagEls) {
+        const sibText = getDirectText(sib).trim().toLowerCase();
+        if (sibText === myText) {
+          const style = window.getComputedStyle(sib);
+          if (style.display !== 'none' && style.visibility !== 'hidden') {
+            totalWithSameText++;
+            if (sib === el) {
+              nthWithSameText = totalWithSameText;
+            }
+          }
+        }
+      }
+    } catch {}
+  }
+
+  return {
+    selector: selectors[0] || '',
+    fallbackSelectors: selectors.slice(1),
+    ariaLabel: el.getAttribute('aria-label') || undefined,
+    textContent: getDirectText(el).substring(0, 200) || undefined,
+    description: undefined, // Can be filled in later by the recorder
+    bounds: {
+      left: Math.round(rect.left),
+      top: Math.round(rect.top),
+      width: Math.round(rect.width),
+      height: Math.round(rect.height),
+      // Viewport-relative percentages (resolution-independent)
+      pctX: Math.round((centerX / vw) * 10000) / 100,   // center X as % of viewport width
+      pctY: Math.round((centerY / vh) * 10000) / 100,    // center Y as % of viewport height
+      pctW: Math.round((rect.width / vw) * 10000) / 100, // width as % of viewport width
+      pctH: Math.round((rect.height / vh) * 10000) / 100,// height as % of viewport height
+      viewportW: vw,
+      viewportH: vh,
+    },
+    tag: el.tagName.toLowerCase(),
+    role: el.getAttribute('role') || undefined,
+    inputType: el.getAttribute('type') || undefined,
+    value: el.value !== undefined ? String(el.value).substring(0, 500) : undefined,
+    // Additional attributes for smarter element resolution during playback
+    placeholder: el.getAttribute('placeholder') || undefined,
+    title: el.getAttribute('title') || undefined,
+    alt: el.getAttribute('alt') || undefined,
+    name: el.getAttribute('name') || undefined,
+    dataTestId: el.getAttribute('data-testid') || el.getAttribute('data-test-id') || undefined,
+    // Contextual information for disambiguating similar elements (e.g., 2 "Create" buttons)
+    context: {
+      ancestors: context.ancestors || undefined,
+      landmark: context.landmark || undefined,
+      nearestHeading: context.nearestHeading || undefined,
+      siblings: context.siblings || undefined,
+      label: context.label || undefined,
+      nthWithSameText: totalWithSameText > 1 ? nthWithSameText : undefined,
+      totalWithSameText: totalWithSameText > 1 ? totalWithSameText : undefined,
+    },
+  };
+}
+
+/**
+ * Send a recording event to the background script for relay to Woodbury.
+ */
+function sendRecordingEvent(eventType, element, extra = {}) {
+  console.log('[Woodbury REC:content] sendRecordingEvent', eventType, element?.tagName, (element?.textContent || '').slice(0, 30));
+  const event = {
+    type: 'recording_event',
+    event: eventType,
+    element: captureElementMeta(element),
+    page: {
+      url: location.href,
+      title: document.title,
+    },
+    timestamp: Date.now(),
+    ...extra,
+  };
+
+  chrome.runtime.sendMessage(event);
+}
+
+// Recording event handlers
+function onRecordClick(e) {
+  if (!recordingActive) return;
+  // Skip clicks on the Woodbury recording overlay itself
+  if (e.target.closest('[data-woodbury-recording]')) return;
+  sendRecordingEvent('click', e.target);
+}
+
+function onRecordInput(e) {
+  if (!recordingActive) return;
+  sendRecordingEvent('input', e.target);
+}
+
+function onRecordKeydown(e) {
+  if (!recordingActive) return;
+  // Only capture special keys (Enter, Escape, Tab, etc.) not regular typing
+  const specialKeys = ['Enter', 'Escape', 'Tab', 'Backspace', 'Delete', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown'];
+  if (!specialKeys.includes(e.key) && !e.ctrlKey && !e.metaKey && !e.altKey) return;
+
+  sendRecordingEvent('keydown', e.target, {
+    keyboard: {
+      key: e.key,
+      modifiers: [
+        e.ctrlKey && 'ctrl',
+        e.shiftKey && 'shift',
+        e.altKey && 'alt',
+        e.metaKey && 'cmd',
+      ].filter(Boolean),
+    },
+  });
+}
+
+function startRecording() {
+  if (recordingActive) return;
+  recordingActive = true;
+
+  document.addEventListener('click', onRecordClick, true);
+  document.addEventListener('input', onRecordInput, true);
+  document.addEventListener('keydown', onRecordKeydown, true);
+
+  // Show recording indicator
+  showRecordingIndicator();
+  console.log('[Woodbury Bridge] Recording mode ACTIVE');
+}
+
+function stopRecording() {
+  if (!recordingActive) return;
+  recordingActive = false;
+
+  document.removeEventListener('click', onRecordClick, true);
+  document.removeEventListener('input', onRecordInput, true);
+  document.removeEventListener('keydown', onRecordKeydown, true);
+
+  // Remove recording indicator
+  hideRecordingIndicator();
+  console.log('[Woodbury Bridge] Recording mode STOPPED');
+}
+
+function showRecordingIndicator() {
+  if (document.getElementById('woodbury-recording-host')) return;
+
+  // Use Shadow DOM so the indicator is completely isolated from the page's
+  // CSS and Content Security Policy — no inline style issues, no z-index wars.
+  const host = document.createElement('div');
+  host.id = 'woodbury-recording-host';
+  host.setAttribute('data-woodbury-recording', 'true');
+  // Minimal host styles to position the shadow container
+  host.style.cssText = 'position:fixed;top:8px;right:8px;z-index:2147483647;pointer-events:none;';
+
+  const shadow = host.attachShadow({ mode: 'closed' });
+  shadow.innerHTML = `
+    <style>
+      :host { all: initial; }
+      @keyframes rec-pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.3; }
+      }
+      .rec-badge {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        background: #dc2626;
+        color: white;
+        padding: 4px 12px;
+        border-radius: 12px;
+        font: bold 12px/1.5 -apple-system, BlinkMacSystemFont, sans-serif;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+        pointer-events: none;
+      }
+      .rec-dot {
+        display: inline-block;
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: white;
+        animation: rec-pulse 1s infinite;
+      }
+    </style>
+    <div class="rec-badge">
+      <span class="rec-dot"></span> REC
+    </div>
+  `;
+
+  document.body.appendChild(host);
+}
+
+function hideRecordingIndicator() {
+  document.getElementById('woodbury-recording-host')?.remove();
+}
+
+// NOTE: set_recording_mode is handled in the main handleAction() dispatcher
+// above to avoid race conditions with multiple chrome.runtime.onMessage listeners.
+
+// ── Workflow Debug Overlay ─────────────────────────────────────
+// Visual step-through mode: shows numbered markers at each interaction
+// position, a step list panel, and coordinate diagnostics.
+
+let _debugShadow = null; // reference to the shadow root for updates
+
+const STEP_TYPE_COLORS = {
+  click: '#3b82f6',
+  type: '#10b981',
+  navigate: '#6b7280',
+  keyboard: '#8b5cf6',
+  scroll: '#f59e0b',
+  wait: '#64748b',
+  assert: '#06b6d4',
+};
+const STEP_TYPE_ICONS = {
+  navigate: '\u{1F310}',
+  click: '\u{1F5B1}',
+  type: '\u{2328}',
+  keyboard: '\u{2328}',
+  wait: '\u{23F3}',
+  scroll: '\u{2195}',
+  assert: '\u{2714}',
+};
+
+function showDebugOverlay(params) {
+  // Remove existing overlay first
+  hideDebugOverlay();
+
+  const steps = params.steps || [];
+
+  const host = document.createElement('div');
+  host.id = 'woodbury-debug-host';
+  host.setAttribute('data-woodbury-debug', 'true');
+  host.style.cssText = 'position:fixed;inset:0;z-index:2147483646;pointer-events:none;';
+
+  const shadow = host.attachShadow({ mode: 'closed' });
+  _debugShadow = shadow;
+
+  // Build marker HTML — position markers only (step list + controls live in the side panel)
+  let markersHtml = '';
+  for (const s of steps) {
+    if (!s.hasPosition) continue;
+    const isHover = s.type === 'click' && s.clickType === 'hover';
+    const color = isHover ? '#a78bfa' : (STEP_TYPE_COLORS[s.type] || '#6b7280');
+    const hoverClass = isHover ? ' dbg-marker-hover' : '';
+    markersHtml += `
+      <div class="dbg-marker dbg-marker-pending${hoverClass}" data-idx="${s.index}"
+           style="left:${s.pctX}%;top:${s.pctY}%;border-color:${color};">
+        <span class="dbg-marker-num" style="background:${color};">${s.index + 1}</span>
+        <span class="dbg-marker-tip">${s.index + 1}. ${escText(s.label)}</span>
+      </div>`;
+  }
+
+  shadow.innerHTML = `
+    <style>
+      :host { all: initial; }
+
+      /* ── Markers only — step list + coord info live in Chrome side panel ── */
+      .dbg-markers { position:absolute; inset:0; pointer-events:none; }
+      .dbg-marker {
+        position: absolute;
+        transform: translate(-50%, -50%);
+        pointer-events: none;
+        z-index: 1;
+      }
+      .dbg-marker-num {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 24px;
+        height: 24px;
+        border-radius: 50%;
+        color: white;
+        font: bold 11px/1 -apple-system, BlinkMacSystemFont, sans-serif;
+        box-shadow: 0 1px 4px rgba(0,0,0,0.4);
+        border: 2px solid rgba(255,255,255,0.5);
+      }
+      .dbg-marker-tip {
+        display: none;
+        position: absolute;
+        top: 28px;
+        left: 50%;
+        transform: translateX(-50%);
+        background: #0f172a;
+        color: #e2e8f0;
+        padding: 4px 8px;
+        border-radius: 4px;
+        font: 11px/1.3 -apple-system, BlinkMacSystemFont, sans-serif;
+        white-space: nowrap;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.5);
+        pointer-events: none;
+        z-index: 10;
+      }
+      .dbg-marker:hover .dbg-marker-tip { display: block; }
+
+      .dbg-marker-completed .dbg-marker-num { opacity: 0.4; }
+      .dbg-marker-completed::after {
+        content: '\u{2714}';
+        position: absolute;
+        top: -4px;
+        right: -6px;
+        font-size: 12px;
+        color: #10b981;
+      }
+      .dbg-marker-failed .dbg-marker-num { opacity: 0.5; }
+      .dbg-marker-failed::after {
+        content: '\u{2718}';
+        position: absolute;
+        top: -4px;
+        right: -6px;
+        font-size: 12px;
+        color: #ef4444;
+      }
+      @keyframes dbg-pulse {
+        0%, 100% { box-shadow: 0 0 0 0 rgba(59,130,246,0.5); }
+        50% { box-shadow: 0 0 0 8px rgba(59,130,246,0); }
+      }
+      .dbg-marker-current .dbg-marker-num {
+        width: 30px;
+        height: 30px;
+        font-size: 13px;
+        animation: dbg-pulse 1.5s infinite;
+      }
+      @keyframes dbg-selected-pulse {
+        0%, 100% { box-shadow: 0 0 0 0 rgba(96,165,250,0.6); }
+        50% { box-shadow: 0 0 0 10px rgba(96,165,250,0); }
+      }
+      .dbg-marker-selected .dbg-marker-num {
+        width: 32px;
+        height: 32px;
+        font-size: 14px;
+        border: 3px solid #60a5fa;
+        animation: dbg-selected-pulse 1.2s infinite;
+      }
+      .dbg-marker-selected .dbg-marker-tip { display: block; }
+
+      /* Hover/move markers: dashed border to distinguish from click markers */
+      .dbg-marker-hover { border-style: dashed; }
+      .dbg-marker-hover .dbg-marker-num { border: 1px dashed rgba(255,255,255,0.5); }
+    </style>
+
+    <div class="dbg-markers">${markersHtml}</div>
+  `;
+
+  document.body.appendChild(host);
+  return { overlayShown: true, markersRendered: steps.filter(s => s.hasPosition).length };
+}
+
+function updateDebugStep(params) {
+  if (!_debugShadow) return { updated: false };
+
+  const { currentIndex, completedIndices = [], failedIndices = [] } = params;
+
+  // Update markers only — step list + coord info live in the Chrome side panel
+  const markers = _debugShadow.querySelectorAll('.dbg-marker');
+  markers.forEach(m => {
+    const idx = parseInt(m.dataset.idx);
+    m.className = 'dbg-marker';
+    if (completedIndices.includes(idx)) {
+      m.className += ' dbg-marker-completed';
+    } else if (failedIndices.includes(idx)) {
+      m.className += ' dbg-marker-failed';
+    } else if (idx === currentIndex) {
+      m.className += ' dbg-marker-current';
+    } else {
+      m.className += ' dbg-marker-pending';
+    }
+  });
+
+  return { updated: true };
+}
+
+function updateDebugMarker(params) {
+  if (!_debugShadow) return { updated: false };
+  const { stepIndex, pctX, pctY } = params;
+  if (stepIndex == null || pctX == null || pctY == null) return { updated: false };
+
+  const marker = _debugShadow.querySelector('.dbg-marker[data-idx="' + stepIndex + '"]');
+  if (marker) {
+    marker.style.left = pctX + '%';
+    marker.style.top = pctY + '%';
+    return { updated: true, stepIndex, pctX, pctY };
+  }
+  return { updated: false, reason: 'marker not found' };
+}
+
+function selectDebugMarker(params) {
+  if (!_debugShadow) return { selected: false };
+  const { stepIndex } = params;
+
+  // Remove selected class from all markers
+  _debugShadow.querySelectorAll('.dbg-marker').forEach(m => {
+    m.classList.remove('dbg-marker-selected');
+  });
+
+  // Add selected class to the target marker
+  if (stepIndex != null) {
+    const marker = _debugShadow.querySelector('.dbg-marker[data-idx="' + stepIndex + '"]');
+    if (marker) {
+      marker.classList.add('dbg-marker-selected');
+      return { selected: true, stepIndex };
+    }
+  }
+  return { selected: false };
+}
+
+/**
+ * Query what element is at viewport coordinates (x, y).
+ * Returns a fingerprint for change detection (e.g. to verify a popup appeared after clicking).
+ * Does NOT click — pure DOM query.
+ */
+function getElementAtPoint({ x, y }) {
+  if (x === undefined || y === undefined) throw new Error('x and y are required');
+  const el = document.elementFromPoint(x, y);
+  if (!el) return { found: false, fingerprint: null };
+
+  const tag = el.tagName.toLowerCase();
+  const id = el.id || '';
+  const classes = Array.from(el.classList).slice(0, 5).join(' ');
+  const role = el.getAttribute('role') || '';
+  const text = (el.textContent || '').trim().slice(0, 40);
+  const fingerprint = `${tag}#${id}.${classes}[role=${role}]"${text}"`;
+
+  return { found: true, tag, id, classes, role, text, fingerprint };
+}
+
+function hideDebugOverlay() {
+  _debugShadow = null;
+  document.getElementById('woodbury-debug-host')?.remove();
+  return { overlayRemoved: true };
+}
+
+function escText(str) {
+  if (!str) return '';
+  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
 // Log that content script is loaded
 console.log('[Woodbury Bridge] Content script loaded on', location.href);
+
+} // end of if (!window.__woodburyContentScriptLoaded)

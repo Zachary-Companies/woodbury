@@ -14,6 +14,7 @@ import { ExtensionManager } from './extension-manager.js';
 import { EXTENSIONS_DIR, discoverExtensions, parseEnvFile } from './extension-loader.js';
 import { scaffoldExtension, initGitRepo, ensureGhInstalled, isToolInstalled } from './extension-scaffold.js';
 import { startDashboard, type DashboardHandle } from './config-dashboard.js';
+import { startGoLinks, addRoute, removeRoute, getRoutes, setupHosts, teardownSetup, isHostsConfigured, GO_HOSTNAME, type GoLinksHandle } from './go-links.js';
 import { debugLog } from './debug-log.js';
 
 const program = new Command();
@@ -100,7 +101,7 @@ program
       if (!config.noExtensions) {
         try {
           const doneDash = debugLog.time('dashboard', 'Starting config dashboard');
-          dashboard = await startDashboard(config.verbose || false, extensionManager);
+          dashboard = await startDashboard(config.verbose || false, extensionManager, config.workingDirectory);
           config.dashboardUrl = dashboard.url;
           doneDash();
           debugLog.info('dashboard', 'Dashboard running', { url: dashboard.url, port: dashboard.port });
@@ -110,13 +111,43 @@ program
         }
       }
 
+      // Start go-links proxy
+      let goLinks: GoLinksHandle | undefined;
+      try {
+        const doneGoLinks = debugLog.time('go-links', 'Starting go-links proxy');
+        goLinks = await startGoLinks(config.verbose || false);
+        config.goLinksUrl = goLinks.url;
+
+        // Auto-register dashboard
+        if (dashboard) {
+          await addRoute('config', dashboard.url);
+        }
+
+        // Auto-register extension web UIs
+        if (extensionManager) {
+          for (const ext of extensionManager.getExtensionSummaries()) {
+            for (const uiUrl of ext.webUIs) {
+              await addRoute(ext.name, uiUrl);
+            }
+          }
+        }
+
+        doneGoLinks();
+        debugLog.info('go-links', 'Go-links proxy running', { url: goLinks.url, port: goLinks.port });
+      } catch (err) {
+        debugLog.error('go-links', 'Go-links failed to start', { error: String(err) });
+        if (config.verbose) {
+          console.warn(`  ${icons.warning}  Go-links failed to start: ${err}`);
+        }
+      }
+
       if (debugLog.isEnabled) {
         console.log(colors.muted(`  Debug log: ${debugLog.filePath}`));
       }
 
       debugLog.section('REPL');
       debugLog.info('repl', 'Starting REPL');
-      await startRepl(config, extensionManager, dashboard);
+      await startRepl(config, extensionManager, dashboard, goLinks);
     } catch (error) {
       debugLog.error('startup', 'Fatal startup error', { error: String(error), stack: error instanceof Error ? error.stack : undefined });
       console.error(`${icons.error}  ${labels.error}`, colors.error(String(error)));
@@ -285,17 +316,23 @@ ext
   .command('create <name>')
   .description('Scaffold a new extension')
   .option('--web', 'Include site-knowledge templates for web-navigation extensions')
+  .option('--workflow', 'Include workflow templates for browser automation extensions')
   .option('--no-git', 'Skip git repository initialization')
   .option('--github', 'Create a GitHub repository and push (implies --git)')
   .option('--public', 'Make the GitHub repository public (default: private)')
-  .action(async (name: string, cmdOpts: { web?: boolean; git?: boolean; github?: boolean; public?: boolean }) => {
+  .action(async (name: string, cmdOpts: { web?: boolean; workflow?: boolean; git?: boolean; github?: boolean; public?: boolean }) => {
     try {
-      const dir = await scaffoldExtension(name, { webNavigation: cmdOpts.web });
+      const dir = await scaffoldExtension(name, { webNavigation: cmdOpts.web, workflow: cmdOpts.workflow });
       console.log(`${icons.success}  ${colors.success('Extension scaffolded!')}`);
       console.log();
       console.log(`  ${colors.muted('Directory:')} ${dir}`);
       console.log(`  ${colors.muted('Edit:')}      ${path.join(dir, 'index.js')}`);
-      if (cmdOpts.web) {
+      if (cmdOpts.workflow) {
+        console.log(`  ${colors.muted('Workflows:')} ${path.join(dir, 'workflows')}`);
+        console.log(`  ${colors.muted('Knowledge:')} ${path.join(dir, 'site-knowledge')}`);
+        console.log();
+        console.log(colors.muted('  Add .workflow.json files to workflows/ and fill in site-knowledge/*.md.'));
+      } else if (cmdOpts.web) {
         console.log(`  ${colors.muted('Knowledge:')} ${path.join(dir, 'site-knowledge')}`);
         console.log();
         console.log(colors.muted('  Fill in site-knowledge/*.md files before building tools.'));
@@ -542,6 +579,93 @@ ext
     } catch (error) {
       console.error(`${icons.error}  ${colors.error(`Failed to read package.json: ${error}`)}`);
       process.exit(1);
+    }
+  });
+
+// Go-links management commands
+const go = program
+  .command('go')
+  .description('Manage go-links (local URL shortcuts)');
+
+go
+  .command('setup')
+  .description(`Add "${GO_HOSTNAME}" to /etc/hosts (one-time, requires sudo)`)
+  .action(async () => {
+    console.log(colors.primary.bold('Go-Links Setup'));
+    console.log();
+    console.log(colors.muted(`Adds "127.0.0.1 ${GO_HOSTNAME}" to /etc/hosts and sets up port forwarding so you can type ${GO_HOSTNAME}/config in your browser`));
+    console.log();
+    const result = await setupHosts();
+    if (result.success) {
+      console.log();
+      for (const line of result.message.split('\n')) {
+        console.log(`  ${line}`);
+      }
+    } else {
+      console.error(`${icons.error}  ${colors.error(result.message)}`);
+      process.exit(1);
+    }
+  });
+
+go
+  .command('teardown')
+  .description(`Remove "${GO_HOSTNAME}" from /etc/hosts`)
+  .action(async () => {
+    console.log(colors.muted('Removing go-links setup...'));
+    console.log();
+    const result = await teardownSetup();
+    if (result.success) {
+      for (const line of result.message.split('\n')) {
+        console.log(`  ${line}`);
+      }
+    } else {
+      console.error(`${icons.error}  ${colors.error(result.message)}`);
+      process.exit(1);
+    }
+  });
+
+go
+  .command('list')
+  .description('List all go-link routes')
+  .action(async () => {
+    const routes = getRoutes();
+    const entries = Object.entries(routes);
+    if (entries.length === 0) {
+      console.log(colors.muted('No go-link routes configured.'));
+      console.log(colors.muted('  Routes are auto-registered when Woodbury starts.'));
+      console.log(colors.muted('  Add manually: woodbury go add <name> <url>'));
+      return;
+    }
+    console.log(colors.primary.bold(`Go-Links (${entries.length}):`));
+    console.log();
+    const hostsOk = await isHostsConfigured();
+    for (const [name, target] of entries.sort(([a], [b]) => a.localeCompare(b))) {
+      const goUrl = hostsOk ? `${GO_HOSTNAME}/${name}` : `127.0.0.1:9000/${name}`;
+      console.log(`  ${colors.secondary(goUrl)} ${colors.muted('→')} ${target}`);
+    }
+    if (!hostsOk) {
+      console.log();
+      console.log(colors.muted('  Tip: Run ') + colors.secondary('woodbury go setup') + colors.muted(` to enable ${GO_HOSTNAME}/ shorthand`));
+    }
+  });
+
+go
+  .command('add <name> <url>')
+  .description('Add a go-link route')
+  .action(async (name: string, url: string) => {
+    await addRoute(name, url);
+    console.log(`${icons.success}  ${colors.success(`Added ${GO_HOSTNAME}/${name} → ${url}`)}`);
+  });
+
+go
+  .command('remove <name>')
+  .description('Remove a go-link route')
+  .action(async (name: string) => {
+    const removed = await removeRoute(name);
+    if (removed) {
+      console.log(`${icons.success}  ${colors.success(`Removed ${GO_HOSTNAME}/${name}`)}`);
+    } else {
+      console.log(`${icons.warning}  ${colors.warning(`Route "${GO_HOSTNAME}/${name}" not found`)}`);
     }
   });
 

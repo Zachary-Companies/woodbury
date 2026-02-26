@@ -15,6 +15,12 @@ export default function GeneratePage() {
   const [result, setResult] = useState('');
   const [error, setError] = useState('');
 
+  // Image generation
+  const [imagePrompt, setImagePrompt] = useState('');
+  const [generatingImage, setGeneratingImage] = useState(false);
+  const [generatedImageUrl, setGeneratedImageUrl] = useState('');
+  const [createdPostId, setCreatedPostId] = useState('');
+
   const togglePlatform = (p: string) => {
     setSelectedPlatforms(prev =>
       prev.includes(p) ? prev.filter(x => x !== p) : [...prev, p]
@@ -66,16 +72,68 @@ export default function GeneratePage() {
       });
       if (res.ok) {
         const post = await res.json();
-        window.location.href = `/posts/${post.id}`;
+        setCreatedPostId(post.id);
       }
     } catch (err: any) {
       setError(err.message);
     }
   };
 
+  const handleGenerateImage = async () => {
+    if (!imagePrompt.trim()) return;
+
+    let postId = createdPostId;
+    if (!postId) {
+      if (!result) {
+        setError('Generate text content first, then create a post before generating an image');
+        return;
+      }
+      try {
+        const res = await fetch('/api/posts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            text: result,
+            platforms: selectedPlatforms.length > 0 ? selectedPlatforms : ['instagram'],
+          }),
+        });
+        if (!res.ok) throw new Error('Failed to create post');
+        const post = await res.json();
+        postId = post.id;
+        setCreatedPostId(postId);
+      } catch (err: any) {
+        setError(err.message);
+        return;
+      }
+    }
+
+    setGeneratingImage(true);
+    setError('');
+
+    try {
+      const res = await fetch('/api/generate/image', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: imagePrompt, postId }),
+      });
+
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || 'Image generation failed');
+      }
+
+      const data = await res.json();
+      setGeneratedImageUrl(data.url);
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setGeneratingImage(false);
+    }
+  };
+
   return (
     <div className="max-w-3xl">
-      <h1 className="text-2xl font-bold mb-6">🤖 AI Content Generator</h1>
+      <h1 className="text-2xl font-bold mb-6">AI Content Generator</h1>
 
       {/* Prompt */}
       <section className="mb-6">
@@ -93,7 +151,6 @@ export default function GeneratePage() {
 
       {/* Options */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
-        {/* Platforms */}
         <section>
           <label className="block text-sm font-medium text-muted mb-2">
             Target Platforms
@@ -115,7 +172,6 @@ export default function GeneratePage() {
           </div>
         </section>
 
-        {/* Tone */}
         <section>
           <label className="block text-sm font-medium text-muted mb-2">
             Tone
@@ -149,13 +205,13 @@ export default function GeneratePage() {
         <span className="text-sm text-muted">Include hashtags</span>
       </label>
 
-      {/* Generate button */}
+      {/* Generate text button */}
       <button
         onClick={handleGenerate}
         disabled={generating || !prompt.trim()}
         className="bg-primary hover:bg-primary-hover disabled:opacity-50 text-white px-6 py-3 rounded-lg font-medium transition-colors w-full mb-6"
       >
-        {generating ? '⏳ Generating...' : '✨ Generate Post Content'}
+        {generating ? 'Generating...' : 'Generate Post Content'}
       </button>
 
       {error && (
@@ -164,21 +220,67 @@ export default function GeneratePage() {
         </div>
       )}
 
-      {/* Result */}
+      {/* Text Result */}
       {result && (
-        <section className="bg-surface border border-border rounded-lg p-4">
+        <section className="bg-surface border border-border rounded-lg p-4 mb-6">
           <div className="flex items-center justify-between mb-3">
             <h3 className="text-sm font-medium text-muted">Generated Content</h3>
-            <button
-              onClick={handleCreatePost}
-              className="bg-secondary hover:bg-secondary/80 text-white px-3 py-1 rounded text-xs font-medium transition-colors"
-            >
-              → Create Post
-            </button>
+            {!createdPostId && (
+              <button
+                onClick={handleCreatePost}
+                className="bg-secondary hover:bg-secondary/80 text-white px-3 py-1 rounded text-xs font-medium transition-colors"
+              >
+                Create Post
+              </button>
+            )}
+            {createdPostId && (
+              <a
+                href={`/posts/${createdPostId}`}
+                className="bg-primary hover:bg-primary-hover text-white px-3 py-1 rounded text-xs font-medium transition-colors"
+              >
+                View Post
+              </a>
+            )}
           </div>
           <div className="bg-background rounded-lg p-3 whitespace-pre-wrap text-sm">
             {result}
           </div>
+        </section>
+      )}
+
+      {/* Image Generation — appears after text is generated */}
+      {result && (
+        <section className="bg-surface border border-border rounded-lg p-4 mb-6">
+          <label className="block text-sm font-medium text-muted mb-2">
+            Generate Image
+          </label>
+          <div className="flex gap-2 mb-3">
+            <input
+              type="text"
+              value={imagePrompt}
+              onChange={e => setImagePrompt(e.target.value)}
+              placeholder="Describe the image (e.g., 'A vibrant flat-lay workspace with coffee and laptop')..."
+              className="flex-1 bg-background border border-border rounded-lg px-3 py-2 text-sm text-foreground placeholder-muted/50 focus:border-primary focus:outline-none"
+              onKeyDown={e => e.key === 'Enter' && handleGenerateImage()}
+            />
+            <button
+              onClick={handleGenerateImage}
+              disabled={generatingImage || !imagePrompt.trim()}
+              className="bg-secondary hover:bg-secondary/80 disabled:opacity-50 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors whitespace-nowrap"
+            >
+              {generatingImage ? 'Generating...' : 'Generate Image'}
+            </button>
+          </div>
+
+          {generatedImageUrl && (
+            <div className="rounded-lg overflow-hidden border border-border max-w-sm">
+              <img
+                src={generatedImageUrl}
+                alt={imagePrompt}
+                className="w-full aspect-[4/5] object-cover"
+              />
+            </div>
+          )}
         </section>
       )}
     </div>

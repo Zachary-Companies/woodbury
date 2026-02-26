@@ -47,6 +47,31 @@
       margin-top: 0.25rem;
     }
 
+    /* ── Nav Tabs ─────────────────────────────────────── */
+    .nav-tabs {
+      display: flex;
+      border-bottom: 1px solid #334155;
+    }
+
+    .nav-tab {
+      flex: 1;
+      padding: 0.7rem 0.5rem;
+      text-align: center;
+      font-size: 0.75rem;
+      font-weight: 600;
+      color: #64748b;
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      transition: all 0.15s;
+      background: none;
+      border-top: none;
+      border-left: none;
+      border-right: none;
+    }
+
+    .nav-tab:hover { color: #94a3b8; background: #334155; }
+    .nav-tab.active { color: #7c3aed; border-bottom-color: #7c3aed; }
+
     .ext-list {
       flex: 1;
       overflow-y: auto;
@@ -459,6 +484,86 @@
 
     .btn-modal-select:hover { background: #6d28d9; }
 
+    /* ── Download Detection Modal ────────────────────── */
+    .dl-detect-file-list {
+      max-height: 200px;
+      overflow-y: auto;
+      padding: 0.5rem 1.25rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.35rem;
+    }
+
+    .dl-detect-file-item {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.4rem 0.5rem;
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 0.8rem;
+      color: #e2e8f0;
+    }
+
+    .dl-detect-file-item:hover { background: #263549; border-color: #475569; }
+
+    .dl-detect-file-item input[type="checkbox"] {
+      accent-color: #7c3aed;
+      flex-shrink: 0;
+    }
+
+    .dl-detect-fname {
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .dl-detect-fsize {
+      color: #64748b;
+      font-size: 0.75rem;
+      flex-shrink: 0;
+    }
+
+    .dl-detect-dest-input {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 0.5rem 0.6rem;
+      background: #0f172a;
+      border: 1px solid #334155;
+      border-radius: 6px;
+      color: #e2e8f0;
+      font-size: 0.8rem;
+      font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+    }
+
+    .dl-detect-dest-input:focus {
+      outline: none;
+      border-color: #7c3aed;
+      box-shadow: 0 0 0 2px rgba(124, 58, 237, 0.2);
+    }
+
+    .dl-detect-var-toggle {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin-top: 0.5rem;
+      font-size: 0.78rem;
+      color: #94a3b8;
+      cursor: pointer;
+    }
+
+    .dl-detect-var-toggle input[type="checkbox"] { accent-color: #7c3aed; }
+    .dl-detect-var-toggle code {
+      background: #1e293b;
+      padding: 0.1rem 0.35rem;
+      border-radius: 3px;
+      font-size: 0.75rem;
+      color: #a78bfa;
+    }
+
     /* ── Web UI Section ────────────────────────────────── */
     .webui-section {
       background: #1e293b;
@@ -560,15 +665,593 @@
     }
 
     @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── Workflow Cards ──────────────────────────────── */
+    .wf-grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 0.75rem;
+    }
+
+    .wf-card {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      padding: 1rem 1.25rem;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+
+    .wf-card:hover { border-color: #7c3aed44; }
+    .wf-card.active { border-color: #7c3aed; background: #7c3aed11; }
+
+    .wf-card-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.5rem;
+      margin-bottom: 0.35rem;
+    }
+
+    .wf-card-name {
+      font-size: 0.9rem;
+      font-weight: 600;
+      color: #e2e8f0;
+    }
+
+    .wf-card-site {
+      font-size: 0.7rem;
+      color: #64748b;
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      background: #0f172a;
+      padding: 1px 8px;
+      border-radius: 4px;
+    }
+
+    .wf-card-desc {
+      font-size: 0.75rem;
+      color: #94a3b8;
+      margin-bottom: 0.5rem;
+    }
+
+    .wf-card-stats {
+      display: flex;
+      gap: 0.75rem;
+      font-size: 0.65rem;
+      color: #64748b;
+      text-transform: uppercase;
+      letter-spacing: 0.02em;
+    }
+
+    .wf-card-stat { display: flex; align-items: center; gap: 0.25rem; }
+    .wf-card-stat-smart { color: #10b981; }
+
+    /* ── Workflow Detail View ────────────────────────── */
+    .wf-detail-header {
+      margin-bottom: 1.5rem;
+      padding-bottom: 1rem;
+      border-bottom: 1px solid #334155;
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+    }
+
+    .wf-detail-header h2 { font-size: 1.5rem; color: #e2e8f0; }
+
+    .wf-detail-meta {
+      font-size: 0.8rem;
+      color: #64748b;
+      margin-top: 0.25rem;
+    }
+
+    .wf-detail-actions {
+      display: flex;
+      gap: 0.5rem;
+      flex-shrink: 0;
+    }
+
+    .btn-danger {
+      background: none;
+      border: 1px solid #ef4444;
+      border-radius: 6px;
+      padding: 0.5rem 1rem;
+      color: #ef4444;
+      font-size: 0.8rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+
+    .btn-danger:hover { background: #ef444422; }
+
+    .btn-secondary {
+      background: #334155;
+      border: 1px solid #475569;
+      border-radius: 6px;
+      padding: 0.5rem 1rem;
+      color: #e2e8f0;
+      font-size: 0.8rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+
+    .btn-secondary:hover { background: #475569; }
+
+    /* ── Workflow Section Cards ──────────────────────── */
+    .wf-section {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      margin-bottom: 1rem;
+      overflow: hidden;
+    }
+
+    .wf-section-header {
+      padding: 0.75rem 1.25rem;
+      font-size: 0.75rem;
+      font-weight: 600;
+      color: #94a3b8;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      border-bottom: 1px solid #334155;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .wf-section-body { padding: 0.75rem 1.25rem; }
+
+    /* ── Variable Editor ─────────────────────────────── */
+    .wf-var-row {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      padding: 0.5rem 0;
+      font-size: 0.8rem;
+    }
+
+    .wf-var-row + .wf-var-row { border-top: 1px solid #1e293b; }
+
+    .wf-var-name {
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      color: #06b6d4;
+      font-weight: 600;
+      min-width: 120px;
+    }
+
+    .wf-var-desc { color: #94a3b8; flex: 1; font-size: 0.75rem; }
+
+    .wf-var-default {
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      color: #64748b;
+      font-size: 0.7rem;
+      max-width: 200px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .wf-var-rename {
+      cursor: pointer;
+      position: relative;
+    }
+
+    .wf-var-rename:hover {
+      text-decoration: underline;
+      text-decoration-style: dashed;
+      text-underline-offset: 2px;
+    }
+
+    .wf-var-rename-icon {
+      font-size: 0.65rem;
+      margin-left: 0.3rem;
+      opacity: 0;
+      transition: opacity 0.15s;
+    }
+
+    .wf-var-rename:hover .wf-var-rename-icon { opacity: 0.6; }
+
+    .wf-var-rename-input {
+      background: #0f172a;
+      border: 1px solid #7c3aed;
+      border-radius: 4px;
+      padding: 0.25rem 0.5rem;
+      color: #06b6d4;
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      font-size: 0.8rem;
+      font-weight: 600;
+      outline: none;
+      width: 140px;
+      box-shadow: 0 0 0 2px rgba(124, 58, 237, 0.2);
+    }
+
+    /* ── AI Generation Prompt ──────────────────────── */
+    .wf-var-prompt-badge {
+      font-size: 0.65rem;
+      background: rgba(124, 58, 237, 0.15);
+      color: #a78bfa;
+      padding: 0.1rem 0.4rem;
+      border-radius: 4px;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: background 0.15s;
+    }
+    .wf-var-prompt-badge:hover { background: rgba(124, 58, 237, 0.25); }
+    .wf-var-prompt-add { opacity: 0.5; }
+    .wf-var-prompt-add:hover { opacity: 1; }
+
+    .wf-var-gen-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.3rem;
+      padding: 0.3rem 0.6rem;
+      border: 1px solid #334155;
+      border-radius: 4px;
+      background: #1e293b;
+      color: #a78bfa;
+      font-size: 0.7rem;
+      cursor: pointer;
+      white-space: nowrap;
+      margin-top: 0.25rem;
+      transition: background 0.15s, color 0.15s;
+    }
+    .wf-var-gen-btn:hover { background: #334155; color: #c4b5fd; }
+    .wf-var-gen-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    .wf-var-prompt-editor {
+      width: 100%;
+      padding: 0.4rem 0.5rem;
+      background: #0f172a;
+      border: 1px solid #7c3aed;
+      border-radius: 4px;
+      color: #e2e8f0;
+      font-size: 0.75rem;
+      font-family: inherit;
+      resize: vertical;
+      min-height: 60px;
+      outline: none;
+      box-sizing: border-box;
+    }
+    .wf-var-prompt-editor:focus { box-shadow: 0 0 0 2px rgba(124, 58, 237, 0.2); }
+
+    .wf-var-input {
+      background: #0f172a;
+      border: 1px solid #334155;
+      border-radius: 4px;
+      padding: 0.4rem 0.6rem;
+      color: #e2e8f0;
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      font-size: 0.75rem;
+      outline: none;
+      width: 180px;
+      transition: border-color 0.15s;
+    }
+
+    .wf-var-input:focus { border-color: #7c3aed; }
+
+    /* ── Steps List ──────────────────────────────────── */
+    .wf-step {
+      display: flex;
+      align-items: flex-start;
+      gap: 0.75rem;
+      padding: 0.5rem 0;
+      font-size: 0.8rem;
+    }
+
+    .wf-step + .wf-step { border-top: 1px solid #0f172a; }
+
+    .wf-step-num {
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      font-size: 0.65rem;
+      color: #475569;
+      min-width: 2rem;
+      text-align: right;
+      padding-top: 2px;
+    }
+
+    .wf-step-icon {
+      font-size: 0.85rem;
+      min-width: 1.5rem;
+      text-align: center;
+    }
+
+    .wf-step-label {
+      color: #e2e8f0;
+      flex: 1;
+    }
+
+    .wf-step-type {
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      font-size: 0.65rem;
+      color: #475569;
+      padding: 1px 6px;
+      background: #0f172a;
+      border-radius: 3px;
+    }
+
+    .wf-step-smart {
+      font-size: 0.65rem;
+      color: #10b981;
+      padding: 1px 6px;
+      background: #10b98118;
+      border-radius: 3px;
+    }
+
+    /* ── Step expand / inline editor ────────────────── */
+    .wf-step[data-step-idx] { cursor: pointer; transition: background 0.15s; }
+    .wf-step[data-step-idx]:hover { background: rgba(51, 65, 85, 0.3); }
+    .wf-step-expanded { background: rgba(51, 65, 85, 0.4) !important; }
+    .wf-step-expand {
+      font-size: 0.6rem;
+      color: #475569;
+      margin-left: auto;
+      transition: transform 0.2s;
+    }
+    .wf-step-expanded .wf-step-expand { transform: rotate(180deg); }
+
+    .wf-step-editor {
+      padding: 0.6rem 0.75rem 0.6rem 3.5rem;
+      border-top: 1px solid #1e293b;
+      background: rgba(15, 23, 42, 0.5);
+    }
+    .wf-step-editor + .wf-step { border-top: 1px solid #1e293b; }
+    .wf-se-row {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin-bottom: 0.4rem;
+      flex-wrap: wrap;
+    }
+    .wf-se-label {
+      font-size: 0.65rem;
+      color: #64748b;
+      min-width: 60px;
+      white-space: nowrap;
+    }
+    .wf-se-input {
+      flex: 1;
+      min-width: 120px;
+      padding: 0.3rem 0.5rem;
+      background: #0f172a;
+      border: 1px solid #334155;
+      border-radius: 4px;
+      color: #e2e8f0;
+      font-size: 0.75rem;
+      font-family: 'SF Mono', 'Fira Code', monospace;
+    }
+    .wf-se-input:focus {
+      border-color: #3b82f6;
+      outline: none;
+      box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.15);
+    }
+    select.wf-se-input { appearance: auto; cursor: pointer; }
+    textarea.wf-se-input {
+      min-height: 50px;
+      resize: vertical;
+      font-family: inherit;
+    }
+    .wf-se-actions {
+      display: flex;
+      gap: 0.4rem;
+      margin-top: 0.5rem;
+      padding-top: 0.5rem;
+      border-top: 1px solid #1e293b;
+    }
+    .wf-se-btn {
+      padding: 0.25rem 0.6rem;
+      border-radius: 4px;
+      font-size: 0.7rem;
+      cursor: pointer;
+      border: 1px solid #334155;
+      background: #1e293b;
+      color: #94a3b8;
+    }
+    .wf-se-btn:hover { background: #334155; color: #e2e8f0; }
+    .wf-se-btn-save { background: #1d4ed8; color: #fff; border-color: #2563eb; }
+    .wf-se-btn-save:hover { background: #2563eb; }
+    .wf-se-btn-delete { color: #f87171; }
+    .wf-se-btn-delete:hover { background: rgba(127, 29, 29, 0.2); color: #fca5a5; }
+    .wf-se-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    /* ── JSON editor ─────────────────────────────────── */
+    .wf-json-editor {
+      width: 100%;
+      min-height: 400px;
+      background: #0f172a;
+      border: 1px solid #334155;
+      border-radius: 6px;
+      padding: 1rem;
+      color: #e2e8f0;
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      font-size: 0.75rem;
+      line-height: 1.5;
+      resize: vertical;
+      outline: none;
+      tab-size: 2;
+    }
+
+    .wf-json-editor:focus { border-color: #7c3aed; }
+
+    /* ── View toggle active state ─────────────────── */
+    .wf-view-active {
+      background: #7c3aed !important;
+      color: white !important;
+      border-color: #7c3aed !important;
+    }
+
+    /* ── Pipeline steps ──────────────────────────────── */
+    .wf-pipeline-step {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      padding: 0.5rem 0.75rem;
+      border-radius: 6px;
+      font-size: 0.8rem;
+      background: #0f172a;
+      margin-bottom: 0.25rem;
+    }
+
+    .wf-pipeline-step-num {
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      font-size: 0.65rem;
+      color: #7c3aed;
+      font-weight: 700;
+      min-width: 1.5rem;
+      text-align: center;
+      background: #7c3aed22;
+      border-radius: 4px;
+      padding: 2px 4px;
+    }
+
+    .wf-pipeline-step-name {
+      color: #e2e8f0;
+      flex: 1;
+      font-weight: 500;
+    }
+
+    /* ── Run button green ─────────────────────────────── */
+    .wf-run-btn { background: #10b981 !important; }
+    .wf-run-btn:hover { background: #059669 !important; }
+
+    /* ── New Workflow button ────────────────────────────── */
+    .wf-sidebar-new {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.7rem 1rem;
+      margin: 0.5rem 0.75rem;
+      background: #7c3aed22;
+      border: 1px dashed #7c3aed55;
+      border-radius: 8px;
+      color: #7c3aed;
+      font-size: 0.8rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    .wf-sidebar-new:hover {
+      background: #7c3aed33;
+      border-color: #7c3aed;
+    }
+
+    /* ── Create Workflow form ───────────────────────────── */
+    .wf-create-field {
+      margin-bottom: 1rem;
+    }
+    .wf-create-label {
+      display: block;
+      font-size: 0.75rem;
+      font-weight: 600;
+      color: #94a3b8;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 0.35rem;
+    }
+    .wf-create-hint {
+      font-size: 0.7rem;
+      color: #475569;
+      margin-top: 0.25rem;
+    }
+    .wf-create-var-row {
+      background: #0f172a;
+      border: 1px solid #1e293b;
+      border-radius: 6px;
+      padding: 0.6rem 0.75rem;
+      margin-bottom: 0.5rem;
+    }
+    .wf-create-step-row {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      background: #0f172a;
+      border: 1px solid #1e293b;
+      border-radius: 6px;
+      padding: 0.6rem 0.75rem;
+      margin-bottom: 0.5rem;
+    }
+
+    /* ── Recording UI ──────────────────────────────────── */
+    .wf-record-section { border-color: #ef444444; }
+    .wf-record-start-btn { background: #ef4444 !important; font-size: 0.85rem; padding: 0.5rem 1.25rem; }
+    .wf-record-start-btn:hover { background: #dc2626 !important; }
+    .wf-record-controls { display: flex; gap: 0.5rem; align-items: center; }
+    .wf-record-active-btn { font-size: 0.8rem; padding: 0.4rem 1rem; }
+    .wf-record-status { font-size: 0.8rem; color: #94a3b8; padding: 0.5rem 0; display: flex; align-items: center; gap: 0.5rem; }
+    .wf-rec-indicator { font-size: 1rem; color: #64748b; }
+    .wf-rec-active { color: #ef4444; animation: wf-rec-pulse 1s ease-in-out infinite; }
+    .wf-rec-paused { color: #f59e0b; }
+    @keyframes wf-rec-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+    .wf-record-steps { max-height: 300px; overflow-y: auto; margin-top: 0.5rem; }
+    .wf-record-step-item { display: flex; align-items: center; gap: 0.5rem; padding: 0.35rem 0.5rem; font-size: 0.75rem; border-bottom: 1px solid #1e293b; animation: wf-step-fadein 0.3s ease-out; }
+    @keyframes wf-step-fadein { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+    .wf-manual-section { border-color: #334155; }
+    .wf-manual-section > summary { list-style: none; }
+    .wf-manual-section > summary::-webkit-details-marker { display: none; }
+    .wf-manual-section > summary::before { content: '\25b6  '; font-size: 0.6rem; transition: transform 0.2s; display: inline-block; }
+    .wf-manual-section[open] > summary::before { transform: rotate(90deg); }
+
+    /* ── Run Progress UI ──────────────────────────────────── */
+    .wf-run-progress { background: #0f172a; border: 1px solid #1e293b; border-radius: 8px; padding: 1rem; }
+    .wf-run-progress-header { display: flex; align-items: center; gap: 0.5rem; font-size: 0.85rem; font-weight: 600; color: #e2e8f0; margin-bottom: 0.75rem; }
+    .wf-run-progress-bar-container { height: 6px; background: #1e293b; border-radius: 3px; overflow: hidden; margin-bottom: 0.75rem; }
+    .wf-run-progress-bar { height: 100%; background: #7c3aed; border-radius: 3px; transition: width 0.4s ease-out; }
+    .wf-run-step-feed { max-height: 350px; overflow-y: auto; }
+    .wf-run-step-item { display: flex; align-items: center; gap: 0.5rem; padding: 0.4rem 0.5rem; font-size: 0.75rem; border-bottom: 1px solid #1e293b; animation: wf-step-fadein 0.3s ease-out; }
+    .wf-run-step-ok { color: #94a3b8; }
+    .wf-run-step-fail { color: #fca5a5; }
+    .wf-run-step-status { margin-left: auto; font-size: 0.7rem; }
+    .wf-run-step-error { font-size: 0.65rem; color: #ef4444; margin-left: 0.5rem; max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+    /* ── Debug Mode UI ───────────────────────────────────── */
+    .wf-debug-container { background: #0f172a; border: 1px solid #1e293b; border-radius: 8px; padding: 1rem; }
+    .wf-debug-header { display: flex; align-items: center; gap: 0.5rem; font-size: 0.85rem; font-weight: 600; color: #e2e8f0; margin-bottom: 0.75rem; }
+    .wf-debug-controls { display: flex; gap: 0.5rem; margin-bottom: 0.75rem; }
+    .wf-debug-controls button { padding: 0.4rem 0.8rem; border: none; border-radius: 6px; font-size: 0.75rem; font-weight: 600; cursor: pointer; transition: background 0.15s, opacity 0.15s; }
+    .wf-debug-controls button:hover { opacity: 0.85; }
+    .wf-debug-controls button:disabled { opacity: 0.4; cursor: not-allowed; }
+    .wf-debug-step-list { max-height: 300px; overflow-y: auto; margin-bottom: 0.75rem; border: 1px solid #1e293b; border-radius: 6px; }
+    .wf-debug-step { display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem 0.6rem; font-size: 0.75rem; border-bottom: 1px solid #1e293b; color: #94a3b8; transition: background 0.2s, border-color 0.2s; }
+    .wf-debug-step:last-child { border-bottom: none; }
+    .wf-debug-step-current { background: rgba(59, 130, 246, 0.1); border-left: 3px solid #3b82f6; color: #e2e8f0; }
+    .wf-debug-step-completed { color: #86efac; }
+    .wf-debug-step-completed .wf-debug-step-icon::after { content: '✓'; color: #22c55e; }
+    .wf-debug-step-failed { color: #fca5a5; }
+    .wf-debug-step-failed .wf-debug-step-icon::after { content: '✗'; color: #ef4444; }
+    .wf-debug-step-pending { color: #64748b; }
+    .wf-debug-step-num { min-width: 22px; height: 22px; border-radius: 50%; background: #1e293b; display: flex; align-items: center; justify-content: center; font-size: 0.65rem; font-weight: 700; color: #94a3b8; flex-shrink: 0; }
+    .wf-debug-step-current .wf-debug-step-num { background: #3b82f6; color: #fff; }
+    .wf-debug-step-completed .wf-debug-step-num { background: #166534; color: #86efac; }
+    .wf-debug-step-failed .wf-debug-step-num { background: #7f1d1d; color: #fca5a5; }
+    .wf-debug-step-icon { width: 16px; text-align: center; flex-shrink: 0; }
+    .wf-debug-step-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .wf-debug-step-status { margin-left: auto; font-size: 0.65rem; font-style: italic; }
+    .wf-debug-coord { background: #020617; border: 1px solid #1e293b; border-radius: 6px; padding: 0.75rem; font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace; font-size: 0.7rem; }
+    .wf-debug-coord-title { font-size: 0.75rem; font-weight: 600; color: #e2e8f0; margin-bottom: 0.5rem; }
+    .wf-debug-coord-row { display: flex; justify-content: space-between; padding: 0.2rem 0; border-bottom: 1px solid #0f172a; }
+    .wf-debug-coord-row:last-child { border-bottom: none; }
+    .wf-debug-coord-label { color: #64748b; }
+    .wf-debug-coord-value { color: #7dd3fc; font-weight: 500; }
+    .wf-debug-btn { background: #3b82f6 !important; }
+    .wf-debug-btn:hover { background: #2563eb !important; }
   </style>
 </head>
 <body>
   <div class="sidebar">
     <div class="sidebar-header">
-      <h1>Woodbury Config</h1>
-      <p>Extension API Key Management</p>
+      <h1>Woodbury</h1>
+      <p>Dashboard</p>
     </div>
-    <div class="ext-list" id="ext-list">
+    <div class="nav-tabs">
+      <button class="nav-tab active" data-tab="config">Config</button>
+      <button class="nav-tab" data-tab="workflows">Workflows</button>
+    </div>
+    <!-- Config sidebar content -->
+    <div class="ext-list" id="ext-list" data-panel="config">
+      <div class="loading"><div class="spinner"></div> Loading...</div>
+    </div>
+    <!-- Workflows sidebar content -->
+    <div class="ext-list" id="wf-list" data-panel="workflows" style="display:none;">
       <div class="loading"><div class="spinner"></div> Loading...</div>
     </div>
   </div>
@@ -602,5 +1285,6 @@
   </div>
 
   <script src="app.js"></script>
+  <script src="workflows.js"></script>
 </body>
 </html>

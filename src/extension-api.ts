@@ -45,6 +45,14 @@ export interface ExtensionContext {
    * Declare expected keys in the "woodbury.env" field of package.json.
    */
   readonly env: Readonly<Record<string, string>>;
+
+  /**
+   * Register a periodic background task. The handler is called on an interval.
+   * Return a string to inject it as an agent message (the agent will process it
+   * as if the user typed it). Return null/undefined to skip (nothing to do).
+   * Tasks only run while the REPL is active and idle (not during agent execution).
+   */
+  registerBackgroundTask(handler: BackgroundTaskHandler, options: BackgroundTaskOptions): void;
 }
 
 /**
@@ -97,6 +105,25 @@ export interface ExtensionLogger {
   error(message: string): void;
   debug(message: string): void;
 }
+
+/**
+ * Options for registering a background task.
+ */
+export interface BackgroundTaskOptions {
+  /** Interval in milliseconds between invocations (minimum 10000) */
+  intervalMs: number;
+  /** Human-readable label shown in logs and /tasks command */
+  label?: string;
+  /** If true, run immediately on start in addition to on interval. Default: false */
+  runImmediately?: boolean;
+}
+
+/**
+ * Handler for a background task. Called periodically.
+ * Return a string to inject it as an agent message, or null/undefined to skip.
+ */
+export type BackgroundTaskHandler =
+  () => Promise<string | null | undefined> | string | null | undefined;
 
 /**
  * The shape every extension module must export.

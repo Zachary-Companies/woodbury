@@ -17,6 +17,8 @@ import type {
   WebUIOptions,
   WebUIHandle,
   WoodburyExtension,
+  BackgroundTaskHandler,
+  BackgroundTaskOptions,
 } from './extension-api.js';
 import {
   discoverExtensions,
@@ -27,6 +29,14 @@ import {
 import { bridgeServer } from './bridge-server.js';
 import { debugLog } from './debug-log.js';
 
+/** Internal record for a registered background task */
+interface BackgroundTaskRecord {
+  handler: BackgroundTaskHandler;
+  options: BackgroundTaskOptions;
+  extensionName: string;
+  timer: ReturnType<typeof setInterval> | null;
+}
+
 /** Record of a loaded and activated extension */
 export interface ExtensionRecord {
   manifest: ExtensionManifest;
@@ -35,6 +45,7 @@ export interface ExtensionRecord {
   commands: SlashCommand[];
   promptSections: string[];
   webServers: WebUIHandle[];
+  backgroundTasks: BackgroundTaskRecord[];
 }
 
 /** Summary of an extension for display */
@@ -47,6 +58,14 @@ export interface ExtensionSummary {
   commands: number;
   hasPrompt: boolean;
   webUIs: string[];
+}
+
+/** Summary of a background task for display */
+export interface BackgroundTaskSummary {
+  extensionName: string;
+  label: string;
+  intervalMs: number;
+  running: boolean;
 }
 
 const MIME_TYPES: Record<string, string> = {
@@ -70,6 +89,8 @@ export class ExtensionManager {
   private extensions: Map<string, ExtensionRecord> = new Map();
   private workingDirectory: string;
   private verbose: boolean;
+  private onBackgroundMessage: ((message: string, extensionName: string) => void) | null = null;
+  private backgroundTasksRunning: boolean = false;
 
   constructor(workingDirectory: string, verbose: boolean = false) {
     this.workingDirectory = workingDirectory;
@@ -161,6 +182,7 @@ export class ExtensionManager {
       commands: [],
       promptSections: [],
       webServers: [],
+      backgroundTasks: [],
     };
 
     // Build the ExtensionContext for this extension
@@ -213,6 +235,18 @@ export class ExtensionManager {
         },
       },
 
+      registerBackgroundTask: (handler: BackgroundTaskHandler, options: BackgroundTaskOptions) => {
+        const minInterval = 10000;
+        const intervalMs = Math.max(options.intervalMs, minInterval);
+        record.backgroundTasks.push({
+          handler,
+          options: { ...options, intervalMs },
+          extensionName: manifest.name,
+          timer: null,
+        });
+        debugLog.info('ext-mgr', `Background task registered: "${options.label || 'unnamed'}" (${manifest.name}, ${intervalMs}ms)`);
+      },
+
       env: frozenEnv,
     };
 
@@ -224,6 +258,7 @@ export class ExtensionManager {
       commands: record.commands.map(c => c.name),
       promptSections: record.promptSections.length,
       webServers: record.webServers.length,
+      backgroundTasks: record.backgroundTasks.length,
     });
   }
 
@@ -260,6 +295,7 @@ export class ExtensionManager {
    * Shut down all extensions.
    */
   async deactivateAll(): Promise<void> {
+    this.stopBackgroundTasks();
     const names = Array.from(this.extensions.keys());
     for (const name of names) {
       await this.deactivate(name);
@@ -305,6 +341,90 @@ export class ExtensionManager {
       hasPrompt: r.promptSections.length > 0,
       webUIs: r.webServers.map((s) => s.url),
     }));
+  }
+
+  /**
+   * Set the callback invoked when a background task produces a message.
+   * The REPL wires this to inject the message into the agent loop.
+   */
+  setOnBackgroundMessage(callback: ((message: string, extensionName: string) => void) | null): void {
+    this.onBackgroundMessage = callback;
+  }
+
+  /**
+   * Start all registered background tasks.
+   * Each task runs on a setInterval timer. When the handler returns a string,
+   * the onBackgroundMessage callback is invoked.
+   */
+  startBackgroundTasks(): void {
+    if (this.backgroundTasksRunning) return;
+    this.backgroundTasksRunning = true;
+
+    for (const record of this.extensions.values()) {
+      for (const task of record.backgroundTasks) {
+        const runTask = async () => {
+          try {
+            const result = await task.handler();
+            if (typeof result === 'string' && result.length > 0 && this.onBackgroundMessage) {
+              this.onBackgroundMessage(result, task.extensionName);
+            }
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            debugLog.error('ext-mgr', `Background task error (${task.options.label || task.extensionName})`, { error: msg });
+          }
+        };
+
+        // Run immediately if requested
+        if (task.options.runImmediately) {
+          runTask();
+        }
+
+        task.timer = setInterval(runTask, task.options.intervalMs);
+        debugLog.info('ext-mgr', `Background task started: "${task.options.label || 'unnamed'}" (${task.extensionName})`);
+      }
+    }
+  }
+
+  /**
+   * Stop all background task timers.
+   */
+  stopBackgroundTasks(): void {
+    if (!this.backgroundTasksRunning) return;
+    this.backgroundTasksRunning = false;
+
+    for (const record of this.extensions.values()) {
+      for (const task of record.backgroundTasks) {
+        if (task.timer) {
+          clearInterval(task.timer);
+          task.timer = null;
+        }
+      }
+    }
+    debugLog.info('ext-mgr', 'All background tasks stopped');
+  }
+
+  /** Check if any background tasks are registered */
+  hasBackgroundTasks(): boolean {
+    for (const record of this.extensions.values()) {
+      if (record.backgroundTasks.length > 0) return true;
+    }
+    return false;
+  }
+
+  /** Get summary of all registered background tasks */
+  getBackgroundTaskSummaries(): BackgroundTaskSummary[] {
+    const summaries: BackgroundTaskSummary[] = [];
+    for (const record of this.extensions.values()) {
+      for (const task of record.backgroundTasks) {
+        summaries.push({
+          extensionName: task.extensionName,
+          label: task.options.label || 'unnamed',
+          intervalMs: task.options.intervalMs,
+          running: task.timer !== null,
+        });
+      }
+    }
+    return summaries;
   }
 
   /** Check if any extensions are loaded */

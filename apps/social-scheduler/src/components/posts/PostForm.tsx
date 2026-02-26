@@ -2,7 +2,7 @@
 
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
-import type { Post, ConnectorManifest } from '@/types';
+import type { Post, ConnectorManifest, ImageAttachment } from '@/types';
 import { getPlatformIcon } from '@/lib/utils';
 
 interface PostFormProps {
@@ -23,8 +23,15 @@ export default function PostForm({ post, connectors }: PostFormProps) {
   const [tags, setTags] = useState(post?.tags.join(', ') || '');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+
+  // Text generation
   const [generating, setGenerating] = useState(false);
   const [genPrompt, setGenPrompt] = useState('');
+
+  // Image generation
+  const [images, setImages] = useState<ImageAttachment[]>(post?.content.images || []);
+  const [imagePrompt, setImagePrompt] = useState('');
+  const [generatingImage, setGeneratingImage] = useState(false);
 
   const togglePlatform = (platform: string) => {
     setPlatforms(prev =>
@@ -70,7 +77,7 @@ export default function PostForm({ post, connectors }: PostFormProps) {
       const method = post ? 'PUT' : 'POST';
 
       if (post) {
-        body.content = { text: body.text };
+        body.content = { text: body.text, images };
         delete body.text;
       }
 
@@ -126,6 +133,79 @@ export default function PostForm({ post, connectors }: PostFormProps) {
     }
   };
 
+  const handleGenerateImage = async () => {
+    if (!imagePrompt.trim()) return;
+
+    // We need a post ID to save the image. If editing, use the post ID.
+    // If creating new, save as draft first to get an ID.
+    let postId = post?.id;
+
+    if (!postId) {
+      if (!text.trim() || platforms.length === 0) {
+        setError('Add text and select a platform before generating an image');
+        return;
+      }
+
+      // Save as draft first
+      try {
+        const res = await fetch('/api/posts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            text: text.trim(),
+            platforms,
+            tags: tags.split(',').map(t => t.trim()).filter(Boolean),
+            timezone,
+          }),
+        });
+        if (!res.ok) throw new Error('Failed to save draft');
+        const saved = await res.json();
+        postId = saved.id;
+        // Update URL to edit mode without full reload
+        window.history.replaceState(null, '', `/posts/${postId}`);
+      } catch (err: any) {
+        setError(err.message);
+        return;
+      }
+    }
+
+    setGeneratingImage(true);
+    setError('');
+
+    try {
+      const res = await fetch('/api/generate/image', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: imagePrompt, postId }),
+      });
+
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || 'Image generation failed');
+      }
+
+      const data = await res.json();
+      setImages(prev => [...prev, {
+        id: data.id,
+        filename: data.filename,
+        mimeType: data.mimeType,
+        prompt: imagePrompt,
+      }]);
+      setImagePrompt('');
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setGeneratingImage(false);
+    }
+  };
+
+  const removeImage = (imageId: string) => {
+    setImages(prev => prev.filter(img => img.id !== imageId));
+  };
+
+  // Determine the post ID for image URLs (could be from prop or from a newly created draft)
+  const currentPostId = post?.id || (images.length > 0 ? images[0]?.id?.split('-').slice(0, -1).join('-') : null);
+
   return (
     <div className="max-w-3xl space-y-6">
       {error && (
@@ -175,10 +255,10 @@ export default function PostForm({ post, connectors }: PostFormProps) {
         />
       </section>
 
-      {/* AI Generation */}
+      {/* AI Text Generation */}
       <section className="bg-surface border border-border rounded-lg p-4">
         <label className="block text-sm font-medium text-muted mb-2">
-          🤖 AI Generate
+          🤖 AI Generate Text
         </label>
         <div className="flex gap-2">
           <input
@@ -192,11 +272,76 @@ export default function PostForm({ post, connectors }: PostFormProps) {
           <button
             onClick={handleGenerate}
             disabled={generating || !genPrompt.trim()}
-            className="bg-secondary hover:bg-secondary/80 disabled:opacity-50 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors"
+            className="bg-secondary hover:bg-secondary/80 disabled:opacity-50 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors whitespace-nowrap"
           >
             {generating ? '⏳' : '✨'} Generate
           </button>
         </div>
+      </section>
+
+      {/* Image Generation */}
+      <section className="bg-surface border border-border rounded-lg p-4">
+        <label className="block text-sm font-medium text-muted mb-2">
+          🖼️ AI Generate Image
+        </label>
+        <div className="flex gap-2 mb-3">
+          <input
+            type="text"
+            value={imagePrompt}
+            onChange={e => setImagePrompt(e.target.value)}
+            placeholder="Describe the image you want (e.g., 'A cozy workspace flat-lay with coffee and laptop')..."
+            className="flex-1 bg-background border border-border rounded-lg px-3 py-2 text-sm text-foreground placeholder-muted/50 focus:border-primary focus:outline-none"
+            onKeyDown={e => e.key === 'Enter' && handleGenerateImage()}
+          />
+          <button
+            onClick={handleGenerateImage}
+            disabled={generatingImage || !imagePrompt.trim()}
+            className="bg-secondary hover:bg-secondary/80 disabled:opacity-50 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors whitespace-nowrap"
+          >
+            {generatingImage ? '⏳ Generating...' : '🎨 Generate'}
+          </button>
+        </div>
+
+        {/* Image previews */}
+        {images.length > 0 && (
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+            {images.map(img => {
+              // Build the URL — we know the post ID from either the prop or the image's storage
+              const imgPostId = post?.id;
+              const imgUrl = imgPostId
+                ? `/api/media/${imgPostId}/${img.filename}`
+                : undefined;
+
+              return (
+                <div key={img.id} className="relative group rounded-lg overflow-hidden border border-border bg-background">
+                  {imgUrl ? (
+                    <img
+                      src={imgUrl}
+                      alt={img.prompt || 'Post image'}
+                      className="w-full aspect-[4/5] object-cover"
+                    />
+                  ) : (
+                    <div className="w-full aspect-[4/5] flex items-center justify-center text-muted text-xs">
+                      {img.filename}
+                    </div>
+                  )}
+                  <button
+                    onClick={() => removeImage(img.id)}
+                    className="absolute top-1 right-1 bg-black/60 hover:bg-danger text-white rounded-full w-6 h-6 flex items-center justify-center text-xs opacity-0 group-hover:opacity-100 transition-opacity"
+                    title="Remove image"
+                  >
+                    ✕
+                  </button>
+                  {img.prompt && (
+                    <div className="absolute bottom-0 left-0 right-0 bg-black/60 text-white text-xs p-1.5 line-clamp-2">
+                      {img.prompt}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
       </section>
 
       {/* Schedule */}

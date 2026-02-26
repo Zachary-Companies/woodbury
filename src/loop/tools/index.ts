@@ -71,6 +71,9 @@ export { ffFileDialogDefinition, ffFileDialogHandler } from './ff-file-dialog.js
 // Browser Bridge tool (Chrome extension via WebSocket)
 export { browserQueryDefinition, browserQueryHandler } from './browser-query.js';
 
+// Workflow automation tool
+export { workflowPlayDefinition, workflowPlayHandler } from './workflow-play.js';
+
 // AI Image Generation tools
 export { nanobananaTool } from './nanobanana.js';
 
@@ -107,6 +110,7 @@ import { ffMouseDefinition, ffMouseHandler } from './ff-mouse.js';
 import { ffKeyboardDefinition, ffKeyboardHandler } from './ff-keyboard.js';
 import { ffFileDialogDefinition, ffFileDialogHandler } from './ff-file-dialog.js';
 import { browserQueryDefinition, browserQueryHandler } from './browser-query.js';
+import { workflowPlayDefinition, workflowPlayHandler } from './workflow-play.js';
 import { nanobananaTool } from './nanobanana.js';
 
 // Tool definition type
@@ -156,6 +160,8 @@ export const allTools = [
   { definition: ffFileDialogDefinition, handler: ffFileDialogHandler },
   // Browser Bridge (Chrome extension via WebSocket)
   { definition: browserQueryDefinition, handler: browserQueryHandler },
+  // Workflow automation
+  { definition: workflowPlayDefinition, handler: workflowPlayHandler },
   // AI Image Generation
   { definition: nanobananaTool, handler: nanobananaTool.execute },
 ];
