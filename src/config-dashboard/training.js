@@ -257,16 +257,16 @@ function renderTrainingConfig(summary) {
 
   html += '<label>Loss Function' +
     '<select id="train-loss">' +
-    '<option value="arcface" selected>ArcFace (angular margin)</option>' +
-    '<option value="ntxent">NT-Xent (contrastive)</option>' +
+    '<option value="ntxent" selected>NT-Xent (contrastive)</option>' +
+    '<option value="arcface">ArcFace (angular margin)</option>' +
     '<option value="triplet">Triplet</option>' +
     '<option value="contrastive">Contrastive</option>' +
     '</select></label>';
 
   html += '<label>Embedding Dim' +
     '<select id="train-embed-dim">' +
-    '<option value="64">64</option>' +
-    '<option value="128" selected>128</option>' +
+    '<option value="64" selected>64</option>' +
+    '<option value="128">128</option>' +
     '<option value="256">256</option>' +
     '</select></label>';
 
@@ -359,7 +359,7 @@ function renderTrainingConfig(summary) {
           epochs: parseInt(document.querySelector('#train-epochs').value) || 50,
           lr: parseFloat(document.querySelector('#train-lr').value) || 3e-4,
           lossType: document.querySelector('#train-loss').value,
-          embedDim: parseInt(document.querySelector('#train-embed-dim').value) || 128,
+          embedDim: parseInt(document.querySelector('#train-embed-dim').value) || 64,
           exportOnnx: document.querySelector('#train-export-onnx').value === 'true',
           workerId: targetValue !== 'local' ? targetValue : undefined,
         };
