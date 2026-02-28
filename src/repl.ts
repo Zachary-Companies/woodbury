@@ -375,7 +375,8 @@ export class Repl {
         stop: () => this.agent!.stop()
       } : undefined,
       print: (msg: string) => this.print(msg),
-      extensionManager: this.extensionManager
+      extensionManager: this.extensionManager,
+      dashboardHandle: this.options.dashboardHandle
     };
 
     try {

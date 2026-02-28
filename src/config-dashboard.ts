@@ -14,6 +14,7 @@
 
 import {
   createServer,
+  request as httpRequest,
   type Server,
   type IncomingMessage,
   type ServerResponse,
@@ -31,12 +32,17 @@ import type { ExtensionManager } from './extension-manager.js';
 import { debugLog } from './debug-log.js';
 import {
   discoverWorkflows,
+  discoverCompositions,
   loadWorkflow,
   type DiscoveredWorkflow,
 } from './workflow/loader.js';
+import type { WorkflowDocument, Expectation, RunRecord, NodeRunResult, PendingApproval, ApprovalGateConfig, BatchConfig, VariablePool, Schedule } from './workflow/types.js';
+import { checkExpectations } from './workflow/executor.js';
 import { WorkflowRecorder } from './workflow/recorder.js';
 import { bridgeServer, ensureBridgeServer } from './bridge-server.js';
-import { appendFileSync, mkdirSync } from 'node:fs';
+import { startRemoteRelay, type RelayHandle } from './remote-relay.js';
+import { appendFileSync, mkdirSync, createReadStream, createWriteStream } from 'node:fs';
+import { spawn, type ChildProcess } from 'node:child_process';
 
 // Shared recording log
 const _REC_LOG_DIR = join(homedir(), '.woodbury', 'logs');
@@ -54,12 +60,47 @@ function dashRecLog(level: string, msg: string, data?: any): void {
 }
 
 // ────────────────────────────────────────────────────────────────
+//  Output variable inference
+// ────────────────────────────────────────────────────────────────
+
+/**
+ * Scan workflow steps to find variables produced during execution.
+ * Looks for set_variable, capture_download, and other output-producing step types.
+ */
+function inferOutputVariables(wf: WorkflowDocument): string[] {
+  const outputs = new Set<string>();
+
+  function scan(steps: any[]) {
+    for (const s of steps) {
+      if (s.type === 'capture_download' && s.outputVariable) {
+        outputs.add(s.outputVariable);
+      }
+      if (s.type === 'set_variable' && s.variable) {
+        outputs.add(s.variable);
+      }
+      // Recurse into nested step arrays
+      for (const k of ['steps', 'trySteps', 'catchSteps', 'thenSteps', 'elseSteps']) {
+        if (Array.isArray((s as any)[k])) scan((s as any)[k]);
+      }
+    }
+  }
+
+  scan(wf.steps || []);
+  return Array.from(outputs);
+}
+
+// ────────────────────────────────────────────────────────────────
 //  Public types
 // ────────────────────────────────────────────────────────────────
 
 export interface DashboardHandle {
   url: string;
   port: number;
+  connectionUrl?: string;
+  /** Pair with a remote user via their 4-digit code */
+  pair?: (code: string) => Promise<boolean>;
+  /** Whether a remote user is already paired */
+  isPaired?: () => boolean;
   close(): Promise<void>;
 }
 
@@ -214,6 +255,7 @@ export async function startDashboard(
 
   // Workflow execution state — shared across requests
   let activeRun: {
+    runId?: string;
     workflowId: string;
     workflowName: string;
     abort: AbortController;
@@ -229,6 +271,37 @@ export async function startDashboard(
     outputVariables?: Record<string, unknown>;
   } | null = null;
 
+  // Composition execution state
+  let activeCompRun: {
+    runId?: string;
+    compositionId: string;
+    compositionName: string;
+    abort: AbortController;
+    startedAt: number;
+    nodesTotal: number;
+    nodesCompleted: number;
+    currentNodeId: string | null;
+    executionOrder: string[];
+    nodeStates: Record<string, {
+      status: 'pending' | 'running' | 'retrying' | 'completed' | 'failed' | 'skipped';
+      workflowId: string;
+      workflowName: string;
+      stepsTotal: number;
+      stepsCompleted: number;
+      currentStep: string;
+      error?: string;
+      outputVariables?: Record<string, unknown>;
+      durationMs?: number;
+      retryAttempt?: number;
+      retryMax?: number;
+      expectationResults?: Array<{ description: string; passed: boolean; detail: string }>;
+    }>;
+    done: boolean;
+    success: boolean;
+    error?: string;
+    durationMs?: number;
+  } | null = null;
+
   // Debug mode state (visual step-through)
   let debugSession: {
     workflowId: string;
@@ -240,6 +313,660 @@ export async function startDashboard(
     failedIndices: number[];
     stepResults: any[];
   } | null = null;
+
+  // Batch run state
+  let activeBatchRun: {
+    batchId: string;
+    compositionId: string;
+    compositionName: string;
+    abort: AbortController;
+    startedAt: number;
+    totalIterations: number;
+    completedIterations: number;
+    failedIterations: number;
+    currentIteration: number;
+    iterationVariables: Record<string, unknown>[];
+    runIds: string[];
+    delayBetweenMs: number;
+    done: boolean;
+    error?: string;
+    durationMs?: number;
+  } | null = null;
+
+  // Training state — subprocess management
+  let activeTraining: {
+    process: ChildProcess | null;
+    runId?: string;
+    backbone: string;
+    epochs: number;
+    currentEpoch: number;
+    totalEpochs: number;
+    loss: number;
+    lr: number;
+    eta_s: number;
+    phase: 'preparing' | 'training' | 'exporting' | 'complete' | 'error';
+    metrics: Record<string, number>;
+    bestAuc: number;
+    logs: string[];
+    done: boolean;
+    success: boolean;
+    error?: string;
+    outputDir: string;
+    startedAt: number;
+    durationMs?: number;
+    trainSamples?: number;
+    valSamples?: number;
+    groups?: number;
+    device?: string;
+    embedDim?: number;
+    lossType?: string;
+  } | null = null;
+
+  const TRAINING_DATA_DIR = join(homedir(), '.woodbury', 'data', 'training-crops');
+  const MODELS_DIR = join(homedir(), '.woodbury', 'data', 'models');
+  const WORKERS_FILE = join(homedir(), '.woodbury', 'data', 'workers.json');
+
+  // Worker management
+  interface WorkerConfig {
+    id: string;
+    name: string;
+    host: string;
+    port: number;
+    addedAt: string;
+  }
+
+  async function loadWorkers(): Promise<WorkerConfig[]> {
+    try {
+      const content = await readFile(WORKERS_FILE, 'utf-8');
+      return JSON.parse(content);
+    } catch { return []; }
+  }
+
+  async function saveWorkers(workers: WorkerConfig[]) {
+    await mkdir(join(homedir(), '.woodbury', 'data'), { recursive: true });
+    await writeFile(WORKERS_FILE, JSON.stringify(workers, null, 2));
+  }
+
+  function probeWorker(host: string, port: number, timeoutMs = 3000): Promise<any> {
+    return new Promise((resolve, reject) => {
+      const req = httpRequest({ hostname: host, port, path: '/health', method: 'GET', timeout: timeoutMs }, (res) => {
+        let data = '';
+        res.on('data', (chunk: string) => data += chunk);
+        res.on('end', () => {
+          try { resolve(JSON.parse(data)); } catch { reject(new Error('Invalid JSON')); }
+        });
+      });
+      req.on('error', reject);
+      req.on('timeout', () => { req.destroy(); reject(new Error('Timeout')); });
+      req.end();
+    });
+  }
+
+  // Remote training state (mirrors activeTraining shape + worker info)
+  let remoteTraining: {
+    worker: WorkerConfig;
+    jobId: string;
+    pollTimer: ReturnType<typeof setInterval> | null;
+    eventIndex: number;
+    backbone: string;
+    epochs: number;
+    currentEpoch: number;
+    totalEpochs: number;
+    loss: number;
+    lr: number;
+    eta_s: number;
+    phase: string;
+    metrics: Record<string, number>;
+    bestAuc: number;
+    logs: string[];
+    done: boolean;
+    success: boolean;
+    error?: string;
+    outputDir: string;
+    startedAt: number;
+    durationMs?: number;
+    trainSamples?: number;
+    valSamples?: number;
+    groups?: number;
+    device?: string;
+    embedDim?: number;
+    lossType?: string;
+  } | null = null;
+
+  function processRemoteEvent(evt: any) {
+    if (!remoteTraining) return;
+    switch (evt.event) {
+      case 'init':
+        remoteTraining.trainSamples = evt.train_samples;
+        remoteTraining.valSamples = evt.val_samples;
+        remoteTraining.groups = evt.groups;
+        remoteTraining.device = evt.device;
+        remoteTraining.totalEpochs = evt.epochs;
+        break;
+      case 'epoch':
+        remoteTraining.currentEpoch = evt.epoch;
+        remoteTraining.loss = evt.loss;
+        remoteTraining.lr = evt.lr;
+        remoteTraining.eta_s = evt.eta_s || 0;
+        break;
+      case 'validation':
+        remoteTraining.metrics = { ...evt };
+        delete (remoteTraining.metrics as any).event;
+        delete (remoteTraining.metrics as any).epoch;
+        if (evt.best_auc !== undefined) remoteTraining.bestAuc = evt.best_auc;
+        break;
+      case 'export':
+        remoteTraining.phase = evt.phase === 'complete' ? 'complete' : 'exporting';
+        break;
+      case 'complete':
+        remoteTraining.bestAuc = evt.best_auc || remoteTraining.bestAuc;
+        break;
+      case 'error':
+        remoteTraining.error = evt.message;
+        break;
+    }
+  }
+
+  function startRemotePolling() {
+    if (!remoteTraining) return;
+    remoteTraining.pollTimer = setInterval(async () => {
+      if (!remoteTraining) return;
+      try {
+        const data: any = await new Promise((resolve, reject) => {
+          const req = httpRequest({
+            hostname: remoteTraining!.worker.host,
+            port: remoteTraining!.worker.port,
+            path: `/jobs/current/events?since=${remoteTraining!.eventIndex}`,
+            method: 'GET',
+            timeout: 5000,
+          }, (res) => {
+            let body = '';
+            res.on('data', (chunk: string) => body += chunk);
+            res.on('end', () => { try { resolve(JSON.parse(body)); } catch { reject(new Error('bad json')); } });
+          });
+          req.on('error', reject);
+          req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
+          req.end();
+        });
+        // Process new events
+        for (const evt of (data.events || [])) {
+          processRemoteEvent(evt);
+        }
+        remoteTraining.eventIndex = data.total || remoteTraining.eventIndex;
+
+        // Also fetch full status for phase/done/logs
+        const status: any = await new Promise((resolve, reject) => {
+          const req = httpRequest({
+            hostname: remoteTraining!.worker.host,
+            port: remoteTraining!.worker.port,
+            path: '/jobs/current',
+            method: 'GET',
+            timeout: 5000,
+          }, (res) => {
+            let body = '';
+            res.on('data', (chunk: string) => body += chunk);
+            res.on('end', () => { try { resolve(JSON.parse(body)); } catch { reject(new Error('bad json')); } });
+          });
+          req.on('error', reject);
+          req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
+          req.end();
+        });
+
+        remoteTraining.phase = status.phase || remoteTraining.phase;
+        remoteTraining.logs = status.logs || remoteTraining.logs;
+
+        if (status.done) {
+          remoteTraining.done = true;
+          remoteTraining.success = status.success;
+          remoteTraining.error = status.error;
+          remoteTraining.durationMs = Date.now() - remoteTraining.startedAt;
+          if (remoteTraining.pollTimer) clearInterval(remoteTraining.pollTimer);
+          remoteTraining.pollTimer = null;
+
+          // Pull artifacts if successful
+          if (status.success && status.has_artifacts) {
+            try {
+              await pullRemoteArtifacts();
+            } catch (e) {
+              remoteTraining.logs.push(`Warning: Failed to pull artifacts: ${e}`);
+            }
+          }
+
+          // Save run record
+          try {
+            const runId = generateRunId();
+            await createRunRecord({
+              id: runId,
+              type: 'training',
+              name: `Train ${remoteTraining.backbone} (${remoteTraining.epochs} epochs) [${remoteTraining.worker.name}]`,
+              status: status.success ? 'completed' : 'failed',
+              startedAt: new Date(remoteTraining.startedAt).toISOString(),
+              completedAt: new Date().toISOString(),
+              durationMs: remoteTraining.durationMs,
+              stepsCompleted: remoteTraining.currentEpoch,
+              stepsTotal: remoteTraining.totalEpochs,
+              error: remoteTraining.error,
+              metadata: {
+                backbone: remoteTraining.backbone,
+                epochs: remoteTraining.epochs,
+                bestAuc: remoteTraining.bestAuc,
+                outputDir: remoteTraining.outputDir,
+                lossType: remoteTraining.lossType,
+                embedDim: remoteTraining.embedDim,
+                worker: remoteTraining.worker.name,
+              },
+            } as any);
+          } catch {}
+        }
+      } catch {
+        // Worker unreachable — keep trying for a while
+        if (remoteTraining) {
+          remoteTraining.logs.push('Warning: Worker unreachable, retrying...');
+        }
+      }
+    }, 1500);
+  }
+
+  async function pullRemoteArtifacts() {
+    if (!remoteTraining) return;
+    const runTs = Date.now();
+    const localDir = join(MODELS_DIR, `run-${runTs}`);
+    await mkdir(localDir, { recursive: true });
+    remoteTraining.outputDir = localDir;
+
+    return new Promise<void>((resolve, reject) => {
+      const req = httpRequest({
+        hostname: remoteTraining!.worker.host,
+        port: remoteTraining!.worker.port,
+        path: '/jobs/current/artifacts',
+        method: 'GET',
+        timeout: 60000,
+      }, (res) => {
+        if (res.statusCode !== 200) {
+          reject(new Error(`Artifact download failed: ${res.statusCode}`));
+          return;
+        }
+        const tarPath = join(localDir, 'artifacts.tar.gz');
+        const ws = createWriteStream(tarPath);
+        res.pipe(ws);
+        ws.on('finish', () => {
+          // Extract tar.gz
+          const tar = spawn('tar', ['xzf', tarPath, '-C', localDir]);
+          tar.on('close', (code) => {
+            // Clean up tar file
+            unlink(tarPath).catch(() => {});
+            if (code === 0) {
+              remoteTraining!.logs.push(`Artifacts saved to ${localDir}`);
+              resolve();
+            } else {
+              reject(new Error(`tar extract failed with code ${code}`));
+            }
+          });
+        });
+        ws.on('error', reject);
+      });
+      req.on('error', reject);
+      req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
+      req.end();
+    });
+  }
+
+  // ── Run History Storage ─────────────────────────────
+  const RUNS_DIR = join(homedir(), '.woodbury', 'data');
+  const RUNS_FILE = join(RUNS_DIR, 'runs.json');
+  const MAX_RUNS = 500;
+  let runsCache: RunRecord[] | null = null;
+
+  async function loadRuns(): Promise<RunRecord[]> {
+    if (runsCache !== null) return runsCache;
+    try {
+      await mkdir(RUNS_DIR, { recursive: true });
+      const content = await readFile(RUNS_FILE, 'utf-8');
+      runsCache = JSON.parse(content) as RunRecord[];
+    } catch {
+      runsCache = [];
+    }
+    return runsCache;
+  }
+
+  async function saveRuns(runs: RunRecord[]): Promise<void> {
+    if (runs.length > MAX_RUNS) {
+      runs = runs.slice(runs.length - MAX_RUNS);
+    }
+    runsCache = runs;
+    await mkdir(RUNS_DIR, { recursive: true });
+    await writeFile(RUNS_FILE, JSON.stringify(runs, null, 2));
+  }
+
+  function generateRunId(): string {
+    return 'run-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7);
+  }
+
+  async function createRunRecord(record: RunRecord): Promise<void> {
+    const runs = await loadRuns();
+    runs.push(record);
+    await saveRuns(runs);
+  }
+
+  async function updateRunRecord(id: string, updates: Partial<RunRecord>): Promise<void> {
+    const runs = await loadRuns();
+    const idx = runs.findIndex(r => r.id === id);
+    if (idx >= 0) {
+      Object.assign(runs[idx], updates);
+      await saveRuns(runs);
+    }
+  }
+
+  async function deleteRunRecord(id: string): Promise<boolean> {
+    const runs = await loadRuns();
+    const idx = runs.findIndex(r => r.id === id);
+    if (idx < 0) return false;
+    runs.splice(idx, 1);
+    await saveRuns(runs);
+    return true;
+  }
+
+  function extractOutputFiles(variables: Record<string, unknown>): string[] {
+    const files: string[] = [];
+    for (const val of Object.values(variables)) {
+      if (typeof val === 'string' && (val.startsWith('/') || val.startsWith('~'))) {
+        files.push(val);
+      }
+      if (Array.isArray(val)) {
+        for (const item of val) {
+          if (typeof item === 'string' && (item.startsWith('/') || item.startsWith('~'))) {
+            files.push(item);
+          }
+        }
+      }
+    }
+    return files;
+  }
+
+  // ── Schedule Storage + Scheduler ────────────────────
+  const SCHEDULES_FILE = join(RUNS_DIR, 'schedules.json');
+  let schedulesCache: Schedule[] | null = null;
+  let schedulerTimer: ReturnType<typeof setInterval> | null = null;
+
+  async function loadSchedules(): Promise<Schedule[]> {
+    if (schedulesCache !== null) return schedulesCache;
+    try {
+      await mkdir(RUNS_DIR, { recursive: true });
+      const content = await readFile(SCHEDULES_FILE, 'utf-8');
+      schedulesCache = JSON.parse(content) as Schedule[];
+      return schedulesCache;
+    } catch {
+      schedulesCache = [];
+      return schedulesCache;
+    }
+  }
+
+  async function saveSchedules(schedules: Schedule[]): Promise<void> {
+    schedulesCache = schedules;
+    await mkdir(RUNS_DIR, { recursive: true });
+    await writeFile(SCHEDULES_FILE, JSON.stringify(schedules, null, 2), 'utf-8');
+  }
+
+  function generateScheduleId(): string {
+    return 'sched-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7);
+  }
+
+  /**
+   * Simple cron matcher — checks if a Date matches a cron expression.
+   * Format: "minute hour dom month dow"
+   * Supports: numbers, '*', comma-separated values, ranges (1-5), step values (star/N).
+   */
+  function cronMatchesDate(cron: string, date: Date): boolean {
+    const parts = cron.trim().split(/\s+/);
+    if (parts.length !== 5) return false;
+
+    const fields = [
+      date.getMinutes(),   // 0-59
+      date.getHours(),     // 0-23
+      date.getDate(),      // 1-31
+      date.getMonth() + 1, // 1-12
+      date.getDay(),       // 0-6 (0=Sunday)
+    ];
+
+    for (let i = 0; i < 5; i++) {
+      if (!cronFieldMatches(parts[i], fields[i])) return false;
+    }
+    return true;
+  }
+
+  function cronFieldMatches(field: string, value: number): boolean {
+    if (field === '*') return true;
+
+    // Step values: */N
+    if (field.startsWith('*/')) {
+      const step = parseInt(field.slice(2), 10);
+      if (isNaN(step) || step <= 0) return false;
+      return value % step === 0;
+    }
+
+    // Comma-separated values
+    const segments = field.split(',');
+    for (const seg of segments) {
+      // Range: a-b
+      if (seg.includes('-')) {
+        const [lo, hi] = seg.split('-').map(Number);
+        if (!isNaN(lo) && !isNaN(hi) && value >= lo && value <= hi) return true;
+      } else {
+        if (parseInt(seg, 10) === value) return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Scheduler tick — runs every 60 seconds. For each enabled schedule,
+   * check if the cron matches the current minute. If so, trigger a
+   * composition run via internal HTTP fetch (reuses existing pipeline logic).
+   */
+  async function schedulerTick(): Promise<void> {
+    try {
+      const schedules = await loadSchedules();
+      const now = new Date();
+
+      for (const schedule of schedules) {
+        if (!schedule.enabled) continue;
+        if (!cronMatchesDate(schedule.cron, now)) continue;
+
+        // Prevent double-fire: skip if lastRunAt is within the same minute
+        if (schedule.lastRunAt) {
+          const lastRun = new Date(schedule.lastRunAt);
+          if (
+            lastRun.getFullYear() === now.getFullYear() &&
+            lastRun.getMonth() === now.getMonth() &&
+            lastRun.getDate() === now.getDate() &&
+            lastRun.getHours() === now.getHours() &&
+            lastRun.getMinutes() === now.getMinutes()
+          ) {
+            continue; // already fired this minute
+          }
+        }
+
+        // Skip if there's already an active composition or batch run
+        if (activeCompRun || activeBatchRun) {
+          debugLog.info('scheduler', `Skipping schedule "${schedule.id}" — another run is active`);
+          continue;
+        }
+
+        debugLog.info('scheduler', `Triggering schedule "${schedule.id}" for composition "${schedule.compositionId}"`);
+
+        try {
+          const addr = server.address();
+          const port = typeof addr === 'object' && addr ? addr.port : 0;
+          const body = JSON.stringify({ variables: schedule.variables || {} });
+          const runRes = await fetch(
+            `http://127.0.0.1:${port}/api/compositions/${encodeURIComponent(schedule.compositionId)}/run`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body,
+            }
+          );
+          const runData = await runRes.json() as { success?: boolean; runId?: string; error?: string };
+
+          // Update schedule metadata
+          schedule.lastRunAt = now.toISOString();
+          if (runData.runId) schedule.lastRunId = runData.runId;
+          await saveSchedules(schedules);
+
+          debugLog.info('scheduler', `Schedule "${schedule.id}" triggered — runId: ${runData.runId || 'unknown'}`);
+        } catch (err) {
+          debugLog.info('scheduler', `Schedule "${schedule.id}" trigger failed: ${String(err)}`);
+        }
+      }
+    } catch (err) {
+      debugLog.info('scheduler', `Scheduler tick error: ${String(err)}`);
+    }
+  }
+
+  function startScheduler(): void {
+    if (schedulerTimer) return;
+    // Run tick every 60 seconds, starting after a short delay
+    schedulerTimer = setInterval(() => { schedulerTick(); }, 60_000);
+    debugLog.info('scheduler', 'Scheduler started (60s interval)');
+  }
+
+  function stopScheduler(): void {
+    if (schedulerTimer) {
+      clearInterval(schedulerTimer);
+      schedulerTimer = null;
+      debugLog.info('scheduler', 'Scheduler stopped');
+    }
+  }
+
+  // Start the scheduler immediately
+  startScheduler();
+
+  // ── Pending Approvals ───────────────────────────────
+  const pendingApprovals = new Map<string, {
+    approval: PendingApproval;
+    resolve: (approved: boolean) => void;
+    timer?: ReturnType<typeof setTimeout>;
+  }>();
+
+  function createApprovalRequest(
+    nodeId: string,
+    runId: string,
+    compositionId: string,
+    compositionName: string,
+    gate: ApprovalGateConfig,
+    upstreamVars: Record<string, unknown>,
+  ): Promise<boolean> {
+    const id = 'approval-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7);
+
+    // Build preview variables from upstream outputs
+    let previewVars: Record<string, unknown> | undefined;
+    if (gate.previewVariables && gate.previewVariables.length > 0) {
+      previewVars = {};
+      for (const varName of gate.previewVariables) {
+        if (varName in upstreamVars) {
+          previewVars[varName] = upstreamVars[varName];
+        }
+      }
+    } else {
+      // Default: show all upstream variables
+      previewVars = { ...upstreamVars };
+    }
+
+    const approval: PendingApproval = {
+      id,
+      runId,
+      nodeId,
+      compositionId,
+      compositionName,
+      message: gate.message,
+      previewVariables: previewVars,
+      createdAt: new Date().toISOString(),
+      timeoutMs: gate.timeoutMs,
+    };
+
+    return new Promise<boolean>((resolve) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+
+      // Auto-reject on timeout
+      if (gate.timeoutMs && gate.timeoutMs > 0) {
+        timer = setTimeout(() => {
+          if (pendingApprovals.has(id)) {
+            pendingApprovals.delete(id);
+            debugLog.info('approval', `Approval "${id}" auto-rejected (timeout: ${gate.timeoutMs}ms)`);
+            resolve(false);
+          }
+        }, gate.timeoutMs);
+      }
+
+      pendingApprovals.set(id, { approval, resolve, timer });
+      debugLog.info('approval', `Approval gate created: "${id}" for node "${nodeId}" in "${compositionName}"`);
+    });
+  }
+
+  // ── Composition execution helpers ──────────────────
+  function topoSort(
+    nodes: Array<{ id: string }>,
+    edges: Array<{ sourceNodeId: string; targetNodeId: string }>
+  ): string[] {
+    const adj = new Map<string, string[]>();
+    const inDeg = new Map<string, number>();
+    for (const n of nodes) { adj.set(n.id, []); inDeg.set(n.id, 0); }
+    for (const e of edges) {
+      adj.get(e.sourceNodeId)?.push(e.targetNodeId);
+      inDeg.set(e.targetNodeId, (inDeg.get(e.targetNodeId) || 0) + 1);
+    }
+    const queue: string[] = [];
+    for (const [id, deg] of inDeg) { if (deg === 0) queue.push(id); }
+    const result: string[] = [];
+    while (queue.length > 0) {
+      const nodeId = queue.shift()!;
+      result.push(nodeId);
+      for (const neighbor of (adj.get(nodeId) || [])) {
+        const newDeg = (inDeg.get(neighbor) || 1) - 1;
+        inDeg.set(neighbor, newDeg);
+        if (newDeg === 0) queue.push(neighbor);
+      }
+    }
+    if (result.length !== nodes.length) {
+      throw new Error('These workflows form a loop and can\'t run in order. Check your connections.');
+    }
+    return result;
+  }
+
+  function gatherInputVariables(
+    nodeId: string,
+    edges: Array<{ sourceNodeId: string; sourcePort: string; targetNodeId: string; targetPort: string }>,
+    nodeOutputs: Record<string, Record<string, unknown>>
+  ): Record<string, unknown> {
+    const inputs: Record<string, unknown> = {};
+    for (const edge of edges) {
+      if (edge.targetNodeId !== nodeId) continue;
+      const upstreamOutputs = nodeOutputs[edge.sourceNodeId];
+      if (upstreamOutputs && edge.sourcePort in upstreamOutputs) {
+        inputs[edge.targetPort] = upstreamOutputs[edge.sourcePort];
+      }
+    }
+    return inputs;
+  }
+
+  // Find all downstream node IDs from a given node
+  function getDownstreamNodes(
+    nodeId: string,
+    edges: Array<{ sourceNodeId: string; targetNodeId: string }>
+  ): Set<string> {
+    const downstream = new Set<string>();
+    const queue = [nodeId];
+    while (queue.length > 0) {
+      const current = queue.shift()!;
+      for (const e of edges) {
+        if (e.sourceNodeId === current && !downstream.has(e.targetNodeId)) {
+          downstream.add(e.targetNodeId);
+          queue.push(e.targetNodeId);
+        }
+      }
+    }
+    return downstream;
+  }
 
   const server: Server = createServer(async (req, res) => {
     // CORS preflight
@@ -415,6 +1142,7 @@ export async function startDashboard(
             required: v.required,
             default: v.default,
           })),
+          outputVariables: inferOutputVariables(d.workflow),
           smartWaitCount: d.workflow.steps.filter(
             (s: any) => s.type === 'wait' && s.condition?.type !== 'delay'
           ).length,
@@ -524,8 +1252,9 @@ export async function startDashboard(
           }
         );
 
-        dashRecLog('INFO', 'Calling activeRecorder.start()');
-        await activeRecorder.start(body.name, body.site);
+        const captureElementCrops = body.captureElementCrops !== false; // default true
+        dashRecLog('INFO', 'Calling activeRecorder.start()', { captureElementCrops });
+        await activeRecorder.start(body.name, body.site, { captureElementCrops });
         dashRecLog('INFO', 'activeRecorder.start() completed successfully');
         sendJson(res, 200, { success: true, status: 'recording' });
       } catch (err) {
@@ -640,6 +1369,10 @@ export async function startDashboard(
           sendJson(res, 409, { error: `Workflow "${activeRun.workflowName}" is already running. Wait for it to finish or cancel it.` });
           return;
         }
+        if (activeCompRun && !activeCompRun.done) {
+          sendJson(res, 409, { error: `Composition "${activeCompRun.compositionName}" is running. Wait for it to finish or cancel it.` });
+          return;
+        }
 
         const body = await readBody(req);
         const variables: Record<string, unknown> = body?.variables || {};
@@ -750,7 +1483,23 @@ Rules:
           }
         }
 
-        sendJson(res, 200, { success: true, status: 'running', workflowName: wf.name, stepsTotal: wf.steps.length });
+        // Create run history record
+        const runId = generateRunId();
+        activeRun!.runId = runId;
+        await createRunRecord({
+          id: runId,
+          type: 'workflow',
+          sourceId: id,
+          name: wf.name,
+          startedAt: new Date().toISOString(),
+          durationMs: 0,
+          status: 'running',
+          variables: mergedVars,
+          stepsTotal: wf.steps.length,
+          stepsCompleted: 0,
+        });
+
+        sendJson(res, 200, { success: true, status: 'running', runId, workflowName: wf.name, stepsTotal: wf.steps.length });
 
         // Execute asynchronously (don't await — we respond immediately)
         const run = activeRun;
@@ -771,7 +1520,7 @@ Rules:
               });
             }
           },
-        }).then((result: any) => {
+        }).then(async (result: any) => {
           run.done = true;
           run.success = result.success;
           run.durationMs = result.durationMs;
@@ -783,11 +1532,31 @@ Rules:
             steps: `${result.stepsExecuted}/${result.stepsTotal}`,
             durationMs: result.durationMs,
           });
-        }).catch((err: Error) => {
+
+          // Update run history record
+          await updateRunRecord(runId, {
+            completedAt: new Date().toISOString(),
+            durationMs: result.durationMs,
+            status: result.success ? 'completed' : 'failed',
+            error: result.error,
+            stepsCompleted: result.stepsExecuted,
+            stepResults: run.stepResults,
+            outputFiles: extractOutputFiles(result.variables || {}),
+          });
+        }).catch(async (err: Error) => {
           run.done = true;
           run.success = false;
           run.error = String(err);
           debugLog.error('dashboard-run', `Workflow "${wf.name}" crashed`, { error: String(err) });
+
+          await updateRunRecord(runId, {
+            completedAt: new Date().toISOString(),
+            durationMs: Date.now() - run.startedAt,
+            status: 'failed',
+            error: String(err),
+            stepsCompleted: run.stepsCompleted,
+            stepResults: run.stepResults,
+          });
         });
       } catch (err) {
         sendJson(res, 500, { error: String(err) });
@@ -804,6 +1573,7 @@ Rules:
       sendJson(res, 200, {
         active: !activeRun.done,
         done: activeRun.done,
+        runId: activeRun.runId,
         success: activeRun.success,
         workflowId: activeRun.workflowId,
         workflowName: activeRun.workflowName,
@@ -829,6 +1599,18 @@ Rules:
       activeRun.success = false;
       activeRun.error = 'Cancelled by user';
       activeRun.durationMs = Date.now() - activeRun.startedAt;
+
+      if (activeRun.runId) {
+        updateRunRecord(activeRun.runId, {
+          completedAt: new Date().toISOString(),
+          durationMs: activeRun.durationMs,
+          status: 'cancelled',
+          error: 'Cancelled by user',
+          stepsCompleted: activeRun.stepsCompleted,
+          stepResults: activeRun.stepResults,
+        }).catch(() => {});
+      }
+
       sendJson(res, 200, { success: true, message: 'Workflow cancelled' });
       return;
     }
@@ -1689,6 +2471,1908 @@ Rules:
       return;
     }
 
+    // ── Composition API Routes ──────────────────────────────
+
+    // GET /api/compositions — list all compositions
+    if (req.method === 'GET' && pathname === '/api/compositions') {
+      try {
+        const discovered = await discoverCompositions(workDir);
+        const compositions = discovered.map(d => ({
+          id: d.composition.id,
+          name: d.composition.name,
+          description: d.composition.description,
+          source: d.source,
+          path: d.path,
+          nodeCount: d.composition.nodes.length,
+          edgeCount: d.composition.edges.length,
+          metadata: d.composition.metadata,
+        }));
+        sendJson(res, 200, { compositions });
+      } catch (err) {
+        sendJson(res, 500, { error: String(err) });
+      }
+      return;
+    }
+
+    // POST /api/compositions — create a new composition
+    if (req.method === 'POST' && pathname === '/api/compositions') {
+      try {
+        const body = await readBody(req);
+        if (!body) {
+          sendJson(res, 400, { error: 'Request body is required' });
+          return;
+        }
+
+        const { name, description } = body;
+        if (!name || typeof name !== 'string' || !name.trim()) {
+          sendJson(res, 400, { error: 'Please give your pipeline a name' });
+          return;
+        }
+
+        // Generate ID from name
+        const id = name.trim().toLowerCase()
+          .replace(/[^a-z0-9]+/g, '-')
+          .replace(/^-+|-+$/g, '');
+
+        if (!id) {
+          sendJson(res, 400, { error: 'That name can\'t be used — try using letters and numbers' });
+          return;
+        }
+
+        // Check for ID collision
+        const discovered = await discoverCompositions(workDir);
+        if (discovered.some(d => d.composition.id === id)) {
+          sendJson(res, 409, { error: 'A pipeline with that name already exists — try a different name' });
+          return;
+        }
+
+        const composition = {
+          version: '1.0' as const,
+          id,
+          name: name.trim(),
+          description: (description || '').trim() || undefined,
+          nodes: [] as any[],
+          edges: [] as any[],
+          metadata: {
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          },
+        };
+
+        // Save to global workflows directory (compositions live alongside workflows)
+        const globalDir = join(homedir(), '.woodbury', 'workflows');
+        await mkdir(globalDir, { recursive: true });
+        const compPath = join(globalDir, `${id}.composition.json`);
+        await writeFile(compPath, JSON.stringify(composition, null, 2), 'utf-8');
+        debugLog.info('dashboard', `Created composition "${id}"`, { path: compPath });
+        sendJson(res, 201, { success: true, composition, path: compPath });
+      } catch (err) {
+        sendJson(res, 500, { error: String(err) });
+      }
+      return;
+    }
+
+    // GET /api/compositions/:id — get a single composition
+    const getCompMatch = pathname.match(/^\/api\/compositions\/([^/]+)$/);
+    if (req.method === 'GET' && getCompMatch) {
+      const id = decodeURIComponent(getCompMatch[1]);
+      try {
+        const discovered = await discoverCompositions(workDir);
+        const found = discovered.find(d => d.composition.id === id);
+        if (!found) {
+          sendJson(res, 404, { error: `Composition "${id}" not found` });
+          return;
+        }
+        sendJson(res, 200, { composition: found.composition, path: found.path, source: found.source });
+      } catch (err) {
+        sendJson(res, 500, { error: String(err) });
+      }
+      return;
+    }
+
+    // PUT /api/compositions/:id — update a composition (full replace)
+    const putCompMatch = pathname.match(/^\/api\/compositions\/([^/]+)$/);
+    if (req.method === 'PUT' && putCompMatch) {
+      const id = decodeURIComponent(putCompMatch[1]);
+      try {
+        const discovered = await discoverCompositions(workDir);
+        const found = discovered.find(d => d.composition.id === id);
+        if (!found) {
+          sendJson(res, 404, { error: `Composition "${id}" not found` });
+          return;
+        }
+
+        const body = await readBody(req);
+        if (!body || !body.composition) {
+          sendJson(res, 400, { error: 'Request body must have a "composition" object' });
+          return;
+        }
+
+        const comp = body.composition;
+        if (!comp.version || !comp.id || !comp.name || !Array.isArray(comp.nodes) || !Array.isArray(comp.edges)) {
+          sendJson(res, 400, { error: 'Composition missing required fields (version, id, name, nodes, edges)' });
+          return;
+        }
+
+        // Update metadata
+        comp.metadata = comp.metadata || {};
+        comp.metadata.updatedAt = new Date().toISOString();
+
+        await writeFile(found.path, JSON.stringify(comp, null, 2), 'utf-8');
+        debugLog.info('dashboard', `Updated composition "${id}"`, { path: found.path });
+        sendJson(res, 200, { success: true, composition: comp, path: found.path });
+      } catch (err) {
+        sendJson(res, 500, { error: String(err) });
+      }
+      return;
+    }
+
+    // DELETE /api/compositions/:id — delete a composition
+    const delCompMatch = pathname.match(/^\/api\/compositions\/([^/]+)$/);
+    if (req.method === 'DELETE' && delCompMatch) {
+      const id = decodeURIComponent(delCompMatch[1]);
+      try {
+        const discovered = await discoverCompositions(workDir);
+        const found = discovered.find(d => d.composition.id === id);
+        if (!found) {
+          sendJson(res, 404, { error: `Composition "${id}" not found` });
+          return;
+        }
+
+        await unlink(found.path);
+        debugLog.info('dashboard', `Deleted composition "${id}"`, { path: found.path });
+        sendJson(res, 200, { success: true });
+      } catch (err) {
+        sendJson(res, 500, { error: String(err) });
+      }
+      return;
+    }
+
+    // POST /api/compositions/:id/duplicate — clone a composition
+    const dupCompMatch = pathname.match(/^\/api\/compositions\/([^/]+)\/duplicate$/);
+    if (req.method === 'POST' && dupCompMatch) {
+      const id = decodeURIComponent(dupCompMatch[1]);
+      try {
+        const discovered = await discoverCompositions(workDir);
+        const found = discovered.find(d => d.composition.id === id);
+        if (!found) {
+          sendJson(res, 404, { error: `Composition "${id}" not found` });
+          return;
+        }
+
+        const baseName = found.composition.name + ' Copy';
+        let newId = baseName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+        let counter = 1;
+        while (discovered.some(d => d.composition.id === newId)) {
+          newId = baseName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') + '-' + counter;
+          counter++;
+        }
+
+        const clone = JSON.parse(JSON.stringify(found.composition));
+        clone.id = newId;
+        clone.name = counter > 1 ? baseName + ' ' + counter : baseName;
+        clone.metadata = { createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+
+        const globalDir = join(homedir(), '.woodbury', 'workflows');
+        await mkdir(globalDir, { recursive: true });
+        const compPath = join(globalDir, `${newId}.composition.json`);
+        await writeFile(compPath, JSON.stringify(clone, null, 2), 'utf-8');
+        debugLog.info('dashboard', `Duplicated composition "${id}" → "${newId}"`);
+        sendJson(res, 201, { success: true, composition: clone, path: compPath });
+      } catch (err) {
+        sendJson(res, 500, { error: String(err) });
+      }
+      return;
+    }
+
+    // ── Composition Execution Routes ─────────────────────────
+
+    // POST /api/compositions/:id/run — execute a composition
+    const runCompMatch = pathname.match(/^\/api\/compositions\/([^/]+)\/run$/);
+    if (req.method === 'POST' && runCompMatch) {
+      const id = decodeURIComponent(runCompMatch[1]);
+      try {
+        if (activeCompRun && !activeCompRun.done) {
+          sendJson(res, 409, { error: `"${activeCompRun.compositionName}" is already running. Wait for it to finish or stop it first.` });
+          return;
+        }
+        if (activeRun && !activeRun.done) {
+          sendJson(res, 409, { error: `Workflow "${activeRun.workflowName}" is running. Wait for it to finish first.` });
+          return;
+        }
+
+        // Load the composition
+        const compDiscovered = await discoverCompositions(workDir);
+        const compFound = compDiscovered.find(d => d.composition.id === id);
+        if (!compFound) {
+          sendJson(res, 404, { error: `Composition "${id}" not found` });
+          return;
+        }
+        const comp = compFound.composition;
+
+        if (comp.nodes.length === 0) {
+          sendJson(res, 400, { error: 'Add at least one workflow to your pipeline before running it' });
+          return;
+        }
+
+        // Topological sort
+        let executionOrder: string[];
+        try {
+          executionOrder = topoSort(comp.nodes, comp.edges);
+        } catch (cycleErr) {
+          sendJson(res, 400, { error: String(cycleErr) });
+          return;
+        }
+
+        // Resolve all workflows (skip approval gate nodes)
+        const wfDiscovered = await discoverWorkflows(workDir);
+        const wfMap: Record<string, any> = {};
+        for (const node of comp.nodes) {
+          if (node.workflowId === '__approval_gate__') continue; // Gate nodes don't need workflows
+          const found = wfDiscovered.find(d => d.workflow.id === node.workflowId);
+          if (!found) {
+            sendJson(res, 400, { error: `The workflow "${node.workflowId}" was deleted or renamed. Remove it from the pipeline and re-add it.` });
+            return;
+          }
+          wfMap[node.id] = found.workflow;
+        }
+
+        // Ensure bridge
+        await ensureBridgeServer();
+        if (!bridgeServer.isConnected) {
+          sendJson(res, 503, { error: 'Chrome extension is not connected.' });
+          return;
+        }
+
+        // Load executeWorkflow
+        let executeWorkflow: Function;
+        try {
+          const wfRunnerPath = join(homedir(), '.woodbury', 'extensions', 'social-scheduler', 'lib', 'workflow-runner.js');
+          const wfRunner = require(wfRunnerPath);
+          executeWorkflow = wfRunner.executeWorkflow;
+          if (!executeWorkflow) throw new Error('executeWorkflow not found');
+        } catch (importErr: any) {
+          sendJson(res, 500, { error: `Workflow runner import failed: ${importErr?.message}` });
+          return;
+        }
+
+        const body = await readBody(req);
+        const initialVariables: Record<string, unknown> = body?.variables || {};
+
+        // Initialize run state
+        const abort = new AbortController();
+        const nodeStates: Record<string, any> = {};
+        for (const node of comp.nodes) {
+          if (node.workflowId === '__approval_gate__') {
+            nodeStates[node.id] = {
+              status: 'pending',
+              workflowId: '__approval_gate__',
+              workflowName: node.label || 'Approval Gate',
+              stepsTotal: 1,
+              stepsCompleted: 0,
+              currentStep: '',
+            };
+          } else {
+            const wf = wfMap[node.id];
+            nodeStates[node.id] = {
+              status: 'pending',
+              workflowId: node.workflowId,
+              workflowName: wf.name,
+              stepsTotal: wf.steps.length,
+              stepsCompleted: 0,
+              currentStep: '',
+            };
+          }
+        }
+
+        activeCompRun = {
+          compositionId: id,
+          compositionName: comp.name,
+          abort,
+          startedAt: Date.now(),
+          nodesTotal: comp.nodes.length,
+          nodesCompleted: 0,
+          currentNodeId: null,
+          executionOrder,
+          nodeStates,
+          done: false,
+          success: false,
+        };
+
+        // Create run history record
+        const compRunId = generateRunId();
+        activeCompRun.runId = compRunId;
+        await createRunRecord({
+          id: compRunId,
+          type: 'pipeline',
+          sourceId: id,
+          name: comp.name,
+          startedAt: new Date().toISOString(),
+          durationMs: 0,
+          status: 'running',
+          variables: initialVariables,
+          nodesTotal: comp.nodes.length,
+          nodesCompleted: 0,
+          nodeResults: [],
+        });
+
+        sendJson(res, 200, { success: true, status: 'running', runId: compRunId, compositionName: comp.name, nodesTotal: comp.nodes.length });
+
+        // Helper: finalize the run history record for a composition run
+        async function finalizeCompRunRecord(runId: string, r: typeof activeCompRun, order: string[]): Promise<void> {
+          if (!r) return;
+          const nodeResults: NodeRunResult[] = order.map(nId => {
+            const ns = r.nodeStates[nId];
+            return {
+              nodeId: nId,
+              workflowId: ns.workflowId,
+              workflowName: ns.workflowName,
+              status: ns.status === 'completed' ? 'completed' as const : ns.status === 'skipped' ? 'skipped' as const : 'failed' as const,
+              durationMs: ns.durationMs || 0,
+              stepsTotal: ns.stepsTotal,
+              stepsCompleted: ns.stepsCompleted,
+              error: ns.error,
+              outputVariables: ns.outputVariables,
+              expectationResults: ns.expectationResults,
+              retryAttempts: (ns.retryAttempt && ns.retryAttempt > 1) ? ns.retryAttempt - 1 : undefined,
+            };
+          });
+
+          const allOutputFiles: string[] = [];
+          for (const nr of nodeResults) {
+            if (nr.outputVariables) {
+              allOutputFiles.push(...extractOutputFiles(nr.outputVariables));
+            }
+          }
+
+          await updateRunRecord(runId, {
+            completedAt: new Date().toISOString(),
+            durationMs: r.durationMs,
+            status: r.success ? 'completed' : 'failed',
+            error: r.error,
+            nodesCompleted: r.nodesCompleted,
+            nodeResults,
+            outputFiles: allOutputFiles.length > 0 ? allOutputFiles : undefined,
+          });
+        }
+
+        // Execute asynchronously
+        const run = activeCompRun;
+        const nodeOutputs: Record<string, Record<string, unknown>> = {};
+
+        (async () => {
+          try {
+            for (const nodeId of executionOrder) {
+              if (abort.signal.aborted) break;
+
+              const wf = wfMap[nodeId];
+              const node = comp.nodes.find((n: any) => n.id === nodeId);
+              const ns = run.nodeStates[nodeId];
+
+              // Skip if already skipped (due to upstream failure)
+              if (ns.status === 'skipped') continue;
+
+              // ── Approval Gate Node ──────────────────────────
+              if (node?.workflowId === '__approval_gate__' && node.approvalGate) {
+                ns.status = 'running';
+                ns.currentStep = 'Waiting for approval...';
+                run.currentNodeId = nodeId;
+                const gateStart = Date.now();
+
+                // Gather all upstream variables for preview
+                const upstreamVars: Record<string, unknown> = { ...initialVariables };
+                for (const [nid, outputs] of Object.entries(nodeOutputs)) {
+                  Object.assign(upstreamVars, outputs);
+                }
+
+                debugLog.info('comp-run', `Approval gate "${nodeId}" waiting for user approval`);
+
+                const approved = await createApprovalRequest(
+                  nodeId,
+                  compRunId,
+                  id,
+                  comp.name,
+                  node.approvalGate,
+                  upstreamVars,
+                );
+
+                ns.durationMs = Date.now() - gateStart;
+
+                if (approved) {
+                  ns.status = 'completed';
+                  ns.stepsCompleted = 1;
+                  run.nodesCompleted++;
+                  // Pass through upstream variables so downstream nodes can use them
+                  nodeOutputs[nodeId] = upstreamVars;
+                  debugLog.info('comp-run', `Approval gate "${nodeId}" approved`);
+                  continue;
+                } else {
+                  ns.status = 'failed';
+                  ns.error = 'Rejected by user';
+                  debugLog.info('comp-run', `Approval gate "${nodeId}" rejected`);
+
+                  const onReject = node.approvalGate.onReject || 'stop';
+                  if (onReject === 'skip') {
+                    ns.status = 'skipped';
+                    continue;
+                  } else {
+                    // 'stop' — skip all downstream and halt
+                    const downstream = getDownstreamNodes(nodeId, comp.edges);
+                    for (const downId of downstream) {
+                      if (run.nodeStates[downId]) {
+                        run.nodeStates[downId].status = 'skipped';
+                      }
+                    }
+                    run.done = true;
+                    run.success = false;
+                    run.error = `Approval gate rejected: ${node.approvalGate.message}`;
+                    run.durationMs = Date.now() - run.startedAt;
+                    await finalizeCompRunRecord(compRunId, run, executionOrder);
+                    return;
+                  }
+                }
+              }
+
+              // Determine failure policy for this node
+              const policy = node?.onFailure || { action: 'stop' as const };
+              const maxAttempts = (policy.action === 'retry' && policy.retry)
+                ? policy.retry.maxAttempts
+                : 1;
+              const retryDelayMs = (policy.action === 'retry' && policy.retry)
+                ? policy.retry.delayMs
+                : 1000;
+              const backoffMultiplier = (policy.action === 'retry' && policy.retry?.backoffMultiplier)
+                ? policy.retry.backoffMultiplier
+                : 1;
+
+              run.currentNodeId = nodeId;
+              let nodeSuccess = false;
+
+              for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+                if (abort.signal.aborted) break;
+
+                ns.status = attempt > 1 ? 'retrying' : 'running';
+                ns.retryAttempt = attempt;
+                ns.retryMax = maxAttempts;
+                ns.stepsCompleted = 0;
+                ns.error = undefined;
+                ns.expectationResults = undefined;
+
+                // Gather input variables from upstream edges
+                const edgeInputs = gatherInputVariables(nodeId, comp.edges, nodeOutputs);
+
+                // Merge: edge inputs > initial variables > workflow defaults
+                const mergedVars: Record<string, unknown> = { ...initialVariables, ...edgeInputs };
+                for (const v of (wf.variables || [])) {
+                  if (mergedVars[v.name] === undefined && v.default !== undefined) {
+                    mergedVars[v.name] = v.default;
+                  }
+                }
+
+                // Auto-generate variables with AI prompts that still have no value
+                const toGenerate = ((wf.variables || []) as any[]).filter(
+                  (v: any) => v.generationPrompt && (mergedVars[v.name] === undefined || mergedVars[v.name] === '')
+                );
+                if (toGenerate.length > 0) {
+                  try {
+                    const { runPrompt } = await import('./loop/llm-service.js');
+                    const model = process.env.ANTHROPIC_API_KEY
+                      ? 'claude-sonnet-4-20250514'
+                      : process.env.OPENAI_API_KEY
+                        ? 'gpt-4o-mini'
+                        : process.env.GROQ_API_KEY
+                          ? 'llama-3.1-70b-versatile'
+                          : 'claude-sonnet-4-20250514';
+                    for (const v of toGenerate) {
+                      try {
+                        const genPrompt = `You are generating a value for a variable in a browser automation workflow.\n\nVariable: "${v.name}" (type: ${v.type || 'string'})\nWorkflow: "${wf.name}" on ${wf.site || 'unknown site'}\n\nInstructions from the user:\n${v.generationPrompt}\n\nRules:\n- Follow the user's instructions precisely\n- Be creative and original for text/lyrics/content\n- Return ONLY the raw value — no JSON wrapping, no quotes around it, no explanation\n- If the type is a number, return just the number\n- If the type is boolean, return just "true" or "false"\n- For multi-line content (lyrics, paragraphs), use actual newlines`;
+                        const llmResponse = await runPrompt(
+                          [{ role: 'user', content: genPrompt }],
+                          model,
+                          { maxTokens: 2048, temperature: 0.9 }
+                        );
+                        mergedVars[v.name] = llmResponse.content.trim();
+                      } catch { /* non-fatal */ }
+                    }
+                  } catch { /* LLM import failed, skip */ }
+                }
+
+                debugLog.info('comp-run', `Executing node "${nodeId}" attempt ${attempt}/${maxAttempts} (workflow: ${wf.name})`, {
+                  inputVars: Object.keys(mergedVars),
+                });
+
+                try {
+                  const result = await executeWorkflow(bridgeServer, wf, mergedVars, {
+                    log: (msg: string) => debugLog.info('comp-run', `[${wf.name}] ${msg}`),
+                    signal: abort.signal,
+                    onProgress: (event: any) => {
+                      if (event.type === 'step_start') {
+                        ns.currentStep = event.step?.label || event.step?.id || `Step ${event.index + 1}`;
+                      } else if (event.type === 'step_complete') {
+                        ns.stepsCompleted = event.index + 1;
+                      }
+                    },
+                  });
+
+                  if (result.success) {
+                    // Check expectations — merge workflow-level + node-level
+                    const expectations: Expectation[] = [
+                      ...((wf.expectations as Expectation[]) || []),
+                      ...((node?.expectations as Expectation[]) || []),
+                    ];
+
+                    if (expectations.length > 0) {
+                      const expResults = await checkExpectations(expectations, result.variables);
+                      ns.expectationResults = expResults.map(r => ({
+                        description: r.expectation.description || r.detail,
+                        passed: r.passed,
+                        detail: r.detail,
+                      }));
+
+                      const failed = expResults.filter(r => !r.passed);
+                      if (failed.length > 0) {
+                        const failDescs = failed.map(f => f.detail).join('; ');
+                        debugLog.info('comp-run', `Node "${nodeId}" expectations failed (attempt ${attempt}/${maxAttempts})`, { failDescs });
+
+                        if (attempt < maxAttempts) {
+                          // Wait before retrying
+                          const delay = retryDelayMs * Math.pow(backoffMultiplier, attempt - 1);
+                          await new Promise(r => setTimeout(r, delay));
+                          continue; // Retry
+                        }
+
+                        // Final attempt — expectations still not met, treat as failure
+                        ns.status = 'failed';
+                        ns.error = `Expectations not met: ${failDescs}`;
+                        ns.durationMs = result.durationMs;
+                        break;
+                      }
+                    }
+
+                    // All good — node succeeded
+                    ns.status = 'completed';
+                    ns.outputVariables = result.variables;
+                    ns.durationMs = result.durationMs;
+                    ns.stepsCompleted = ns.stepsTotal;
+                    nodeOutputs[nodeId] = result.variables;
+                    run.nodesCompleted++;
+                    nodeSuccess = true;
+                    debugLog.info('comp-run', `Node "${nodeId}" completed`, {
+                      outputVars: Object.keys(result.variables),
+                      durationMs: result.durationMs,
+                    });
+                    break;
+                  } else {
+                    // Workflow reported failure
+                    if (attempt < maxAttempts) {
+                      debugLog.info('comp-run', `Node "${nodeId}" failed (attempt ${attempt}/${maxAttempts}), retrying...`, { error: result.error });
+                      const delay = retryDelayMs * Math.pow(backoffMultiplier, attempt - 1);
+                      await new Promise(r => setTimeout(r, delay));
+                      continue; // Retry
+                    }
+
+                    ns.status = 'failed';
+                    ns.error = result.error;
+                    ns.durationMs = result.durationMs;
+                    break;
+                  }
+                } catch (stepErr: any) {
+                  if (attempt < maxAttempts) {
+                    debugLog.info('comp-run', `Node "${nodeId}" threw error (attempt ${attempt}/${maxAttempts}), retrying...`, { error: String(stepErr) });
+                    const delay = retryDelayMs * Math.pow(backoffMultiplier, attempt - 1);
+                    await new Promise(r => setTimeout(r, delay));
+                    continue; // Retry
+                  }
+
+                  ns.status = 'failed';
+                  ns.error = String(stepErr);
+                  break;
+                }
+              } // end retry loop
+
+              // Handle node failure based on policy
+              if (!nodeSuccess && ns.status === 'failed') {
+                if (policy.action === 'skip') {
+                  ns.status = 'skipped';
+                  debugLog.info('comp-run', `Node "${nodeId}" failed but policy is 'skip', continuing pipeline`);
+                  continue; // Don't skip downstream — let them try without this node's outputs
+                } else {
+                  // 'stop' (default) — skip all downstream and halt
+                  const downstream = getDownstreamNodes(nodeId, comp.edges);
+                  for (const downId of downstream) {
+                    if (run.nodeStates[downId]) {
+                      run.nodeStates[downId].status = 'skipped';
+                    }
+                  }
+                  run.done = true;
+                  run.success = false;
+                  run.error = `"${wf.name}" failed: ${ns.error}`;
+                  run.durationMs = Date.now() - run.startedAt;
+                  debugLog.info('comp-run', `Pipeline stopped at node "${nodeId}"`, { error: ns.error });
+                  await finalizeCompRunRecord(compRunId, run, executionOrder);
+                  return;
+                }
+              }
+            }
+
+            // All nodes completed successfully
+            if (!run.done) {
+              run.done = true;
+              run.success = true;
+              run.durationMs = Date.now() - run.startedAt;
+              run.currentNodeId = null;
+              debugLog.info('comp-run', `Composition "${comp.name}" completed`, {
+                nodes: run.nodesCompleted,
+                durationMs: run.durationMs,
+              });
+              await finalizeCompRunRecord(compRunId, run, executionOrder);
+            }
+          } catch (err) {
+            run.done = true;
+            run.success = false;
+            run.error = String(err);
+            run.durationMs = Date.now() - run.startedAt;
+            debugLog.error('comp-run', `Composition "${comp.name}" crashed`, { error: String(err) });
+            await finalizeCompRunRecord(compRunId, run, executionOrder);
+          }
+        })();
+
+      } catch (err) {
+        sendJson(res, 500, { error: String(err) });
+      }
+      return;
+    }
+
+    // GET /api/compositions/run/status — poll composition execution progress
+    if (req.method === 'GET' && pathname === '/api/compositions/run/status') {
+      if (!activeCompRun) {
+        sendJson(res, 200, { active: false });
+        return;
+      }
+      // Include any pending approvals for this run
+      const runApprovals: PendingApproval[] = [];
+      for (const [, entry] of pendingApprovals) {
+        if (activeCompRun.runId && entry.approval.runId === activeCompRun.runId) {
+          runApprovals.push(entry.approval);
+        }
+      }
+
+      sendJson(res, 200, {
+        active: !activeCompRun.done,
+        done: activeCompRun.done,
+        runId: activeCompRun.runId,
+        success: activeCompRun.success,
+        compositionId: activeCompRun.compositionId,
+        compositionName: activeCompRun.compositionName,
+        nodesTotal: activeCompRun.nodesTotal,
+        nodesCompleted: activeCompRun.nodesCompleted,
+        currentNodeId: activeCompRun.currentNodeId,
+        executionOrder: activeCompRun.executionOrder,
+        nodeStates: activeCompRun.nodeStates,
+        pendingApprovals: runApprovals,
+        error: activeCompRun.error,
+        durationMs: activeCompRun.done ? activeCompRun.durationMs : Date.now() - activeCompRun.startedAt,
+      });
+      return;
+    }
+
+    // POST /api/compositions/run/cancel — abort a running composition
+    if (req.method === 'POST' && pathname === '/api/compositions/run/cancel') {
+      if (!activeCompRun || activeCompRun.done) {
+        sendJson(res, 400, { error: 'Nothing is running right now' });
+        return;
+      }
+      activeCompRun.abort.abort();
+      // Reject any pending approvals for this run
+      for (const [approvalId, entry] of pendingApprovals) {
+        if (activeCompRun.runId && entry.approval.runId === activeCompRun.runId) {
+          if (entry.timer) clearTimeout(entry.timer);
+          pendingApprovals.delete(approvalId);
+          entry.resolve(false);
+        }
+      }
+      // Mark running/retrying node as failed, pending nodes as skipped
+      for (const nodeId in activeCompRun.nodeStates) {
+        const ns = activeCompRun.nodeStates[nodeId];
+        if (ns.status === 'running' || ns.status === 'retrying') ns.status = 'failed';
+        if (ns.status === 'pending') ns.status = 'skipped';
+      }
+      activeCompRun.done = true;
+      activeCompRun.success = false;
+      activeCompRun.error = 'Cancelled by user';
+      activeCompRun.durationMs = Date.now() - activeCompRun.startedAt;
+
+      if (activeCompRun.runId) {
+        const nodeResults: NodeRunResult[] = activeCompRun.executionOrder.map(nId => {
+          const ns = activeCompRun!.nodeStates[nId];
+          return {
+            nodeId: nId,
+            workflowId: ns.workflowId,
+            workflowName: ns.workflowName,
+            status: ns.status === 'completed' ? 'completed' as const : ns.status === 'skipped' ? 'skipped' as const : 'failed' as const,
+            durationMs: ns.durationMs || 0,
+            stepsTotal: ns.stepsTotal,
+            stepsCompleted: ns.stepsCompleted,
+            error: ns.error,
+          };
+        });
+        updateRunRecord(activeCompRun.runId, {
+          completedAt: new Date().toISOString(),
+          durationMs: activeCompRun.durationMs,
+          status: 'cancelled',
+          error: 'Cancelled by user',
+          nodesCompleted: activeCompRun.nodesCompleted,
+          nodeResults,
+        }).catch(() => {});
+      }
+
+      sendJson(res, 200, { success: true, message: 'Composition cancelled' });
+      return;
+    }
+
+    // ── Batch Execution API ──────────────────────────────────
+
+    // POST /api/compositions/:id/batch-run — run a composition in batch mode
+    const batchRunMatch = pathname.match(/^\/api\/compositions\/([^/]+)\/batch-run$/);
+    if (req.method === 'POST' && batchRunMatch) {
+      const id = decodeURIComponent(batchRunMatch[1]);
+      try {
+        if (activeBatchRun && !activeBatchRun.done) {
+          sendJson(res, 409, { error: 'A batch is already running. Wait for it to finish or cancel it.' });
+          return;
+        }
+        if (activeCompRun && !activeCompRun.done) {
+          sendJson(res, 409, { error: `Pipeline "${activeCompRun.compositionName}" is running. Wait for it to finish.` });
+          return;
+        }
+        if (activeRun && !activeRun.done) {
+          sendJson(res, 409, { error: `Workflow "${activeRun.workflowName}" is running. Wait for it to finish.` });
+          return;
+        }
+
+        const body = await readBody(req);
+        if (!body || !body.batchConfig) {
+          sendJson(res, 400, { error: 'batchConfig is required' });
+          return;
+        }
+
+        const config: BatchConfig = body.batchConfig;
+        if (!config.pools || !Array.isArray(config.pools) || config.pools.length === 0) {
+          sendJson(res, 400, { error: 'At least one variable pool is required' });
+          return;
+        }
+
+        // Validate pools
+        for (const pool of config.pools) {
+          if (!pool.variableName || !Array.isArray(pool.values) || pool.values.length === 0) {
+            sendJson(res, 400, { error: `Pool for "${pool.variableName}" needs at least one value` });
+            return;
+          }
+        }
+
+        // Generate iteration variable sets
+        const iterations: Record<string, unknown>[] = [];
+        const baseVars: Record<string, unknown> = body.variables || {};
+
+        if (config.mode === 'zip') {
+          const len = Math.min(...config.pools.map(p => p.values.length));
+          for (let i = 0; i < len; i++) {
+            const vars: Record<string, unknown> = { ...baseVars };
+            for (const pool of config.pools) {
+              vars[pool.variableName] = pool.values[i];
+            }
+            iterations.push(vars);
+          }
+        } else {
+          // Cartesian product
+          function cartesian(pools: VariablePool[], idx: number, current: Record<string, unknown>, results: Record<string, unknown>[]) {
+            if (idx >= pools.length) {
+              results.push({ ...current });
+              return;
+            }
+            for (const val of pools[idx].values) {
+              current[pools[idx].variableName] = val;
+              cartesian(pools, idx + 1, current, results);
+            }
+          }
+          cartesian(config.pools, 0, { ...baseVars }, iterations);
+        }
+
+        if (iterations.length === 0) {
+          sendJson(res, 400, { error: 'Batch produces zero iterations' });
+          return;
+        }
+        if (iterations.length > 100) {
+          sendJson(res, 400, { error: `Batch would produce ${iterations.length} iterations (max 100). Reduce the number of values.` });
+          return;
+        }
+
+        // Verify the composition exists
+        const compDiscovered = await discoverCompositions(workDir);
+        const compFound = compDiscovered.find(d => d.composition.id === id);
+        if (!compFound) {
+          sendJson(res, 404, { error: `Composition "${id}" not found` });
+          return;
+        }
+
+        const batchId = 'batch-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7);
+        const abort = new AbortController();
+
+        activeBatchRun = {
+          batchId,
+          compositionId: id,
+          compositionName: compFound.composition.name,
+          abort,
+          startedAt: Date.now(),
+          totalIterations: iterations.length,
+          completedIterations: 0,
+          failedIterations: 0,
+          currentIteration: 0,
+          iterationVariables: iterations,
+          runIds: [],
+          delayBetweenMs: config.delayBetweenMs || 2000,
+          done: false,
+        };
+
+        sendJson(res, 200, {
+          success: true,
+          batchId,
+          totalIterations: iterations.length,
+          compositionName: compFound.composition.name,
+        });
+
+        // Execute batch asynchronously
+        const batch = activeBatchRun;
+        (async () => {
+          try {
+            for (let i = 0; i < iterations.length; i++) {
+              if (abort.signal.aborted) break;
+
+              batch.currentIteration = i;
+              const iterVars = iterations[i];
+
+              debugLog.info('batch', `Batch "${batchId}" iteration ${i + 1}/${iterations.length}`, {
+                vars: Object.keys(iterVars),
+              });
+
+              // Trigger a composition run via the internal run logic
+              // We reuse the existing POST /api/compositions/:id/run endpoint internally
+              try {
+                const runRes = await fetch(`http://127.0.0.1:${(server.address() as any)?.port}/api/compositions/${encodeURIComponent(id)}/run`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ variables: iterVars }),
+                });
+                const runData = await runRes.json() as { success?: boolean; runId?: string; error?: string };
+
+                if (runData.runId) {
+                  batch.runIds.push(runData.runId);
+
+                  // Update the run record to include batchId
+                  await updateRunRecord(runData.runId, { batchId });
+
+                  // Wait for the composition run to finish
+                  while (activeCompRun && !activeCompRun.done && !abort.signal.aborted) {
+                    await new Promise(r => setTimeout(r, 500));
+                  }
+
+                  if (activeCompRun?.success) {
+                    batch.completedIterations++;
+                  } else {
+                    batch.failedIterations++;
+                  }
+                } else {
+                  batch.failedIterations++;
+                  debugLog.warn('batch', `Batch iteration ${i + 1} failed to start: ${runData.error || 'unknown'}`);
+                }
+              } catch (iterErr) {
+                batch.failedIterations++;
+                debugLog.error('batch', `Batch iteration ${i + 1} error: ${iterErr}`);
+              }
+
+              // Delay between iterations (skip if last or aborted)
+              if (i < iterations.length - 1 && !abort.signal.aborted) {
+                await new Promise(r => setTimeout(r, batch.delayBetweenMs));
+              }
+            }
+          } catch (err) {
+            batch.error = String(err);
+            debugLog.error('batch', `Batch "${batchId}" crashed: ${err}`);
+          } finally {
+            batch.done = true;
+            batch.durationMs = Date.now() - batch.startedAt;
+            debugLog.info('batch', `Batch "${batchId}" finished`, {
+              completed: batch.completedIterations,
+              failed: batch.failedIterations,
+              total: batch.totalIterations,
+              durationMs: batch.durationMs,
+            });
+          }
+        })();
+
+      } catch (err) {
+        sendJson(res, 500, { error: String(err) });
+      }
+      return;
+    }
+
+    // GET /api/batch/status — poll batch execution progress
+    if (req.method === 'GET' && pathname === '/api/batch/status') {
+      if (!activeBatchRun) {
+        sendJson(res, 200, { active: false });
+        return;
+      }
+      sendJson(res, 200, {
+        active: !activeBatchRun.done,
+        done: activeBatchRun.done,
+        batchId: activeBatchRun.batchId,
+        compositionId: activeBatchRun.compositionId,
+        compositionName: activeBatchRun.compositionName,
+        totalIterations: activeBatchRun.totalIterations,
+        completedIterations: activeBatchRun.completedIterations,
+        failedIterations: activeBatchRun.failedIterations,
+        currentIteration: activeBatchRun.currentIteration,
+        runIds: activeBatchRun.runIds,
+        error: activeBatchRun.error,
+        durationMs: activeBatchRun.done ? activeBatchRun.durationMs : Date.now() - activeBatchRun.startedAt,
+      });
+      return;
+    }
+
+    // POST /api/batch/cancel — abort a running batch
+    if (req.method === 'POST' && pathname === '/api/batch/cancel') {
+      if (!activeBatchRun || activeBatchRun.done) {
+        sendJson(res, 400, { error: 'No batch is currently running' });
+        return;
+      }
+      activeBatchRun.abort.abort();
+      // Also cancel the current composition run if active
+      if (activeCompRun && !activeCompRun.done) {
+        activeCompRun.abort.abort();
+        for (const nodeId in activeCompRun.nodeStates) {
+          const ns = activeCompRun.nodeStates[nodeId];
+          if (ns.status === 'running' || ns.status === 'retrying') ns.status = 'failed';
+          if (ns.status === 'pending') ns.status = 'skipped';
+        }
+        activeCompRun.done = true;
+        activeCompRun.success = false;
+        activeCompRun.error = 'Cancelled (batch cancelled)';
+        activeCompRun.durationMs = Date.now() - activeCompRun.startedAt;
+      }
+      // Reject any pending approvals
+      for (const [approvalId, entry] of pendingApprovals) {
+        if (entry.timer) clearTimeout(entry.timer);
+        pendingApprovals.delete(approvalId);
+        entry.resolve(false);
+      }
+      activeBatchRun.done = true;
+      activeBatchRun.durationMs = Date.now() - activeBatchRun.startedAt;
+      sendJson(res, 200, { success: true, message: 'Batch cancelled' });
+      return;
+    }
+
+    // ── Approval Gate API ──────────────────────────────────────
+
+    // GET /api/approvals — list all pending approvals
+    if (req.method === 'GET' && pathname === '/api/approvals') {
+      const approvals: PendingApproval[] = [];
+      for (const [, entry] of pendingApprovals) {
+        approvals.push(entry.approval);
+      }
+      sendJson(res, 200, { approvals });
+      return;
+    }
+
+    // POST /api/approvals/:id/approve — approve a pending gate
+    const approveMatch = pathname.match(/^\/api\/approvals\/([^/]+)\/approve$/);
+    if (req.method === 'POST' && approveMatch) {
+      const approvalId = decodeURIComponent(approveMatch[1]);
+      const entry = pendingApprovals.get(approvalId);
+      if (!entry) {
+        sendJson(res, 404, { error: `Approval "${approvalId}" not found or already resolved` });
+        return;
+      }
+      if (entry.timer) clearTimeout(entry.timer);
+      pendingApprovals.delete(approvalId);
+      entry.resolve(true);
+      debugLog.info('approval', `Approval "${approvalId}" approved by user`);
+      sendJson(res, 200, { success: true, approved: true });
+      return;
+    }
+
+    // POST /api/approvals/:id/reject — reject a pending gate
+    const rejectMatch = pathname.match(/^\/api\/approvals\/([^/]+)\/reject$/);
+    if (req.method === 'POST' && rejectMatch) {
+      const approvalId = decodeURIComponent(rejectMatch[1]);
+      const entry = pendingApprovals.get(approvalId);
+      if (!entry) {
+        sendJson(res, 404, { error: `Approval "${approvalId}" not found or already resolved` });
+        return;
+      }
+      if (entry.timer) clearTimeout(entry.timer);
+      pendingApprovals.delete(approvalId);
+      entry.resolve(false);
+      debugLog.info('approval', `Approval "${approvalId}" rejected by user`);
+      sendJson(res, 200, { success: true, approved: false });
+      return;
+    }
+
+    // ── Schedule API ─────────────────────────────────────────
+
+    // GET /api/schedules — list all schedules
+    if (req.method === 'GET' && pathname === '/api/schedules') {
+      try {
+        const schedules = await loadSchedules();
+        sendJson(res, 200, { schedules });
+      } catch (err) {
+        sendJson(res, 500, { error: String(err) });
+      }
+      return;
+    }
+
+    // POST /api/schedules — create a new schedule
+    if (req.method === 'POST' && pathname === '/api/schedules') {
+      try {
+        const body = await readBody(req);
+        const data = JSON.parse(body) as Partial<Schedule>;
+
+        if (!data.compositionId || !data.cron) {
+          sendJson(res, 400, { error: 'compositionId and cron are required' });
+          return;
+        }
+
+        // Validate cron format (5 fields)
+        const cronParts = data.cron.trim().split(/\s+/);
+        if (cronParts.length !== 5) {
+          sendJson(res, 400, { error: 'Invalid cron expression — must have 5 fields: minute hour dom month dow' });
+          return;
+        }
+
+        // Verify composition exists
+        const compDir = join(homedir(), '.woodbury', 'compositions');
+        const compFile = join(compDir, data.compositionId + '.json');
+        let compName = data.compositionName || 'Unknown';
+        try {
+          const compContent = await readFile(compFile, 'utf-8');
+          const comp = JSON.parse(compContent);
+          compName = comp.name || compName;
+        } catch {
+          sendJson(res, 404, { error: `Composition "${data.compositionId}" not found` });
+          return;
+        }
+
+        const schedule: Schedule = {
+          id: generateScheduleId(),
+          compositionId: data.compositionId,
+          compositionName: compName,
+          cron: data.cron.trim(),
+          enabled: data.enabled !== false,
+          variables: data.variables || {},
+          description: data.description || '',
+          createdAt: new Date().toISOString(),
+        };
+
+        const schedules = await loadSchedules();
+        schedules.push(schedule);
+        await saveSchedules(schedules);
+
+        debugLog.info('scheduler', `Created schedule "${schedule.id}" for "${compName}"`);
+        sendJson(res, 201, { schedule });
+      } catch (err) {
+        sendJson(res, 500, { error: String(err) });
+      }
+      return;
+    }
+
+    // GET/PUT/DELETE /api/schedules/:id
+    const scheduleDetailMatch = pathname.match(/^\/api\/schedules\/([^/]+)$/);
+    if (scheduleDetailMatch) {
+      const scheduleId = decodeURIComponent(scheduleDetailMatch[1]);
+      const schedules = await loadSchedules();
+      const idx = schedules.findIndex(s => s.id === scheduleId);
+
+      if (req.method === 'GET') {
+        if (idx < 0) {
+          sendJson(res, 404, { error: `Schedule "${scheduleId}" not found` });
+          return;
+        }
+        sendJson(res, 200, { schedule: schedules[idx] });
+        return;
+      }
+
+      if (req.method === 'PUT') {
+        if (idx < 0) {
+          sendJson(res, 404, { error: `Schedule "${scheduleId}" not found` });
+          return;
+        }
+        try {
+          const body = await readBody(req);
+          const updates = JSON.parse(body) as Partial<Schedule>;
+
+          // Apply allowed updates
+          if (updates.cron !== undefined) {
+            const cronParts = updates.cron.trim().split(/\s+/);
+            if (cronParts.length !== 5) {
+              sendJson(res, 400, { error: 'Invalid cron expression — must have 5 fields' });
+              return;
+            }
+            schedules[idx].cron = updates.cron.trim();
+          }
+          if (updates.enabled !== undefined) schedules[idx].enabled = updates.enabled;
+          if (updates.variables !== undefined) schedules[idx].variables = updates.variables;
+          if (updates.description !== undefined) schedules[idx].description = updates.description;
+
+          await saveSchedules(schedules);
+          debugLog.info('scheduler', `Updated schedule "${scheduleId}"`);
+          sendJson(res, 200, { schedule: schedules[idx] });
+        } catch (err) {
+          sendJson(res, 500, { error: String(err) });
+        }
+        return;
+      }
+
+      if (req.method === 'DELETE') {
+        if (idx < 0) {
+          sendJson(res, 404, { error: `Schedule "${scheduleId}" not found` });
+          return;
+        }
+        schedules.splice(idx, 1);
+        await saveSchedules(schedules);
+        debugLog.info('scheduler', `Deleted schedule "${scheduleId}"`);
+        sendJson(res, 200, { success: true });
+        return;
+      }
+    }
+
+    // ── Run History API ────────────────────────────────────────
+
+    // GET /api/runs — list runs with optional filters
+    if (req.method === 'GET' && pathname === '/api/runs') {
+      try {
+        const runs = await loadRuns();
+        const url = new URL(req.url!, `http://${req.headers.host}`);
+        const statusFilter = url.searchParams.get('status');
+        const typeFilter = url.searchParams.get('type');
+        const limit = parseInt(url.searchParams.get('limit') || '50', 10);
+        const offset = parseInt(url.searchParams.get('offset') || '0', 10);
+
+        let filtered = [...runs].reverse(); // newest first
+        if (statusFilter) filtered = filtered.filter(r => r.status === statusFilter);
+        if (typeFilter) filtered = filtered.filter(r => r.type === typeFilter);
+
+        const total = filtered.length;
+        const page = filtered.slice(offset, offset + limit);
+        sendJson(res, 200, { runs: page, total, limit, offset });
+      } catch (err) {
+        sendJson(res, 500, { error: String(err) });
+      }
+      return;
+    }
+
+    // DELETE /api/runs — clear all run history
+    if (req.method === 'DELETE' && pathname === '/api/runs') {
+      try {
+        await saveRuns([]);
+        sendJson(res, 200, { success: true });
+      } catch (err) {
+        sendJson(res, 500, { error: String(err) });
+      }
+      return;
+    }
+
+    // GET/DELETE /api/runs/:id — single run detail or delete
+    const runDetailMatch = pathname.match(/^\/api\/runs\/([^/]+)$/);
+    if (runDetailMatch) {
+      const runId = decodeURIComponent(runDetailMatch[1]);
+      if (req.method === 'GET') {
+        try {
+          const runs = await loadRuns();
+          const found = runs.find(r => r.id === runId);
+          if (!found) {
+            sendJson(res, 404, { error: `Run "${runId}" not found` });
+            return;
+          }
+          sendJson(res, 200, { run: found });
+        } catch (err) {
+          sendJson(res, 500, { error: String(err) });
+        }
+        return;
+      } else if (req.method === 'DELETE') {
+        try {
+          const deleted = await deleteRunRecord(runId);
+          if (!deleted) {
+            sendJson(res, 404, { error: `Run "${runId}" not found` });
+            return;
+          }
+          sendJson(res, 200, { success: true });
+        } catch (err) {
+          sendJson(res, 500, { error: String(err) });
+        }
+        return;
+      }
+    }
+
+    // ── Training API Routes ────────────────────────────────
+
+    // GET /api/training/data-summary — scan training data directory
+    if (req.method === 'GET' && pathname === '/api/training/data-summary') {
+      try {
+        const metadataPath = join(TRAINING_DATA_DIR, 'metadata.jsonl');
+        const snapshotsDir = join(TRAINING_DATA_DIR, 'snapshots');
+
+        let totalCrops = 0;
+        let uniqueGroups = new Set<string>();
+        let uniqueSites = new Set<string>();
+        let interactedGroups = new Set<string>();
+        let hasMetadata = false;
+        let hasSnapshots = false;
+
+        try {
+          const metaContent = await readFile(metadataPath, 'utf-8');
+          hasMetadata = true;
+          for (const line of metaContent.split('\n')) {
+            if (!line.trim()) continue;
+            try {
+              const entry = JSON.parse(line);
+              totalCrops++;
+              uniqueGroups.add(entry.group_id || '');
+              uniqueSites.add(entry.site_id || '');
+              if (entry.interacted) interactedGroups.add(entry.group_id || '');
+            } catch {}
+          }
+        } catch {}
+
+        try {
+          await stat(snapshotsDir);
+          hasSnapshots = true;
+        } catch {}
+
+        sendJson(res, 200, {
+          hasMetadata,
+          hasSnapshots,
+          totalCrops,
+          uniqueGroups: uniqueGroups.size,
+          uniqueSites: uniqueSites.size,
+          interactedGroups: interactedGroups.size,
+          dataDir: TRAINING_DATA_DIR,
+        });
+      } catch (err) {
+        sendJson(res, 500, { error: String(err) });
+      }
+      return;
+    }
+
+    // POST /api/training/prepare — run data preparation from snapshots
+    if (req.method === 'POST' && pathname === '/api/training/prepare') {
+      try {
+        if (activeTraining && !activeTraining.done) {
+          sendJson(res, 409, { error: 'Training is already in progress' });
+          return;
+        }
+
+        const body = await readBody(req);
+        const source = body?.source || 'viewport';
+        const cropsPerElement = body?.cropsPerElement || 10;
+
+        activeTraining = {
+          process: null,
+          backbone: '',
+          epochs: 0,
+          currentEpoch: 0,
+          totalEpochs: 0,
+          loss: 0,
+          lr: 0,
+          eta_s: 0,
+          phase: 'preparing',
+          metrics: {},
+          bestAuc: 0,
+          logs: [],
+          done: false,
+          success: false,
+          outputDir: TRAINING_DATA_DIR,
+          startedAt: Date.now(),
+        };
+
+        const proc = spawn('python', [
+          '-m', 'woobury_models.prepare',
+          '--snapshots-dir', join(TRAINING_DATA_DIR, 'snapshots'),
+          '--output-dir', TRAINING_DATA_DIR,
+          '--source', source,
+          '--crops-per-element', String(cropsPerElement),
+        ], {
+          env: { ...process.env, PYTHONUNBUFFERED: '1' },
+          cwd: join(homedir(), 'Documents', 'GitHub', 'woobury-models'),
+        });
+
+        activeTraining.process = proc;
+
+        proc.stdout?.on('data', (data: Buffer) => {
+          const lines = data.toString().split('\n').filter(Boolean);
+          for (const line of lines) {
+            if (activeTraining && activeTraining.logs.length < 500) {
+              activeTraining.logs.push(line);
+            }
+          }
+        });
+
+        proc.stderr?.on('data', (data: Buffer) => {
+          const lines = data.toString().split('\n').filter(Boolean);
+          for (const line of lines) {
+            if (activeTraining && activeTraining.logs.length < 500) {
+              activeTraining.logs.push(line);
+            }
+          }
+        });
+
+        proc.on('close', (code) => {
+          if (activeTraining && activeTraining.phase === 'preparing') {
+            activeTraining.done = true;
+            activeTraining.success = code === 0;
+            activeTraining.phase = code === 0 ? 'complete' : 'error';
+            activeTraining.durationMs = Date.now() - activeTraining.startedAt;
+            if (code !== 0) {
+              activeTraining.error = `Preparation failed with exit code ${code}`;
+            }
+          }
+        });
+
+        sendJson(res, 200, { success: true, status: 'preparing' });
+      } catch (err) {
+        sendJson(res, 500, { error: String(err) });
+      }
+      return;
+    }
+
+    // POST /api/training/start — start model training
+    if (req.method === 'POST' && pathname === '/api/training/start') {
+      try {
+        if ((activeTraining && !activeTraining.done) || (remoteTraining && !remoteTraining.done)) {
+          sendJson(res, 409, { error: 'Training is already in progress' });
+          return;
+        }
+
+        const body = await readBody(req);
+        const backbone = body?.backbone || 'mobilenet_v3_small';
+        const epochs = body?.epochs || 50;
+        const lr = body?.lr || 3e-4;
+        const lossType = body?.lossType || 'ntxent';
+        const embedDim = body?.embedDim || 64;
+        const exportOnnx = body?.exportOnnx !== false;
+        const workerId = body?.workerId;
+
+        // ── Remote Worker Dispatch ──
+        if (workerId) {
+          if (remoteTraining && !remoteTraining.done) {
+            sendJson(res, 409, { error: 'Remote training is already in progress' });
+            return;
+          }
+          const workers = await loadWorkers();
+          const worker = workers.find(w => w.id === workerId);
+          if (!worker) {
+            sendJson(res, 404, { error: 'Worker not found' });
+            return;
+          }
+
+          const jobId = `run-${Date.now()}`;
+          const config = {
+            job_id: jobId,
+            backbone,
+            epochs,
+            lr,
+            loss_type: lossType,
+            embed_dim: embedDim,
+            export_onnx: exportOnnx,
+            source: 'viewport',
+            crops_per_element: body?.cropsPerElement || 10,
+          };
+
+          // Initialize remote training state
+          remoteTraining = {
+            worker,
+            jobId,
+            pollTimer: null,
+            eventIndex: 0,
+            backbone,
+            epochs,
+            currentEpoch: 0,
+            totalEpochs: epochs,
+            loss: 0,
+            lr,
+            eta_s: 0,
+            phase: 'uploading',
+            metrics: {},
+            bestAuc: 0,
+            logs: [`Sending snapshots to ${worker.name} (${worker.host}:${worker.port})...`],
+            done: false,
+            success: false,
+            outputDir: '',
+            startedAt: Date.now(),
+            embedDim,
+            lossType,
+          };
+
+          // Tar and send snapshots in background
+          const snapshotsDir = join(TRAINING_DATA_DIR, 'snapshots');
+          const configJson = JSON.stringify(config);
+          const boundary = '----WooburyBoundary' + Date.now();
+
+          // Build multipart body: config + tar.gz data
+          const tarProc = spawn('tar', ['czf', '-', '-C', TRAINING_DATA_DIR, 'snapshots']);
+          const tarChunks: Buffer[] = [];
+          tarProc.stdout.on('data', (chunk: Buffer) => tarChunks.push(chunk));
+          tarProc.stderr.on('data', () => {}); // ignore
+
+          tarProc.on('close', (code) => {
+            if (code !== 0 || !remoteTraining) {
+              if (remoteTraining) {
+                remoteTraining.phase = 'error';
+                remoteTraining.done = true;
+                remoteTraining.error = 'Failed to create tar archive';
+              }
+              return;
+            }
+
+            const tarData = Buffer.concat(tarChunks);
+            remoteTraining.logs.push(`Uploading ${(tarData.length / 1024 / 1024).toFixed(1)} MB...`);
+
+            // Build multipart body
+            const configPart = Buffer.from(
+              `--${boundary}\r\nContent-Disposition: form-data; name="config"\r\nContent-Type: application/json\r\n\r\n${configJson}\r\n`
+            );
+            const dataPart = Buffer.from(
+              `--${boundary}\r\nContent-Disposition: form-data; name="data"; filename="snapshots.tar.gz"\r\nContent-Type: application/gzip\r\n\r\n`
+            );
+            const ending = Buffer.from(`\r\n--${boundary}--\r\n`);
+            const fullBody = Buffer.concat([configPart, dataPart, tarData, ending]);
+
+            const req = httpRequest({
+              hostname: worker.host,
+              port: worker.port,
+              path: '/jobs',
+              method: 'POST',
+              timeout: 120000,
+              headers: {
+                'Content-Type': `multipart/form-data; boundary=${boundary}`,
+                'Content-Length': fullBody.length,
+              },
+            }, (res) => {
+              let body = '';
+              res.on('data', (chunk: string) => body += chunk);
+              res.on('end', () => {
+                if (remoteTraining) {
+                  remoteTraining.phase = 'preparing';
+                  remoteTraining.logs.push('Job accepted by worker, starting preparation...');
+                  startRemotePolling();
+                }
+              });
+            });
+
+            req.on('error', (err) => {
+              if (remoteTraining) {
+                remoteTraining.phase = 'error';
+                remoteTraining.done = true;
+                remoteTraining.error = `Failed to submit job: ${err.message}`;
+              }
+            });
+
+            req.write(fullBody);
+            req.end();
+          });
+
+          sendJson(res, 200, { success: true, outputDir: 'remote', workerId });
+          return;
+        }
+
+        // ── Local Training ──
+        // Create output directory for this run
+        const runTs = Date.now();
+        const outputDir = join(MODELS_DIR, `run-${runTs}`);
+        await mkdir(outputDir, { recursive: true });
+
+        // Write config YAML for this run
+        const configContent = [
+          'input:',
+          '  max_side: 128',
+          '  letterbox_to: [128, 128]',
+          '  normalize: imagenet_mean_std',
+          '',
+          'model:',
+          `  backbone: ${backbone}`,
+          `  embed_dim: ${embedDim}`,
+          '  pretrained: true',
+          '',
+          'loss:',
+          `  type: ${lossType}`,
+          '  ntxent_temperature: 0.07',
+          '  triplet_margin: 0.2',
+          '  contrastive_margin: 0.8',
+          '',
+          'batching:',
+          '  scheme: pk',
+          '  P: 32',
+          '  K: 4',
+          '',
+          'optimizer:',
+          '  name: adamw',
+          `  lr: ${lr}`,
+          '  weight_decay: 1.0e-4',
+          `  epochs: ${epochs}`,
+          '  lr_schedule: cosine',
+          '  mixed_precision: true',
+          '',
+          'data:',
+          '  train_frac: 0.7',
+          '  val_frac: 0.15',
+          '  site_holdout: false',
+          '  pos_fraction: 0.5',
+          '  augmentation_p: 0.3',
+          '',
+        ].join('\n');
+
+        const configPath = join(outputDir, 'config.yaml');
+        await writeFile(configPath, configContent);
+
+        activeTraining = {
+          process: null,
+          backbone,
+          epochs,
+          currentEpoch: 0,
+          totalEpochs: epochs,
+          loss: 0,
+          lr,
+          eta_s: 0,
+          phase: 'training',
+          metrics: {},
+          bestAuc: 0,
+          logs: [],
+          done: false,
+          success: false,
+          outputDir,
+          startedAt: Date.now(),
+          embedDim,
+          lossType,
+        };
+
+        const args = [
+          '-m', 'woobury_models.train',
+          '--json-progress',
+          '--config', configPath,
+          '--data-dir', TRAINING_DATA_DIR,
+          '--output-dir', outputDir,
+        ];
+        if (exportOnnx) args.push('--export-onnx');
+
+        const proc = spawn('python', args, {
+          env: { ...process.env, PYTHONUNBUFFERED: '1' },
+          cwd: join(homedir(), 'Documents', 'GitHub', 'woobury-models'),
+        });
+
+        activeTraining.process = proc;
+
+        // Parse JSON progress from stdout
+        let stdoutBuf = '';
+        proc.stdout?.on('data', (data: Buffer) => {
+          stdoutBuf += data.toString();
+          const lines = stdoutBuf.split('\n');
+          stdoutBuf = lines.pop() || '';  // Keep incomplete line in buffer
+
+          for (const line of lines) {
+            if (!line.trim()) continue;
+            try {
+              const evt = JSON.parse(line);
+              if (!activeTraining) continue;
+
+              switch (evt.event) {
+                case 'init':
+                  activeTraining.trainSamples = evt.train_samples;
+                  activeTraining.valSamples = evt.val_samples;
+                  activeTraining.groups = evt.groups;
+                  activeTraining.device = evt.device;
+                  activeTraining.totalEpochs = evt.epochs;
+                  break;
+                case 'epoch':
+                  activeTraining.currentEpoch = evt.epoch;
+                  activeTraining.loss = evt.loss;
+                  activeTraining.lr = evt.lr;
+                  activeTraining.eta_s = evt.eta_s || 0;
+                  break;
+                case 'validation':
+                  activeTraining.metrics = { ...evt };
+                  delete (activeTraining.metrics as any).event;
+                  delete (activeTraining.metrics as any).epoch;
+                  if (evt.best_auc !== undefined) activeTraining.bestAuc = evt.best_auc;
+                  break;
+                case 'checkpoint':
+                  // Just log it
+                  break;
+                case 'export':
+                  activeTraining.phase = evt.phase === 'complete' ? 'complete' : 'exporting';
+                  break;
+                case 'complete':
+                  activeTraining.bestAuc = evt.best_auc || activeTraining.bestAuc;
+                  break;
+                case 'error':
+                  activeTraining.error = evt.message;
+                  break;
+              }
+            } catch {
+              // Not JSON — add to logs
+              if (activeTraining && activeTraining.logs.length < 500) {
+                activeTraining.logs.push(line);
+              }
+            }
+          }
+        });
+
+        // Capture stderr as log lines
+        proc.stderr?.on('data', (data: Buffer) => {
+          if (!activeTraining) return;
+          const lines = data.toString().split('\n').filter(Boolean);
+          for (const line of lines) {
+            if (activeTraining.logs.length < 500) {
+              activeTraining.logs.push(line);
+            }
+          }
+        });
+
+        proc.on('close', async (code) => {
+          if (!activeTraining) return;
+          activeTraining.done = true;
+          activeTraining.success = code === 0;
+          activeTraining.durationMs = Date.now() - activeTraining.startedAt;
+          if (code !== 0 && !activeTraining.error) {
+            activeTraining.error = `Training process exited with code ${code}`;
+          }
+          if (activeTraining.phase !== 'error') {
+            activeTraining.phase = code === 0 ? 'complete' : 'error';
+          }
+
+          // Save run record
+          try {
+            const runId = generateRunId();
+            activeTraining.runId = runId;
+            await createRunRecord({
+              id: runId,
+              type: 'training',
+              name: `Train ${backbone} (${epochs} epochs)`,
+              status: code === 0 ? 'completed' : 'failed',
+              startedAt: new Date(activeTraining.startedAt).toISOString(),
+              completedAt: new Date().toISOString(),
+              durationMs: activeTraining.durationMs,
+              stepsCompleted: activeTraining.currentEpoch,
+              stepsTotal: activeTraining.totalEpochs,
+              error: activeTraining.error,
+              metadata: {
+                backbone,
+                epochs,
+                bestAuc: activeTraining.bestAuc,
+                outputDir,
+                lossType,
+                embedDim,
+              },
+            } as any);
+          } catch {}
+        });
+
+        sendJson(res, 200, { success: true, outputDir });
+      } catch (err) {
+        sendJson(res, 500, { error: String(err) });
+      }
+      return;
+    }
+
+    // GET /api/training/status — poll training progress (local or remote)
+    if (req.method === 'GET' && pathname === '/api/training/status') {
+      // Check remote training first
+      if (remoteTraining) {
+        sendJson(res, 200, {
+          active: !remoteTraining.done,
+          done: remoteTraining.done,
+          success: remoteTraining.success,
+          backbone: remoteTraining.backbone,
+          phase: remoteTraining.phase,
+          currentEpoch: remoteTraining.currentEpoch,
+          totalEpochs: remoteTraining.totalEpochs,
+          loss: remoteTraining.loss,
+          lr: remoteTraining.lr,
+          eta_s: remoteTraining.eta_s,
+          metrics: remoteTraining.metrics,
+          bestAuc: remoteTraining.bestAuc,
+          error: remoteTraining.error,
+          outputDir: remoteTraining.outputDir,
+          durationMs: remoteTraining.done ? remoteTraining.durationMs : Date.now() - remoteTraining.startedAt,
+          trainSamples: remoteTraining.trainSamples,
+          valSamples: remoteTraining.valSamples,
+          groups: remoteTraining.groups,
+          device: remoteTraining.device,
+          embedDim: remoteTraining.embedDim,
+          lossType: remoteTraining.lossType,
+          logs: remoteTraining.logs,
+          worker: { id: remoteTraining.worker.id, name: remoteTraining.worker.name, host: remoteTraining.worker.host },
+        });
+        return;
+      }
+      if (!activeTraining) {
+        sendJson(res, 200, { active: false });
+        return;
+      }
+      sendJson(res, 200, {
+        active: !activeTraining.done,
+        done: activeTraining.done,
+        runId: activeTraining.runId,
+        success: activeTraining.success,
+        backbone: activeTraining.backbone,
+        phase: activeTraining.phase,
+        currentEpoch: activeTraining.currentEpoch,
+        totalEpochs: activeTraining.totalEpochs,
+        loss: activeTraining.loss,
+        lr: activeTraining.lr,
+        eta_s: activeTraining.eta_s,
+        metrics: activeTraining.metrics,
+        bestAuc: activeTraining.bestAuc,
+        error: activeTraining.error,
+        outputDir: activeTraining.outputDir,
+        durationMs: activeTraining.done ? activeTraining.durationMs : Date.now() - activeTraining.startedAt,
+        trainSamples: activeTraining.trainSamples,
+        valSamples: activeTraining.valSamples,
+        groups: activeTraining.groups,
+        device: activeTraining.device,
+        embedDim: activeTraining.embedDim,
+        lossType: activeTraining.lossType,
+        logs: activeTraining.logs,
+      });
+      return;
+    }
+
+    // POST /api/training/cancel — stop training (local or remote)
+    if (req.method === 'POST' && pathname === '/api/training/cancel') {
+      // Handle remote cancel
+      if (remoteTraining && !remoteTraining.done) {
+        try {
+          await new Promise<void>((resolve, reject) => {
+            const req = httpRequest({
+              hostname: remoteTraining!.worker.host,
+              port: remoteTraining!.worker.port,
+              path: '/jobs/current/cancel',
+              method: 'POST',
+              timeout: 5000,
+            }, () => resolve());
+            req.on('error', reject);
+            req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
+            req.end();
+          });
+        } catch {}
+        remoteTraining.done = true;
+        remoteTraining.success = false;
+        remoteTraining.error = 'Cancelled by user';
+        remoteTraining.phase = 'error';
+        remoteTraining.durationMs = Date.now() - remoteTraining.startedAt;
+        if (remoteTraining.pollTimer) clearInterval(remoteTraining.pollTimer);
+        remoteTraining.pollTimer = null;
+        sendJson(res, 200, { success: true, message: 'Remote training cancelled' });
+        return;
+      }
+      if (!activeTraining || activeTraining.done) {
+        sendJson(res, 400, { error: 'No training is currently running' });
+        return;
+      }
+      if (activeTraining.process) {
+        activeTraining.process.kill('SIGTERM');
+      }
+      activeTraining.done = true;
+      activeTraining.success = false;
+      activeTraining.error = 'Cancelled by user';
+      activeTraining.phase = 'error';
+      activeTraining.durationMs = Date.now() - activeTraining.startedAt;
+      sendJson(res, 200, { success: true, message: 'Training cancelled' });
+      return;
+    }
+
+    // ── Worker Management ─────────────────────────────────
+
+    // GET /api/workers — list workers with live health
+    if (req.method === 'GET' && pathname === '/api/workers') {
+      try {
+        const workers = await loadWorkers();
+        const results = await Promise.all(workers.map(async (w) => {
+          try {
+            const health = await probeWorker(w.host, w.port);
+            return { ...w, online: true, ...health };
+          } catch {
+            return { ...w, online: false, gpu: null, gpu_memory_gb: null, cuda_available: false, busy: false };
+          }
+        }));
+        sendJson(res, 200, { workers: results });
+      } catch (err) {
+        sendJson(res, 500, { error: String(err) });
+      }
+      return;
+    }
+
+    // POST /api/workers — add a worker
+    if (req.method === 'POST' && pathname === '/api/workers') {
+      try {
+        const body = await readBody(req);
+        const { name, host, port } = body || {};
+        if (!name || !host || !port) {
+          sendJson(res, 400, { error: 'name, host, and port are required' });
+          return;
+        }
+        // Validate connectivity
+        try {
+          await probeWorker(host, port);
+        } catch {
+          sendJson(res, 400, { error: `Cannot reach worker at ${host}:${port}` });
+          return;
+        }
+        const workers = await loadWorkers();
+        const worker: WorkerConfig = {
+          id: `w-${Date.now()}`,
+          name,
+          host,
+          port,
+          addedAt: new Date().toISOString(),
+        };
+        workers.push(worker);
+        await saveWorkers(workers);
+        sendJson(res, 200, { worker });
+      } catch (err) {
+        sendJson(res, 500, { error: String(err) });
+      }
+      return;
+    }
+
+    // DELETE /api/workers/:id — remove a worker
+    if (req.method === 'DELETE' && pathname.startsWith('/api/workers/')) {
+      try {
+        const workerId = pathname.split('/api/workers/')[1];
+        const workers = await loadWorkers();
+        const filtered = workers.filter(w => w.id !== workerId);
+        if (filtered.length === workers.length) {
+          sendJson(res, 404, { error: 'Worker not found' });
+          return;
+        }
+        await saveWorkers(filtered);
+        sendJson(res, 200, { success: true });
+      } catch (err) {
+        sendJson(res, 500, { error: String(err) });
+      }
+      return;
+    }
+
+    // GET /api/training/models — list trained models
+    if (req.method === 'GET' && pathname === '/api/training/models') {
+      try {
+        await mkdir(MODELS_DIR, { recursive: true });
+        const entries = await readdir(MODELS_DIR);
+        const models = [];
+        for (const entry of entries) {
+          const dir = join(MODELS_DIR, entry);
+          try {
+            const s = await stat(dir);
+            if (!s.isDirectory()) continue;
+            // Check for config.yaml and a model file
+            const files = await readdir(dir);
+            models.push({
+              id: entry,
+              dir,
+              hasConfig: files.includes('config.yaml'),
+              hasBestModel: files.includes('best_model.pt'),
+              hasFinalModel: files.includes('final_model.pt'),
+              hasOnnx: files.includes('encoder.onnx'),
+              hasQuantized: files.includes('encoder_quantized.onnx'),
+              files,
+              createdAt: s.birthtime.toISOString(),
+            });
+          } catch {}
+        }
+        sendJson(res, 200, { models });
+      } catch (err) {
+        sendJson(res, 500, { error: String(err) });
+      }
+      return;
+    }
+
     // ── Static File Serving ─────────────────────────────────
     const filePath =
       pathname === '/' ? '/index.html' : pathname.split('?')[0];
@@ -1732,10 +4416,26 @@ Rules:
     console.log(`[dashboard] Config dashboard at ${dashboardUrl}`);
   }
 
+  // Start remote relay (Firebase RTDB connection)
+  let relayHandle: RelayHandle | null = null;
+  try {
+    relayHandle = await startRemoteRelay(assignedPort, verbose);
+    debugLog.info('relay', 'Remote relay started', { connectionUrl: relayHandle.connectionUrl });
+  } catch (err) {
+    debugLog.info('relay', `Remote relay failed to start: ${String(err)}`);
+    if (verbose) console.log(`[dashboard] Remote relay failed: ${err}`);
+  }
+
   return {
     url: dashboardUrl,
     port: assignedPort,
-    close: () =>
-      new Promise<void>((resolve) => server.close(() => resolve())),
+    connectionUrl: relayHandle?.connectionUrl,
+    pair: relayHandle ? (code: string) => relayHandle!.pair(code) : undefined,
+    isPaired: relayHandle ? () => relayHandle!.isPaired() : undefined,
+    close: () => {
+      relayHandle?.stop();
+      stopScheduler();
+      return new Promise<void>((resolve) => server.close(() => resolve()));
+    },
   };
 }

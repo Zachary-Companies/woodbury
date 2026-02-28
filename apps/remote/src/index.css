@@ -1,0 +1,60 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Safe area insets for mobile notch/pill */
+:root {
+  --sat: env(safe-area-inset-top);
+  --sab: env(safe-area-inset-bottom);
+}
+
+body {
+  padding-top: var(--sat);
+  padding-bottom: var(--sab);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Prevent overscroll bounce */
+html, body {
+  overscroll-behavior: none;
+}
+
+/* Loading spinner */
+.spinner {
+  border: 3px solid rgba(255, 255, 255, 0.1);
+  border-top-color: #7c3aed;
+  border-radius: 50%;
+  width: 32px;
+  height: 32px;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Small spinner for inline use */
+.spinner-sm {
+  border: 2px solid rgba(255, 255, 255, 0.1);
+  border-top-color: #06b6d4;
+  border-radius: 50%;
+  width: 16px;
+  height: 16px;
+  animation: spin 0.8s linear infinite;
+}
+
+/* Toast animation */
+@keyframes slideUp {
+  from { transform: translateY(100%); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
+.toast-enter {
+  animation: slideUp 0.3s ease-out;
+}
+
+/* Pull-to-refresh indicator */
+.pull-indicator {
+  transition: transform 0.2s;
+}

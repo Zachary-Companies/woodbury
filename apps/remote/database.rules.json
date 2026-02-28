@@ -1,0 +1,28 @@
+{
+  "rules": {
+    "instances": {
+      "$instanceId": {
+        ".read": "auth != null",
+        ".write": "auth != null"
+      }
+    },
+    "access": {
+      "$uid": {
+        ".read": "auth != null && auth.uid === $uid",
+        ".write": "auth != null && auth.uid === $uid"
+      }
+    },
+    "users": {
+      "$uid": {
+        ".read": "auth != null && auth.uid === $uid",
+        ".write": "auth != null"
+      }
+    },
+    "pairing_codes": {
+      "$code": {
+        ".read": "auth != null",
+        ".write": "auth != null"
+      }
+    }
+  }
+}

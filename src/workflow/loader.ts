@@ -12,7 +12,7 @@ import { promises as fs } from 'fs';
 import { join, resolve, basename } from 'path';
 import { homedir } from 'os';
 import { existsSync } from 'fs';
-import type { WorkflowDocument } from './types.js';
+import type { WorkflowDocument, CompositionDocument } from './types.js';
 
 const EXTENSIONS_DIR = join(homedir(), '.woodbury', 'extensions');
 const GLOBAL_WORKFLOWS_DIR = join(homedir(), '.woodbury', 'workflows');
@@ -183,4 +183,76 @@ export async function loadWorkflowsFromDir(dir: string): Promise<WorkflowDocumen
   }
 
   return workflows;
+}
+
+// ────────────────────────────────────────────────────────────────
+//  Composition discovery (same pattern as workflows)
+// ────────────────────────────────────────────────────────────────
+
+export interface DiscoveredComposition {
+  path: string;
+  composition: CompositionDocument;
+  source: 'project' | 'global';
+}
+
+/**
+ * Load a single composition file from disk.
+ */
+export async function loadComposition(filePath: string): Promise<CompositionDocument> {
+  const absolutePath = resolve(filePath);
+  const content = await fs.readFile(absolutePath, 'utf-8');
+  const doc: CompositionDocument = JSON.parse(content);
+
+  if (!doc.version) throw new Error(`Composition missing "version": ${filePath}`);
+  if (!doc.id) throw new Error(`Composition missing "id": ${filePath}`);
+  if (!doc.name) throw new Error(`Composition missing "name": ${filePath}`);
+  if (!Array.isArray(doc.nodes)) throw new Error(`Composition missing "nodes": ${filePath}`);
+  if (!Array.isArray(doc.edges)) throw new Error(`Composition missing "edges": ${filePath}`);
+
+  return doc;
+}
+
+/**
+ * Discover all .composition.json files from project-local and global locations.
+ */
+export async function discoverCompositions(
+  workingDirectory?: string
+): Promise<DiscoveredComposition[]> {
+  const results: DiscoveredComposition[] = [];
+
+  // 1. Project-local compositions
+  if (workingDirectory) {
+    const projectDir = join(workingDirectory, '.woodbury-work', 'workflows');
+    results.push(...await discoverCompositionsFromDir(projectDir, 'project'));
+  }
+
+  // 2. Global user compositions
+  results.push(...await discoverCompositionsFromDir(GLOBAL_WORKFLOWS_DIR, 'global'));
+
+  return results;
+}
+
+async function discoverCompositionsFromDir(
+  dir: string,
+  source: DiscoveredComposition['source']
+): Promise<DiscoveredComposition[]> {
+  const results: DiscoveredComposition[] = [];
+  if (!existsSync(dir)) return results;
+
+  try {
+    const files = await fs.readdir(dir);
+    for (const file of files) {
+      if (!file.endsWith('.composition.json')) continue;
+      try {
+        const composition = await loadComposition(join(dir, file));
+        results.push({ path: join(dir, file), composition, source });
+      } catch {
+        // Skip invalid
+      }
+    }
+  } catch {
+    // Dir not readable
+  }
+
+  return results;
 }

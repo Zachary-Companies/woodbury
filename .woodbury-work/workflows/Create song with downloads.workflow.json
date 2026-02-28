@@ -1,0 +1,595 @@
+{
+  "version": "1.0",
+  "id": "Create song with downloads",
+  "name": "Create Song With Downloads",
+  "description": "Recorded workflow for suno.com",
+  "site": "suno.com",
+  "variables": [
+    {
+      "name": "lyrics",
+      "description": "Lyrics to enter in the text area",
+      "type": "string",
+      "required": true,
+      "default": "Add lyrics here for something cool."
+    },
+    {
+      "name": "style",
+      "description": "Value to enter in the text area",
+      "type": "string",
+      "required": true,
+      "default": "lofi hip hop"
+    },
+    {
+      "name": "title",
+      "description": "Title to enter in the input field",
+      "type": "string",
+      "required": true,
+      "default": "Optional Title"
+    },
+    {
+      "name": "outputDir",
+      "description": "Output directory for downloaded files",
+      "type": "string",
+      "required": false,
+      "default": "/Users/andrewporter/Downloads/"
+    }
+  ],
+  "steps": [
+    {
+      "id": "step-1-navigate",
+      "label": "Navigate to https://suno.com",
+      "type": "navigate",
+      "url": "https://suno.com",
+      "waitMs": 2000
+    },
+    {
+      "id": "step-2-click-span",
+      "label": "Click span \"Create\"",
+      "type": "click",
+      "target": {
+        "selector": "div:nth-of-type(1) > div:nth-of-type(3) > a:nth-of-type(2) > span > span",
+        "textContent": "Create",
+        "expectedBounds": {
+          "left": 50,
+          "top": 223,
+          "width": 47,
+          "height": 16,
+          "tolerance": 80,
+          "pctX": 3.58,
+          "pctY": 21.02,
+          "pctW": 2.3,
+          "pctH": 1.46,
+          "viewportW": 2056,
+          "viewportH": 1099
+        },
+        "context": {
+          "ancestors": [
+            "span",
+            "a",
+            "div",
+            "div"
+          ],
+          "nthWithSameText": 1,
+          "totalWithSameText": 3
+        }
+      },
+      "delayAfterMs": 300
+    },
+    {
+      "id": "step-3-navigate",
+      "label": "Navigate to https://suno.com/create",
+      "type": "navigate",
+      "url": "https://suno.com/create",
+      "waitMs": 2000
+    },
+    {
+      "id": "step-4-wait",
+      "label": "Wait 2.0s",
+      "type": "wait",
+      "condition": {
+        "type": "delay",
+        "ms": 2000
+      }
+    },
+    {
+      "id": "step-5-wait",
+      "label": "Wait 3.2s",
+      "type": "wait",
+      "condition": {
+        "type": "delay",
+        "ms": 3220
+      }
+    },
+    {
+      "id": "step-7-click-textarea",
+      "label": "Click div > div:nth-of-type(1) > div:nth-of-ty",
+      "type": "click",
+      "target": {
+        "selector": "div > div:nth-of-type(1) > div:nth-of-type(1) > div > textarea",
+        "expectedBounds": {
+          "left": 232,
+          "top": 228,
+          "width": 386,
+          "height": 100,
+          "tolerance": 80,
+          "pctX": 20.67,
+          "pctY": 25.3,
+          "pctW": 18.77,
+          "pctH": 9.1,
+          "viewportW": 2056,
+          "viewportH": 1099
+        },
+        "placeholder": "Write some lyrics or a prompt — or leave blank for instrumental",
+        "context": {
+          "ancestors": [
+            "div",
+            "div",
+            "div",
+            "div"
+          ]
+        }
+      },
+      "delayAfterMs": 300
+    },
+    {
+      "id": "step-8-type-div",
+      "label": "Type {{lyrics}}",
+      "type": "type",
+      "target": {
+        "selector": "div > div:nth-of-type(1) > div:nth-of-type(1) > div > textarea",
+        "expectedBounds": {
+          "left": 232,
+          "top": 228,
+          "width": 386,
+          "height": 100,
+          "tolerance": 80,
+          "pctX": 20.67,
+          "pctY": 25.3,
+          "pctW": 18.77,
+          "pctH": 9.1,
+          "viewportW": 2056,
+          "viewportH": 1099
+        },
+        "placeholder": "Write some lyrics or a prompt — or leave blank for instrumental",
+        "context": {
+          "ancestors": [
+            "div",
+            "div",
+            "div",
+            "div"
+          ]
+        }
+      },
+      "value": "{{lyrics}}",
+      "clearFirst": true
+    },
+    {
+      "id": "step-9-click-textarea",
+      "label": "Click div > div:nth-of-type(1) > div:nth-of-ty",
+      "type": "click",
+      "target": {
+        "selector": "div > div:nth-of-type(1) > div:nth-of-type(1) > div > textarea",
+        "expectedBounds": {
+          "left": 232,
+          "top": 438,
+          "width": 386,
+          "height": 100,
+          "tolerance": 80,
+          "pctX": 20.67,
+          "pctY": 44.36,
+          "pctW": 18.77,
+          "pctH": 9.1,
+          "viewportW": 2056,
+          "viewportH": 1099
+        },
+        "placeholder": "calm music, smooth basslines, dark undertones, tambourines, bubbly",
+        "context": {
+          "ancestors": [
+            "div",
+            "div",
+            "div",
+            "div"
+          ]
+        }
+      },
+      "delayAfterMs": 300
+    },
+    {
+      "id": "step-10-type-div",
+      "label": "Type {{style}}",
+      "type": "type",
+      "target": {
+        "selector": "div > div:nth-of-type(1) > div:nth-of-type(1) > div > textarea",
+        "textContent": "S",
+        "expectedBounds": {
+          "left": 232,
+          "top": 438,
+          "width": 386,
+          "height": 100,
+          "tolerance": 80,
+          "pctX": 20.67,
+          "pctY": 44.36,
+          "pctW": 18.77,
+          "pctH": 9.1,
+          "viewportW": 2056,
+          "viewportH": 1099
+        },
+        "placeholder": "calm music, smooth basslines, dark undertones, tambourines, bubbly",
+        "context": {
+          "ancestors": [
+            "div",
+            "div",
+            "div",
+            "div"
+          ]
+        }
+      },
+      "value": "{{style}}",
+      "clearFirst": true
+    },
+    {
+      "id": "step-13-click-input",
+      "label": "Click div > div > div > div:nth-of-type(1) > i",
+      "type": "click",
+      "target": {
+        "selector": "div > div > div > div:nth-of-type(1) > input",
+        "expectedBounds": {
+          "left": 260,
+          "top": 713,
+          "width": 358,
+          "height": 37,
+          "tolerance": 80,
+          "pctX": 21.35,
+          "pctY": 66.52,
+          "pctW": 17.41,
+          "pctH": 3.37,
+          "viewportW": 2056,
+          "viewportH": 1099
+        },
+        "placeholder": "Song Title (Optional)",
+        "context": {
+          "ancestors": [
+            "div",
+            "div",
+            "div",
+            "div"
+          ]
+        }
+      },
+      "delayAfterMs": 300
+    },
+    {
+      "id": "step-14-type-div",
+      "label": "Type {{title}}",
+      "type": "type",
+      "target": {
+        "selector": "div > div > div > div:nth-of-type(1) > input",
+        "expectedBounds": {
+          "left": 260,
+          "top": 713,
+          "width": 358,
+          "height": 37,
+          "tolerance": 80,
+          "pctX": 21.35,
+          "pctY": 66.52,
+          "pctW": 17.41,
+          "pctH": 3.37,
+          "viewportW": 2056,
+          "viewportH": 1099
+        },
+        "placeholder": "Song Title (Optional)",
+        "context": {
+          "ancestors": [
+            "div",
+            "div",
+            "div",
+            "div"
+          ]
+        }
+      },
+      "value": "{{title}}",
+      "clearFirst": true
+    },
+    {
+      "id": "step-15-click-span",
+      "label": "Click span \"Create\"",
+      "type": "click",
+      "target": {
+        "selector": "div:nth-of-type(3) > div > div:nth-of-type(3) > button:nth-of-type(2) > span",
+        "textContent": "Create",
+        "expectedBounds": {
+          "left": 292,
+          "top": 963,
+          "width": 330,
+          "height": 24,
+          "tolerance": 80,
+          "pctX": 22.23,
+          "pctY": 88.72,
+          "pctW": 16.05,
+          "pctH": 2.18,
+          "viewportW": 2056,
+          "viewportH": 1099
+        },
+        "context": {
+          "ancestors": [
+            "button \"Create song\"",
+            "div",
+            "div",
+            "div"
+          ],
+          "nthWithSameText": 3,
+          "totalWithSameText": 3
+        }
+      },
+      "delayAfterMs": 300
+    },
+    {
+      "id": "step-16-wait",
+      "label": "Wait 127.5s",
+      "type": "wait",
+      "condition": {
+        "type": "delay",
+        "ms": 127502
+      }
+    },
+    {
+      "id": "step-17-click-svg",
+      "label": "Click div:nth-of-type(2) > div:nth-of-type(2) ",
+      "type": "click",
+      "target": {
+        "selector": "div:nth-of-type(2) > div:nth-of-type(2) > button > span > svg",
+        "expectedBounds": {
+          "left": 2000,
+          "top": 171,
+          "width": 16,
+          "height": 16,
+          "tolerance": 80,
+          "pctX": 97.2,
+          "pctY": 16.3,
+          "pctW": 0.78,
+          "pctH": 1.46,
+          "viewportW": 2056,
+          "viewportH": 1099
+        },
+        "context": {
+          "ancestors": [
+            "span",
+            "button",
+            "div",
+            "div"
+          ]
+        }
+      },
+      "delayAfterMs": 300
+    },
+    {
+      "id": "step-18-click-path",
+      "label": "Click #_r_cc_ > path",
+      "type": "click",
+      "target": {
+        "selector": "#_r_cc_ > path",
+        "expectedBounds": {
+          "left": 1637,
+          "top": 649,
+          "width": 290,
+          "height": 136,
+          "tolerance": 80,
+          "pctX": 88.7,
+          "pctY": 61.4,
+          "pctW": 14.11,
+          "pctH": 12.37,
+          "viewportW": 2056,
+          "viewportH": 1099
+        },
+        "context": {
+          "ancestors": [
+            "svg#_r_cc_",
+            "button",
+            "div",
+            "div"
+          ]
+        }
+      },
+      "delayAfterMs": 300,
+      "clickType": "hover"
+    },
+    {
+      "id": "step-19-click-span",
+      "label": "Click span \"MP3 Audio\"",
+      "type": "click",
+      "target": {
+        "selector": "div:nth-of-type(11) > div > div:nth-of-type(1) > button > span",
+        "textContent": "MP3 Audio",
+        "expectedBounds": {
+          "left": 1657,
+          "top": 665,
+          "width": 125,
+          "height": 24,
+          "tolerance": 80,
+          "pctX": 80.9,
+          "pctY": 61.6,
+          "pctW": 6.09,
+          "pctH": 2.18,
+          "viewportW": 2056,
+          "viewportH": 1099
+        },
+        "context": {
+          "ancestors": [
+            "button \"MP3 Audio\"",
+            "div",
+            "div",
+            "div"
+          ]
+        }
+      },
+      "delayAfterMs": 300
+    },
+    {
+      "id": "step-20-click-a",
+      "label": "Click a",
+      "type": "click",
+      "target": {
+        "selector": "a",
+        "expectedBounds": {
+          "left": 0,
+          "top": 0,
+          "width": 0,
+          "height": 0,
+          "tolerance": 80,
+          "pctX": 0,
+          "pctY": 0,
+          "pctW": 0,
+          "pctH": 0,
+          "viewportW": 2056,
+          "viewportH": 1099
+        }
+      },
+      "delayAfterMs": 300
+    },
+    {
+      "id": "step-21-wait",
+      "label": "Wait 3.2s",
+      "type": "wait",
+      "condition": {
+        "type": "delay",
+        "ms": 3245
+      }
+    },
+    {
+      "id": "step-22-click-svg",
+      "label": "Click div:nth-of-type(2) > div:nth-of-type(2) ",
+      "type": "click",
+      "target": {
+        "selector": "div:nth-of-type(2) > div:nth-of-type(2) > button > span > svg",
+        "expectedBounds": {
+          "left": 2000,
+          "top": 282,
+          "width": 16,
+          "height": 16,
+          "tolerance": 80,
+          "pctX": 97.1,
+          "pctY": 26.4,
+          "pctW": 0.78,
+          "pctH": 1.46,
+          "viewportW": 2056,
+          "viewportH": 1099
+        },
+        "context": {
+          "ancestors": [
+            "span",
+            "button",
+            "div",
+            "div"
+          ]
+        }
+      },
+      "delayAfterMs": 300
+    },
+    {
+      "id": "step-23-click-path",
+      "label": "Click #_r_d0_ > path",
+      "type": "click",
+      "target": {
+        "selector": "#_r_d0_ > path",
+        "expectedBounds": {
+          "left": 1637,
+          "top": 760,
+          "width": 322,
+          "height": 136,
+          "tolerance": 80,
+          "pctX": 87.5,
+          "pctY": 71.4,
+          "pctW": 15.66,
+          "pctH": 12.37,
+          "viewportW": 2056,
+          "viewportH": 1099
+        },
+        "context": {
+          "ancestors": [
+            "svg#_r_d0_",
+            "button",
+            "div",
+            "div"
+          ]
+        }
+      },
+      "delayAfterMs": 300,
+      "clickType": "hover"
+    },
+    {
+      "id": "step-24-click-span",
+      "label": "Click span \"MP3 Audio\"",
+      "type": "click",
+      "target": {
+        "selector": "div:nth-of-type(11) > div > div:nth-of-type(1) > button > span",
+        "textContent": "MP3 Audio",
+        "expectedBounds": {
+          "left": 1657,
+          "top": 776,
+          "width": 125,
+          "height": 24,
+          "tolerance": 80,
+          "pctX": 79.5,
+          "pctY": 71,
+          "pctW": 6.09,
+          "pctH": 2.18,
+          "viewportW": 2056,
+          "viewportH": 1099
+        },
+        "context": {
+          "ancestors": [
+            "button \"MP3 Audio\"",
+            "div",
+            "div",
+            "div"
+          ]
+        }
+      },
+      "delayAfterMs": 300
+    },
+    {
+      "id": "step-25-click-a",
+      "label": "Click a",
+      "type": "click",
+      "target": {
+        "selector": "a",
+        "expectedBounds": {
+          "left": 0,
+          "top": 0,
+          "width": 0,
+          "height": 0,
+          "tolerance": 80,
+          "pctX": 0,
+          "pctY": 0,
+          "pctW": 0,
+          "pctH": 0,
+          "viewportW": 2056,
+          "viewportH": 1099
+        }
+      },
+      "delayAfterMs": 300
+    },
+    {
+      "id": "capture-downloads-24",
+      "type": "capture_download",
+      "label": "Capture downloaded files",
+      "filenamePattern": ".*\\.mp3$",
+      "maxFiles": 2,
+      "lookbackMs": 30000,
+      "waitTimeoutMs": 120000,
+      "outputVariable": "downloadedFiles"
+    },
+    {
+      "id": "move-downloads-25",
+      "type": "move_file",
+      "label": "Move downloads to destination",
+      "source": "{{downloadedFiles}}",
+      "destination": "{{outputDir}}"
+    }
+  ],
+  "metadata": {
+    "createdAt": "2026-02-25T22:48:37.310Z",
+    "updatedAt": "2026-02-26T13:53:56.667Z",
+    "recordedBy": "recorder"
+  }
+}

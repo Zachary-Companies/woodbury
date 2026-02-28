@@ -28,6 +28,10 @@ export interface WorkflowDocument {
   steps: WorkflowStep[];
   /** Recording/authoring metadata */
   metadata: WorkflowMetadata;
+  /** Conditions that must be true after all steps succeed */
+  expectations?: Expectation[];
+  /** Retry the entire workflow if steps or expectations fail */
+  retry?: RetryConfig;
 }
 
 export interface WorkflowMetadata {
@@ -421,6 +425,64 @@ export type WorkflowStep =
   | SetVariableStep;
 
 // ────────────────────────────────────────────────────────────────
+//  Expectations (workflow-level outcome checks)
+// ────────────────────────────────────────────────────────────────
+
+/** Check that a directory contains at least N files matching a pattern */
+export interface FileCountExpectation {
+  type: 'file_count';
+  /** Directory path (supports {{variables}}) */
+  directory: string;
+  /** Glob pattern for filename matching (e.g., "*.mp3"). Default: "*" */
+  pattern?: string;
+  /** Minimum number of files required */
+  minCount: number;
+  /** Optional maximum (undefined = no upper limit) */
+  maxCount?: number;
+  /** Human-readable description */
+  description?: string;
+}
+
+/** Check that a specific file path exists */
+export interface FileExistsExpectation {
+  type: 'file_exists';
+  /** File path (supports {{variables}}) */
+  path: string;
+  /** Optionally check minimum file size in bytes */
+  minSizeBytes?: number;
+  description?: string;
+}
+
+/** Check that a runtime variable was set to a non-empty value */
+export interface VariableNotEmptyExpectation {
+  type: 'variable_not_empty';
+  /** Variable name to check */
+  variable: string;
+  description?: string;
+}
+
+/** Check that a runtime variable equals a specific value */
+export interface VariableEqualsExpectation {
+  type: 'variable_equals';
+  variable: string;
+  value: unknown;
+  description?: string;
+}
+
+export type Expectation =
+  | FileCountExpectation
+  | FileExistsExpectation
+  | VariableNotEmptyExpectation
+  | VariableEqualsExpectation;
+
+export interface ExpectationResult {
+  expectation: Expectation;
+  passed: boolean;
+  /** Human-readable description of what was checked and the outcome */
+  detail: string;
+}
+
+// ────────────────────────────────────────────────────────────────
 //  Execution types
 // ────────────────────────────────────────────────────────────────
 
@@ -448,6 +510,8 @@ export interface ExecutionResult {
   /** Overall error if workflow failed */
   error?: string;
   durationMs: number;
+  /** Results of expectation checks (only present when expectations are defined) */
+  expectationResults?: ExpectationResult[];
 }
 
 export interface StepResult {
@@ -465,7 +529,199 @@ export type ExecutionProgressEvent =
   | { type: 'step_retry'; stepId: string; stepLabel: string; attempt: number; maxAttempts: number; error: string }
   | { type: 'precondition_check'; stepId: string; condition: Precondition; passed: boolean }
   | { type: 'postcondition_check'; stepId: string; condition: Postcondition; passed: boolean }
+  | { type: 'expectation_check'; expectation: Expectation; passed: boolean; detail: string }
+  | { type: 'workflow_retry'; attempt: number; maxAttempts: number; failedExpectations: string[] }
   | { type: 'workflow_complete'; result: ExecutionResult };
+
+// ────────────────────────────────────────────────────────────────
+//  Composition (visual workflow graph)
+// ────────────────────────────────────────────────────────────────
+
+/** A composition connects multiple workflows into a directed graph */
+export interface CompositionDocument {
+  version: '1.0';
+  id: string;
+  name: string;
+  description?: string;
+  nodes: CompositionNode[];
+  edges: CompositionEdge[];
+  metadata?: {
+    createdAt: string;
+    updatedAt: string;
+    viewport?: { panX: number; panY: number; zoom: number };
+  };
+}
+
+/** What to do when a pipeline node fails or its expectations are not met */
+export interface NodeFailurePolicy {
+  /** 'stop' = halt pipeline (default), 'skip' = skip and continue, 'retry' = retry the node */
+  action: 'stop' | 'skip' | 'retry';
+  /** Retry configuration (only used when action is 'retry') */
+  retry?: RetryConfig;
+}
+
+/** A node in the composition graph — references a workflow */
+export interface CompositionNode {
+  id: string;
+  workflowId: string;
+  position: { x: number; y: number };
+  label?: string;
+  inputOverrides?: Record<string, unknown>;
+  /** Override or add expectations for this node (merged with workflow defaults) */
+  expectations?: Expectation[];
+  /** What to do when this node fails or expectations fail */
+  onFailure?: NodeFailurePolicy;
+  /** Approval gate configuration (only when workflowId is '__approval_gate__') */
+  approvalGate?: ApprovalGateConfig;
+}
+
+/** Configuration for an approval gate node in a composition */
+export interface ApprovalGateConfig {
+  /** Message to display to the reviewer */
+  message: string;
+  /** Variable names from upstream nodes to preview in the approval dialog */
+  previewVariables?: string[];
+  /** Timeout in ms — auto-reject if no response within this duration (0 = no timeout) */
+  timeoutMs?: number;
+  /** What to do if rejected: 'stop' halts the pipeline (default), 'skip' continues */
+  onReject?: 'stop' | 'skip';
+}
+
+/** Runtime state of a pending approval gate */
+export interface PendingApproval {
+  id: string;
+  runId: string;
+  nodeId: string;
+  compositionId: string;
+  compositionName: string;
+  message: string;
+  previewVariables?: Record<string, unknown>;
+  createdAt: string;
+  timeoutMs?: number;
+}
+
+/** An edge connecting an output port of one node to an input port of another */
+export interface CompositionEdge {
+  id: string;
+  sourceNodeId: string;
+  sourcePort: string;
+  targetNodeId: string;
+  targetPort: string;
+}
+
+// ────────────────────────────────────────────────────────────────
+//  Run History
+// ────────────────────────────────────────────────────────────────
+
+/** Result of a single node in a pipeline run */
+export interface NodeRunResult {
+  nodeId: string;
+  workflowId: string;
+  workflowName: string;
+  status: 'completed' | 'failed' | 'skipped';
+  durationMs: number;
+  stepsTotal: number;
+  stepsCompleted: number;
+  error?: string;
+  outputVariables?: Record<string, unknown>;
+  expectationResults?: Array<{ description: string; passed: boolean; detail: string }>;
+  retryAttempts?: number;
+}
+
+/** Persisted record of a single workflow or pipeline run */
+export interface RunRecord {
+  /** Unique identifier, e.g. "run-1708963200000-abc12" */
+  id: string;
+  /** Whether this was a single workflow run or a pipeline (composition) run */
+  type: 'workflow' | 'pipeline';
+  /** ID of the workflow or composition that was run */
+  sourceId: string;
+  /** Human-readable name */
+  name: string;
+  /** ISO timestamp when execution started */
+  startedAt: string;
+  /** ISO timestamp when execution completed */
+  completedAt?: string;
+  /** Total duration in milliseconds */
+  durationMs: number;
+  /** Final status */
+  status: 'running' | 'completed' | 'failed' | 'cancelled';
+  /** Error message if failed or cancelled */
+  error?: string;
+  /** Per-node results (pipeline runs only) */
+  nodeResults?: NodeRunResult[];
+  /** Total nodes (pipeline runs only) */
+  nodesTotal?: number;
+  /** Nodes completed successfully (pipeline runs only) */
+  nodesCompleted?: number;
+  /** Total steps (workflow runs only) */
+  stepsTotal?: number;
+  /** Steps completed (workflow runs only) */
+  stepsCompleted?: number;
+  /** Per-step results (workflow runs only) */
+  stepResults?: Array<{ index: number; label: string; type: string; status: string; error?: string }>;
+  /** Input variables passed at run start */
+  variables: Record<string, unknown>;
+  /** Files produced during execution */
+  outputFiles?: string[];
+  /** Batch ID if this run is part of a batch */
+  batchId?: string;
+  /** Schedule ID if triggered by a schedule */
+  scheduleId?: string;
+}
+
+// ────────────────────────────────────────────────────────────────
+//  Batching
+// ────────────────────────────────────────────────────────────────
+
+/** A pool of values for a single variable */
+export interface VariablePool {
+  variableName: string;
+  values: unknown[];
+}
+
+/**
+ * Configuration for running a pipeline in batch mode
+ *
+ * - `zip` mode: iterate pools in parallel (like Python's zip). Length = min pool length.
+ * - `product` mode: Cartesian product of all pools. Length = product of all pool lengths.
+ */
+export interface BatchConfig {
+  pools: VariablePool[];
+  mode: 'zip' | 'product';
+  /** Delay in ms between each iteration (default: 2000) */
+  delayBetweenMs: number;
+}
+
+// ────────────────────────────────────────────────────────────────
+//  Scheduling
+// ────────────────────────────────────────────────────────────────
+
+/**
+ * A schedule that triggers a composition run at specified intervals.
+ *
+ * Uses simplified cron syntax: minute hour day-of-month month day-of-week
+ * Supports: *, specific values, comma lists, ranges (1-5), and step values (e.g. every 5 minutes).
+ */
+export interface Schedule {
+  id: string;
+  compositionId: string;
+  compositionName: string;
+  /** Simplified cron expression: "minute hour dom month dow" */
+  cron: string;
+  /** Whether this schedule is active */
+  enabled: boolean;
+  /** Variables to pass to each triggered run */
+  variables?: Record<string, unknown>;
+  /** ISO timestamp of last triggered run */
+  lastRunAt?: string;
+  /** Run ID of last triggered run */
+  lastRunId?: string;
+  /** Human-readable description */
+  description?: string;
+  /** ISO timestamp when created */
+  createdAt: string;
+}
 
 // ────────────────────────────────────────────────────────────────
 //  Bridge server interface (subset used by workflow engine)

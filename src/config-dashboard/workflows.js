@@ -179,6 +179,12 @@ function showNewWorkflowForm() {
   html += '<div class="wf-section-body">';
   html += '<div class="wf-create-hint" style="margin-bottom:0.75rem;">Click <strong>Start Recording</strong>, then perform the actions in Chrome. Each click, keystroke, and navigation will be captured as a workflow step. Click <strong>Stop</strong> when done.</div>';
 
+  // Record options
+  html += '<label style="display:flex;align-items:center;gap:6px;margin-bottom:0.75rem;font-size:0.78rem;color:#94a3b8;cursor:pointer;user-select:none;">';
+  html += '<input type="checkbox" id="wf-capture-crops" checked style="accent-color:#7c3aed;margin:0;">';
+  html += 'Capture element screenshots for visual matching';
+  html += '</label>';
+
   // Record controls
   html += '<div class="wf-record-controls" id="wf-record-controls">';
   html += '<button class="btn-save wf-record-start-btn" id="wf-btn-record-start">&#x23fa; Start Recording</button>';
@@ -954,10 +960,13 @@ async function startRecording() {
   document.querySelector('#wf-btn-record-cancel').addEventListener('click', cancelRecording);
 
   try {
+    var captureCropsEl = document.querySelector('#wf-capture-crops');
+    var captureElementCrops = captureCropsEl ? captureCropsEl.checked : true;
+
     var res = await fetch('/api/recording/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: name, site: site }),
+      body: JSON.stringify({ name: name, site: site, captureElementCrops: captureElementCrops }),
     });
     var data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Start failed');

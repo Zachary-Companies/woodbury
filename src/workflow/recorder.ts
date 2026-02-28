@@ -117,6 +117,8 @@ interface RecordingSession {
   stepCounter: number;
   pendingInput: PendingInput | null;
   eventListener: ((msg: any) => void) | null;
+  /** Handler for page element snapshot events (ML training data) */
+  snapshotListener: ((msg: any) => void) | null;
   /** Handler for bridge reconnection events */
   reconnectHandler: (() => void) | null;
   /** Active gap tracker for smart wait detection */
@@ -125,6 +127,12 @@ interface RecordingSession {
   gapDetectionTimer: ReturnType<typeof setTimeout> | null;
   /** Download IDs snapshot taken at recording start (for diff at stop) */
   downloadSnapshotIds: Set<number>;
+  /** When true, capture element screenshots for ML training data */
+  captureElementCrops: boolean;
+  /** Counter for naming snapshot files */
+  snapshotCounter: number;
+  /** Map of element selectors → interaction details (for ML training data) */
+  interactedSelectors: Map<string, { action: string; stepIndex: number; text?: string; ariaLabel?: string; tag?: string; childSelector?: string }[]>;
 }
 
 export interface RecorderStatus {
@@ -186,7 +194,7 @@ export class WorkflowRecorder {
     return this.session !== null;
   }
 
-  async start(name: string, site: string): Promise<void> {
+  async start(name: string, site: string, options?: { captureElementCrops?: boolean }): Promise<void> {
     // Truncate log file at start of each recording for clean diagnosis
     try {
       mkdirSync(RECORDING_LOG_DIR, { recursive: true });
@@ -295,10 +303,14 @@ export class WorkflowRecorder {
       stepCounter: 0,
       pendingInput: null,
       eventListener: null,
+      snapshotListener: null,
       reconnectHandler: null,
       gapTracker: null,
       gapDetectionTimer: null,
       downloadSnapshotIds,
+      captureElementCrops: options?.captureElementCrops ?? (process.env.WOODBURY_CAPTURE_CROPS !== '0'),
+      snapshotCounter: 0,
+      interactedSelectors: new Map(),
     };
 
     // 7. Add initial navigate step
@@ -324,6 +336,18 @@ export class WorkflowRecorder {
     };
     this.session.eventListener = handler;
     bridgeServer.on('recording_event', handler);
+
+    // 8b. Listen for page element snapshots (ML training data)
+    if (this.session.captureElementCrops) {
+      const snapshotHandler = (msg: any) => {
+        this.handlePageSnapshot(msg).catch((err) => {
+          recLog('WARN', 'snapshot-capture: handler error', { error: String(err) });
+        });
+      };
+      this.session.snapshotListener = snapshotHandler;
+      bridgeServer.on('page_elements_snapshot', snapshotHandler);
+      recLog('INFO', 'Element snapshot capture enabled (page_elements_snapshot)');
+    }
 
     // 9. Listen for bridge reconnection — re-enable recording mode
     //    if the WebSocket drops and reconnects during a recording session.
@@ -375,8 +399,20 @@ export class WorkflowRecorder {
     if (this.session.eventListener) {
       bridgeServer.removeListener('recording_event', this.session.eventListener);
     }
+    if (this.session.snapshotListener) {
+      bridgeServer.removeListener('page_elements_snapshot', this.session.snapshotListener);
+    }
     if (this.session.reconnectHandler) {
       bridgeServer.removeListener('connected', this.session.reconnectHandler);
+    }
+
+    // Write interacted selectors to metadata
+    if (this.session.captureElementCrops && this.session.interactedSelectors.size > 0) {
+      try {
+        await this.saveInteractedSelectors();
+      } catch (err) {
+        recLog('WARN', 'Failed to save interacted selectors', { error: String(err) });
+      }
     }
 
     // Post-process: collapse typo correction sequences
@@ -465,6 +501,9 @@ export class WorkflowRecorder {
 
     if (this.session.eventListener) {
       bridgeServer.removeListener('recording_event', this.session.eventListener);
+    }
+    if (this.session.snapshotListener) {
+      bridgeServer.removeListener('page_elements_snapshot', this.session.snapshotListener);
     }
     if (this.session.reconnectHandler) {
       bridgeServer.removeListener('connected', this.session.reconnectHandler);
@@ -984,11 +1023,186 @@ export class WorkflowRecorder {
     };
 
     this.addStep(step);
+
+    // Track interacted element selectors for ML training data
+    if (this.session?.captureElementCrops && event.element.selector) {
+      const selector = event.element.selector;
+      const interaction = {
+        action: 'click',
+        stepIndex: this.session.steps.length - 1,
+        text: event.element.textContent?.slice(0, 200),
+        ariaLabel: event.element.ariaLabel,
+        tag: event.element.tag,
+      };
+      const existing = this.session.interactedSelectors.get(selector);
+      if (existing) {
+        existing.push(interaction);
+      } else {
+        this.session.interactedSelectors.set(selector, [interaction]);
+      }
+
+      // Also track the interactive ancestor selector (button/a/input that contains the click target)
+      // This matches how snapshotInteractiveElements captures elements — by the interactive parent,
+      // not the child span/svg/path that actually received the click.
+      const ancestorSel = (event.element as any).interactiveAncestorSelector;
+      if (ancestorSel && ancestorSel !== selector) {
+        const ancestorExisting = this.session.interactedSelectors.get(ancestorSel);
+        if (ancestorExisting) {
+          ancestorExisting.push({ ...interaction, childSelector: selector });
+        } else {
+          this.session.interactedSelectors.set(ancestorSel, [{ ...interaction, childSelector: selector }]);
+        }
+      }
+    }
+  }
+
+  // ── Element crop capture for ML training ────────────────
+
+  // ── Page Snapshot Capture (ML Training Data) ────────────────
+  //
+  // Instead of per-click captures, we take full-page viewport screenshots
+  // and store metadata for ALL visible interactive elements. The raw
+  // screenshots + element bounds are saved; cropping happens later during
+  // training data preparation. This is more efficient and guarantees
+  // pre-interaction state for all elements.
+
+  /**
+   * Handle a page_elements_snapshot from the Chrome extension.
+   * Saves a full desktop screenshot, the viewport PNG, and element metadata JSON.
+   *
+   * The desktop screenshot captures the entire screen (for future desktop app support).
+   * The viewport image from Chrome + element bounds are used for browser-based cropping.
+   */
+  private async handlePageSnapshot(msg: any): Promise<void> {
+    if (!this.session?.captureElementCrops) return;
+
+    try {
+      const { viewportImage, snapshot, timestamp } = msg;
+      if (!viewportImage || !snapshot?.elements?.length) {
+        recLog('WARN', 'snapshot-capture: missing viewportImage or elements');
+        return;
+      }
+
+      const siteId = this.session.site || 'unknown';
+      const snapshotIdx = this.session.snapshotCounter++;
+      const cropRoot = join(homedir(), '.woodbury', 'data', 'training-crops');
+      const snapshotsDir = join(cropRoot, 'snapshots', siteId.replace(/[^a-zA-Z0-9.-]/g, '_'));
+      mkdirSync(snapshotsDir, { recursive: true });
+
+      const ts = timestamp || Date.now();
+      const baseName = `snapshot_${String(snapshotIdx).padStart(4, '0')}_${ts}`;
+
+      // 1. Save viewport PNG (from Chrome captureVisibleTab)
+      const base64Data = viewportImage.replace(/^data:image\/png;base64,/, '');
+      const viewportPath = join(snapshotsDir, `${baseName}_viewport.png`);
+      writeFileSync(viewportPath, Buffer.from(base64Data, 'base64'));
+
+      // 2. Capture and save full desktop screenshot
+      let desktopFile: string | null = null;
+      try {
+        const mod = await import('flow-frame-core/dist/inference/capturescreenshot.js');
+        const desktopDataUrl: string = await mod.captureScreenshotBase64(undefined);
+        const desktopBase64 = desktopDataUrl.replace(/^data:image\/png;base64,/, '');
+        const desktopPath = join(snapshotsDir, `${baseName}_desktop.png`);
+        writeFileSync(desktopPath, Buffer.from(desktopBase64, 'base64'));
+        desktopFile = `${baseName}_desktop.png`;
+      } catch (err) {
+        recLog('WARN', 'snapshot-capture: desktop screenshot failed (continuing with viewport only)', { error: String(err) });
+      }
+
+      // 3. Save element metadata JSON
+      const metaPath = join(snapshotsDir, `${baseName}.json`);
+      const metadata = {
+        site_id: siteId,
+        page_url: snapshot.url,
+        page_title: snapshot.title,
+        viewport_width: snapshot.viewportWidth,
+        viewport_height: snapshot.viewportHeight,
+        timestamp: ts / 1000,
+        viewport_image: `${baseName}_viewport.png`,
+        desktop_image: desktopFile,
+        elements: snapshot.elements.map((el: any) => ({
+          selector: el.selector || '',
+          tag: el.tag || '',
+          text: (el.text || '').slice(0, 200),
+          aria_label: el.ariaLabel || '',
+          role: el.role || '',
+          type: el.type || '',
+          bounds: el.bounds,
+        })),
+      };
+      writeFileSync(metaPath, JSON.stringify(metadata, null, 2));
+
+      recLog('INFO', `snapshot-capture: saved snapshot #${snapshotIdx}`, {
+        elements: snapshot.elements.length,
+        url: snapshot.url?.slice(0, 60),
+        desktop: !!desktopFile,
+      });
+
+    } catch (err) {
+      recLog('WARN', 'snapshot-capture: failed', { error: String(err) });
+    }
+  }
+
+  /**
+   * Save a summary of which elements were interacted with during the recording.
+   * This is written at recording stop time so the training pipeline knows
+   * which elements are "positives" (interacted) vs "negatives" (not interacted).
+   */
+  private async saveInteractedSelectors(): Promise<void> {
+    if (!this.session) return;
+
+    const siteId = this.session.site || 'unknown';
+    const cropRoot = join(homedir(), '.woodbury', 'data', 'training-crops');
+    const snapshotsDir = join(cropRoot, 'snapshots', siteId.replace(/[^a-zA-Z0-9.-]/g, '_'));
+    mkdirSync(snapshotsDir, { recursive: true });
+
+    const summaryPath = join(snapshotsDir, `interactions_${Date.now()}.json`);
+
+    // Convert Map to a structured object: selector → list of interactions with step details
+    const interactedElements: Record<string, any> = {};
+    for (const [selector, interactions] of this.session.interactedSelectors) {
+      interactedElements[selector] = interactions;
+    }
+
+    const summary = {
+      site_id: siteId,
+      recording_name: this.session.workflowName,
+      timestamp: Date.now() / 1000,
+      total_steps: this.session.steps.length,
+      // Flat list for backward compatibility with prepare.py
+      interacted_selectors: [...this.session.interactedSelectors.keys()],
+      // Rich interaction details: selector → [{action, stepIndex, text, ariaLabel, tag}]
+      interacted_elements: interactedElements,
+    };
+    writeFileSync(summaryPath, JSON.stringify(summary, null, 2));
+
+    recLog('INFO', 'snapshot-capture: saved interaction summary', {
+      interacted: this.session.interactedSelectors.size,
+      path: summaryPath,
+    });
   }
 
   private handleInput(event: RecordingEvent): void {
     const selector = event.element.selector;
     const value = event.element.value || '';
+
+    // Track interacted element selectors for ML training data
+    if (this.session?.captureElementCrops && selector) {
+      const interaction = {
+        action: 'input',
+        stepIndex: this.session.steps.length,
+        text: event.element.textContent?.slice(0, 200),
+        ariaLabel: event.element.ariaLabel,
+        tag: event.element.tag,
+      };
+      const existing = this.session.interactedSelectors.get(selector);
+      if (existing) {
+        existing.push(interaction);
+      } else {
+        this.session.interactedSelectors.set(selector, [interaction]);
+      }
+    }
 
     // Coalesce: same element → update pending value
     if (this.session!.pendingInput && this.session!.pendingInput.selector === selector) {

@@ -70,6 +70,9 @@ export interface WoodburyConfig {
 
   /** URL of the running go-links proxy (set at runtime) */
   goLinksUrl?: string;
+
+  /** Remote control connection URL (set at runtime by Firebase relay) */
+  remoteUrl?: string;
 }
 
 // Job orchestration types
@@ -154,6 +157,7 @@ export interface SlashCommandContext {
   print: (message: string) => void;
   agent?: any;
   extensionManager?: any;
+  dashboardHandle?: any;
 }
 
 // Renderer types

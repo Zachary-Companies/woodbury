@@ -446,6 +446,22 @@ function switchTab(tab) {
     if (typeof initWorkflows === 'function') {
       initWorkflows();
     }
+  } else if (tab === 'compositions') {
+    selectedExtension = null;
+    // Compositions module handles its own rendering
+    if (typeof initCompositions === 'function') {
+      initCompositions();
+    }
+  } else if (tab === 'runs') {
+    selectedExtension = null;
+    if (typeof initRuns === 'function') {
+      initRuns();
+    }
+  } else if (tab === 'training') {
+    selectedExtension = null;
+    if (typeof initTraining === 'function') {
+      initTraining();
+    }
   }
 }
 

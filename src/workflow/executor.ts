@@ -32,6 +32,8 @@ import type {
   ExecutionResult,
   StepResult,
   ExecutionProgressEvent,
+  ExpectationResult,
+  Expectation,
   BridgeInterface,
   NavigateStep,
   ClickStep,
@@ -55,10 +57,92 @@ import { substituteObject } from './variable-sub.js';
 import { ElementResolver } from './resolver.js';
 import { ConditionValidator } from './validator.js';
 
+// ── Expectation Checker ──────────────────────────────────────
+
+async function checkExpectations(
+  expectations: Expectation[],
+  variables: Record<string, unknown>,
+): Promise<ExpectationResult[]> {
+  const results: ExpectationResult[] = [];
+  for (const raw of expectations) {
+    // Substitute {{variables}} in expectation fields
+    const exp = substituteObject(raw, variables) as Expectation;
+    results.push(await checkOneExpectation(exp, variables));
+  }
+  return results;
+}
+
+async function checkOneExpectation(
+  exp: Expectation,
+  variables: Record<string, unknown>,
+): Promise<ExpectationResult> {
+  switch (exp.type) {
+    case 'file_count': {
+      try {
+        const entries = await fs.readdir(exp.directory);
+        const pattern = exp.pattern || '*';
+        // Convert glob to regex: *.mp3 → ^.*\.mp3$
+        const regex = new RegExp(
+          '^' + pattern.replace(/\./g, '\\.').replace(/\*/g, '.*').replace(/\?/g, '.') + '$'
+        );
+        const matching = entries.filter(e => regex.test(e));
+        const count = matching.length;
+        const passed = count >= exp.minCount && (exp.maxCount === undefined || count <= exp.maxCount);
+        return {
+          expectation: exp,
+          passed,
+          detail: `Found ${count} file(s) matching "${pattern}" in ${exp.directory} (need >= ${exp.minCount})`,
+        };
+      } catch {
+        return { expectation: exp, passed: false, detail: `Directory not accessible: ${exp.directory}` };
+      }
+    }
+    case 'file_exists': {
+      try {
+        const stat = await fs.stat(exp.path);
+        if (exp.minSizeBytes !== undefined && stat.size < exp.minSizeBytes) {
+          return { expectation: exp, passed: false, detail: `File exists but too small: ${stat.size} bytes (need >= ${exp.minSizeBytes})` };
+        }
+        return { expectation: exp, passed: true, detail: `File exists: ${exp.path} (${stat.size} bytes)` };
+      } catch {
+        return { expectation: exp, passed: false, detail: `File not found: ${exp.path}` };
+      }
+    }
+    case 'variable_not_empty': {
+      const value = variables[exp.variable];
+      const passed = value !== undefined && value !== null && value !== '';
+      return {
+        expectation: exp,
+        passed,
+        detail: passed ? `Variable "${exp.variable}" is set` : `Variable "${exp.variable}" is empty or missing`,
+      };
+    }
+    case 'variable_equals': {
+      const actual = variables[exp.variable];
+      const passed = actual === exp.value;
+      return {
+        expectation: exp,
+        passed,
+        detail: passed
+          ? `Variable "${exp.variable}" equals expected value`
+          : `Variable "${exp.variable}" is ${JSON.stringify(actual)}, expected ${JSON.stringify(exp.value)}`,
+      };
+    }
+    default:
+      return { expectation: exp, passed: false, detail: 'Unknown expectation type' };
+  }
+}
+
+// Export for use in composition execution (config-dashboard.ts)
+export { checkExpectations };
+
+// ── Workflow Executor ────────────────────────────────────────
+
 export class WorkflowExecutor {
   private resolver: ElementResolver;
   private validator: ConditionValidator;
   private variables: Record<string, unknown>;
+  private initialVariables: Record<string, unknown>;
   private signal?: AbortSignal;
   private onProgress?: (event: ExecutionProgressEvent) => void;
   private stopOnFailure: boolean;
@@ -71,6 +155,7 @@ export class WorkflowExecutor {
     this.resolver = new ElementResolver(bridge);
     this.validator = new ConditionValidator(bridge);
     this.variables = { ...options.variables };
+    this.initialVariables = { ...options.variables };
     this.signal = options.signal;
     this.onProgress = options.onProgress;
     this.stopOnFailure = options.stopOnFailure ?? true;
@@ -78,6 +163,7 @@ export class WorkflowExecutor {
 
   /**
    * Execute a workflow document.
+   * Supports workflow-level expectations (post-step checks) and retry.
    */
   async execute(workflow: WorkflowDocument): Promise<ExecutionResult> {
     const startTime = Date.now();
@@ -113,32 +199,120 @@ export class WorkflowExecutor {
       };
     }
 
-    // Merge defaults
-    for (const v of workflow.variables) {
-      if (this.variables[v.name] === undefined && v.default !== undefined) {
-        this.variables[v.name] = v.default;
+    // Workflow-level retry loop
+    const maxAttempts = workflow.retry?.maxAttempts ?? 1;
+    let retryDelayMs = workflow.retry?.delayMs ?? 5000;
+    const retryBackoff = workflow.retry?.backoffMultiplier ?? 1;
+    let lastFailedExpectations: string[] = [];
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      // Reset variables for retry
+      this.variables = { ...this.initialVariables };
+      for (const v of workflow.variables) {
+        if (this.variables[v.name] === undefined && v.default !== undefined) {
+          this.variables[v.name] = v.default;
+        }
       }
+
+      if (attempt > 1) {
+        execLog('INFO', `=== Workflow retry attempt ${attempt}/${maxAttempts} ===`, {
+          failedExpectations: lastFailedExpectations,
+        });
+        this.emitProgress({
+          type: 'workflow_retry',
+          attempt,
+          maxAttempts,
+          failedExpectations: lastFailedExpectations,
+        });
+        await this.delay(retryDelayMs);
+        retryDelayMs *= retryBackoff;
+      }
+
+      // Execute steps
+      const stepResults = await this.executeSteps(workflow.steps);
+      const stepsSuccess = stepResults.every(r => r.status === 'success' || r.status === 'skipped');
+
+      if (!stepsSuccess) {
+        if (attempt === maxAttempts) {
+          const failed = stepResults.find(r => r.status === 'failed');
+          const result: ExecutionResult = {
+            success: false,
+            stepsExecuted: stepResults.filter(r => r.status !== 'skipped').length,
+            stepsTotal: stepResults.length,
+            variables: this.variables,
+            stepResults,
+            error: failed?.error,
+            durationMs: Date.now() - startTime,
+          };
+          this.emitProgress({ type: 'workflow_complete', result });
+          return result;
+        }
+        lastFailedExpectations = ['Steps failed'];
+        continue; // retry
+      }
+
+      // Check expectations after successful steps
+      let expectationResults: ExpectationResult[] | undefined;
+      if (workflow.expectations && workflow.expectations.length > 0) {
+        expectationResults = await checkExpectations(workflow.expectations, this.variables);
+
+        for (const er of expectationResults) {
+          this.emitProgress({
+            type: 'expectation_check',
+            expectation: er.expectation,
+            passed: er.passed,
+            detail: er.detail,
+          });
+        }
+
+        const allPassed = expectationResults.every(r => r.passed);
+
+        if (!allPassed) {
+          const failed = expectationResults.filter(r => !r.passed);
+          lastFailedExpectations = failed.map(f => f.detail);
+
+          if (attempt === maxAttempts) {
+            const result: ExecutionResult = {
+              success: false,
+              stepsExecuted: stepResults.filter(r => r.status !== 'skipped').length,
+              stepsTotal: stepResults.length,
+              variables: this.variables,
+              stepResults,
+              expectationResults,
+              error: `Expectations not met: ${failed.map(f => f.detail).join('; ')}`,
+              durationMs: Date.now() - startTime,
+            };
+            this.emitProgress({ type: 'workflow_complete', result });
+            return result;
+          }
+          continue; // retry
+        }
+      }
+
+      // All steps passed + all expectations passed (or no expectations)
+      const result: ExecutionResult = {
+        success: true,
+        stepsExecuted: stepResults.filter(r => r.status !== 'skipped').length,
+        stepsTotal: stepResults.length,
+        variables: this.variables,
+        stepResults,
+        expectationResults,
+        durationMs: Date.now() - startTime,
+      };
+      this.emitProgress({ type: 'workflow_complete', result });
+      return result;
     }
 
-    // Execute steps
-    const stepResults = await this.executeSteps(workflow.steps);
-
-    const result: ExecutionResult = {
-      success: stepResults.every(r => r.status === 'success' || r.status === 'skipped'),
-      stepsExecuted: stepResults.filter(r => r.status !== 'skipped').length,
-      stepsTotal: stepResults.length,
+    // Should not reach here, but just in case
+    return {
+      success: false,
+      stepsExecuted: 0,
+      stepsTotal: workflow.steps.length,
       variables: this.variables,
-      stepResults,
+      stepResults: [],
+      error: 'Workflow execution ended unexpectedly',
       durationMs: Date.now() - startTime,
     };
-
-    if (!result.success) {
-      const failed = stepResults.find(r => r.status === 'failed');
-      result.error = failed?.error;
-    }
-
-    this.emitProgress({ type: 'workflow_complete', result });
-    return result;
   }
 
   /**

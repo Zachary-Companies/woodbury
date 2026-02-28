@@ -693,6 +693,82 @@ export const slashCommands: SlashCommand[] = [
         ctx.print(chalk.red(`❌ Failed to start recording: ${error}`));
       }
     }
+  },
+
+  {
+    name: 'remote',
+    description: 'Show remote control status and pairing info',
+    async handler(_args: string[], ctx: SlashCommandContext) {
+      const handle = ctx.dashboardHandle;
+      if (!handle || !ctx.config.remoteUrl) {
+        ctx.print(chalk.yellow('Remote relay is not running.'));
+        ctx.print(chalk.gray('  The relay starts automatically with the dashboard.'));
+        ctx.print(chalk.gray('  Check that you are not using --no-extensions.'));
+        return;
+      }
+
+      ctx.print('');
+      ctx.print(chalk.green('🌐 Remote Control'));
+      ctx.print('');
+
+      if (handle.isPaired && handle.isPaired()) {
+        ctx.print(chalk.green('  ✅ Paired with a remote user'));
+        ctx.print(chalk.gray('  The remote user can access this instance from their phone.'));
+        ctx.print(chalk.gray('  They just need to log into https://woobury-ai.web.app'));
+      } else {
+        ctx.print(chalk.yellow('  ⏳ Not yet paired'));
+        ctx.print(chalk.gray('  To connect a phone:'));
+        ctx.print(chalk.gray('    1. Open https://woobury-ai.web.app on your phone'));
+        ctx.print(chalk.gray('    2. Sign in with Google'));
+        ctx.print(chalk.gray('    3. Tap "Generate Pairing Code"'));
+        ctx.print(chalk.gray('    4. Type /pair <code> here in the terminal'));
+      }
+
+      ctx.print('');
+      ctx.print(chalk.gray(`  Connection URL (advanced): ${ctx.config.remoteUrl}`));
+      ctx.print('');
+    }
+  },
+
+  {
+    name: 'pair',
+    description: 'Pair with a remote phone using a 4-digit code',
+    async handler(args: string[], ctx: SlashCommandContext) {
+      const handle = ctx.dashboardHandle;
+      if (!handle || !handle.pair) {
+        ctx.print(chalk.yellow('Remote relay is not running.'));
+        ctx.print(chalk.gray('  The relay starts automatically with the dashboard.'));
+        return;
+      }
+
+      const code = args[0]?.trim();
+      if (!code || !/^\d{4}$/.test(code)) {
+        ctx.print(chalk.yellow('Usage: /pair <4-digit-code>'));
+        ctx.print('');
+        ctx.print(chalk.gray('  To get a code:'));
+        ctx.print(chalk.gray('    1. Open https://woobury-ai.web.app on your phone'));
+        ctx.print(chalk.gray('    2. Sign in with Google'));
+        ctx.print(chalk.gray('    3. Tap "Generate Pairing Code"'));
+        ctx.print(chalk.gray('    4. Type /pair <code> here'));
+        return;
+      }
+
+      ctx.print(chalk.gray(`  Pairing with code ${code}...`));
+
+      try {
+        const success = await handle.pair(code);
+        if (success) {
+          ctx.print(chalk.green('  ✅ Paired successfully!'));
+          ctx.print(chalk.gray('  The remote user can now control this instance from their phone.'));
+        } else {
+          ctx.print(chalk.red('  ❌ Pairing failed.'));
+          ctx.print(chalk.gray('  The code may be invalid, expired, or already used.'));
+          ctx.print(chalk.gray('  Generate a new code on the phone and try again.'));
+        }
+      } catch (err) {
+        ctx.print(chalk.red(`  ❌ Pairing error: ${err}`));
+      }
+    }
   }
 ];
 

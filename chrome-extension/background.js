@@ -158,6 +158,13 @@ async function handleMessage(message) {
       const response = await chrome.tabs.sendMessage(tab.id, { action, params });
       console.log('[Woodbury REC] Content script response:', JSON.stringify(response));
       sendResponse({ id, success: true, data: response });
+
+      // After recording mode is enabled, capture a snapshot of all interactive elements
+      if (recordingModeActive && tab.id) {
+        capturePageSnapshot(tab.id).catch(err => {
+          console.log('[Woodbury REC] Page snapshot failed:', err.message);
+        });
+      }
     } catch (err) {
       console.log('[Woodbury REC] ERROR forwarding to content script:', err.message);
       sendResponse({ id, success: false, error: err.message });
@@ -881,6 +888,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponseCallback) => 
     console.log('[Woodbury REC] recording_event from content:', message.event, message.element?.tag, (message.element?.textContent || '').slice(0, 30));
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify(message));
+
+      // After click events, schedule a page snapshot (debounced) to capture
+      // the new page state with all its interactive elements for ML training.
+      if (message.event === 'click') {
+        (async () => {
+          try {
+            const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+            if (tab?.id) scheduleSnapshot(tab.id);
+          } catch {}
+        })();
+      }
     } else if (recordingModeActive) {
       // Buffer events when WS is temporarily disconnected during recording
       recordingEventBuffer.push(JSON.stringify(message));
@@ -895,6 +913,60 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponseCallback) => 
     return false;
   }
 });
+
+// ── Page Snapshot for ML Training ────────────────────────────────────────
+// Captures a viewport screenshot + all interactive element metadata, then sends
+// to the bridge as a `page_elements_snapshot` message. Called on recording start,
+// after clicks (debounced), and after page navigations.
+let snapshotTimer = null;
+const SNAPSHOT_DEBOUNCE_MS = 1500; // Wait 1.5s after last click before capturing
+
+async function capturePageSnapshot(tabId) {
+  if (!recordingModeActive) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+  try {
+    // 1. Capture viewport screenshot
+    const dataUrl = await chrome.tabs.captureVisibleTab(null, { format: 'png' });
+
+    // 2. Ask content script for all interactive elements
+    let snapshot;
+    try {
+      const resp = await chrome.tabs.sendMessage(tabId, {
+        action: 'snapshot_interactive_elements',
+        params: {},
+      });
+      snapshot = resp?.data || resp;
+    } catch (err) {
+      console.log('[Woodbury REC] snapshot: content script query failed:', err.message);
+      return;
+    }
+
+    if (!snapshot?.elements?.length) return;
+
+    // 3. Send to bridge
+    const payload = {
+      type: 'page_elements_snapshot',
+      viewportImage: dataUrl,
+      snapshot: snapshot,
+      timestamp: Date.now(),
+    };
+    ws.send(JSON.stringify(payload));
+    console.log('[Woodbury REC] Page snapshot sent:', snapshot.elements.length, 'elements');
+  } catch (err) {
+    console.log('[Woodbury REC] Page snapshot error:', err.message);
+  }
+}
+
+function scheduleSnapshot(tabId) {
+  if (snapshotTimer) clearTimeout(snapshotTimer);
+  snapshotTimer = setTimeout(() => {
+    snapshotTimer = null;
+    capturePageSnapshot(tabId).catch(err => {
+      console.log('[Woodbury REC] Scheduled snapshot failed:', err.message);
+    });
+  }, SNAPSHOT_DEBOUNCE_MS);
+}
 
 // Re-apply recording mode when a page finishes loading (user-initiated navigation,
 // SPA route changes, or page reloads). This ensures the recording indicator and
@@ -924,6 +996,8 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
         params: { enabled: true },
       });
       console.log('[Woodbury REC] Recording mode re-applied after navigation:', JSON.stringify(resp));
+      // Capture snapshot of the new page after a brief delay for rendering
+      setTimeout(() => capturePageSnapshot(tabId).catch(() => {}), 1000);
     } catch (err) {
       console.log('[Woodbury REC] FAILED to restore recording mode after navigation:', err.message);
     }

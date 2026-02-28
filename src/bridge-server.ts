@@ -153,11 +153,17 @@ class BridgeServer extends EventEmitter {
                   text: message.element?.textContent?.slice(0, 40),
                 });
               }
+              if (message.type === 'page_elements_snapshot') {
+                bridgeLog('EVENT', 'page_elements_snapshot from extension', {
+                  elements: message.snapshot?.elements?.length,
+                  url: message.snapshot?.url?.slice(0, 60),
+                });
+              }
 
               this.handleMessage(message);
 
-              // Forward recording events and responses to all subscribers
-              if (message.type === 'recording_event' || message.id) {
+              // Forward recording events, snapshots, and responses to all subscribers
+              if (message.type === 'recording_event' || message.type === 'page_elements_snapshot' || message.id) {
                 const json = raw.toString();
                 for (const sub of this.subscribers) {
                   if (sub.readyState === WebSocket.OPEN && sub !== ws) {
@@ -382,6 +388,12 @@ class BridgeServer extends EventEmitter {
     // Recording event from the Chrome extension content script
     if (message.type === 'recording_event') {
       this.emit('recording_event', message);
+      return;
+    }
+
+    // Page elements snapshot for ML training data
+    if (message.type === 'page_elements_snapshot') {
+      this.emit('page_elements_snapshot', message);
       return;
     }
 

@@ -104,6 +104,10 @@ async function handleAction(action, params) {
       console.log('[Woodbury REC:content] recordingActive after:', recordingActive);
       return { recording: recordingActive };
 
+    // ── Element Snapshot (ML training data) ──────────────────
+    case 'snapshot_interactive_elements':
+      return snapshotInteractiveElements();
+
     // ── Workflow Debug Overlay ───────────────────────────────
     case 'show_debug_overlay':
       return showDebugOverlay(params);
@@ -1406,6 +1410,30 @@ function captureElementMeta(el) {
   const selectors = buildSelectorSet(el);
   const rect = el.getBoundingClientRect();
 
+  // Find the nearest interactive ancestor (button, a, input, etc.) for ML matching.
+  // When users click a <span> inside a <button>, the snapshot captures the <button>,
+  // so we need the ancestor's selector to match snapshot elements to interactions.
+  const interactiveTags = new Set(['button', 'a', 'input', 'textarea', 'select', 'label', 'summary']);
+  const interactiveRoles = new Set(['button', 'link', 'tab', 'menuitem', 'checkbox', 'radio', 'switch', 'slider', 'combobox', 'option']);
+  let interactiveAncestor = null;
+  let current = el;
+  while (current && current !== document.body) {
+    const tag = current.tagName.toLowerCase();
+    const role = current.getAttribute('role') || '';
+    if (interactiveTags.has(tag) || interactiveRoles.has(role)) {
+      interactiveAncestor = current;
+      break;
+    }
+    current = current.parentElement;
+  }
+  let interactiveAncestorSelector = undefined;
+  if (interactiveAncestor && interactiveAncestor !== el) {
+    try {
+      const ancestorSels = buildSelectorSet(interactiveAncestor);
+      interactiveAncestorSelector = ancestorSels[0] || buildUniqueSelector(interactiveAncestor);
+    } catch {}
+  }
+
   // Viewport dimensions for percentage-based positioning
   const vw = window.innerWidth;
   const vh = window.innerHeight;
@@ -1477,6 +1505,93 @@ function captureElementMeta(el) {
       nthWithSameText: totalWithSameText > 1 ? nthWithSameText : undefined,
       totalWithSameText: totalWithSameText > 1 ? totalWithSameText : undefined,
     },
+    // Selector of nearest interactive ancestor (button, a, input, etc.)
+    // for matching click targets to snapshot elements when the click landed on a child
+    interactiveAncestorSelector,
+  };
+}
+
+/**
+ * Snapshot all visible interactive elements on the page.
+ * Returns metadata for every button, link, input, etc. that is visible in the viewport.
+ * Used by the ML crop capture system to capture all elements at once.
+ */
+function snapshotInteractiveElements() {
+  const selectors = [
+    'button', '[role="button"]', '[role="tab"]', '[role="menuitem"]',
+    'a[href]', 'input', 'textarea', 'select',
+    '[role="checkbox"]', '[role="radio"]', '[role="switch"]',
+    '[role="slider"]', '[role="combobox"]', '[role="listbox"]',
+    '[contenteditable="true"]',
+    'summary', 'details > summary',
+    'label', '[role="link"]', '[role="option"]',
+    'img[alt]', 'svg[role]', '[tabindex]',
+  ];
+
+  const seen = new Set();
+  const elements = [];
+
+  for (const sel of selectors) {
+    try {
+      const nodes = document.querySelectorAll(sel);
+      for (const el of nodes) {
+        if (seen.has(el)) continue;
+        seen.add(el);
+
+        // Skip hidden elements
+        const style = window.getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') continue;
+
+        // Skip elements with aria-hidden="true"
+        if (el.getAttribute('aria-hidden') === 'true') continue;
+
+        const rect = el.getBoundingClientRect();
+        // Skip tiny or off-viewport elements
+        if (rect.width < 8 || rect.height < 8) continue;
+        if (rect.bottom < 0 || rect.top > window.innerHeight) continue;
+        if (rect.right < 0 || rect.left > window.innerWidth) continue;
+
+        const tag = el.tagName.toLowerCase();
+        const text = (el.textContent || '').trim().slice(0, 100);
+        const ariaLabel = el.getAttribute('aria-label') || '';
+        const role = el.getAttribute('role') || '';
+
+        // Build a unique selector for this element (use same strategy as recording clicks)
+        let elSelector = '';
+        try {
+          const selectorSet = buildSelectorSet(el);
+          elSelector = selectorSet[0] || buildUniqueSelector(el) || tag;
+        } catch {
+          elSelector = tag;
+        }
+
+        elements.push({
+          selector: elSelector,
+          tag,
+          text,
+          ariaLabel,
+          role,
+          type: el.type || '',
+          bounds: {
+            left: Math.round(rect.left),
+            top: Math.round(rect.top),
+            width: Math.round(rect.width),
+            height: Math.round(rect.height),
+          },
+        });
+      }
+    } catch {
+      // Skip invalid selectors
+    }
+  }
+
+  console.log('[Woodbury CROP] snapshotInteractiveElements:', elements.length, 'elements found');
+  return {
+    url: location.href,
+    title: document.title,
+    viewportWidth: window.innerWidth,
+    viewportHeight: window.innerHeight,
+    elements,
   };
 }
 
@@ -1501,11 +1616,54 @@ function sendRecordingEvent(eventType, element, extra = {}) {
 }
 
 // Recording event handlers
+
 function onRecordClick(e) {
   if (!recordingActive) return;
   // Skip clicks on the Woodbury recording overlay itself
   if (e.target.closest('[data-woodbury-recording]')) return;
-  sendRecordingEvent('click', e.target);
+
+  // Gather similar visible elements for hard-negative mining (ML training)
+  const el = e.target;
+  const tag = el.tagName.toLowerCase();
+  const similarSelectors = {
+    button: 'button, [role="button"]',
+    a: 'a[href]',
+    input: 'input',
+    textarea: 'textarea',
+    select: 'select',
+    img: 'img',
+  };
+  const searchSel = similarSelectors[tag] || '';
+  let similarElements = [];
+  if (searchSel) {
+    try {
+      const candidates = document.querySelectorAll(searchSel);
+      for (const candidate of candidates) {
+        if (candidate === el) continue;
+        if (similarElements.length >= 5) break;
+        const rect = candidate.getBoundingClientRect();
+        if (rect.width < 4 || rect.height < 4) continue;
+        if (rect.bottom < 0 || rect.top > window.innerHeight) continue;
+        if (rect.right < 0 || rect.left > window.innerWidth) continue;
+        similarElements.push({
+          selector: buildUniqueSelector(candidate),
+          tag: candidate.tagName.toLowerCase(),
+          textContent: (candidate.textContent || '').trim().slice(0, 100),
+          ariaLabel: candidate.getAttribute('aria-label') || '',
+          bounds: {
+            left: Math.round(rect.left),
+            top: Math.round(rect.top),
+            width: Math.round(rect.width),
+            height: Math.round(rect.height),
+          },
+        });
+      }
+    } catch (err) {
+      // Ignore selector errors
+    }
+  }
+
+  sendRecordingEvent('click', el, { similarElements });
 }
 
 function onRecordInput(e) {

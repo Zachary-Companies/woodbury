@@ -103,8 +103,11 @@ program
           const doneDash = debugLog.time('dashboard', 'Starting config dashboard');
           dashboard = await startDashboard(config.verbose || false, extensionManager, config.workingDirectory);
           config.dashboardUrl = dashboard.url;
+          if (dashboard.connectionUrl) {
+            config.remoteUrl = dashboard.connectionUrl;
+          }
           doneDash();
-          debugLog.info('dashboard', 'Dashboard running', { url: dashboard.url, port: dashboard.port });
+          debugLog.info('dashboard', 'Dashboard running', { url: dashboard.url, port: dashboard.port, remoteUrl: dashboard.connectionUrl });
         } catch (err) {
           debugLog.error('dashboard', 'Dashboard failed to start', { error: String(err) });
           console.warn(`  ${icons.warning}  Dashboard failed to start: ${err}`);
