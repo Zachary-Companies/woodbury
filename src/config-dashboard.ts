@@ -43,6 +43,7 @@ import { bridgeServer, ensureBridgeServer } from './bridge-server.js';
 import { startRemoteRelay, type RelayHandle } from './remote-relay.js';
 import { appendFileSync, mkdirSync, createReadStream, createWriteStream } from 'node:fs';
 import { spawn, type ChildProcess } from 'node:child_process';
+import { createSocket, type Socket as DgramSocket } from 'node:dgram';
 
 // Shared recording log
 const _REC_LOG_DIR = join(homedir(), '.woodbury', 'logs');
@@ -401,6 +402,62 @@ export async function startDashboard(
       req.end();
     });
   }
+
+  // ── Worker auto-discovery via UDP beacon ──
+  const BEACON_PORT = 8678;
+  let discoverySocket: DgramSocket | null = null;
+
+  function startWorkerDiscovery() {
+    try {
+      discoverySocket = createSocket({ type: 'udp4', reuseAddr: true });
+
+      discoverySocket.on('message', async (msg) => {
+        try {
+          const data = JSON.parse(msg.toString());
+          if (data.service !== 'woodbury-worker') return;
+          const { host, port, hostname } = data;
+          if (!host || !port) return;
+
+          // Check if already known
+          const workers = await loadWorkers();
+          if (workers.some(w => w.host === host && w.port === port)) return;
+
+          // Validate connectivity before adding
+          try {
+            await probeWorker(host, port);
+          } catch {
+            return; // Can't reach it, skip
+          }
+
+          const worker: WorkerConfig = {
+            id: `w-${Date.now()}`,
+            name: hostname || host,
+            host,
+            port,
+            addedAt: new Date().toISOString(),
+          };
+          workers.push(worker);
+          await saveWorkers(workers);
+          if (verbose) console.log(`[dashboard] Auto-discovered worker: ${hostname || host} (${host}:${port})`);
+        } catch {
+          // Ignore malformed packets
+        }
+      });
+
+      discoverySocket.on('error', () => {
+        // Non-critical — manual add still works
+        discoverySocket?.close();
+        discoverySocket = null;
+      });
+
+      discoverySocket.bind(BEACON_PORT);
+      if (verbose) console.log(`[dashboard] Worker discovery listening on UDP port ${BEACON_PORT}`);
+    } catch {
+      // Non-critical
+    }
+  }
+
+  startWorkerDiscovery();
 
   // Remote training state (mirrors activeTraining shape + worker info)
   let remoteTraining: {
@@ -4306,6 +4363,14 @@ Rules:
           return;
         }
         const workers = await loadWorkers();
+        // Deduplicate: if a worker with the same host:port exists, update it
+        const existing = workers.find(w => w.host === host && w.port === port);
+        if (existing) {
+          existing.name = name;
+          await saveWorkers(workers);
+          sendJson(res, 200, { worker: existing, exists: true });
+          return;
+        }
         const worker: WorkerConfig = {
           id: `w-${Date.now()}`,
           name,
@@ -4412,6 +4477,18 @@ Rules:
   const assignedPort = typeof addr === 'object' && addr ? addr.port : 0;
   const dashboardUrl = `http://127.0.0.1:${assignedPort}`;
 
+  // Persist dashboard URL so workers can auto-discover it
+  try {
+    const dataDir = join(homedir(), '.woodbury', 'data');
+    mkdirSync(dataDir, { recursive: true });
+    await writeFile(
+      join(dataDir, 'dashboard.json'),
+      JSON.stringify({ url: dashboardUrl, port: assignedPort, pid: process.pid }, null, 2),
+    );
+  } catch {
+    // Non-critical — workers can still use --register
+  }
+
   if (verbose) {
     console.log(`[dashboard] Config dashboard at ${dashboardUrl}`);
   }
@@ -4435,6 +4512,7 @@ Rules:
     close: () => {
       relayHandle?.stop();
       stopScheduler();
+      discoverySocket?.close();
       return new Promise<void>((resolve) => server.close(() => resolve()));
     },
   };

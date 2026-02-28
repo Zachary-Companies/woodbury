@@ -257,15 +257,16 @@ function renderTrainingConfig(summary) {
 
   html += '<label>Loss Function' +
     '<select id="train-loss">' +
-    '<option value="ntxent" selected>NT-Xent (contrastive)</option>' +
+    '<option value="arcface" selected>ArcFace (angular margin)</option>' +
+    '<option value="ntxent">NT-Xent (contrastive)</option>' +
     '<option value="triplet">Triplet</option>' +
     '<option value="contrastive">Contrastive</option>' +
     '</select></label>';
 
   html += '<label>Embedding Dim' +
     '<select id="train-embed-dim">' +
-    '<option value="64" selected>64</option>' +
-    '<option value="128">128</option>' +
+    '<option value="64">64</option>' +
+    '<option value="128" selected>128</option>' +
     '<option value="256">256</option>' +
     '</select></label>';
 
@@ -358,7 +359,7 @@ function renderTrainingConfig(summary) {
           epochs: parseInt(document.querySelector('#train-epochs').value) || 50,
           lr: parseFloat(document.querySelector('#train-lr').value) || 3e-4,
           lossType: document.querySelector('#train-loss').value,
-          embedDim: parseInt(document.querySelector('#train-embed-dim').value) || 64,
+          embedDim: parseInt(document.querySelector('#train-embed-dim').value) || 128,
           exportOnnx: document.querySelector('#train-export-onnx').value === 'true',
           workerId: targetValue !== 'local' ? targetValue : undefined,
         };
@@ -493,7 +494,7 @@ function renderTrainingProgress(status) {
   if (status.backbone) {
     html += '<div class="ext-header-meta">' + escHtml(status.backbone) + ' &middot; ' +
       escHtml(status.lossType || 'ntxent') + ' &middot; ' +
-      (status.embedDim || 64) + 'd';
+      (status.embedDim || 128) + 'd';
     if (status.worker) {
       html += ' &middot; <span class="worker-badge worker-online" style="font-size:0.7rem;">' +
         escHtml(status.worker.name) + ' (' + escHtml(status.worker.host) + ')</span>';
