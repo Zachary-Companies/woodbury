@@ -32,6 +32,20 @@ mac:
   entitlementsInherit: electron/entitlements.mac.plist
   hardenedRuntime: true
 
+win:
+  icon: electron/icons/icon.ico
+  target:
+    - target: nsis
+      arch:
+        - x64
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  installerIcon: electron/icons/icon.ico
+  uninstallerIcon: electron/icons/icon.ico
+
 dmg:
   contents:
     - x: 130

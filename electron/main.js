@@ -44,13 +44,17 @@ async function startBackend() {
 // ── Window ───────────────────────────────────────────────────
 
 function createWindow(url) {
+  const isMac = process.platform === 'darwin';
+
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 820,
     minWidth: 900,
     minHeight: 600,
-    titleBarStyle: 'hiddenInset',
-    trafficLightPosition: { x: 16, y: 16 },
+    ...(isMac ? {
+      titleBarStyle: 'hiddenInset',
+      trafficLightPosition: { x: 16, y: 16 },
+    } : {}),
     backgroundColor: '#0f172a',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -63,30 +67,32 @@ function createWindow(url) {
   mainWindow.loadURL(url);
 
   mainWindow.once('ready-to-show', () => {
-    // Inject CSS to account for hidden title bar inset
-    mainWindow.webContents.insertCSS(`
-      /* Push sidebar header below traffic light buttons */
-      .sidebar-header { padding-top: 2.25rem !important; }
+    if (isMac) {
+      // Inject CSS to account for hidden title bar inset (macOS only)
+      mainWindow.webContents.insertCSS(`
+        /* Push sidebar header below traffic light buttons */
+        .sidebar-header { padding-top: 2.25rem !important; }
 
-      /* Make the top title bar area draggable */
-      .sidebar::before {
-        content: '';
-        display: block;
-        position: absolute;
-        top: 0;
-        left: 0;
-        right: 0;
-        height: 52px;
-        -webkit-app-region: drag;
-        z-index: 10;
-        pointer-events: none;
-      }
+        /* Make the top title bar area draggable */
+        .sidebar::before {
+          content: '';
+          display: block;
+          position: absolute;
+          top: 0;
+          left: 0;
+          right: 0;
+          height: 52px;
+          -webkit-app-region: drag;
+          z-index: 10;
+          pointer-events: none;
+        }
 
-      /* Ensure interactive elements remain clickable */
-      .nav-tab, button, input, select, textarea, a, .ext-item, .wf-sidebar-new {
-        -webkit-app-region: no-drag;
-      }
-    `);
+        /* Ensure interactive elements remain clickable */
+        .nav-tab, button, input, select, textarea, a, .ext-item, .wf-sidebar-new {
+          -webkit-app-region: no-drag;
+        }
+      `);
+    }
 
     mainWindow.show();
   });
@@ -250,8 +256,11 @@ function createTray() {
   let icon;
 
   try {
-    icon = nativeImage.createFromPath(iconPath).resize({ width: 18, height: 18 });
-    icon.setTemplateImage(true); // macOS auto-adjusts for dark/light menu bar
+    const traySize = process.platform === 'win32' ? 16 : 18;
+    icon = nativeImage.createFromPath(iconPath).resize({ width: traySize, height: traySize });
+    if (process.platform === 'darwin') {
+      icon.setTemplateImage(true); // macOS auto-adjusts for dark/light menu bar
+    }
   } catch {
     // If no icon file yet, create a simple placeholder
     icon = nativeImage.createEmpty();

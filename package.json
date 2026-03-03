@@ -9,7 +9,7 @@
   },
   "scripts": {
     "build": "tsc",
-    "postbuild": "chmod +x dist/index.js && rm -rf dist/config-dashboard && cp -r src/config-dashboard dist/config-dashboard",
+    "postbuild": "node -e \"const fs=require('fs');if(process.platform!=='win32'){try{fs.chmodSync('dist/index.js',0o755)}catch{}};fs.cpSync('src/config-dashboard','dist/config-dashboard',{recursive:true,force:true})\"",
     "clean": "rimraf dist",
     "watch": "tsc --watch",
     "test": "jest",
@@ -22,9 +22,11 @@
     "test:coverage": "jest --coverage",
     "dev": "ts-node src/index.ts",
     "start": "node dist/index.js",
-    "postinstall": "plutil -replace CFBundleDisplayName -string Woodbury node_modules/electron/dist/Electron.app/Contents/Info.plist 2>/dev/null; plutil -replace CFBundleName -string Woodbury node_modules/electron/dist/Electron.app/Contents/Info.plist 2>/dev/null; true",
+    "postinstall": "node -e \"if(process.platform==='darwin'){try{require('child_process').execSync('plutil -replace CFBundleDisplayName -string Woodbury node_modules/electron/dist/Electron.app/Contents/Info.plist 2>/dev/null; plutil -replace CFBundleName -string Woodbury node_modules/electron/dist/Electron.app/Contents/Info.plist 2>/dev/null; true')}catch{}}\"",
     "electron:dev": "npm run build && electron electron/main.js",
     "electron:build": "npm run build && electron-builder --mac",
+    "electron:build:mac": "npm run build && electron-builder --mac",
+    "electron:build:win": "npm run build && electron-builder --win",
     "electron:pack": "npm run build && electron-builder --mac --dir"
   },
   "dependencies": {

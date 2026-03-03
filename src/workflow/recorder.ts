@@ -2278,10 +2278,10 @@ export class WorkflowRecorder {
     await new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => {
         hookChild.kill('SIGKILL');
-        reject(new Error(
-          'Desktop hook timed out starting (5s). On macOS, ensure Accessibility permissions ' +
-          'are granted in System Settings → Privacy & Security → Accessibility for the desktop-hook binary.'
-        ));
+        const hint = process.platform === 'darwin'
+          ? 'On macOS, ensure Accessibility permissions are granted in System Settings → Privacy & Security → Accessibility for the desktop-hook binary.'
+          : 'On Windows, try running the app as Administrator.';
+        reject(new Error(`Desktop hook timed out starting (5s). ${hint}`));
       }, 5000);
 
       // Check pending messages first (might have arrived before we set up listener)

@@ -26,7 +26,7 @@ export default function CTASection() {
                 href="https://github.com/Zachary-Companies/woodbury/releases/latest"
                 className="rounded-full bg-white px-8 py-3.5 text-sm font-semibold text-slate-900 shadow-lg shadow-purple-500/10 transition-all hover:bg-slate-200 hover:shadow-purple-500/20"
               >
-                Download for Mac
+                Download
               </a>
               <a
                 href="https://github.com/Zachary-Companies/woodbury"

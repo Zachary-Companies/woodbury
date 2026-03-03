@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Zachary-Companies/woodbury/releases/latest"><strong>Download for Mac</strong></a> · <a href="https://woobury-ai.web.app">Website</a> · <a href="docs/extensions.md">Extension Docs</a>
+  <a href="https://github.com/Zachary-Companies/woodbury/releases/latest"><strong>Download</strong></a> · <a href="https://woobury-ai.web.app">Website</a> · <a href="docs/extensions.md">Extension Docs</a>
 </p>
 
 ---
@@ -44,13 +44,21 @@ Woodbury is a desktop automation platform that lets you record browser and deskt
 | Platform | Link |
 |----------|------|
 | macOS (Apple Silicon) | [Latest Release](https://github.com/Zachary-Companies/woodbury/releases/latest) |
+| Windows (x64) | [Latest Release](https://github.com/Zachary-Companies/woodbury/releases/latest) |
 
 ## Getting Started
 
 ### Desktop App (recommended)
 
+**macOS:**
 1. Download the `.dmg` from the [latest release](https://github.com/Zachary-Companies/woodbury/releases/latest)
 2. Drag **Woodbury** into your Applications folder
+3. Open Woodbury — the dashboard launches automatically
+4. Add your API key (Anthropic, OpenAI, or Groq) in the Config tab
+
+**Windows:**
+1. Download the `.exe` installer from the [latest release](https://github.com/Zachary-Companies/woodbury/releases/latest)
+2. Run the installer and follow the prompts
 3. Open Woodbury — the dashboard launches automatically
 4. Add your API key (Anthropic, OpenAI, or Groq) in the Config tab
 
@@ -245,6 +253,9 @@ npm test
 
 # Build Electron .dmg (macOS)
 npm run electron:build
+
+# Build Electron .exe installer (Windows)
+npm run electron:build:win
 
 # Dev mode (Electron)
 npm run electron:dev
