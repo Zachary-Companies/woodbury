@@ -11,10 +11,12 @@
  *   const { workflow, filePath } = await recorder.stop(workingDir);
  */
 
-import { promises as fs, appendFileSync, mkdirSync, writeFileSync } from 'fs';
+import { promises as fs, appendFileSync, mkdirSync, writeFileSync, unlinkSync, existsSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import { bridgeServer, ensureBridgeServer } from '../bridge-server.js';
+import { execSync, spawn, fork, type ChildProcess } from 'child_process';
+import { tmpdir } from 'os';
 import type {
   WorkflowDocument,
   WorkflowStep,
@@ -27,6 +29,10 @@ import type {
   WaitStep,
   KeyboardStep,
   RecordingEvent,
+  DesktopLaunchAppStep,
+  DesktopClickStep,
+  DesktopTypeStep,
+  DesktopKeyboardStep,
 } from './types.js';
 
 // ── Recording debug log ─────────────────────────────────────
@@ -133,6 +139,10 @@ interface RecordingSession {
   snapshotCounter: number;
   /** Map of element selectors → interaction details (for ML training data) */
   interactedSelectors: Map<string, { action: string; stepIndex: number; text?: string; ariaLabel?: string; tag?: string; childSelector?: string }[]>;
+  /** Whether this is a desktop (native app) recording vs browser recording */
+  desktopMode: boolean;
+  /** Reference to uIOhook instance (only set during desktop recording) */
+  desktopHook: any | null;
 }
 
 export interface RecorderStatus {
@@ -311,6 +321,8 @@ export class WorkflowRecorder {
       captureElementCrops: options?.captureElementCrops ?? (process.env.WOODBURY_CAPTURE_CROPS !== '0'),
       snapshotCounter: 0,
       interactedSelectors: new Map(),
+      desktopMode: false,
+      desktopHook: null,
     };
 
     // 7. Add initial navigate step
@@ -386,16 +398,31 @@ export class WorkflowRecorder {
     this.flushPendingInput();
     this.cancelGapTracking();
 
-    // Stop recording in Chrome extension
-    try {
-      await bridgeServer.setRecordingMode(false);
-      recLog('INFO', 'Recording mode disabled in Chrome');
-    } catch (err) {
-      recLog('WARN', 'Failed to disable recording mode', { error: String(err) });
-      // Extension might have disconnected — that's ok
+    // Desktop mode: kill the hook child process
+    if (this.session.desktopMode && this.session.desktopHook) {
+      const hookChild = this.session.desktopHook as ChildProcess;
+      hookChild.removeAllListeners();
+      try {
+        hookChild.kill('SIGKILL');
+        recLog('INFO', 'Desktop hook process killed');
+      } catch (err) {
+        recLog('WARN', 'Failed to kill desktop hook process (non-fatal)', { error: String(err) });
+      }
+      this.session.desktopHook = null;
     }
 
-    // Remove event listeners
+    // Browser mode: stop recording in Chrome extension
+    if (!this.session.desktopMode) {
+      try {
+        await bridgeServer.setRecordingMode(false);
+        recLog('INFO', 'Recording mode disabled in Chrome');
+      } catch (err) {
+        recLog('WARN', 'Failed to disable recording mode', { error: String(err) });
+        // Extension might have disconnected — that's ok
+      }
+    }
+
+    // Remove event listeners (browser mode only)
     if (this.session.eventListener) {
       bridgeServer.removeListener('recording_event', this.session.eventListener);
     }
@@ -426,32 +453,34 @@ export class WorkflowRecorder {
     const { steps, variables } = this.detectVariables(this.session.steps);
     this.session.steps = steps;
 
-    // Detect new downloads by diffing against snapshot
+    // Detect new downloads by diffing against snapshot (browser mode only)
     let newDownloads: Array<{ id: number; filename: string; fileSize: number }> = [];
-    try {
-      recLog('INFO', 'Checking for new downloads since recording started');
-      const dlResult = await bridgeServer.send('get_downloads', { limit: 200, state: 'complete' }) as any;
-      const downloads: any[] = dlResult?.downloads || [];
-      for (const dl of downloads) {
-        if (typeof dl.id === 'number' && !this.session.downloadSnapshotIds.has(dl.id)) {
-          newDownloads.push({
-            id: dl.id,
-            filename: dl.filename || '',
-            fileSize: dl.fileSize || 0,
-          });
+    if (!this.session.desktopMode) {
+      try {
+        recLog('INFO', 'Checking for new downloads since recording started');
+        const dlResult = await bridgeServer.send('get_downloads', { limit: 200, state: 'complete' }) as any;
+        const downloads: any[] = dlResult?.downloads || [];
+        for (const dl of downloads) {
+          if (typeof dl.id === 'number' && !this.session.downloadSnapshotIds.has(dl.id)) {
+            newDownloads.push({
+              id: dl.id,
+              filename: dl.filename || '',
+              fileSize: dl.fileSize || 0,
+            });
+          }
         }
+        if (newDownloads.length > 0) {
+          recLog('INFO', `Detected ${newDownloads.length} new download(s)`, {
+            files: newDownloads.map(d => d.filename),
+          });
+          this.status(`Detected ${newDownloads.length} new download(s) during recording`);
+        } else {
+          recLog('INFO', 'No new downloads detected');
+        }
+      } catch (err) {
+        recLog('WARN', 'Download diff failed', { error: String(err) });
+        // Non-fatal — just won't report downloads
       }
-      if (newDownloads.length > 0) {
-        recLog('INFO', `Detected ${newDownloads.length} new download(s)`, {
-          files: newDownloads.map(d => d.filename),
-        });
-        this.status(`Detected ${newDownloads.length} new download(s) during recording`);
-      } else {
-        recLog('INFO', 'No new downloads detected');
-      }
-    } catch (err) {
-      recLog('WARN', 'Download diff failed', { error: String(err) });
-      // Non-fatal — just won't report downloads
     }
 
     // Build workflow document
@@ -466,6 +495,12 @@ export class WorkflowRecorder {
     await fs.mkdir(dir, { recursive: true });
     const filePath = join(dir, `${this.session.workflowName}.workflow.json`);
     await fs.writeFile(filePath, JSON.stringify(workflow, null, 2));
+
+    // Copy training snapshots to workflow directory (fire-and-forget)
+    const sessionStartTime = this.session.startTime;
+    const sessionSite = this.session.site;
+    const workflowId = this.session.workflowName;
+    this.copySnapshotsToWorkflowDir(workflowId, sessionSite, sessionStartTime);
 
     // Clear session
     this.session = null;
@@ -493,10 +528,21 @@ export class WorkflowRecorder {
 
     this.cancelGapTracking();
 
-    try {
-      await bridgeServer.setRecordingMode(false);
-    } catch {
-      // Extension might have disconnected
+    // Desktop mode: kill the hook child process
+    if (this.session.desktopMode && this.session.desktopHook) {
+      const hookChild = this.session.desktopHook as ChildProcess;
+      hookChild.removeAllListeners();
+      try { hookChild.kill('SIGKILL'); } catch { /* ok */ }
+      this.session.desktopHook = null;
+    }
+
+    // Browser mode: stop recording in Chrome extension
+    if (!this.session.desktopMode) {
+      try {
+        await bridgeServer.setRecordingMode(false);
+      } catch {
+        // Extension might have disconnected
+      }
     }
 
     if (this.session.eventListener) {
@@ -1024,6 +1070,9 @@ export class WorkflowRecorder {
 
     this.addStep(step);
 
+    // Capture reference crop for visual verification (fire-and-forget)
+    this.captureReferenceCrop(step, event.element.bounds);
+
     // Track interacted element selectors for ML training data
     if (this.session?.captureElementCrops && event.element.selector) {
       const selector = event.element.selector;
@@ -1056,7 +1105,123 @@ export class WorkflowRecorder {
     }
   }
 
-  // ── Element crop capture for ML training ────────────────
+  // ── Snapshot copy for per-workflow training ──────────────
+
+  /**
+   * Copy training snapshots captured during this recording session to the
+   * workflow's own directory. This makes training data self-contained per workflow.
+   * Runs in background — never blocks the recording stop flow.
+   */
+  private copySnapshotsToWorkflowDir(workflowId: string, site: string, sessionStartTime: number): void {
+    (async () => {
+      try {
+        const siteDir = site.replace(/[^a-zA-Z0-9.-]/g, '_');
+        const srcDir = join(homedir(), '.woodbury', 'data', 'training-crops', 'snapshots', siteDir);
+        const dstDir = join(homedir(), '.woodbury', 'data', 'workflows', workflowId, 'snapshots');
+
+        // Check if source directory exists
+        try {
+          await fs.access(srcDir);
+        } catch {
+          recLog('INFO', 'copySnapshots: no snapshots directory found, skipping', { srcDir });
+          return;
+        }
+
+        await fs.mkdir(dstDir, { recursive: true });
+
+        // List all files in the snapshots source directory
+        const files = await fs.readdir(srcDir);
+        let copied = 0;
+
+        for (const file of files) {
+          const srcPath = join(srcDir, file);
+          const stat = await fs.stat(srcPath);
+
+          // Only copy files created during this recording session
+          if (stat.mtimeMs >= sessionStartTime) {
+            const dstPath = join(dstDir, file);
+            await fs.copyFile(srcPath, dstPath);
+            copied++;
+          }
+        }
+
+        recLog('INFO', 'copySnapshots: copied training snapshots to workflow dir', {
+          workflowId,
+          copied,
+          total: files.length,
+          dstDir,
+        });
+      } catch (err) {
+        recLog('WARN', 'copySnapshots: failed (non-fatal)', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    })();
+  }
+
+  // ── Reference crop capture for visual verification ──────
+
+  /**
+   * Capture a reference crop of the element at the given bounds.
+   * Fires in the background — never blocks the recording flow.
+   * Saves the crop to ~/.woodbury/data/workflows/{workflowName}/refs/{stepId}.png
+   * and sets step.target.referenceImage to the saved path.
+   */
+  private captureReferenceCrop(step: ClickStep | TypeStep, bounds: RecordingEvent['element']['bounds']): void {
+    if (!this.session) return;
+    if (!bounds || bounds.width < 4 || bounds.height < 4) return;
+    if (bounds.left < 0 || bounds.top < 0) return;
+
+    const workflowName = this.session.workflowName;
+    const stepId = step.id;
+
+    // Fire and forget — capture in background
+    (async () => {
+      try {
+        // Capture viewport and crop the element region using the extension's OffscreenCanvas
+        const result = await bridgeServer.send('capture_viewport', {
+          crop: {
+            left: Math.round(bounds.left),
+            top: Math.round(bounds.top),
+            width: Math.round(bounds.width),
+            height: Math.round(bounds.height),
+          },
+        }) as Record<string, unknown>;
+
+        const data = result?.data as Record<string, unknown> | undefined;
+        const image = (data?.image || result?.image) as string | undefined;
+        if (!image) {
+          recLog('WARN', 'captureReferenceCrop: no image returned', { stepId });
+          return;
+        }
+
+        // Save the cropped image
+        const refsDir = join(homedir(), '.woodbury', 'data', 'workflows', workflowName, 'refs');
+        mkdirSync(refsDir, { recursive: true });
+        const cropPath = join(refsDir, `${stepId}.png`);
+
+        // Decode base64 data URL and save as PNG
+        const base64Data = image.replace(/^data:image\/png;base64,/, '');
+        const buffer = Buffer.from(base64Data, 'base64');
+        await fs.writeFile(cropPath, buffer);
+
+        // Set the reference image path on the step's target
+        step.target.referenceImage = cropPath;
+
+        recLog('INFO', 'captureReferenceCrop: saved', {
+          stepId,
+          path: cropPath,
+          size: buffer.length,
+          bounds: { left: bounds.left, top: bounds.top, width: bounds.width, height: bounds.height },
+        });
+      } catch (err) {
+        recLog('WARN', 'captureReferenceCrop: failed (non-fatal)', {
+          stepId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    })();
+  }
 
   // ── Page Snapshot Capture (ML Training Data) ────────────────
   //
@@ -1259,6 +1424,11 @@ export class WorkflowRecorder {
 
     this.session.pendingInput = null;
     this.addStep(step);
+
+    // Capture reference crop for visual verification (fire-and-forget)
+    if (step.target.expectedBounds) {
+      this.captureReferenceCrop(step, step.target.expectedBounds);
+    }
   }
 
   // ── Step creation helpers ────────────────────────────────
@@ -1997,4 +2167,451 @@ export class WorkflowRecorder {
   private delay(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
   }
+
+  // ── Desktop (native app) recording ─────────────────────────
+
+  /**
+   * Start recording global mouse clicks for native desktop app automation.
+   * Uses uiohook-napi for cross-platform global input hooks.
+   *
+   * Unlike browser recording (which captures DOM events via Chrome extension),
+   * desktop recording captures raw screen coordinates and replays them with
+   * robotjs — no element selectors, just x/y positions.
+   */
+  async startDesktopRecording(name: string, appName?: string): Promise<void> {
+    // Truncate log file at start of each recording
+    try {
+      mkdirSync(RECORDING_LOG_DIR, { recursive: true });
+      writeFileSync(RECORDING_LOG_PATH, '');
+    } catch { /* ok */ }
+    recLog('INFO', '=== Desktop recording start BEGIN ===', { name, appName });
+
+    if (this.session) {
+      recLog('ERROR', 'Recording already in progress');
+      throw new Error('Recording already in progress. Use /record stop first.');
+    }
+
+    // Launch the target application if specified
+    if (appName) {
+      recLog('INFO', `Launching application: ${appName}`);
+      try {
+        await launchApp(appName);
+        recLog('INFO', `Application launched: ${appName}`);
+      } catch (err: any) {
+        recLog('ERROR', `Failed to launch app "${appName}"`, { error: String(err) });
+        throw new Error(`Could not launch "${appName}": ${err.message}`);
+      }
+    }
+
+    // Use the compiled native Swift event monitor (macOS) or uiohook-napi (other platforms).
+    // The Swift binary uses NSEvent.addGlobalMonitorForEvents which handles macOS
+    // accessibility permissions properly, outputs JSON lines to stdout, and can be
+    // killed cleanly with SIGTERM/SIGKILL.
+    const hookBinaryPath = join(__dirname, '..', '..', 'tools', 'desktop-hook');
+    const isSwiftHookAvailable = process.platform === 'darwin' && existsSync(hookBinaryPath);
+
+    let hookChild: ReturnType<typeof spawn>;
+
+    if (isSwiftHookAvailable) {
+      recLog('INFO', 'Using native Swift desktop-hook binary', { path: hookBinaryPath });
+      hookChild = spawn(hookBinaryPath, [], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } else {
+      // Fallback: uiohook-napi in a child process (cross-platform)
+      let uiohookEntryPath: string;
+      try {
+        uiohookEntryPath = require.resolve('uiohook-napi');
+      } catch (err: any) {
+        throw new Error(
+          `Desktop recording requires either the desktop-hook binary (macOS) or uiohook-napi.\n` +
+          `Error: ${err.message}`
+        );
+      }
+      const scriptPath = join(tmpdir(), `woodbury-desktop-hook-${Date.now()}.js`);
+      writeFileSync(scriptPath, `
+        'use strict';
+        const { uIOhook } = require(${JSON.stringify(uiohookEntryPath)});
+        uIOhook.on('mousedown', (e) => {
+          const line = JSON.stringify({ type: 'click', x: e.x, y: e.y, button: e.button, clicks: e.clicks || 1, action: 'click', time: e.time });
+          process.stdout.write(line + '\\n');
+        });
+        uIOhook.start();
+        process.stdout.write(JSON.stringify({ type: 'started' }) + '\\n');
+      `);
+      hookChild = spawn(process.execPath, [scriptPath], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      // Clean up temp script after a short delay
+      setTimeout(() => { try { unlinkSync(scriptPath); } catch { /* ok */ } }, 2000);
+    }
+
+    // Parse JSON lines from the hook process stdout
+    let stdoutBuffer = '';
+    const pendingMessages: any[] = [];
+    let onMessage: ((msg: any) => void) | null = null;
+
+    hookChild.stdout!.on('data', (chunk: Buffer) => {
+      stdoutBuffer += chunk.toString();
+      const lines = stdoutBuffer.split('\n');
+      stdoutBuffer = lines.pop() || ''; // keep incomplete line in buffer
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const msg = JSON.parse(line);
+          if (onMessage) {
+            onMessage(msg);
+          } else {
+            pendingMessages.push(msg);
+          }
+        } catch {
+          recLog('WARN', 'Failed to parse hook output line', { line });
+        }
+      }
+    });
+
+    hookChild.stderr!.on('data', (chunk: Buffer) => {
+      recLog('WARN', '[hook-stderr]', { output: chunk.toString().trim() });
+    });
+
+    // Wait for the hook to confirm it started
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        hookChild.kill('SIGKILL');
+        reject(new Error(
+          'Desktop hook timed out starting (5s). On macOS, ensure Accessibility permissions ' +
+          'are granted in System Settings → Privacy & Security → Accessibility for the desktop-hook binary.'
+        ));
+      }, 5000);
+
+      // Check pending messages first (might have arrived before we set up listener)
+      for (const msg of pendingMessages) {
+        if (msg.type === 'started') {
+          clearTimeout(timeout);
+          resolve();
+          return;
+        } else if (msg.type === 'error') {
+          clearTimeout(timeout);
+          hookChild.kill('SIGKILL');
+          reject(new Error(`Desktop hook failed: ${msg.message}`));
+          return;
+        }
+      }
+
+      onMessage = (msg: any) => {
+        if (msg.type === 'started') {
+          clearTimeout(timeout);
+          resolve();
+        } else if (msg.type === 'error') {
+          clearTimeout(timeout);
+          hookChild.kill('SIGKILL');
+          reject(new Error(`Desktop hook failed: ${msg.message}`));
+        }
+      };
+
+      hookChild.once('error', (err) => {
+        clearTimeout(timeout);
+        hookChild.kill('SIGKILL');
+        reject(err);
+      });
+
+      hookChild.once('exit', (code) => {
+        clearTimeout(timeout);
+        if (code !== null && code !== 0) {
+          reject(new Error(`Desktop hook process exited with code ${code}`));
+        }
+      });
+    });
+
+    recLog('INFO', 'Desktop hook child process started successfully', { pid: hookChild.pid });
+
+    // Initialize session in desktop mode
+    this.session = {
+      workflowName: name,
+      site: 'desktop',
+      steps: [],
+      startTime: Date.now(),
+      paused: false,
+      lastUrl: '',
+      lastEventTime: Date.now(),
+      stepCounter: 0,
+      pendingInput: null,
+      eventListener: null,
+      snapshotListener: null,
+      reconnectHandler: null,
+      gapTracker: null,
+      gapDetectionTimer: null,
+      downloadSnapshotIds: new Set(),
+      captureElementCrops: false,
+      snapshotCounter: 0,
+      interactedSelectors: new Map(),
+      desktopMode: true,
+      desktopHook: hookChild,
+    };
+
+    // Insert a launch app step as the first step so the workflow opens the app on replay
+    if (appName) {
+      const launchStep: DesktopLaunchAppStep = {
+        id: this.nextStepId('desktop-launch', appName),
+        label: `Launch ${appName}`,
+        type: 'desktop_launch_app',
+        appName,
+        delayAfterMs: 2000,
+      };
+      this.addStep(launchStep);
+      recLog('INFO', 'Inserted desktop_launch_app step', { appName });
+    }
+
+    // Forward events from the hook process to the recording handler
+    // (messages arrive via the stdout JSON line parser set up above)
+    onMessage = (msg: any) => {
+      if (msg.type === 'click') {
+        this.handleDesktopClick(msg);
+      } else if (msg.type === 'keypress') {
+        this.handleDesktopKeypress(msg);
+      } else if (msg.type === 'keydown') {
+        this.handleDesktopKeydown(msg);
+      }
+    };
+
+    hookChild.on('error', (err) => {
+      recLog('ERROR', 'Desktop hook process error', { error: String(err) });
+    });
+
+    hookChild.on('exit', (code, signal) => {
+      recLog('INFO', `Desktop hook process exited`, { code, signal });
+    });
+
+    const appMsg = appName ? ` (${appName})` : '';
+    recLog('INFO', `Desktop recording started${appMsg} — global click hook active`);
+    this.status(`Desktop recording started${appMsg} — click anywhere on screen to record actions.`);
+  }
+
+  /**
+   * Handle a global mouse click event from uiohook-napi.
+   * Builds a DesktopClickStep and adds it to the recording.
+   */
+  private handleDesktopClick(e: any): void {
+    if (!this.session || this.session.paused || !this.session.desktopMode) return;
+
+    const now = e.time || Date.now();
+
+    // Detect time gap → insert wait step
+    const gap = now - this.session.lastEventTime;
+    if (gap > GAP_THRESHOLD_MS) {
+      const waitMs = Math.min(gap, MAX_GAP_WAIT_MS);
+      const waitStep = this.createWaitStep(waitMs);
+      this.addStep(waitStep);
+    }
+    this.session.lastEventTime = now;
+
+    // Determine click action from event data
+    // e.button: 1 = left, 2 = right, 3 = middle (libuiohook convention)
+    // e.clicks: number of consecutive clicks (1 = single, 2 = double)
+    const action: 'click' | 'double_click' | 'right_click' =
+      e.clicks >= 2 ? 'double_click'
+      : e.button === 2 ? 'right_click'
+      : 'click';
+
+    // Get frontmost application name (platform-specific)
+    const app = getFrontmostApp();
+
+    const step: DesktopClickStep = {
+      id: this.nextStepId('desktop-click', app || 'desktop'),
+      label: `Desktop ${action} at (${e.x}, ${e.y})${app ? ` in ${app}` : ''}`,
+      type: 'desktop_click',
+      x: e.x,
+      y: e.y,
+      action,
+      app: app || undefined,
+      description: app || 'Desktop click',
+      delayAfterMs: 500,
+    };
+
+    this.addStep(step);
+    recLog('INFO', 'Desktop click captured', { x: e.x, y: e.y, action, app, button: e.button, clicks: e.clicks });
+
+    // Capture desktop screenshot (fire-and-forget, for reference)
+    this.captureDesktopScreenshot(step.id).catch(() => { /* ignore */ });
+  }
+
+  /**
+   * Handle a keypress event (regular character typing) from the desktop hook.
+   * Accumulates consecutive keypress events into a single DesktopTypeStep.
+   */
+  private handleDesktopKeypress(e: any): void {
+    if (!this.session || this.session.paused || !this.session.desktopMode) return;
+
+    const now = e.time || Date.now();
+    const char = e.chars || e.key || '';
+    if (!char) return;
+
+    // Check if we can merge into the last step (if it's a recent desktop_type)
+    const lastStep = this.session.steps[this.session.steps.length - 1];
+    if (lastStep && lastStep.type === 'desktop_type' && (now - this.session.lastEventTime) < 2000) {
+      // Append to existing type step
+      (lastStep as DesktopTypeStep).value += char;
+      lastStep.label = `Type: "${(lastStep as DesktopTypeStep).value}"`;
+      this.session.lastEventTime = now;
+      recLog('INFO', 'Desktop keypress appended', { char, total: (lastStep as DesktopTypeStep).value });
+      return;
+    }
+
+    // Detect time gap → insert wait step
+    const gap = now - this.session.lastEventTime;
+    if (gap > GAP_THRESHOLD_MS) {
+      const waitMs = Math.min(gap, MAX_GAP_WAIT_MS);
+      this.addStep(this.createWaitStep(waitMs));
+    }
+    this.session.lastEventTime = now;
+
+    const step: DesktopTypeStep = {
+      id: this.nextStepId('desktop-type', 'keyboard'),
+      label: `Type: "${char}"`,
+      type: 'desktop_type',
+      value: char,
+      delayAfterMs: 100,
+    };
+
+    this.addStep(step);
+    recLog('INFO', 'Desktop keypress captured', { char });
+  }
+
+  /**
+   * Handle a keydown event (special key or keyboard shortcut) from the desktop hook.
+   * Creates a DesktopKeyboardStep for shortcuts (Cmd+S, Ctrl+Z, etc.) and special keys.
+   */
+  private handleDesktopKeydown(e: any): void {
+    if (!this.session || this.session.paused || !this.session.desktopMode) return;
+
+    const now = e.time || Date.now();
+    const key = e.key || 'unknown';
+    const modifiers: ('ctrl' | 'shift' | 'alt' | 'cmd')[] = e.modifiers || [];
+
+    // Detect time gap → insert wait step
+    const gap = now - this.session.lastEventTime;
+    if (gap > GAP_THRESHOLD_MS) {
+      const waitMs = Math.min(gap, MAX_GAP_WAIT_MS);
+      this.addStep(this.createWaitStep(waitMs));
+    }
+    this.session.lastEventTime = now;
+
+    const modStr = modifiers.length > 0 ? modifiers.join('+') + '+' : '';
+    const step: DesktopKeyboardStep = {
+      id: this.nextStepId('desktop-key', key),
+      label: `Key: ${modStr}${key}`,
+      type: 'desktop_keyboard',
+      key,
+      modifiers: modifiers.length > 0 ? modifiers : undefined,
+      delayAfterMs: 200,
+    };
+
+    this.addStep(step);
+    recLog('INFO', 'Desktop keydown captured', { key, modifiers });
+  }
+
+  /**
+   * Capture a full desktop screenshot and save it for reference.
+   * Used during desktop recording to provide visual context for each click.
+   */
+  private async captureDesktopScreenshot(stepId: string): Promise<void> {
+    try {
+      const mod = await import('flow-frame-core/dist/inference/capturescreenshot.js');
+      const dataUrl: string = await mod.captureScreenshotBase64(undefined);
+      const base64 = dataUrl.replace(/^data:image\/png;base64,/, '');
+
+      const refsDir = join(homedir(), '.woodbury', 'data', 'workflows', this.session?.workflowName || 'unknown', 'refs');
+      mkdirSync(refsDir, { recursive: true });
+
+      const filename = `${stepId}.png`;
+      writeFileSync(join(refsDir, filename), Buffer.from(base64, 'base64'));
+
+      // Update the step's screenshotRef if it's the latest step
+      if (this.session) {
+        const lastStep = this.session.steps[this.session.steps.length - 1];
+        if (lastStep && lastStep.id === stepId && lastStep.type === 'desktop_click') {
+          (lastStep as DesktopClickStep).screenshotRef = join(refsDir, filename);
+        }
+      }
+    } catch (err) {
+      recLog('WARN', 'captureDesktopScreenshot failed (non-fatal)', { stepId, error: String(err) });
+    }
+  }
+}
+
+// ── Utilities (module-level) ──────────────────────────────────
+
+/**
+ * Get the name of the frontmost application.
+ * Platform-specific: macOS uses osascript, Windows uses PowerShell, Linux uses xdotool.
+ * Returns 'unknown' on failure.
+ */
+function getFrontmostApp(): string {
+  try {
+    if (process.platform === 'darwin') {
+      return execSync(
+        "osascript -e 'tell application \"System Events\" to get name of first application process whose frontmost is true'",
+        { timeout: 2000, encoding: 'utf-8' }
+      ).trim();
+    } else if (process.platform === 'win32') {
+      return execSync(
+        'powershell -NoProfile -c "(Get-Process | Where-Object {$_.MainWindowHandle -ne 0} | Sort-Object -Property CPU -Descending | Select-Object -First 1).ProcessName"',
+        { timeout: 2000, encoding: 'utf-8' }
+      ).trim();
+    } else {
+      return execSync(
+        'xdotool getactivewindow getwindowname 2>/dev/null || echo unknown',
+        { timeout: 2000, encoding: 'utf-8' }
+      ).trim();
+    }
+  } catch {
+    return 'unknown';
+  }
+}
+
+/**
+ * Launch an application by name and wait for it to come to the foreground.
+ * Platform-specific: macOS uses `open -a`, Windows uses `start`, Linux uses xdg-open/launch by name.
+ */
+async function launchApp(appName: string): Promise<void> {
+  const platform = process.platform;
+
+  if (platform === 'darwin') {
+    // macOS: use `open -a` to launch and bring to front
+    // First try to activate it if already running, then open if not
+    try {
+      execSync(
+        `osascript -e 'tell application "${appName.replace(/"/g, '\\"')}" to activate'`,
+        { timeout: 5000, encoding: 'utf-8' }
+      );
+    } catch {
+      // If activate failed, try open -a (works for apps not yet running)
+      execSync(
+        `open -a "${appName.replace(/"/g, '\\"')}"`,
+        { timeout: 5000, encoding: 'utf-8' }
+      );
+    }
+  } else if (platform === 'win32') {
+    // Windows: try Start-Process to launch the app
+    try {
+      execSync(
+        `powershell -NoProfile -c "Start-Process '${appName.replace(/'/g, "''")}';"`,
+        { timeout: 5000, encoding: 'utf-8' }
+      );
+    } catch {
+      // Fallback: try start command
+      spawn('cmd', ['/c', 'start', '', appName], { detached: true, stdio: 'ignore' });
+    }
+  } else {
+    // Linux: try launching by command name
+    try {
+      spawn(appName.toLowerCase(), [], { detached: true, stdio: 'ignore' });
+    } catch {
+      // Fallback: try xdg-open (for .desktop entries)
+      spawn('xdg-open', [appName], { detached: true, stdio: 'ignore' });
+    }
+  }
+
+  // Give the app time to launch and come to foreground
+  await new Promise(resolve => setTimeout(resolve, 1500));
 }

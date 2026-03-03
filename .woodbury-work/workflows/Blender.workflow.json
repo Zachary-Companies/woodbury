@@ -1,0 +1,119 @@
+{
+  "version": "1.0",
+  "id": "Blender",
+  "name": "Blender",
+  "description": "Recorded workflow for desktop",
+  "site": "desktop",
+  "variables": [],
+  "steps": [
+    {
+      "id": "step-1-desktop-launch-Blender",
+      "label": "Launch Blender",
+      "type": "desktop_launch_app",
+      "appName": "Blender",
+      "delayAfterMs": 2000
+    },
+    {
+      "id": "step-2-desktop-click-Blender",
+      "label": "Desktop click at (547, 795) in Blender",
+      "type": "desktop_click",
+      "x": 547,
+      "y": 795,
+      "action": "click",
+      "app": "Blender",
+      "description": "Blender",
+      "delayAfterMs": 500
+    },
+    {
+      "id": "step-3-desktop-click-Blender",
+      "label": "Desktop click at (805, 646) in Blender",
+      "type": "desktop_click",
+      "x": 805,
+      "y": 646,
+      "action": "click",
+      "app": "Blender",
+      "description": "Blender",
+      "delayAfterMs": 500
+    },
+    {
+      "id": "step-4-desktop-type-keyboard",
+      "label": "Type: \"g\"",
+      "type": "desktop_type",
+      "value": "g",
+      "delayAfterMs": 100
+    },
+    {
+      "id": "step-5-desktop-click-Blender",
+      "label": "Desktop click at (1175, 460) in Blender",
+      "type": "desktop_click",
+      "x": 1175,
+      "y": 460,
+      "action": "click",
+      "app": "Blender",
+      "description": "Blender",
+      "delayAfterMs": 500
+    },
+    {
+      "id": "step-6-desktop-type-keyboard",
+      "label": "Type: \"g\"",
+      "type": "desktop_type",
+      "value": "g",
+      "delayAfterMs": 100
+    },
+    {
+      "id": "step-7-desktop-click-Blender",
+      "label": "Desktop click at (467, 606) in Blender",
+      "type": "desktop_click",
+      "x": 467,
+      "y": 606,
+      "action": "click",
+      "app": "Blender",
+      "description": "Blender",
+      "delayAfterMs": 500,
+      "screenshotRef": "/Users/andrewporter/.woodbury/data/workflows/Blender/refs/step-7-desktop-click-Blender.png"
+    },
+    {
+      "id": "step-8-desktop-type-keyboard",
+      "label": "Type: \"g\"",
+      "type": "desktop_type",
+      "value": "g",
+      "delayAfterMs": 100
+    },
+    {
+      "id": "step-9-desktop-click-Blender",
+      "label": "Desktop click at (933, 1035) in Blender",
+      "type": "desktop_click",
+      "x": 933,
+      "y": 1035,
+      "action": "click",
+      "app": "Blender",
+      "description": "Blender",
+      "delayAfterMs": 500,
+      "screenshotRef": "/Users/andrewporter/.woodbury/data/workflows/Blender/refs/step-9-desktop-click-Blender.png"
+    },
+    {
+      "id": "step-10-desktop-type-keyboard",
+      "label": "Type: \"g\"",
+      "type": "desktop_type",
+      "value": "g",
+      "delayAfterMs": 100
+    },
+    {
+      "id": "step-11-desktop-click-Blender",
+      "label": "Desktop click at (1267, 676) in Blender",
+      "type": "desktop_click",
+      "x": 1267,
+      "y": 676,
+      "action": "click",
+      "app": "Blender",
+      "description": "Blender",
+      "delayAfterMs": 500,
+      "screenshotRef": "/Users/andrewporter/.woodbury/data/workflows/Blender/refs/step-11-desktop-click-Blender.png"
+    }
+  ],
+  "metadata": {
+    "createdAt": "2026-03-02T23:36:53.211Z",
+    "updatedAt": "2026-03-02T23:37:20.082Z",
+    "recordedBy": "recorder"
+  }
+}

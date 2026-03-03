@@ -213,9 +213,9 @@ export const ffMouseHandler: ToolHandler = async (params: any, context?: ToolCon
         }
         await wait(100);
       }
-      // Use flow-frame's mouseClick which has a built-in delay for safety
-      await flowFrameOps.mouseClick();
-      await wait(delayMs);
+      // Use flow-frame's mouseClick with configurable pre-click delay
+      await flowFrameOps.mouseClick(delayMs);
+      await wait(100);
       const pos = robot.getMousePos();
       return `# Mouse: Clicked\n\n- Position: (${pos.x}, ${pos.y})\n- Button: left`;
 

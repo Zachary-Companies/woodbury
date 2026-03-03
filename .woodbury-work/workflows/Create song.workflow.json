@@ -6,32 +6,35 @@
   "site": "suno.com",
   "variables": [
     {
-      "name": "text_input",
-      "description": "Value to enter in the text area",
+      "name": "lyrics",
+      "description": "Lyrics to enter in the text area",
       "type": "string",
       "required": true,
-      "default": "new lyics"
+      "default": "add lyrics",
+      "generationPrompt": "You are a professional lo-fi hip hop lyricist and topliner.\n\nGoal: Write complete lo-fi hip hop lyrics (not a poem) for a song about RANDOM TOPICS I provide (or if none are provided, you must invent 2–4 fresh, unexpected topics and weave them together coherently).\n\nStyle & vibe:\n- lo-fi hip hop / chilled boom-bap / late-night study beats\n- introspective, warm, slightly melancholic but hopeful\n- vivid everyday imagery (rain on windows, streetlights, notebooks, bus rides, coffee, late texts)\n- modern but timeless language; no cringe slang, no forced “yo/yeah” filler\n- clever internal rhymes + subtle wordplay; keep it natural\n- avoid name-dropping real artists\n\nInputs you may receive:\n- Topics: (list) OR none\n- Mood: (calm / bittersweet / hopeful / nostalgic / moody)\n- Setting: (optional) (city night, bedroom studio, train ride, etc.)\n- Tempo: (optional) BPM range\n- Perspective: (optional) 1st person by default\n\nStructure requirements:\n1) TITLE (short)\n2) HOOK (8 lines)\n3) VERSE 1 (16 lines)\n4) VERSE 2 (16 lines)\n5) BRIDGE (6–8 lines) — optional but recommended\n6) OUTRO (4–6 lines)\n\nWriting constraints:\n- Each verse should develop the topic(s) with a clear emotional arc (start -> tension -> small realization).\n- Include at least 6 sensory details across the song (sound, smell, texture, light, temperature).\n- Include 2 memorable “sticky” phrases that could be repeated or sampled.\n- Keep lines reasonably rap-able: most lines 6–12 words; vary flow occasionally.\n- No explicit sexual content, hate, or violence.\n- No mention of “as an AI” or “I can’t.”\n\nIf topics are random or multiple:\n- Tie them together with a single unifying theme (e.g., time, distance, healing, routine, identity, seasons).\n- Make the transitions feel intentional, not list-like.\n\nOutput formatting:\n- Put section headers exactly like: [HOOK], [VERSE 1], etc.\n- Write only the lyrics (no explanations).\n- After the lyrics, add a short section:\n  NOTES:\n  - Topics used:\n  - Unifying theme:\n  - 2 sticky phrases:"
     },
     {
-      "name": "text_input_2",
-      "description": "Value to enter in the text area",
+      "name": "style",
+      "description": "Style to enter in the text area",
       "type": "string",
       "required": true,
-      "default": "alsdkfj alkdsfj laksdjf alsdf"
+      "default": "add style",
+      "generationPrompt": "You are a music creative director and **Suno “Style of Music” prompt** generator specializing in lo-fi hip hop.\n\n## Task\n\nGenerate **exactly 1** distinct lo-fi hip hop style. It must feel like a real, producible sub-vibe and be **directly copy/paste-ready for Suno**.\n\n## Optional inputs (may be provided; otherwise you decide)\n\n* Era vibe: (90s / 00s / modern / timeless)\n* Mood: (cozy, melancholic, hopeful, dreamy, nocturnal, gritty, playful, meditative)\n* Setting: (rainy city night, library study session, sunrise commute, rooftop dusk, winter cabin)\n* Energy: (very chill, chill, mid, upbeat)\n* Instrument focus: (jazzy keys, guitar, Rhodes, strings, vocal chops, horns, synth pads)\n* Drum character: (dusty boom-bap, soft swing, crisp hats, vinyl-thick, tape-warm, minimal)\n* Texture: (vinyl crackle, cassette hiss, room noise, tape wobble, detuned)\n* Harmony: (jazzy 7ths/9ths, minor keys, modal, simple loops, rich progressions)\n* BPM range: (e.g., 70–85, 85–95)\n* Vocals: (instrumental / light vocal chops / sung hook / rap verses)\n* “No-go” list: words/concepts/instruments/behaviors to avoid (treat as exclusions)\n\n## Suno prompt rules\n\n* Produce a single **STYLE_STRING** that is **one line**, mostly **comma-separated**, starting with “lo-fi hip hop” or “lofi hip hop”.\n* Include **8–18 concrete descriptors**: mood, setting, tempo, instruments, drum feel, texture, mix traits, arrangement intent.\n* Always include tempo as “XX BPM” or a short range (and keep consistent everywhere).\n* If vocals aren’t specified, default to **instrumental**.\n* Avoid naming real artists.\n* If a No-go list is provided, convert it into an **EXCLUDE_STRING** (single line). If not provided, output **EXCLUDE_STRING: (none)**.\n\n## Output format (must match exactly)\n\nSTYLE_NAME: <Short Style Name>\nSTYLE_STRING: <single-line paste-ready Suno “Style of Music” prompt>\nEXCLUDE_STRING: <single-line exclusions or (none)>\nCORE_VIBE: <1–2 sentences>\nSONIC_PALETTE: <5–9 bullet fragments separated by \" | \" on one line>\nDRUMS_GROOVE: <1–2 sentences>\nHARMONY_MELODY: <1–2 sentences>\nBPM: <single value or short range>\nARRANGEMENT: <1–2 sentences>\nIMAGERY: <3 comma-separated cues>\nTAGLINE: <one punchy line>\nDO: <2 items separated by \" | \">\nDONT: <2 items separated by \" | \">\n\n## Hard constraints\n\n* Output **only** the fields above — no extra text, no additional styles.\n* Keep everything compact and production-useful."
     },
     {
-      "name": "input_value",
-      "description": "Value to enter in the input field",
+      "name": "title",
+      "description": "Title to enter in the input field",
       "type": "string",
       "required": true,
-      "default": "asd fasdf asdf adsf"
+      "default": "song title",
+      "generationPrompt": "You are a lo-fi hip hop title generator.\n\nGoal: Generate 1 song titles that feel authentic for lo-fi hip hop releases.\n\nInputs (may be provided; if not, invent them):\n- Mood: (cozy / melancholic / hopeful / nocturnal / dreamy / rainy / nostalgic)\n- Setting: (late-night desk, train ride, rainy city, winter window, coffee shop, rooftop dusk)\n- Theme/keywords: (optional list)\n- Energy: (very chill / chill / mid)\n- Constraint: (optional) \"no punctuation\" | \"must include 1 number\" | \"2–4 words only\" | \"all lowercase\" | \"max 18 characters\" | \"include a time\" (e.g., 2:13am)\n\nRules:\n- No real artist names, brand names, or copyrighted titles.\n- Avoid clichés like “lofi beats,” “study,” “chill vibes,” “rainy nights” unless used in a fresh way.\n- Titles should be evocative and visual; lean on small moments and objects.\n- Keep most titles 2–5 words; vary occasionally (1 word or 6 words).\n- Provide variety: some minimalist, some poetic, some cryptic, some diary-like.\n- Do not repeat nouns too often (rotate objects/settings).\n- Prefer lowercase unless the user requests otherwise.\n\nOutput format:\n1) 1 title"
     },
     {
       "name": "outputDir",
       "description": "Output directory for downloaded files",
       "type": "string",
       "required": false,
-      "default": "/Users/andrewporter/Downloads/"
+      "default": "/Users/andrewporter/Downloads/music/"
     }
   ],
   "steps": [
@@ -44,39 +47,12 @@
     },
     {
       "id": "step-2-wait",
-      "label": "Wait for \"Create\" to appear",
+      "label": "Wait 3.8s",
       "type": "wait",
       "condition": {
-        "type": "element_visible",
-        "target": {
-          "selector": "div:nth-of-type(1) > div:nth-of-type(3) > a:nth-of-type(2) > span > span",
-          "textContent": "Create",
-          "expectedBounds": {
-            "left": 50,
-            "top": 223,
-            "width": 47,
-            "height": 16,
-            "tolerance": 80,
-            "pctX": 3.58,
-            "pctY": 21.02,
-            "pctW": 2.3,
-            "pctH": 1.46,
-            "viewportW": 2056,
-            "viewportH": 1099
-          },
-          "context": {
-            "ancestors": [
-              "span",
-              "a",
-              "div",
-              "div"
-            ],
-            "nthWithSameText": 1,
-            "totalWithSameText": 3
-          }
-        }
-      },
-      "timeoutMs": 20000
+        "type": "delay",
+        "ms": 3804
+      }
     },
     {
       "id": "step-3-click-span",
@@ -92,11 +68,11 @@
           "height": 16,
           "tolerance": 80,
           "pctX": 3.58,
-          "pctY": 21.02,
+          "pctY": 21.13,
           "pctW": 2.3,
           "pctH": 1.46,
           "viewportW": 2056,
-          "viewportH": 1099
+          "viewportH": 1093
         },
         "context": {
           "ancestors": [
@@ -128,16 +104,7 @@
       }
     },
     {
-      "id": "step-6-wait",
-      "label": "Wait 3.7s",
-      "type": "wait",
-      "condition": {
-        "type": "delay",
-        "ms": 3677
-      }
-    },
-    {
-      "id": "step-7-click-textarea",
+      "id": "step-6-click-textarea",
       "label": "Click div > div:nth-of-type(1) > div:nth-of-ty",
       "type": "click",
       "target": {
@@ -149,11 +116,11 @@
           "height": 100,
           "tolerance": 80,
           "pctX": 20.67,
-          "pctY": 25.3,
+          "pctY": 25.43,
           "pctW": 18.77,
-          "pctH": 9.1,
+          "pctH": 9.15,
           "viewportW": 2056,
-          "viewportH": 1099
+          "viewportH": 1093
         },
         "placeholder": "Write some lyrics or a prompt — or leave blank for instrumental",
         "context": {
@@ -168,8 +135,8 @@
       "delayAfterMs": 300
     },
     {
-      "id": "step-8-type-div",
-      "label": "Type {{text_input}}",
+      "id": "step-7-type-div",
+      "label": "Type {{lyrics}}",
       "type": "type",
       "target": {
         "selector": "div > div:nth-of-type(1) > div:nth-of-type(1) > div > textarea",
@@ -180,11 +147,11 @@
           "height": 100,
           "tolerance": 80,
           "pctX": 20.67,
-          "pctY": 25.3,
+          "pctY": 25.43,
           "pctW": 18.77,
-          "pctH": 9.1,
+          "pctH": 9.15,
           "viewportW": 2056,
-          "viewportH": 1099
+          "viewportH": 1093
         },
         "placeholder": "Write some lyrics or a prompt — or leave blank for instrumental",
         "context": {
@@ -196,11 +163,11 @@
           ]
         }
       },
-      "value": "{{text_input}}",
+      "value": "{{lyrics}}",
       "clearFirst": true
     },
     {
-      "id": "step-9-click-textarea",
+      "id": "step-8-click-textarea",
       "label": "Click div > div:nth-of-type(1) > div:nth-of-ty",
       "type": "click",
       "target": {
@@ -212,13 +179,13 @@
           "height": 100,
           "tolerance": 80,
           "pctX": 20.67,
-          "pctY": 44.36,
+          "pctY": 44.6,
           "pctW": 18.77,
-          "pctH": 9.1,
+          "pctH": 9.15,
           "viewportW": 2056,
-          "viewportH": 1099
+          "viewportH": 1093
         },
-        "placeholder": "electronic vibes, pagan folk, 16beat, j rock, 124 bpm",
+        "placeholder": "efectos de sonido, dark madness electronic, boys choir, minor pentatonic scale, powerful male vocals",
         "context": {
           "ancestors": [
             "div",
@@ -231,8 +198,8 @@
       "delayAfterMs": 300
     },
     {
-      "id": "step-10-type-div",
-      "label": "Type {{text_input_2}}",
+      "id": "step-9-type-div",
+      "label": "Type {{style}}",
       "type": "type",
       "target": {
         "selector": "div > div:nth-of-type(1) > div:nth-of-type(1) > div > textarea",
@@ -243,13 +210,13 @@
           "height": 100,
           "tolerance": 80,
           "pctX": 20.67,
-          "pctY": 44.36,
+          "pctY": 44.6,
           "pctW": 18.77,
-          "pctH": 9.1,
+          "pctH": 9.15,
           "viewportW": 2056,
-          "viewportH": 1099
+          "viewportH": 1093
         },
-        "placeholder": "electronic vibes, pagan folk, 16beat, j rock, 124 bpm",
+        "placeholder": "efectos de sonido, dark madness electronic, boys choir, minor pentatonic scale, powerful male vocals",
         "context": {
           "ancestors": [
             "div",
@@ -259,11 +226,11 @@
           ]
         }
       },
-      "value": "{{text_input_2}}",
+      "value": "{{style}}",
       "clearFirst": true
     },
     {
-      "id": "step-11-click-input",
+      "id": "step-10-click-input",
       "label": "Click div > div > div > div:nth-of-type(1) > i",
       "type": "click",
       "target": {
@@ -275,11 +242,11 @@
           "height": 37,
           "tolerance": 80,
           "pctX": 21.35,
-          "pctY": 66.52,
+          "pctY": 66.88,
           "pctW": 17.41,
-          "pctH": 3.37,
+          "pctH": 3.39,
           "viewportW": 2056,
-          "viewportH": 1099
+          "viewportH": 1093
         },
         "placeholder": "Song Title (Optional)",
         "context": {
@@ -294,17 +261,8 @@
       "delayAfterMs": 300
     },
     {
-      "id": "step-12-wait",
-      "label": "Wait 3.7s",
-      "type": "wait",
-      "condition": {
-        "type": "delay",
-        "ms": 3655
-      }
-    },
-    {
-      "id": "step-13-type-div",
-      "label": "Type {{input_value}}",
+      "id": "step-11-type-div",
+      "label": "Type {{title}}",
       "type": "type",
       "target": {
         "selector": "div > div > div > div:nth-of-type(1) > input",
@@ -315,11 +273,11 @@
           "height": 37,
           "tolerance": 80,
           "pctX": 21.35,
-          "pctY": 66.52,
+          "pctY": 66.88,
           "pctW": 17.41,
-          "pctH": 3.37,
+          "pctH": 3.39,
           "viewportW": 2056,
-          "viewportH": 1099
+          "viewportH": 1093
         },
         "placeholder": "Song Title (Optional)",
         "context": {
@@ -331,11 +289,11 @@
           ]
         }
       },
-      "value": "{{input_value}}",
+      "value": "{{title}}",
       "clearFirst": true
     },
     {
-      "id": "step-14-click-span",
+      "id": "step-12-click-span",
       "label": "Click span \"Create\"",
       "type": "click",
       "target": {
@@ -343,16 +301,16 @@
         "textContent": "Create",
         "expectedBounds": {
           "left": 292,
-          "top": 963,
+          "top": 957,
           "width": 330,
           "height": 24,
           "tolerance": 80,
           "pctX": 22.23,
-          "pctY": 88.72,
+          "pctY": 88.66,
           "pctW": 16.05,
-          "pctH": 2.18,
+          "pctH": 2.2,
           "viewportW": 2056,
-          "viewportH": 1099
+          "viewportH": 1093
         },
         "context": {
           "ancestors": [
@@ -368,41 +326,39 @@
       "delayAfterMs": 300
     },
     {
-      "id": "step-15-wait",
-      "label": "Wait for loading spinner to disappear",
+      "id": "step-13-wait",
+      "label": "Wait 180.0s",
       "type": "wait",
       "condition": {
-        "type": "element_hidden",
-        "target": {
-          "selector": "div > div:nth-of-type(1) > div:nth-of-type(2) > div:nth-of-type(2) > svg"
-        }
+        "type": "delay",
+        "ms": 180000
       },
-      "timeoutMs": 61640
+      "timeoutMs": 77944
     },
     {
-      "id": "step-16-click-svg",
-      "label": "Click div:nth-of-type(2) > div:nth-of-type(2) ",
+      "id": "step-14-click-button",
+      "label": "Click div > div > div:nth-of-type(2) > div:nth",
       "type": "click",
       "target": {
-        "selector": "div:nth-of-type(2) > div:nth-of-type(2) > button > span > svg",
+        "selector": "div > div > div:nth-of-type(2) > div:nth-of-type(2) > button",
         "expectedBounds": {
-          "left": 2000,
-          "top": 171,
-          "width": 16,
-          "height": 16,
+          "left": 1988,
+          "top": 159,
+          "width": 40,
+          "height": 40,
           "tolerance": 80,
-          "pctX": 97.67,
-          "pctY": 16.29,
-          "pctW": 0.78,
-          "pctH": 1.46,
+          "pctX": 97.3,
+          "pctY": 16.4,
+          "pctW": 1.95,
+          "pctH": 3.66,
           "viewportW": 2056,
-          "viewportH": 1099
+          "viewportH": 1093
         },
         "context": {
           "ancestors": [
-            "span",
-            "button",
             "div",
+            "div",
+            "div[role=row] \"song title\"",
             "div"
           ]
         }
@@ -410,37 +366,38 @@
       "delayAfterMs": 300
     },
     {
-      "id": "step-17-click-path",
-      "label": "Click #_r_ca_ > path",
+      "id": "step-15-click-path",
+      "label": "Click #_r_c3_ > path",
       "type": "click",
       "target": {
-        "selector": "#_r_ca_ > path",
+        "selector": "#_r_c3_ > path",
         "expectedBounds": {
           "left": 1637,
           "top": 649,
-          "width": 212,
+          "width": 251,
           "height": 136,
           "tolerance": 80,
-          "pctX": 84.78,
-          "pctY": 65.24,
-          "pctW": 10.31,
-          "pctH": 12.37,
+          "pctX": 88.6,
+          "pctY": 61.6,
+          "pctW": 12.21,
+          "pctH": 12.44,
           "viewportW": 2056,
-          "viewportH": 1099
+          "viewportH": 1093
         },
         "context": {
           "ancestors": [
-            "svg#_r_ca_",
+            "svg#_r_c3_",
             "button",
             "div",
             "div"
           ]
         }
       },
-      "delayAfterMs": 300
+      "delayAfterMs": 300,
+      "clickType": "hover"
     },
     {
-      "id": "step-18-click-span",
+      "id": "step-16-click-span",
       "label": "Click span \"MP3 Audio\"",
       "type": "click",
       "target": {
@@ -452,12 +409,12 @@
           "width": 125,
           "height": 24,
           "tolerance": 80,
-          "pctX": 83.64,
-          "pctY": 61.6,
+          "pctX": 81.8,
+          "pctY": 61.5,
           "pctW": 6.09,
-          "pctH": 2.18,
+          "pctH": 2.2,
           "viewportW": 2056,
-          "viewportH": 1099
+          "viewportH": 1093
         },
         "context": {
           "ancestors": [
@@ -471,7 +428,7 @@
       "delayAfterMs": 300
     },
     {
-      "id": "step-19-click-a",
+      "id": "step-17-click-a",
       "label": "Click a",
       "type": "click",
       "target": {
@@ -487,13 +444,13 @@
           "pctW": 0,
           "pctH": 0,
           "viewportW": 2056,
-          "viewportH": 1099
+          "viewportH": 1093
         }
       },
       "delayAfterMs": 300
     },
     {
-      "id": "step-20-click-svg",
+      "id": "step-18-click-svg",
       "label": "Click div:nth-of-type(2) > div:nth-of-type(2) ",
       "type": "click",
       "target": {
@@ -504,12 +461,12 @@
           "width": 16,
           "height": 16,
           "tolerance": 80,
-          "pctX": 97.67,
-          "pctY": 26.39,
+          "pctX": 97.3,
+          "pctY": 26.5,
           "pctW": 0.78,
           "pctH": 1.46,
           "viewportW": 2056,
-          "viewportH": 1099
+          "viewportH": 1093
         },
         "context": {
           "ancestors": [
@@ -523,37 +480,38 @@
       "delayAfterMs": 300
     },
     {
-      "id": "step-21-click-path",
-      "label": "Click #_r_d1_ > path",
+      "id": "step-19-click-path",
+      "label": "Click #_r_cq_ > path",
       "type": "click",
       "target": {
-        "selector": "#_r_d1_ > path",
+        "selector": "#_r_cq_ > path",
         "expectedBounds": {
           "left": 1637,
           "top": 760,
-          "width": 248,
+          "width": 232,
           "height": 136,
           "tolerance": 80,
-          "pctX": 85.65,
-          "pctY": 75.34,
-          "pctW": 12.06,
-          "pctH": 12.37,
+          "pctX": 88.3,
+          "pctY": 71.8,
+          "pctW": 11.28,
+          "pctH": 12.44,
           "viewportW": 2056,
-          "viewportH": 1099
+          "viewportH": 1093
         },
         "context": {
           "ancestors": [
-            "svg#_r_d1_",
+            "svg#_r_cq_",
             "button",
             "div",
             "div"
           ]
         }
       },
-      "delayAfterMs": 300
+      "delayAfterMs": 300,
+      "clickType": "hover"
     },
     {
-      "id": "step-22-click-span",
+      "id": "step-20-click-span",
       "label": "Click span \"MP3 Audio\"",
       "type": "click",
       "target": {
@@ -565,12 +523,12 @@
           "width": 125,
           "height": 24,
           "tolerance": 80,
-          "pctX": 83.64,
-          "pctY": 71.7,
+          "pctX": 81.6,
+          "pctY": 72.1,
           "pctW": 6.09,
-          "pctH": 2.18,
+          "pctH": 2.2,
           "viewportW": 2056,
-          "viewportH": 1099
+          "viewportH": 1093
         },
         "context": {
           "ancestors": [
@@ -584,7 +542,7 @@
       "delayAfterMs": 300
     },
     {
-      "id": "step-23-click-a",
+      "id": "step-21-click-a",
       "label": "Click a",
       "type": "click",
       "target": {
@@ -600,13 +558,13 @@
           "pctW": 0,
           "pctH": 0,
           "viewportW": 2056,
-          "viewportH": 1099
+          "viewportH": 1093
         }
       },
       "delayAfterMs": 300
     },
     {
-      "id": "capture-downloads-24",
+      "id": "capture-downloads-22",
       "type": "capture_download",
       "label": "Capture downloaded files",
       "filenamePattern": ".*\\.mp3$",
@@ -616,7 +574,7 @@
       "outputVariable": "downloadedFiles"
     },
     {
-      "id": "move-downloads-25",
+      "id": "move-downloads-23",
       "type": "move_file",
       "label": "Move downloads to destination",
       "source": "{{downloadedFiles}}",
@@ -624,8 +582,20 @@
     }
   ],
   "metadata": {
-    "createdAt": "2026-02-27T19:36:20.871Z",
-    "updatedAt": "2026-02-27T19:37:34.169Z",
-    "recordedBy": "recorder"
+    "createdAt": "2026-03-01T00:25:34.286Z",
+    "updatedAt": "2026-03-01T03:04:01.507Z",
+    "recordedBy": "recorder",
+    "modelPath": "/Users/andrewporter/.woodbury/data/workflows/Create song/model/v2.11.0/encoder.onnx",
+    "trainingStatus": "complete",
+    "trainingRun": {
+      "startedAt": "2026-03-01T22:28:39.896Z",
+      "completedAt": "2026-03-01T22:36:56.369Z",
+      "bestAuc": 0.97619,
+      "epochs": 150,
+      "version": "2.11.0",
+      "promoted": true,
+      "worker": "Andrews-MacBook-Pro.local"
+    },
+    "modelVersion": "2.11.0"
   }
 }

@@ -6,8 +6,9 @@
  * checks, postcondition verification, retries, and progress reporting.
  */
 
-import { promises as fs, appendFileSync, mkdirSync } from 'fs';
+import { promises as fs, appendFileSync, mkdirSync, existsSync } from 'fs';
 import { resolve as pathResolve, dirname, join, basename } from 'path';
+import { execSync, spawn as cpSpawn } from 'child_process';
 import { homedir } from 'os';
 
 // Execution log — writes to ~/.woodbury/logs/execution.log
@@ -43,6 +44,7 @@ import type {
   DownloadStep,
   CaptureDownloadStep,
   MoveFileStep,
+  FileDialogStep,
   ScrollStep,
   KeyboardStep,
   SubWorkflowStep,
@@ -50,12 +52,17 @@ import type {
   LoopStep,
   TryCatchStep,
   SetVariableStep,
+  DesktopLaunchAppStep,
+  DesktopClickStep,
+  DesktopTypeStep,
+  DesktopKeyboardStep,
   Precondition,
   Postcondition,
 } from './types.js';
 import { substituteObject } from './variable-sub.js';
 import { ElementResolver } from './resolver.js';
 import { ConditionValidator } from './validator.js';
+import { VisualVerifier } from './visual-verifier.js';
 
 // ── Expectation Checker ──────────────────────────────────────
 
@@ -141,6 +148,8 @@ export { checkExpectations };
 export class WorkflowExecutor {
   private resolver: ElementResolver;
   private validator: ConditionValidator;
+  private visualVerifier: VisualVerifier | null;
+  private _explicitVerifier: boolean;
   private variables: Record<string, unknown>;
   private initialVariables: Record<string, unknown>;
   private signal?: AbortSignal;
@@ -154,6 +163,10 @@ export class WorkflowExecutor {
   ) {
     this.resolver = new ElementResolver(bridge);
     this.validator = new ConditionValidator(bridge);
+    // Visual verifier is initialized per-workflow in execute() with the workflow's modelPath,
+    // unless explicitly provided via options.
+    this.visualVerifier = options.visualVerifier !== undefined ? options.visualVerifier : null;
+    this._explicitVerifier = options.visualVerifier !== undefined;
     this.variables = { ...options.variables };
     this.initialVariables = { ...options.variables };
     this.signal = options.signal;
@@ -167,6 +180,18 @@ export class WorkflowExecutor {
    */
   async execute(workflow: WorkflowDocument): Promise<ExecutionResult> {
     const startTime = Date.now();
+
+    // Initialize visual verifier with workflow's model if not explicitly provided
+    if (!this._explicitVerifier) {
+      const modelPath = workflow.metadata?.modelPath;
+      if (modelPath) {
+        this.visualVerifier = new VisualVerifier(undefined, modelPath);
+      } else {
+        // No model associated with this workflow — create verifier without model
+        // (will use inference server's default model, if any)
+        this.visualVerifier = new VisualVerifier();
+      }
+    }
 
     // Truncate execution log for clean diagnosis
     try {
@@ -479,6 +504,8 @@ export class WorkflowExecutor {
         return this.execCaptureDownload(step as CaptureDownloadStep);
       case 'move_file':
         return this.execMoveFile(step as MoveFileStep);
+      case 'file_dialog':
+        return this.execFileDialog(step as FileDialogStep);
       case 'scroll':
         return this.execScroll(step as ScrollStep);
       case 'keyboard':
@@ -493,6 +520,14 @@ export class WorkflowExecutor {
         return this.execTryCatch(step as TryCatchStep);
       case 'set_variable':
         return this.execSetVariable(step as SetVariableStep);
+      case 'desktop_launch_app':
+        return this.execDesktopLaunchApp(step as DesktopLaunchAppStep);
+      case 'desktop_click':
+        return this.execDesktopClick(step as DesktopClickStep);
+      case 'desktop_type':
+        return this.execDesktopType(step as DesktopTypeStep);
+      case 'desktop_keyboard':
+        return this.execDesktopKeyboard(step as DesktopKeyboardStep);
       default:
         throw new Error(`Unknown step type: ${(step as WorkflowStep).type}`);
     }
@@ -540,6 +575,52 @@ export class WorkflowExecutor {
         actualPos: resolved.position,
         expectedBounds: step.target.expectedBounds,
       });
+    }
+
+    // Visual verification: confirm element looks like the recording
+    if (this.visualVerifier && step.target.referenceImage && resolved.position) {
+      const vResult = await this.visualVerifier.verifyElement(
+        this.bridge,
+        resolved.position,
+        step.target.referenceImage,
+      );
+
+      if (vResult && !vResult.verified) {
+        execLog('WARN', `execClick visual verification failed: ${step.id}`, {
+          similarity: vResult.similarity,
+          matchedBy: resolved.matchedBy,
+        });
+
+        // Build position context from expectedBounds for weighted search
+        const expectedPct = step.target.expectedBounds?.pctX != null
+          ? { x: step.target.expectedBounds.pctX, y: step.target.expectedBounds.pctY! }
+          : undefined;
+
+        // Search nearby for the correct element
+        const search = await this.visualVerifier.searchNearby(
+          this.bridge,
+          resolved.position,
+          step.target.referenceImage,
+          undefined, // default search radius
+          vResult.screenshotDataUrl, // reuse cached screenshot
+          expectedPct, // position weighting for disambiguation
+        );
+
+        if (search?.found) {
+          execLog('INFO', `execClick visual search found better match: ${step.id}`, {
+            similarity: search.similarity,
+            adjustedPosition: search.position,
+            candidatesChecked: search.candidatesChecked,
+            usedPositionWeighting: !!expectedPct,
+          });
+          resolved.position = search.position;
+          resolved.matchedBy = 'visual';
+        }
+      } else if (vResult?.verified) {
+        execLog('INFO', `execClick visual verification passed: ${step.id}`, {
+          similarity: vResult.similarity,
+        });
+      }
     }
 
     if (resolved.position) {
@@ -591,6 +672,51 @@ export class WorkflowExecutor {
       matchedValue: resolved.matchedValue,
       position: resolved.position,
     });
+
+    // Visual verification: confirm element looks like the recording
+    if (this.visualVerifier && step.target.referenceImage && resolved.position) {
+      const vResult = await this.visualVerifier.verifyElement(
+        this.bridge,
+        resolved.position,
+        step.target.referenceImage,
+      );
+
+      if (vResult && !vResult.verified) {
+        execLog('WARN', `execType visual verification failed: ${step.id}`, {
+          similarity: vResult.similarity,
+          matchedBy: resolved.matchedBy,
+        });
+
+        // Build position context from expectedBounds for weighted search
+        const expectedPct = step.target.expectedBounds?.pctX != null
+          ? { x: step.target.expectedBounds.pctX, y: step.target.expectedBounds.pctY! }
+          : undefined;
+
+        const search = await this.visualVerifier.searchNearby(
+          this.bridge,
+          resolved.position,
+          step.target.referenceImage,
+          undefined,
+          vResult.screenshotDataUrl,
+          expectedPct, // position weighting for disambiguation
+        );
+
+        if (search?.found) {
+          execLog('INFO', `execType visual search found better match: ${step.id}`, {
+            similarity: search.similarity,
+            adjustedPosition: search.position,
+            candidatesChecked: search.candidatesChecked,
+            usedPositionWeighting: !!expectedPct,
+          });
+          resolved.position = search.position;
+          resolved.matchedBy = 'visual';
+        }
+      } else if (vResult?.verified) {
+        execLog('INFO', `execType visual verification passed: ${step.id}`, {
+          similarity: vResult.similarity,
+        });
+      }
+    }
 
     // Build the best selector for set_value — prefer placeholder (more unique)
     const setValueSelector = step.target.placeholder
@@ -773,6 +899,66 @@ export class WorkflowExecutor {
     }
   }
 
+  private async execFileDialog(step: FileDialogStep): Promise<void> {
+    const filePath = step.filePath;
+    const outputVariable = step.outputVariable ?? 'selectedFile';
+    const delayBeforeMs = step.delayBeforeMs ?? 2000;
+    const delayAfterMs = step.delayAfterMs ?? 1000;
+
+    execLog('INFO', `execFileDialog: ${step.id}`, {
+      filePath, outputVariable, hasTrigger: !!step.trigger,
+    });
+
+    // Validate absolute path
+    if (!filePath.startsWith('/') && !filePath.match(/^[A-Z]:\\/)) {
+      throw new Error(`file_dialog: filePath must be absolute. Got: "${filePath}"`);
+    }
+
+    // Step 1: Click trigger element to open the file dialog (if specified)
+    if (step.trigger && step.trigger.selector) {
+      const resolved = await this.resolver.resolve(step.trigger);
+      if (resolved.position) {
+        const cx = resolved.position.left + resolved.position.width / 2;
+        const cy = resolved.position.top + resolved.position.height / 2;
+        await this.bridge.send('mouse', {
+          action: 'click',
+          x: Math.round(cx),
+          y: Math.round(cy),
+        });
+      } else {
+        await this.bridge.send('click_element', {
+          selector: step.trigger.selector,
+        });
+      }
+    }
+
+    // Step 2: Wait for OS dialog to appear
+    await this.delay(delayBeforeMs);
+
+    // Step 3: Navigate the OS file dialog using flow-frame-core
+    let flowFrameOps: any;
+    try {
+      flowFrameOps = await import('flow-frame-core/dist/operations.js');
+    } catch (err: any) {
+      throw new Error(`file_dialog: Failed to load flow-frame-core: ${err.message}`);
+    }
+
+    try {
+      await flowFrameOps.fileModalOperate(filePath);
+    } catch (err: any) {
+      throw new Error(`file_dialog: Dialog operation failed: ${err.message}`);
+    }
+
+    // Step 4: Wait for page to process the selected file
+    if (delayAfterMs > 0) {
+      await this.delay(delayAfterMs);
+    }
+
+    // Step 5: Store the file path in workflow variables
+    this.variables[outputVariable] = filePath;
+    execLog('INFO', `execFileDialog complete: stored ${filePath} in ${outputVariable}`);
+  }
+
   private async execScroll(step: ScrollStep): Promise<void> {
     if (step.target) {
       await this.bridge.send('scroll_to_element', {
@@ -827,6 +1013,7 @@ export class WorkflowExecutor {
       signal: this.signal,
       onProgress: this.onProgress,
       stopOnFailure: this.stopOnFailure,
+      visualVerifier: this.visualVerifier,
     });
     subExecutor.setWorkflowDir(dirname(workflowPath));
 
@@ -962,6 +1149,127 @@ export class WorkflowExecutor {
     }
 
     this.variables[step.variable] = value;
+  }
+
+  // ── Desktop step executors ─────────────────────────────────
+
+  private async execDesktopLaunchApp(step: DesktopLaunchAppStep): Promise<void> {
+    const appName = step.appName;
+    execLog('INFO', `execDesktopLaunchApp: ${appName}`);
+
+    if (process.platform === 'darwin') {
+      try {
+        execSync(
+          `osascript -e 'tell application "${appName.replace(/"/g, '\\"')}" to activate'`,
+          { timeout: 5000, encoding: 'utf-8' }
+        );
+      } catch {
+        execSync(
+          `open -a "${appName.replace(/"/g, '\\"')}"`,
+          { timeout: 5000, encoding: 'utf-8' }
+        );
+      }
+    } else if (process.platform === 'win32') {
+      try {
+        execSync(
+          `powershell -NoProfile -c "Start-Process '${appName.replace(/'/g, "''")}';"`,
+          { timeout: 5000, encoding: 'utf-8' }
+        );
+      } catch {
+        cpSpawn('cmd', ['/c', 'start', '', appName], { detached: true, stdio: 'ignore' });
+      }
+    } else {
+      try {
+        cpSpawn(appName.toLowerCase(), [], { detached: true, stdio: 'ignore' });
+      } catch {
+        cpSpawn('xdg-open', [appName], { detached: true, stdio: 'ignore' });
+      }
+    }
+
+    if (step.delayAfterMs) {
+      await this.sleepMs(step.delayAfterMs);
+    }
+  }
+
+  private async execDesktopClick(step: DesktopClickStep): Promise<void> {
+    execLog('INFO', `execDesktopClick: ${step.id}`, { x: step.x, y: step.y, action: step.action, app: step.app });
+
+    let robot: any;
+    try {
+      robot = (await import('robotjs')).default || (await import('robotjs'));
+    } catch (err: any) {
+      throw new Error(`Desktop click requires robotjs: ${err.message}`);
+    }
+
+    // Move mouse to absolute screen coordinates (no Chrome offset)
+    const isWin = process.platform === 'win32';
+    if (isWin) {
+      robot.moveMouse(step.x, step.y);
+    } else {
+      robot.moveMouseSmooth(step.x, step.y);
+    }
+
+    // Small settle delay after move
+    await this.sleepMs(100);
+
+    // Perform click
+    if (step.action === 'double_click') {
+      robot.mouseClick('left', true); // double-click
+    } else if (step.action === 'right_click') {
+      robot.mouseClick('right');
+    } else {
+      robot.mouseClick();
+    }
+
+    if (step.delayAfterMs) {
+      await this.sleepMs(step.delayAfterMs);
+    }
+  }
+
+  private async execDesktopType(step: DesktopTypeStep): Promise<void> {
+    execLog('INFO', `execDesktopType: ${step.id}`, { value: step.value?.slice(0, 50) });
+
+    let robot: any;
+    try {
+      robot = (await import('robotjs')).default || (await import('robotjs'));
+    } catch (err: any) {
+      throw new Error(`Desktop type requires robotjs: ${err.message}`);
+    }
+
+    // typeString handles full strings (not just single key codes)
+    robot.typeString(step.value || '');
+
+    if (step.delayAfterMs) {
+      await this.sleepMs(step.delayAfterMs);
+    }
+  }
+
+  private async execDesktopKeyboard(step: DesktopKeyboardStep): Promise<void> {
+    execLog('INFO', `execDesktopKeyboard: ${step.id}`, { key: step.key, modifiers: step.modifiers });
+
+    let robot: any;
+    try {
+      robot = (await import('robotjs')).default || (await import('robotjs'));
+    } catch (err: any) {
+      throw new Error(`Desktop keyboard requires robotjs: ${err.message}`);
+    }
+
+    // Map modifier names to robotjs format
+    const robotMods = (step.modifiers || []).map((m: string) => {
+      if (m === 'cmd') return process.platform === 'darwin' ? 'command' : 'control';
+      if (m === 'ctrl') return 'control';
+      return m; // 'alt', 'shift' are the same
+    });
+
+    robot.keyTap(step.key, robotMods);
+
+    if (step.delayAfterMs) {
+      await this.sleepMs(step.delayAfterMs);
+    }
+  }
+
+  private sleepMs(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
   }
 
   // ── Utilities ────────────────────────────────────────────────

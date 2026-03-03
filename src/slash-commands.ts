@@ -514,12 +514,13 @@ export const slashCommands: SlashCommand[] = [
       // /record (no args) — show help
       if (!subcommand) {
         ctx.print(chalk.green('Workflow recorder:'));
-        ctx.print(chalk.blue('  /record <name> <site>') + chalk.gray(' - Start recording'));
-        ctx.print(chalk.blue('  /record stop') + chalk.gray('            - Stop and save'));
-        ctx.print(chalk.blue('  /record status') + chalk.gray('          - Show recording state'));
-        ctx.print(chalk.blue('  /record pause') + chalk.gray('           - Pause recording'));
-        ctx.print(chalk.blue('  /record resume') + chalk.gray('          - Resume recording'));
-        ctx.print(chalk.blue('  /record cancel') + chalk.gray('          - Discard recording'));
+        ctx.print(chalk.blue('  /record <name> <site>') + chalk.gray('    - Record browser interactions'));
+        ctx.print(chalk.blue('  /record desktop <name>') + chalk.gray('   - Record desktop clicks (any app)'));
+        ctx.print(chalk.blue('  /record stop') + chalk.gray('             - Stop and save'));
+        ctx.print(chalk.blue('  /record status') + chalk.gray('           - Show recording state'));
+        ctx.print(chalk.blue('  /record pause') + chalk.gray('            - Pause recording'));
+        ctx.print(chalk.blue('  /record resume') + chalk.gray('           - Resume recording'));
+        ctx.print(chalk.blue('  /record cancel') + chalk.gray('           - Discard recording'));
         return;
       }
 
@@ -630,6 +631,56 @@ export const slashCommands: SlashCommand[] = [
         }
         activeRecorder = null;
         ctx.print(chalk.yellow('Recording cancelled. No file saved.'));
+        return;
+      }
+
+      // /record desktop <name> — start desktop (native app) recording
+      if (subcommand === 'desktop') {
+        const desktopName = args[1];
+        if (!desktopName) {
+          ctx.print(chalk.red('Usage: /record desktop <name>'));
+          ctx.print(chalk.gray('  Example: /record desktop automate-finder'));
+          return;
+        }
+
+        if (activeRecorder?.isActive) {
+          ctx.print(chalk.red('Recording already in progress. Use /record stop or /record cancel first.'));
+          return;
+        }
+
+        try {
+          activeRecorder = new WorkflowRecorder(
+            (step: WorkflowStep, index: number) => {
+              const num = chalk.blue(`[${index}]`);
+              const type = chalk.green(step.type);
+              let detail = '';
+
+              if (step.type === 'desktop_click') {
+                detail = chalk.gray(`(${(step as any).x}, ${(step as any).y}) ${(step as any).app || ''}`);
+              } else if (step.type === 'wait') {
+                if ((step as any).condition?.type === 'delay') {
+                  detail = chalk.gray(`${((step as any).condition.ms / 1000).toFixed(1)}s`);
+                }
+              }
+
+              ctx.print(`  ${num} ${type} ${detail}`);
+            },
+            (message: string) => {
+              ctx.print(chalk.gray(`  ${message}`));
+            }
+          );
+
+          await activeRecorder.startDesktopRecording(desktopName);
+
+          ctx.print(chalk.green(`Recording started: ${desktopName} (desktop mode)`));
+          ctx.print('');
+          ctx.print(chalk.gray('  Click anywhere on screen — actions will be captured.'));
+          ctx.print(chalk.gray('  When done, use /record stop to save.'));
+          ctx.print('');
+        } catch (error) {
+          activeRecorder = null;
+          ctx.print(chalk.red(`Failed to start desktop recording: ${error}`));
+        }
         return;
       }
 

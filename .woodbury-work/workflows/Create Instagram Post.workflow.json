@@ -1,0 +1,433 @@
+{
+  "version": "1.0",
+  "id": "Create Instagram Post",
+  "name": "Create Instagram Post",
+  "description": "Recorded workflow for instagram.com",
+  "site": "instagram.com",
+  "variables": [
+    {
+      "name": "input_value",
+      "description": "Value to enter in the input field",
+      "type": "string",
+      "required": true,
+      "default": "C:\\fakepath\\gamer-automation.png"
+    },
+    {
+      "name": "file",
+      "description": "",
+      "type": "string",
+      "required": true
+    }
+  ],
+  "steps": [
+    {
+      "id": "step-1-navigate",
+      "label": "Navigate to https://instagram.com",
+      "type": "navigate",
+      "url": "https://instagram.com",
+      "waitMs": 2000
+    },
+    {
+      "id": "step-2-wait",
+      "label": "Wait for \"New post\" to appear",
+      "type": "wait",
+      "condition": {
+        "type": "element_visible",
+        "target": {
+          "selector": "svg[aria-label=\"New\\ post\"]",
+          "ariaLabel": "New post",
+          "expectedBounds": {
+            "left": 24,
+            "top": 637,
+            "width": 24,
+            "height": 24,
+            "tolerance": 80,
+            "pctX": 1.75,
+            "pctY": 59.33,
+            "pctW": 1.17,
+            "pctH": 2.2,
+            "viewportW": 2056,
+            "viewportH": 1093
+          },
+          "context": {
+            "ancestors": [
+              "div",
+              "div",
+              "div",
+              "div"
+            ]
+          },
+          "referenceImage": "/Users/andrewporter/.woodbury/data/workflows/Create Instagram Post/refs/step-3-click-svg.png"
+        }
+      },
+      "timeoutMs": 20000
+    },
+    {
+      "id": "step-3-click-svg",
+      "label": "Click svg[aria-label=\"New post\"]",
+      "type": "click",
+      "target": {
+        "selector": "svg[aria-label=\"New\\ post\"]",
+        "ariaLabel": "New post",
+        "expectedBounds": {
+          "left": 24,
+          "top": 637,
+          "width": 24,
+          "height": 24,
+          "tolerance": 80,
+          "pctX": 1.75,
+          "pctY": 59.33,
+          "pctW": 1.17,
+          "pctH": 2.2,
+          "viewportW": 2056,
+          "viewportH": 1093
+        },
+        "context": {
+          "ancestors": [
+            "div",
+            "div",
+            "div",
+            "div"
+          ]
+        },
+        "referenceImage": "/Users/andrewporter/.woodbury/data/workflows/Create Instagram Post/refs/step-3-click-svg.png"
+      },
+      "delayAfterMs": 300
+    },
+    {
+      "id": "step-4-click-span",
+      "label": "Click span \"Post\"",
+      "type": "click",
+      "target": {
+        "selector": "div:nth-of-type(2) > div > div > span > span",
+        "textContent": "Post",
+        "expectedBounds": {
+          "left": 28,
+          "top": 689,
+          "width": 32,
+          "height": 20,
+          "tolerance": 80,
+          "pctX": 2.15,
+          "pctY": 63.91,
+          "pctW": 1.57,
+          "pctH": 1.83,
+          "viewportW": 2056,
+          "viewportH": 1093
+        },
+        "context": {
+          "ancestors": [
+            "span",
+            "div",
+            "div",
+            "div"
+          ]
+        },
+        "referenceImage": "/Users/andrewporter/.woodbury/data/workflows/Create Instagram Post/refs/step-4-click-span.png"
+      },
+      "delayAfterMs": 300
+    },
+    {
+      "id": "step-5-wait",
+      "label": "Wait 3.4s",
+      "type": "wait",
+      "condition": {
+        "type": "delay",
+        "ms": 3446
+      }
+    },
+    {
+      "id": "step-6-click-button",
+      "label": "Click button \"Select from computer\"",
+      "type": "click",
+      "target": {
+        "selector": "div > div > div:nth-of-type(2) > div > button",
+        "textContent": "Select from computer",
+        "expectedBounds": {
+          "left": 939,
+          "top": 618,
+          "width": 179,
+          "height": 32,
+          "tolerance": 80,
+          "pctX": 50,
+          "pctY": 58.01,
+          "pctW": 8.7,
+          "pctH": 2.93,
+          "viewportW": 2056,
+          "viewportH": 1093
+        },
+        "context": {
+          "ancestors": [
+            "div",
+            "div",
+            "div",
+            "div"
+          ],
+          "landmark": {
+            "tag": "div",
+            "role": "dialog",
+            "ariaLabel": "Create new post",
+            "label": "<div> \"Create new post\""
+          },
+          "nearestHeading": {
+            "level": "h3",
+            "text": "Drag photos and videos here"
+          }
+        },
+        "referenceImage": "/Users/andrewporter/.woodbury/data/workflows/Create Instagram Post/refs/step-6-click-button.png"
+      },
+      "delayAfterMs": 300
+    },
+    {
+      "id": "step-9-wait",
+      "label": "Wait 10.3s",
+      "type": "wait",
+      "condition": {
+        "type": "delay",
+        "ms": 10260
+      }
+    },
+    {
+      "type": "file_dialog",
+      "filePath": "{{file}}",
+      "outputVariable": "selectedFile",
+      "delayBeforeMs": 2000,
+      "delayAfterMs": 1000,
+      "label": "Select file ",
+      "id": "step-1772409161778-file_dialog"
+    },
+    {
+      "id": "step-8-wait",
+      "label": "Wait 13.7s",
+      "type": "wait",
+      "condition": {
+        "type": "delay",
+        "ms": 13739
+      }
+    },
+    {
+      "id": "step-11-click-div",
+      "label": "Click div \"Next\"",
+      "type": "click",
+      "target": {
+        "selector": "div > div > div:nth-of-type(3) > div > div",
+        "textContent": "Next",
+        "expectedBounds": {
+          "left": 1409,
+          "top": 110,
+          "width": 31,
+          "height": 18,
+          "tolerance": 80,
+          "pctX": 69.27,
+          "pctY": 10.84,
+          "pctW": 1.49,
+          "pctH": 1.65,
+          "viewportW": 2056,
+          "viewportH": 1093
+        },
+        "context": {
+          "ancestors": [
+            "div",
+            "div",
+            "div",
+            "div"
+          ],
+          "landmark": {
+            "tag": "div",
+            "role": "dialog",
+            "ariaLabel": "Crop",
+            "label": "<div> \"Crop\""
+          }
+        },
+        "referenceImage": "/Users/andrewporter/.woodbury/data/workflows/Create Instagram Post/refs/step-11-click-div.png"
+      },
+      "delayAfterMs": 300
+    },
+    {
+      "id": "step-12-wait",
+      "label": "Wait 4.3s",
+      "type": "wait",
+      "condition": {
+        "type": "delay",
+        "ms": 4300
+      }
+    },
+    {
+      "id": "step-13-click-div",
+      "label": "Click div \"Next\"",
+      "type": "click",
+      "target": {
+        "selector": "div > div > div:nth-of-type(3) > div > div",
+        "textContent": "Next",
+        "expectedBounds": {
+          "left": 1579,
+          "top": 110,
+          "width": 31,
+          "height": 18,
+          "tolerance": 80,
+          "pctX": 77.54,
+          "pctY": 10.84,
+          "pctW": 1.49,
+          "pctH": 1.65,
+          "viewportW": 2056,
+          "viewportH": 1093
+        },
+        "context": {
+          "ancestors": [
+            "div",
+            "div",
+            "div",
+            "div"
+          ],
+          "landmark": {
+            "tag": "div",
+            "role": "dialog",
+            "ariaLabel": "Edit",
+            "label": "<div> \"Edit\""
+          }
+        },
+        "referenceImage": "/Users/andrewporter/.woodbury/data/workflows/Create Instagram Post/refs/step-13-click-div.png"
+      },
+      "delayAfterMs": 300
+    },
+    {
+      "id": "step-14-click-div",
+      "label": "Click div[aria-label=\"Write a caption...\"]",
+      "type": "click",
+      "target": {
+        "selector": "div[aria-label=\"Write\\ a\\ caption\\.\\.\\.\"]",
+        "ariaLabel": "Write a caption...",
+        "expectedBounds": {
+          "left": 1287,
+          "top": 201,
+          "width": 339,
+          "height": 168,
+          "tolerance": 80,
+          "pctX": 70.82,
+          "pctY": 26.03,
+          "pctW": 16.49,
+          "pctH": 15.37,
+          "viewportW": 2056,
+          "viewportH": 1093
+        },
+        "context": {
+          "ancestors": [
+            "div",
+            "div",
+            "div",
+            "div"
+          ],
+          "landmark": {
+            "tag": "div",
+            "role": "dialog",
+            "ariaLabel": "Create new post",
+            "label": "<div> \"Create new post\""
+          },
+          "siblings": [
+            {
+              "tag": "div",
+              "text": "Write a caption...",
+              "position": "after"
+            }
+          ]
+        },
+        "referenceImage": "/Users/andrewporter/.woodbury/data/workflows/Create Instagram Post/refs/step-14-click-div.png"
+      },
+      "delayAfterMs": 300
+    },
+    {
+      "id": "step-15-type-div",
+      "label": "Type {{input_value}}",
+      "type": "type",
+      "target": {
+        "selector": "div[aria-label=\"Write\\ a\\ caption\\.\\.\\.\"]",
+        "ariaLabel": "Write a caption...",
+        "expectedBounds": {
+          "left": 1287,
+          "top": 201,
+          "width": 339,
+          "height": 168,
+          "tolerance": 80,
+          "pctX": 70.82,
+          "pctY": 26.03,
+          "pctW": 16.49,
+          "pctH": 15.37,
+          "viewportW": 2056,
+          "viewportH": 1093
+        },
+        "context": {
+          "ancestors": [
+            "div",
+            "div",
+            "div",
+            "div"
+          ],
+          "landmark": {
+            "tag": "div",
+            "role": "dialog",
+            "ariaLabel": "Create new post",
+            "label": "<div> \"Create new post\""
+          }
+        },
+        "referenceImage": "/Users/andrewporter/.woodbury/data/workflows/Create Instagram Post/refs/step-15-type-div.png"
+      },
+      "value": "{{input_value}}",
+      "clearFirst": true,
+      "delayAfterMs": 0
+    },
+    {
+      "id": "step-17-click-div",
+      "label": "Click div \"Share\"",
+      "type": "click",
+      "target": {
+        "selector": "div > div > div:nth-of-type(3) > div > div",
+        "textContent": "Share",
+        "expectedBounds": {
+          "left": 1571,
+          "top": 110,
+          "width": 38,
+          "height": 18,
+          "tolerance": 80,
+          "pctX": 77.35,
+          "pctY": 10.84,
+          "pctW": 1.86,
+          "pctH": 1.65,
+          "viewportW": 2056,
+          "viewportH": 1093
+        },
+        "context": {
+          "ancestors": [
+            "div",
+            "div",
+            "div",
+            "div"
+          ],
+          "landmark": {
+            "tag": "div",
+            "role": "dialog",
+            "ariaLabel": "Create new post",
+            "label": "<div> \"Create new post\""
+          }
+        },
+        "referenceImage": "/Users/andrewporter/.woodbury/data/workflows/Create Instagram Post/refs/step-17-click-div.png"
+      },
+      "delayAfterMs": 300
+    }
+  ],
+  "metadata": {
+    "createdAt": "2026-03-01T23:27:26.195Z",
+    "updatedAt": "2026-03-02T17:56:01.234Z",
+    "recordedBy": "recorder",
+    "modelPath": "/Users/andrewporter/.woodbury/data/workflows/Create Instagram Post/model/v1.1.0/encoder.onnx",
+    "modelVersion": "1.1.0",
+    "trainingStatus": "complete",
+    "trainingRun": {
+      "startedAt": "2026-03-02T19:01:37.997Z",
+      "completedAt": "2026-03-02T19:06:26.881Z",
+      "bestAuc": 0.9423,
+      "epochs": 20,
+      "version": "1.2.0",
+      "promoted": false,
+      "worker": "Andrews-MacBook-Pro.local"
+    }
+  }
+}

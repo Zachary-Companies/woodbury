@@ -29,6 +29,7 @@ import {
   type ExtensionManifest,
 } from './extension-loader.js';
 import type { ExtensionManager } from './extension-manager.js';
+import type { ToolDefinition } from './loop/types.js';
 import { debugLog } from './debug-log.js';
 import {
   discoverWorkflows,
@@ -36,11 +37,12 @@ import {
   loadWorkflow,
   type DiscoveredWorkflow,
 } from './workflow/loader.js';
-import type { WorkflowDocument, Expectation, RunRecord, NodeRunResult, PendingApproval, ApprovalGateConfig, BatchConfig, VariablePool, Schedule } from './workflow/types.js';
+import type { WorkflowDocument, Expectation, RunRecord, NodeRunResult, PendingApproval, ApprovalGateConfig, BatchConfig, VariablePool, Schedule, ModelVersionEntry, ModelVersionRegistry } from './workflow/types.js';
 import { checkExpectations } from './workflow/executor.js';
 import { WorkflowRecorder } from './workflow/recorder.js';
 import { bridgeServer, ensureBridgeServer } from './bridge-server.js';
 import { startRemoteRelay, type RelayHandle } from './remote-relay.js';
+import { ExecutionSnapshotCapture } from './workflow/execution-snapshots.js';
 import { appendFileSync, mkdirSync, createReadStream, createWriteStream } from 'node:fs';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createSocket, type Socket as DgramSocket } from 'node:dgram';
@@ -249,6 +251,98 @@ export async function startDashboard(
   const staticDir = join(__dirname, 'config-dashboard');
   const workDir = workingDirectory || process.cwd();
 
+  // ── Script Tool Context helpers ────────────────────────────────
+  interface ScriptToolDoc {
+    toolName: string;
+    customDescription?: string;
+    examples?: string[];
+    notes?: string;
+    returns?: string;
+    enabled: boolean;
+  }
+  const SCRIPT_TOOL_DOCS_PATH = join(homedir(), '.woodbury', 'data', 'script-tool-docs.json');
+
+  async function loadScriptToolDocs(): Promise<ScriptToolDoc[]> {
+    try {
+      const content = await readFile(SCRIPT_TOOL_DOCS_PATH, 'utf-8');
+      return JSON.parse(content);
+    } catch { return []; }
+  }
+
+  async function saveScriptToolDocs(docs: ScriptToolDoc[]): Promise<void> {
+    await mkdir(join(homedir(), '.woodbury', 'data'), { recursive: true });
+    await writeFile(SCRIPT_TOOL_DOCS_PATH, JSON.stringify(docs, null, 2));
+  }
+
+  function formatToolSignature(def: ToolDefinition): string {
+    const props = def.parameters?.properties;
+    if (!props || typeof props !== 'object') {
+      return `context.tools.${def.name}(params)`;
+    }
+    const required: string[] = def.parameters?.required || [];
+    const parts: string[] = [];
+    for (const [name, prop] of Object.entries(props)) {
+      const p = prop as any;
+      const optional = !required.includes(name) ? '?' : '';
+      let type: string = p.type || 'any';
+      if (p.enum) {
+        if (p.enum.length <= 4) {
+          type = p.enum.map((v: string) => `"${v}"`).join('|');
+        } else {
+          type = p.enum.slice(0, 3).map((v: string) => `"${v}"`).join('|') + '|...';
+        }
+      }
+      parts.push(`${name}${optional}: ${type}`);
+    }
+    return `context.tools.${def.name}({ ${parts.join(', ')} })`;
+  }
+
+  async function generateScriptToolDocs(): Promise<string> {
+    const tools = extensionManager?.getAllTools() ?? [];
+    if (tools.length === 0) return '';
+
+    const customDocs = await loadScriptToolDocs();
+    const customMap = new Map(customDocs.map(d => [d.toolName, d]));
+
+    let section = '\nAvailable tools (via context.tools):\n';
+    for (const tool of tools) {
+      const custom = customMap.get(tool.definition.name);
+      if (custom && !custom.enabled) continue;
+
+      const sig = formatToolSignature(tool.definition);
+      const desc = custom?.customDescription || tool.definition.description.split('\n')[0];
+      section += `\n- ${sig} — ${desc}\n`;
+
+      // Include parameter descriptions from JSON Schema
+      const props = tool.definition.parameters?.properties;
+      const required: string[] = tool.definition.parameters?.required || [];
+      if (props && typeof props === 'object') {
+        section += `  Parameters:\n`;
+        for (const [name, prop] of Object.entries(props)) {
+          const p = prop as any;
+          const req = required.includes(name) ? 'required' : 'optional';
+          const paramDesc = p.description || '';
+          section += `    - ${name} (${req}): ${paramDesc}\n`;
+        }
+      }
+
+      // Include return type documentation
+      if (custom?.returns) {
+        section += `  Returns: ${custom.returns}\n`;
+      }
+
+      if (custom?.examples?.length) {
+        for (const ex of custom.examples) {
+          section += `  Example: ${ex}\n`;
+        }
+      }
+      if (custom?.notes) {
+        section += `  Note: ${custom.notes}\n`;
+      }
+    }
+    return section;
+  }
+
   // Recording state — shared across requests
   let activeRecorder: WorkflowRecorder | null = null;
   let recordingSteps: Array<{ index: number; label: string; type: string }> = [];
@@ -270,7 +364,11 @@ export async function startDashboard(
     error?: string;
     durationMs?: number;
     outputVariables?: Record<string, unknown>;
+    trainingDataKept?: boolean;
   } | null = null;
+
+  // Snapshot capture for execution runs (training data collection)
+  let activeSnapshotCapture: ExecutionSnapshotCapture | null = null;
 
   // Composition execution state
   let activeCompRun: {
@@ -291,16 +389,19 @@ export async function startDashboard(
       stepsCompleted: number;
       currentStep: string;
       error?: string;
+      inputVariables?: Record<string, unknown>;
       outputVariables?: Record<string, unknown>;
       durationMs?: number;
       retryAttempt?: number;
       retryMax?: number;
       expectationResults?: Array<{ description: string; passed: boolean; detail: string }>;
+      logs?: string[];
     }>;
     done: boolean;
     success: boolean;
     error?: string;
     durationMs?: number;
+    pipelineOutputs?: Record<string, unknown>;
   } | null = null;
 
   // Debug mode state (visual step-through)
@@ -517,6 +618,11 @@ export async function startDashboard(
         break;
       case 'complete':
         remoteTraining.bestAuc = evt.best_auc || remoteTraining.bestAuc;
+        break;
+      case 'early_stop':
+        remoteTraining.totalEpochs = evt.epoch;
+        remoteTraining.logs = remoteTraining.logs || [];
+        remoteTraining.logs.push(`Early stopped at epoch ${evt.epoch} (no improvement for ${evt.patience} epochs)`);
         break;
       case 'error':
         remoteTraining.error = evt.message;
@@ -898,6 +1004,886 @@ export async function startDashboard(
   // Start the scheduler immediately
   startScheduler();
 
+  // ── Inference Server (visual element verification) ──────────
+  const INFERENCE_PORT = 8679;
+  let inferenceProc: ChildProcess | null = null;
+  let inferenceModelPath: string | null = null;
+
+  /**
+   * Start the inference server. Models are loaded on demand per-workflow.
+   * Optionally pre-loads the latest model from MODELS_DIR as a default.
+   */
+  async function startInferenceServer(): Promise<void> {
+    if (inferenceProc) return; // already running
+
+    try {
+      // Scan for a default model (latest encoder.onnx in MODELS_DIR)
+      const { readdir, stat } = await import('fs/promises');
+      await import('fs').then(f => f.mkdirSync(MODELS_DIR, { recursive: true }));
+
+      const entries = await readdir(MODELS_DIR);
+      let bestModel: string | null = null;
+      let bestTime = 0;
+
+      for (const entry of entries) {
+        const dir = join(MODELS_DIR, entry);
+        const onnxPath = join(dir, 'encoder.onnx');
+        try {
+          const s = await stat(onnxPath);
+          if (s.isFile() && s.mtimeMs > bestTime) {
+            bestTime = s.mtimeMs;
+            bestModel = onnxPath;
+          }
+        } catch { /* no onnx in this dir */ }
+      }
+
+      // Build args — server starts even without a default model (loads on demand)
+      const args = [
+        '-m', 'woobury_models.serve',
+        '--port', String(INFERENCE_PORT),
+      ];
+      if (bestModel) {
+        args.push('--model', bestModel);
+        inferenceModelPath = bestModel;
+        debugLog.info('inference', `Starting inference server with default model: ${bestModel}`);
+      } else {
+        debugLog.info('inference', 'Starting inference server without default model (models loaded on demand)');
+      }
+
+      inferenceProc = spawn('python', args, {
+        env: { ...process.env, PYTHONUNBUFFERED: '1' },
+        cwd: join(homedir(), 'Documents', 'GitHub', 'woobury-models'),
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+
+      inferenceProc.stdout?.on('data', (chunk: Buffer) => {
+        debugLog.info('inference', chunk.toString().trim());
+      });
+      inferenceProc.stderr?.on('data', (chunk: Buffer) => {
+        debugLog.info('inference-err', chunk.toString().trim());
+      });
+      inferenceProc.on('close', (code) => {
+        debugLog.info('inference', `Inference server exited with code ${code}`);
+        inferenceProc = null;
+      });
+
+    } catch (err) {
+      debugLog.info('inference', `Failed to start inference server: ${String(err)}`);
+    }
+  }
+
+  function stopInferenceServer(): void {
+    if (inferenceProc) {
+      inferenceProc.kill('SIGTERM');
+      inferenceProc = null;
+      inferenceModelPath = null;
+    }
+  }
+
+  // Start inference server in the background (non-blocking)
+  startInferenceServer();
+
+  // ── Per-Workflow Auto-Training ──────────────────────────────
+
+  interface WorkflowTrainingConfig {
+    backbone: string;
+    epochs: number;
+    embedDim: number;
+  }
+
+  const defaultTrainingConfig: WorkflowTrainingConfig = {
+    backbone: 'efficientnet_b0',
+    epochs: 150,
+    embedDim: 128,
+  };
+
+  // ── SemVer Helpers ──────────────────────────────────────────────
+
+  interface SemVer { major: number; minor: number; patch: number; }
+
+  function parseSemVer(v: string): SemVer {
+    const [major, minor, patch] = v.split('.').map(Number);
+    return { major: major || 0, minor: minor || 0, patch: patch || 0 };
+  }
+
+  function semVerToString(v: SemVer): string {
+    return `${v.major}.${v.minor}.${v.patch}`;
+  }
+
+  function compareSemVer(a: string, b: string): number {
+    const pa = parseSemVer(a);
+    const pb = parseSemVer(b);
+    if (pa.major !== pb.major) return pa.major - pb.major;
+    if (pa.minor !== pb.minor) return pa.minor - pb.minor;
+    return pa.patch - pb.patch;
+  }
+
+  function getNextVersion(
+    existingVersions: string[],
+    newBackbone: string,
+    activeBackbone?: string,
+  ): string {
+    if (existingVersions.length === 0) return '1.0.0';
+    const sorted = [...existingVersions].sort(compareSemVer);
+    const latest = parseSemVer(sorted[sorted.length - 1]);
+
+    if (activeBackbone && newBackbone !== activeBackbone) {
+      // Backbone change = major bump
+      return semVerToString({ major: latest.major + 1, minor: 0, patch: 0 });
+    }
+    // Normal retrain = minor bump
+    return semVerToString({ major: latest.major, minor: latest.minor + 1, patch: 0 });
+  }
+
+  // ── Version Registry Helpers ──────────────────────────────────
+
+  async function readVersionRegistry(modelDir: string): Promise<ModelVersionRegistry | null> {
+    const registryPath = join(modelDir, 'versions.json');
+    try {
+      const content = await readFile(registryPath, 'utf8');
+      return JSON.parse(content) as ModelVersionRegistry;
+    } catch {
+      return null;
+    }
+  }
+
+  async function writeVersionRegistry(modelDir: string, registry: ModelVersionRegistry): Promise<void> {
+    await mkdir(modelDir, { recursive: true });
+    const registryPath = join(modelDir, 'versions.json');
+    await writeFile(registryPath, JSON.stringify(registry, null, 2));
+  }
+
+  /**
+   * Migrate an existing unversioned model (flat encoder.onnx) into v1.0.0/ directory.
+   * Called on first retrain of a workflow that was trained before versioning existed.
+   */
+  async function migrateUnversionedModel(
+    modelDir: string,
+    workflowMetadata: any,
+  ): Promise<ModelVersionRegistry | null> {
+    const legacyOnnx = join(modelDir, 'encoder.onnx');
+    try {
+      await stat(legacyOnnx);
+    } catch {
+      return null; // No existing model to migrate
+    }
+
+    // Create v1.0.0 directory and move files
+    const v1Dir = join(modelDir, 'v1.0.0');
+    await mkdir(v1Dir, { recursive: true });
+
+    const filesToMove = ['encoder.onnx', 'best_model.pt', 'final_model.pt', 'config.yaml', 'encoder_quant.onnx'];
+    const { copyFile: cpFile } = await import('node:fs/promises');
+    for (const f of filesToMove) {
+      const src = join(modelDir, f);
+      const dst = join(v1Dir, f);
+      try {
+        await stat(src);
+        await cpFile(src, dst);
+        await unlink(src);
+      } catch { /* file doesn't exist, skip */ }
+    }
+
+    const tr = workflowMetadata?.trainingRun;
+    const registry: ModelVersionRegistry = {
+      activeVersion: '1.0.0',
+      versions: [{
+        version: '1.0.0',
+        bestAuc: tr?.bestAuc || 0,
+        epochs: tr?.epochs || 0,
+        backbone: 'efficientnet_b0',
+        embedDim: 64,
+        trainedAt: tr?.completedAt || new Date().toISOString(),
+        durationMs: 0,
+        worker: tr?.worker,
+        status: 'complete',
+        promotedOverActive: true,
+        modelPath: join(v1Dir, 'encoder.onnx'),
+      }],
+    };
+
+    await writeVersionRegistry(modelDir, registry);
+    debugLog.info('workflow-train', `Migrated legacy model to v1.0.0`, { modelDir });
+    return registry;
+  }
+
+  interface WorkflowTraining {
+    workflowId: string;
+    workflowFilePath: string;
+    phase: 'preparing' | 'training' | 'exporting' | 'complete' | 'error';
+    process: ChildProcess | null;
+    currentEpoch: number;
+    totalEpochs: number;
+    loss: number;
+    bestAuc: number;
+    error?: string;
+    startedAt: number;
+    logs: string[];
+    modelDir: string;
+    config: WorkflowTrainingConfig;
+    /** Per-version output directory (e.g. model/v1.2.0/) */
+    versionDir?: string;
+    /** Version being trained */
+    nextVersion?: string;
+    // Remote worker fields (when dispatching to a worker)
+    worker?: WorkerConfig;
+    remoteJobId?: string;
+    remotePollTimer?: ReturnType<typeof setInterval>;
+    remoteEventIndex?: number;
+  }
+
+  const workflowTrainings = new Map<string, WorkflowTraining>();
+
+  /**
+   * Find the first available idle remote worker.
+   * Returns null if no workers are configured or all are busy/unreachable.
+   */
+  async function findIdleWorker(): Promise<WorkerConfig | null> {
+    const workers = await loadWorkers();
+    for (const w of workers) {
+      try {
+        const health = await probeWorker(w.host, w.port, 3000);
+        if (health.status === 'idle') return w;
+      } catch { /* worker unreachable, try next */ }
+    }
+    return null;
+  }
+
+  /**
+   * Dispatch training to a remote worker and wait for completion.
+   * Tars the workflow's snapshots, uploads to the worker, polls for progress,
+   * and pulls artifacts back to the local model directory.
+   */
+  async function trainForWorkflowRemote(
+    training: WorkflowTraining,
+    worker: WorkerConfig,
+    snapshotsDir: string,
+    modelDir: string,
+  ): Promise<void> {
+    training.phase = 'preparing';
+    training.worker = worker;
+
+    const jobId = `wf-${training.workflowId}-${Date.now()}`;
+    training.remoteJobId = jobId;
+    training.remoteEventIndex = 0;
+
+    const config = {
+      job_id: jobId,
+      backbone: training.config.backbone,
+      epochs: training.config.epochs,
+      lr: 3e-4,
+      loss_type: 'ntxent',
+      embed_dim: training.config.embedDim,
+      export_onnx: true,
+      source: 'viewport',
+      crops_per_element: 15,
+      interacted_only: true,
+      patience: 15,
+      min_epochs: 10,
+      val_every: 5,
+      augmentation_p: 0.3,
+      max_apply: 3,
+    };
+
+    // Phase 1: Tar snapshots and upload to worker
+    training.logs.push(`Packaging snapshots from ${snapshotsDir}...`);
+
+    const tarData = await new Promise<Buffer>((resolve, reject) => {
+      // Tar the snapshots directory — use the parent dir as -C context
+      const parentDir = join(snapshotsDir, '..');
+      const tarProc = spawn('tar', ['czf', '-', '-C', parentDir, 'snapshots']);
+      const chunks: Buffer[] = [];
+      tarProc.stdout.on('data', (chunk: Buffer) => chunks.push(chunk));
+      tarProc.stderr.on('data', () => {});
+      tarProc.on('close', (code) => {
+        if (code === 0) resolve(Buffer.concat(chunks));
+        else reject(new Error(`tar failed with code ${code}`));
+      });
+    });
+
+    training.logs.push(`Uploading ${(tarData.length / 1024 / 1024).toFixed(1)} MB to ${worker.name}...`);
+
+    // Build multipart body
+    const boundary = '----WooburyBoundary' + Date.now();
+    const configJson = JSON.stringify(config);
+    const configPart = Buffer.from(
+      `--${boundary}\r\nContent-Disposition: form-data; name="config"\r\nContent-Type: application/json\r\n\r\n${configJson}\r\n`
+    );
+    const dataPart = Buffer.from(
+      `--${boundary}\r\nContent-Disposition: form-data; name="data"; filename="snapshots.tar.gz"\r\nContent-Type: application/gzip\r\n\r\n`
+    );
+    const ending = Buffer.from(`\r\n--${boundary}--\r\n`);
+    const fullBody = Buffer.concat([configPart, dataPart, tarData, ending]);
+
+    // Submit job to worker
+    await new Promise<void>((resolve, reject) => {
+      const req = httpRequest({
+        hostname: worker.host,
+        port: worker.port,
+        path: '/jobs',
+        method: 'POST',
+        timeout: 120000,
+        headers: {
+          'Content-Type': `multipart/form-data; boundary=${boundary}`,
+          'Content-Length': fullBody.length,
+        },
+      }, (res) => {
+        let body = '';
+        res.on('data', (chunk: string) => body += chunk);
+        res.on('end', () => {
+          try {
+            const data = JSON.parse(body);
+            if (res.statusCode === 200) {
+              training.logs.push('Job accepted by worker, starting preparation...');
+              resolve();
+            } else {
+              reject(new Error(data.error || `Worker returned ${res.statusCode}`));
+            }
+          } catch { resolve(); /* assume success if body isn't JSON */ }
+        });
+      });
+      req.on('error', (err) => reject(new Error(`Failed to submit job: ${err.message}`)));
+      req.on('timeout', () => { req.destroy(); reject(new Error('Upload timeout')); });
+      req.write(fullBody);
+      req.end();
+    });
+
+    // Phase 2: Poll worker for training progress until done
+    training.phase = 'preparing';
+
+    await new Promise<void>((resolve, reject) => {
+      const pollInterval = setInterval(async () => {
+        try {
+          // Fetch events incrementally
+          const eventsData: any = await new Promise((res, rej) => {
+            const req = httpRequest({
+              hostname: worker.host,
+              port: worker.port,
+              path: `/jobs/current/events?since=${training.remoteEventIndex || 0}`,
+              method: 'GET',
+              timeout: 5000,
+            }, (resp) => {
+              let body = '';
+              resp.on('data', (chunk: string) => body += chunk);
+              resp.on('end', () => { try { res(JSON.parse(body)); } catch { rej(new Error('bad json')); } });
+            });
+            req.on('error', rej);
+            req.on('timeout', () => { req.destroy(); rej(new Error('timeout')); });
+            req.end();
+          });
+
+          // Process training events
+          for (const evt of (eventsData.events || [])) {
+            switch (evt.event) {
+              case 'init':
+                training.totalEpochs = evt.epochs;
+                break;
+              case 'epoch':
+                training.currentEpoch = evt.epoch;
+                training.loss = evt.loss;
+                training.phase = 'training';
+                break;
+              case 'validation':
+                if (evt.best_auc !== undefined) training.bestAuc = evt.best_auc;
+                break;
+              case 'export':
+                training.phase = evt.phase === 'complete' ? 'exporting' : 'exporting';
+                break;
+              case 'complete':
+                training.bestAuc = evt.best_auc || training.bestAuc;
+                break;
+              case 'early_stop':
+                training.totalEpochs = evt.epoch;
+                break;
+              case 'error':
+                training.error = evt.message;
+                break;
+            }
+          }
+          training.remoteEventIndex = eventsData.total || training.remoteEventIndex;
+
+          // Fetch full status for phase/done
+          const statusData: any = await new Promise((res, rej) => {
+            const req = httpRequest({
+              hostname: worker.host,
+              port: worker.port,
+              path: '/jobs/current',
+              method: 'GET',
+              timeout: 5000,
+            }, (resp) => {
+              let body = '';
+              resp.on('data', (chunk: string) => body += chunk);
+              resp.on('end', () => { try { res(JSON.parse(body)); } catch { rej(new Error('bad json')); } });
+            });
+            req.on('error', rej);
+            req.on('timeout', () => { req.destroy(); rej(new Error('timeout')); });
+            req.end();
+          });
+
+          if (statusData.phase) training.phase = statusData.phase as any;
+          if (statusData.logs) training.logs = statusData.logs;
+
+          if (statusData.done) {
+            clearInterval(pollInterval);
+            training.remotePollTimer = undefined;
+
+            if (statusData.success && statusData.has_artifacts) {
+              // Phase 3: Pull artifacts to workflow model dir
+              training.logs.push('Downloading trained model from worker...');
+              try {
+                await pullWorkflowArtifacts(worker, modelDir);
+                training.logs.push(`Model saved to ${modelDir}`);
+                resolve();
+              } catch (err) {
+                reject(new Error(`Failed to pull artifacts: ${err instanceof Error ? err.message : String(err)}`));
+              }
+            } else {
+              reject(new Error(statusData.error || 'Remote training failed'));
+            }
+          }
+        } catch (err) {
+          // Worker temporarily unreachable — keep retrying
+          training.logs.push(`Warning: Worker poll failed, retrying...`);
+        }
+      }, 1500);
+
+      training.remotePollTimer = pollInterval;
+    });
+  }
+
+  /**
+   * Pull trained model artifacts from a remote worker to a local directory.
+   */
+  async function pullWorkflowArtifacts(
+    worker: WorkerConfig,
+    targetDir: string,
+  ): Promise<void> {
+    await mkdir(targetDir, { recursive: true });
+
+    return new Promise<void>((resolve, reject) => {
+      const req = httpRequest({
+        hostname: worker.host,
+        port: worker.port,
+        path: '/jobs/current/artifacts',
+        method: 'GET',
+        timeout: 60000,
+      }, (res) => {
+        if (res.statusCode !== 200) {
+          reject(new Error(`Artifact download failed: ${res.statusCode}`));
+          return;
+        }
+        const tarPath = join(targetDir, 'artifacts.tar.gz');
+        const ws = createWriteStream(tarPath);
+        res.pipe(ws);
+        ws.on('finish', () => {
+          const tar = spawn('tar', ['xzf', tarPath, '-C', targetDir]);
+          tar.on('close', (code) => {
+            unlink(tarPath).catch(() => {});
+            if (code === 0) resolve();
+            else reject(new Error(`tar extract failed with code ${code}`));
+          });
+        });
+        ws.on('error', reject);
+      });
+      req.on('error', reject);
+      req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
+      req.end();
+    });
+  }
+
+  /**
+   * Train a model for a specific workflow recording.
+   * Prefers remote workers when available, falls back to local training.
+   * Runs in background: prepare data → train → export ONNX → update workflow JSON.
+   */
+  async function trainForWorkflow(
+    workflowId: string,
+    site: string,
+    workflowFilePath: string,
+    trainingConfig?: Partial<WorkflowTrainingConfig>,
+  ): Promise<void> {
+    const workflowDataDir = join(homedir(), '.woodbury', 'data', 'workflows', workflowId);
+    const snapshotsDir = join(workflowDataDir, 'snapshots');
+    const modelDir = join(workflowDataDir, 'model');
+    const cropsDir = join(workflowDataDir, 'crops');
+
+    const cfg: WorkflowTrainingConfig = { ...defaultTrainingConfig, ...trainingConfig };
+
+    // Create tracking state
+    const training: WorkflowTraining = {
+      workflowId,
+      workflowFilePath,
+      phase: 'preparing',
+      process: null,
+      currentEpoch: 0,
+      totalEpochs: cfg.epochs,
+      loss: 0,
+      bestAuc: 0,
+      startedAt: Date.now(),
+      logs: [],
+      modelDir,
+      config: cfg,
+    };
+    workflowTrainings.set(workflowId, training);
+
+    // Read or create version registry
+    let registry = await readVersionRegistry(modelDir);
+    if (!registry) {
+      // Check for legacy unversioned model and migrate
+      try {
+        const wfContent = await readFile(workflowFilePath, 'utf8');
+        const wfData = JSON.parse(wfContent);
+        registry = await migrateUnversionedModel(modelDir, wfData.metadata);
+      } catch { /* no workflow file or parse error — start fresh */ }
+    }
+
+    // Determine next version
+    const existingVersions = registry ? registry.versions.map(v => v.version) : [];
+    const activeEntry = registry?.versions.find(v => v.version === registry!.activeVersion) || null;
+    const nextVersion = getNextVersion(existingVersions, cfg.backbone, activeEntry?.backbone);
+
+    // Create versioned output directory
+    const versionDir = join(modelDir, `v${nextVersion}`);
+    training.versionDir = versionDir;
+    training.nextVersion = nextVersion;
+
+    try {
+      // Wait briefly for recorder's copySnapshotsToWorkflowDir to finish
+      await new Promise(resolve => setTimeout(resolve, 2000));
+
+      // Check if snapshots exist
+      try {
+        await stat(snapshotsDir);
+      } catch {
+        training.phase = 'error';
+        training.error = 'No training snapshots found for this workflow';
+        debugLog.info('workflow-train', `No snapshots for ${workflowId}`);
+        return;
+      }
+
+      await mkdir(cropsDir, { recursive: true });
+      await mkdir(versionDir, { recursive: true });
+
+      debugLog.info('workflow-train', `Training v${nextVersion} for ${workflowId}`, { versionDir });
+
+      // Try remote worker first — prefer GPU-equipped machines over local CPU training
+      const worker = await findIdleWorker();
+      if (worker) {
+        debugLog.info('workflow-train', `Dispatching training for ${workflowId} to worker ${worker.name} (${worker.host}:${worker.port})`);
+        training.logs.push(`Dispatching to worker: ${worker.name} (${worker.host}:${worker.port})`);
+        await trainForWorkflowRemote(training, worker, snapshotsDir, versionDir);
+      } else {
+        // No remote workers available — train locally
+        debugLog.info('workflow-train', `No remote workers available, training locally for ${workflowId}`);
+        training.logs.push('No remote workers available, training locally');
+        await trainForWorkflowLocal(training, snapshotsDir, cropsDir, versionDir);
+      }
+
+      // Phase 3: Validate ONNX exists in version directory
+      const onnxPath = join(versionDir, 'encoder.onnx');
+      try {
+        await stat(onnxPath);
+      } catch {
+        // Remote artifacts may place encoder.onnx in a subdirectory — check common locations
+        const altPaths = [
+          join(versionDir, 'output', 'encoder.onnx'),
+          join(versionDir, 'checkpoints', 'encoder.onnx'),
+        ];
+        let found = false;
+        for (const alt of altPaths) {
+          try {
+            await stat(alt);
+            const { copyFile: cpFile } = await import('node:fs/promises');
+            await cpFile(alt, onnxPath);
+            found = true;
+            break;
+          } catch { /* try next */ }
+        }
+        if (!found) {
+          throw new Error('Training completed but encoder.onnx not found');
+        }
+      }
+
+      // Phase 4: Quality gate — compare new AUC against active version
+      const activeAuc = activeEntry?.bestAuc ?? 0;
+      const newAuc = training.bestAuc;
+      const promoted = newAuc >= activeAuc; // >= so first train always promotes
+
+      // Update version registry
+      const newEntry: ModelVersionEntry = {
+        version: nextVersion,
+        bestAuc: newAuc,
+        epochs: training.totalEpochs,
+        backbone: cfg.backbone,
+        embedDim: cfg.embedDim,
+        trainedAt: new Date().toISOString(),
+        durationMs: Date.now() - training.startedAt,
+        worker: training.worker?.name,
+        status: 'complete',
+        promotedOverActive: promoted,
+        modelPath: onnxPath,
+      };
+
+      if (!registry) {
+        registry = { activeVersion: nextVersion, versions: [newEntry] };
+      } else {
+        registry.versions.push(newEntry);
+        if (promoted) {
+          registry.activeVersion = nextVersion;
+        }
+      }
+      await writeVersionRegistry(modelDir, registry);
+
+      // Determine which model path to set as active
+      const activeVersion = registry.activeVersion;
+      const activeModelEntry = registry.versions.find(v => v.version === activeVersion)!;
+
+      training.phase = 'complete';
+      debugLog.info('workflow-train', `Training complete for ${workflowId}`, {
+        version: nextVersion,
+        bestAuc: newAuc,
+        promoted,
+        activeVersion,
+        modelPath: activeModelEntry.modelPath,
+        remote: !!training.worker,
+      });
+
+      // Update the workflow JSON file
+      try {
+        const wfContent = await readFile(workflowFilePath, 'utf8');
+        const wf = JSON.parse(wfContent);
+        wf.metadata.modelPath = activeModelEntry.modelPath;
+        wf.metadata.modelVersion = activeVersion;
+        wf.metadata.trainingStatus = 'complete';
+        wf.metadata.trainingRun = {
+          startedAt: new Date(training.startedAt).toISOString(),
+          completedAt: new Date().toISOString(),
+          bestAuc: newAuc,
+          epochs: training.totalEpochs,
+          version: nextVersion,
+          promoted,
+          ...(training.worker ? { worker: training.worker.name } : {}),
+        };
+        await writeFile(workflowFilePath, JSON.stringify(wf, null, 2));
+        debugLog.info('workflow-train', `Updated workflow JSON: ${workflowFilePath}`);
+      } catch (err) {
+        debugLog.info('workflow-train', `Failed to update workflow JSON: ${String(err)}`);
+      }
+
+    } catch (err) {
+      training.phase = 'error';
+      training.error = err instanceof Error ? err.message : String(err);
+      debugLog.info('workflow-train', `Training failed for ${workflowId}: ${training.error}`);
+
+      // Clean up remote poll timer if still running
+      if (training.remotePollTimer) {
+        clearInterval(training.remotePollTimer);
+        training.remotePollTimer = undefined;
+      }
+
+      // Record failed version in registry
+      if (registry) {
+        registry.versions.push({
+          version: nextVersion,
+          bestAuc: training.bestAuc,
+          epochs: training.totalEpochs,
+          backbone: cfg.backbone,
+          embedDim: cfg.embedDim,
+          trainedAt: new Date().toISOString(),
+          durationMs: Date.now() - training.startedAt,
+          worker: training.worker?.name,
+          status: 'failed',
+          promotedOverActive: false,
+          modelPath: join(versionDir, 'encoder.onnx'),
+        });
+        await writeVersionRegistry(modelDir, registry).catch(() => {});
+      }
+
+      // Update workflow JSON with failure status
+      try {
+        const wfContent = await readFile(workflowFilePath, 'utf8');
+        const wf = JSON.parse(wfContent);
+        wf.metadata.trainingStatus = 'failed';
+        wf.metadata.trainingRun = {
+          startedAt: new Date(training.startedAt).toISOString(),
+          completedAt: new Date().toISOString(),
+          error: training.error,
+          version: nextVersion,
+          promoted: false,
+          ...(training.worker ? { worker: training.worker.name } : {}),
+        };
+        await writeFile(workflowFilePath, JSON.stringify(wf, null, 2));
+      } catch { /* best-effort */ }
+    }
+  }
+
+  /**
+   * Run training locally (prepare data → train model → export ONNX).
+   * Extracted to allow trainForWorkflow to choose between local and remote.
+   */
+  async function trainForWorkflowLocal(
+    training: WorkflowTraining,
+    snapshotsDir: string,
+    cropsDir: string,
+    modelDir: string,
+  ): Promise<void> {
+      // Phase 1: Prepare training data from snapshots
+      debugLog.info('workflow-train', `Preparing training data for ${training.workflowId}`);
+      training.phase = 'preparing';
+
+      await new Promise<void>((resolve, reject) => {
+        const proc = spawn('python', [
+          '-m', 'woobury_models.prepare',
+          '--snapshots-dir', snapshotsDir,
+          '--output-dir', cropsDir,
+          '--source', 'viewport',
+          '--crops-per-element', '15',
+          '--interacted-only',
+        ], {
+          env: { ...process.env, PYTHONUNBUFFERED: '1' },
+          cwd: join(homedir(), 'Documents', 'GitHub', 'woobury-models'),
+        });
+
+        training.process = proc;
+
+        proc.stdout?.on('data', (d: Buffer) => {
+          const line = d.toString().trim();
+          if (line && training.logs.length < 200) training.logs.push(line);
+        });
+        proc.stderr?.on('data', (d: Buffer) => {
+          const line = d.toString().trim();
+          if (line && training.logs.length < 200) training.logs.push(line);
+        });
+
+        proc.on('close', (code) => {
+          training.process = null;
+          if (code === 0) resolve();
+          else reject(new Error(`Prepare failed (exit code ${code})`));
+        });
+      });
+
+      // Phase 2: Train the model
+      debugLog.info('workflow-train', `Starting training for ${training.workflowId}`);
+      training.phase = 'training';
+
+      const configContent = [
+        'input:',
+        '  max_side: 224',
+        '  letterbox_to: [224, 224]',
+        '  normalize: imagenet_mean_std',
+        '',
+        'model:',
+        `  backbone: ${training.config.backbone}`,
+        `  embed_dim: ${training.config.embedDim}`,
+        '  pretrained: true',
+        '',
+        'loss:',
+        '  type: ntxent',
+        '  ntxent_temperature: 0.05',
+        '',
+        'batching:',
+        '  scheme: pk',
+        '  P: 32',
+        '  K: 4',
+        '',
+        'optimizer:',
+        '  name: adamw',
+        '  lr: 3.0e-4',
+        '  weight_decay: 1.0e-4',
+        `  epochs: ${training.config.epochs}`,
+        '  lr_schedule: cosine',
+        '  mixed_precision: true',
+        '',
+        'early_stopping:',
+        '  patience: 15',
+        '  min_epochs: 10',
+        '',
+        'evaluation:',
+        '  metrics: [roc_auc, pr_auc, eer, tar_at_fmr]',
+        '  fmr_targets: [0.001, 0.0001]',
+        '  val_every: 5',
+        '',
+        'data:',
+        '  train_frac: 0.7',
+        '  val_frac: 0.15',
+        '  site_holdout: false',
+        '  pos_fraction: 0.5',
+        '  augmentation_p: 0.3',
+        '  max_apply: 3',
+        '',
+      ].join('\n');
+
+      const configPath = join(modelDir, 'config.yaml');
+      await writeFile(configPath, configContent);
+
+      await new Promise<void>((resolve, reject) => {
+        const proc = spawn('python', [
+          '-m', 'woobury_models.train',
+          '--json-progress',
+          '--config', configPath,
+          '--data-dir', cropsDir,
+          '--output-dir', modelDir,
+          '--export-onnx',
+        ], {
+          env: { ...process.env, PYTHONUNBUFFERED: '1' },
+          cwd: join(homedir(), 'Documents', 'GitHub', 'woobury-models'),
+        });
+
+        training.process = proc;
+
+        let stdoutBuf = '';
+        proc.stdout?.on('data', (data: Buffer) => {
+          stdoutBuf += data.toString();
+          const lines = stdoutBuf.split('\n');
+          stdoutBuf = lines.pop() || '';
+
+          for (const line of lines) {
+            if (!line.trim()) continue;
+            try {
+              const evt = JSON.parse(line);
+              switch (evt.event) {
+                case 'init':
+                  training.totalEpochs = evt.epochs;
+                  break;
+                case 'epoch':
+                  training.currentEpoch = evt.epoch;
+                  training.loss = evt.loss;
+                  break;
+                case 'validation':
+                  if (evt.best_auc !== undefined) training.bestAuc = evt.best_auc;
+                  break;
+                case 'export':
+                  training.phase = evt.phase === 'complete' ? 'complete' : 'exporting';
+                  break;
+                case 'complete':
+                  training.bestAuc = evt.best_auc || training.bestAuc;
+                  break;
+                case 'early_stop':
+                  training.totalEpochs = evt.epoch;
+                  break;
+                case 'error':
+                  training.error = evt.message;
+                  break;
+              }
+            } catch {
+              if (training.logs.length < 200) training.logs.push(line);
+            }
+          }
+        });
+
+        proc.stderr?.on('data', (d: Buffer) => {
+          const line = d.toString().trim();
+          if (line && training.logs.length < 200) training.logs.push(line);
+        });
+
+        proc.on('close', (code) => {
+          training.process = null;
+          if (code === 0) resolve();
+          else reject(new Error(`Training failed (exit code ${code})`));
+        });
+      });
+  }
+
   // ── Pending Approvals ───────────────────────────────
   const pendingApprovals = new Map<string, {
     approval: PendingApproval;
@@ -1025,6 +2011,170 @@ export async function startDashboard(
     return downstream;
   }
 
+  /**
+   * Classify whether an error is likely a code bug (fixable by LLM) vs external/infrastructure.
+   * Code bugs: SyntaxError, TypeError, ReferenceError, RangeError, or generic errors without
+   * network/API patterns in the message. External errors are not worth auto-fixing.
+   */
+  function isCodeBug(err: any): boolean {
+    if (err instanceof SyntaxError) return true;
+    if (err instanceof TypeError) return true;
+    if (err instanceof ReferenceError) return true;
+    if (err instanceof RangeError) return true;
+
+    const msg = String(err?.message || '').toLowerCase();
+    const externalPatterns = [
+      'econnrefused', 'econnreset', 'etimedout', 'enotfound',
+      'fetch failed', 'network error', 'socket hang up',
+      'rate limit', 'too many requests', '429',
+      '500', '502', '503', '504',
+      'api key', 'unauthorized', '401', '403',
+      'timeout', 'aborted', 'enospc', 'eperm', 'eacces',
+    ];
+    for (const pat of externalPatterns) {
+      if (msg.includes(pat)) return false;
+    }
+    return true;
+  }
+
+  /**
+   * Find nodes reachable EXCLUSIVELY through a specific output port.
+   * Used by Branch/Switch to skip only nodes that are downstream of the inactive port
+   * without skipping nodes that are also reachable from active ports (convergent paths).
+   */
+  function getNodesExclusivelyDownstreamOfPort(
+    nodeId: string,
+    portName: string,
+    edges: Array<{ sourceNodeId: string; sourcePort: string; targetNodeId: string; targetPort: string }>
+  ): Set<string> {
+    // Set A: BFS from nodeId following only edges from portName, then all edges from subsequent nodes
+    const fromPort = new Set<string>();
+    const qA: string[] = [nodeId];
+    while (qA.length > 0) {
+      const cur = qA.shift()!;
+      for (const e of edges) {
+        // At the origin node, only follow edges from the specified port
+        if (cur === nodeId && e.sourceNodeId === cur && e.sourcePort !== portName) continue;
+        if (e.sourceNodeId === cur && !fromPort.has(e.targetNodeId)) {
+          fromPort.add(e.targetNodeId);
+          qA.push(e.targetNodeId);
+        }
+      }
+    }
+
+    // Set B: BFS from nodeId following edges from ALL OTHER ports, then all edges from subsequent nodes
+    const fromOther = new Set<string>();
+    const qB: string[] = [nodeId];
+    while (qB.length > 0) {
+      const cur = qB.shift()!;
+      for (const e of edges) {
+        // At the origin node, skip edges from the specified port
+        if (cur === nodeId && e.sourceNodeId === cur && e.sourcePort === portName) continue;
+        if (e.sourceNodeId === cur && !fromOther.has(e.targetNodeId)) {
+          fromOther.add(e.targetNodeId);
+          qB.push(e.targetNodeId);
+        }
+      }
+    }
+
+    // A \ B — nodes reachable ONLY through the specified port
+    const exclusive = new Set<string>();
+    for (const id of fromPort) {
+      if (!fromOther.has(id)) exclusive.add(id);
+    }
+    return exclusive;
+  }
+
+  /**
+   * Infer the external inputs for a composition.
+   * An input is any node input port that is NOT connected via an incoming edge,
+   * excluding output node ports (those are internal collectors).
+   */
+  function inferCompositionInputs(
+    comp: any,
+    wfMap: Record<string, any>
+  ): Array<{ name: string; type: string; description: string; nodeId: string; portName: string }> {
+    const connectedInputs = new Set<string>();
+    for (const edge of comp.edges) {
+      connectedInputs.add(`${edge.targetNodeId}:${edge.targetPort}`);
+    }
+
+    const result: Array<{ name: string; type: string; description: string; nodeId: string; portName: string }> = [];
+
+    for (const node of comp.nodes) {
+      // Skip output node — its ports are internal collectors
+      if (node.workflowId === '__output__') continue;
+
+      let ports: Array<{ name: string; type?: string; description?: string }> = [];
+
+      if (node.workflowId === '__approval_gate__') {
+        // Gates have no external inputs
+        continue;
+      } else if (node.workflowId === '__branch__' || node.workflowId === '__delay__' || node.workflowId === '__gate__' || node.workflowId === '__for_each__' || node.workflowId === '__switch__') {
+        // Flow control nodes have fixed ports — not external composition inputs
+        continue;
+      } else if (node.workflowId === '__script__' && node.script) {
+        ports = node.script.inputs || [];
+      } else if (node.workflowId.startsWith('comp:') && node.compositionRef) {
+        // Sub-pipeline inputs would be resolved recursively — skip for now
+        continue;
+      } else {
+        const wf = wfMap[node.id];
+        if (wf && wf.variables) {
+          ports = wf.variables.map((v: any) => ({ name: v.name, type: v.type || 'string', description: v.description }));
+        }
+      }
+
+      for (const port of ports) {
+        const key = `${node.id}:${port.name}`;
+        if (!connectedInputs.has(key)) {
+          const alias = node.portAliases && node.portAliases[port.name];
+          result.push({
+            name: alias || port.name,
+            type: port.type || 'string',
+            description: port.description || '',
+            nodeId: node.id,
+            portName: port.name,
+          });
+        }
+      }
+    }
+
+    return result;
+  }
+
+  /**
+   * Infer the external outputs for a composition.
+   * Returns the output node's ports, if one exists.
+   */
+  function inferCompositionOutputs(
+    comp: any
+  ): Array<{ name: string; type: string; description: string }> {
+    const outputNode = comp.nodes.find((n: any) => n.workflowId === '__output__');
+    if (!outputNode || !outputNode.outputNode) return [];
+    return outputNode.outputNode.ports.map((p: any) => ({
+      name: p.name,
+      type: p.type || 'string',
+      description: p.description || '',
+    }));
+  }
+
+  /**
+   * Parse @input / @output JSDoc annotations from script node code.
+   * Format: @input <name> <type> "<description>"
+   */
+  function parseScriptPorts(code: string): { inputs: Array<{ name: string; type: string; description: string }>; outputs: Array<{ name: string; type: string; description: string }> } {
+    const inputs: Array<{ name: string; type: string; description: string }> = [];
+    const outputs: Array<{ name: string; type: string; description: string }> = [];
+    const regex = /@(input|output)\s+(\w+)\s+(string|number|boolean|string\[\])\s*(?:"([^"]*)")?/g;
+    let match;
+    while ((match = regex.exec(code)) !== null) {
+      const decl = { name: match[2], type: match[3], description: match[4] || '' };
+      (match[1] === 'input' ? inputs : outputs).push(decl);
+    }
+    return { inputs, outputs };
+  }
+
   const server: Server = createServer(async (req, res) => {
     // CORS preflight
     if (req.method === 'OPTIONS') {
@@ -1046,6 +2196,65 @@ export async function startDashboard(
     }
 
     // ── API Routes ───────────────────────────────────────────
+
+    // GET /api/file?path=... — serve local files (images only) for preview
+    if (req.method === 'GET' && pathname === '/api/file') {
+      const filePath = url.searchParams.get('path');
+      if (!filePath) {
+        sendJson(res, 400, { error: 'Missing "path" query parameter' });
+        return;
+      }
+
+      // Must be an absolute path
+      if (!filePath.startsWith('/') && !filePath.match(/^[A-Z]:\\/i)) {
+        sendJson(res, 400, { error: 'Path must be absolute' });
+        return;
+      }
+
+      // Only serve image MIME types for security
+      const ext = extname(filePath).toLowerCase();
+      const imageMimeTypes: Record<string, string> = {
+        '.png': 'image/png',
+        '.jpg': 'image/jpeg',
+        '.jpeg': 'image/jpeg',
+        '.gif': 'image/gif',
+        '.webp': 'image/webp',
+        '.svg': 'image/svg+xml',
+        '.bmp': 'image/bmp',
+        '.ico': 'image/x-icon',
+        '.avif': 'image/avif',
+      };
+
+      const mimeType = imageMimeTypes[ext];
+      if (!mimeType) {
+        sendJson(res, 400, { error: `Unsupported image type: ${ext}` });
+        return;
+      }
+
+      try {
+        const fileStat = await stat(filePath);
+        if (!fileStat.isFile()) {
+          sendJson(res, 404, { error: 'Not a file' });
+          return;
+        }
+
+        res.writeHead(200, {
+          'Content-Type': mimeType,
+          'Content-Length': fileStat.size,
+          'Cache-Control': 'no-cache',
+        });
+        const stream = createReadStream(filePath);
+        stream.pipe(res);
+        stream.on('error', () => {
+          if (!res.headersSent) {
+            sendJson(res, 500, { error: 'Failed to read file' });
+          }
+        });
+      } catch {
+        sendJson(res, 404, { error: 'File not found' });
+      }
+      return;
+    }
 
     // GET /api/extensions
     if (req.method === 'GET' && pathname === '/api/extensions') {
@@ -1310,9 +2519,15 @@ export async function startDashboard(
         );
 
         const captureElementCrops = body.captureElementCrops !== false; // default true
-        dashRecLog('INFO', 'Calling activeRecorder.start()', { captureElementCrops });
-        await activeRecorder.start(body.name, body.site, { captureElementCrops });
-        dashRecLog('INFO', 'activeRecorder.start() completed successfully');
+        const isDesktopMode = body.site === 'desktop';
+        const appName = typeof body.appName === 'string' ? body.appName.trim() : '';
+        dashRecLog('INFO', `Calling activeRecorder.${isDesktopMode ? 'startDesktopRecording' : 'start'}()`, { captureElementCrops, isDesktopMode, appName });
+        if (isDesktopMode) {
+          await activeRecorder.startDesktopRecording(body.name, appName || undefined);
+        } else {
+          await activeRecorder.start(body.name, body.site, { captureElementCrops });
+        }
+        dashRecLog('INFO', 'Recording start completed successfully');
         sendJson(res, 200, { success: true, status: 'recording' });
       } catch (err) {
         dashRecLog('ERROR', 'Recording start failed', { error: String(err), stack: (err as Error)?.stack });
@@ -1340,8 +2555,16 @@ export async function startDashboard(
           filePath: result.filePath,
           stepCount: recordingSteps.length,
           newDownloads: result.newDownloads || [],
+          trainingStatus: 'pending',
         });
         recordingSteps = [];
+
+        // Kick off per-workflow model training in background (non-blocking)
+        const wfId = result.workflow.id;
+        const wfSite = result.workflow.site;
+        trainForWorkflow(wfId, wfSite, result.filePath).catch(err => {
+          debugLog.info('workflow-train', `Background training failed for ${wfId}: ${String(err)}`);
+        });
       } catch (err) {
         sendJson(res, 500, { error: String(err) });
       }
@@ -1442,14 +2665,20 @@ export async function startDashboard(
           return;
         }
 
-        // Ensure bridge server is running + connected
-        await ensureBridgeServer();
-        if (!bridgeServer.isConnected) {
-          sendJson(res, 503, { error: 'Chrome extension is not connected. Connect the Woodbury Chrome extension before running workflows.' });
-          return;
-        }
-
         const wf = found.workflow;
+
+        // Detect desktop workflow: site === 'desktop' or steps contain desktop_ types
+        const isDesktopWorkflow = wf.site === 'desktop' ||
+          (wf.steps || []).some((s: any) => typeof s.type === 'string' && s.type.startsWith('desktop_'));
+
+        // Only require Chrome extension for browser workflows
+        if (!isDesktopWorkflow) {
+          await ensureBridgeServer();
+          if (!bridgeServer.isConnected) {
+            sendJson(res, 503, { error: 'Chrome extension is not connected. Connect the Woodbury Chrome extension before running workflows.' });
+            return;
+          }
+        }
         const abort = new AbortController();
 
         activeRun = {
@@ -1558,6 +2787,10 @@ Rules:
 
         sendJson(res, 200, { success: true, status: 'running', runId, workflowName: wf.name, stepsTotal: wf.steps.length });
 
+        // Set up execution snapshot capture for training data collection (browser workflows only)
+        const snapshotCapture = isDesktopWorkflow ? null : new ExecutionSnapshotCapture(id, wf.site || 'unknown', runId);
+        activeSnapshotCapture = snapshotCapture;
+
         // Execute asynchronously (don't await — we respond immediately)
         const run = activeRun;
         executeWorkflow(bridgeServer, wf, mergedVars, {
@@ -1566,6 +2799,11 @@ Rules:
           onProgress: (event: { type: string; index: number; total: number; step: any; status?: string; error?: string }) => {
             if (event.type === 'step_start') {
               run.currentStep = event.step?.label || event.step?.id || `Step ${event.index + 1}`;
+              // Capture page snapshot before each step (fire-and-forget)
+              const stepType = event.step?.type || '';
+              if (snapshotCapture && ['click', 'type', 'navigate', 'select', 'scroll', 'hover'].includes(stepType)) {
+                snapshotCapture.captureSnapshot(bridgeServer).catch(() => {});
+              }
             } else if (event.type === 'step_complete') {
               run.stepsCompleted = event.index + 1;
               run.stepResults.push({
@@ -1575,6 +2813,13 @@ Rules:
                 status: event.status || 'unknown',
                 error: event.error,
               });
+              // Track interaction for training data
+              if (event.status === 'success' || event.status === 'passed') {
+                const selector = event.step?.selector || event.step?.element?.selector || '';
+                if (selector && snapshotCapture) {
+                  snapshotCapture.trackInteraction(selector, event.step?.type || 'unknown', event.step?.id, event.index);
+                }
+              }
             }
           },
         }).then(async (result: any) => {
@@ -1589,6 +2834,20 @@ Rules:
             steps: `${result.stepsExecuted}/${result.stepsTotal}`,
             durationMs: result.durationMs,
           });
+
+          // Handle training data: keep on success, delete on failure (browser workflows only)
+          if (snapshotCapture) {
+            if (result.success) {
+              await snapshotCapture.saveInteractions();
+              debugLog.info('dashboard-run', `Run snapshots saved as training data (${snapshotCapture.count} snapshots)`, { runId });
+              run.trainingDataKept = true;
+            } else {
+              await snapshotCapture.deleteRunSnapshots();
+              debugLog.info('dashboard-run', 'Run snapshots discarded (run failed)', { runId });
+              run.trainingDataKept = false;
+            }
+          }
+          activeSnapshotCapture = null;
 
           // Update run history record
           await updateRunRecord(runId, {
@@ -1605,6 +2864,13 @@ Rules:
           run.success = false;
           run.error = String(err);
           debugLog.error('dashboard-run', `Workflow "${wf.name}" crashed`, { error: String(err) });
+
+          // Clean up run snapshots on crash (browser workflows only)
+          if (snapshotCapture) {
+            await snapshotCapture.deleteRunSnapshots();
+          }
+          run.trainingDataKept = false;
+          activeSnapshotCapture = null;
 
           await updateRunRecord(runId, {
             completedAt: new Date().toISOString(),
@@ -1641,6 +2907,7 @@ Rules:
         error: activeRun.error,
         durationMs: activeRun.done ? activeRun.durationMs : Date.now() - activeRun.startedAt,
         outputVariables: activeRun.outputVariables,
+        trainingDataKept: activeRun.trainingDataKept,
       });
       return;
     }
@@ -1656,6 +2923,13 @@ Rules:
       activeRun.success = false;
       activeRun.error = 'Cancelled by user';
       activeRun.durationMs = Date.now() - activeRun.startedAt;
+
+      // Clean up run snapshots on cancel
+      if (activeSnapshotCapture) {
+        activeSnapshotCapture.deleteRunSnapshots().catch(() => {});
+        activeSnapshotCapture = null;
+      }
+      activeRun.trainingDataKept = false;
 
       if (activeRun.runId) {
         updateRunRecord(activeRun.runId, {
@@ -2528,6 +3802,184 @@ Rules:
       return;
     }
 
+    // GET /api/script-tool-docs — list all tool docs (auto-generated + custom overrides)
+    if (req.method === 'GET' && pathname === '/api/script-tool-docs') {
+      try {
+        const tools = extensionManager?.getAllTools() ?? [];
+        const customDocs = await loadScriptToolDocs();
+        const customMap = new Map(customDocs.map(d => [d.toolName, d]));
+
+        const result = tools.map(tool => {
+          const def = tool.definition;
+          const custom = customMap.get(def.name);
+          return {
+            name: def.name,
+            description: def.description,
+            signature: formatToolSignature(def),
+            parameters: def.parameters?.properties || {},
+            dangerous: def.dangerous || false,
+            customDescription: custom?.customDescription || null,
+            examples: custom?.examples || [],
+            notes: custom?.notes || null,
+            returns: custom?.returns || null,
+            enabled: custom?.enabled ?? true,
+          };
+        });
+
+        sendJson(res, 200, { tools: result });
+      } catch (err) {
+        sendJson(res, 500, { error: String((err as Error).message) });
+      }
+      return;
+    }
+
+    // PUT /api/script-tool-docs — bulk save custom docs for all tools
+    if (req.method === 'PUT' && pathname === '/api/script-tool-docs') {
+      try {
+        const body = await readBody(req);
+        const docs: ScriptToolDoc[] = (body.tools || []).map((t: any) => ({
+          toolName: t.toolName || t.name,
+          customDescription: t.customDescription || undefined,
+          examples: t.examples || [],
+          notes: t.notes || undefined,
+          returns: t.returns || undefined,
+          enabled: t.enabled ?? true,
+        }));
+        await saveScriptToolDocs(docs);
+        sendJson(res, 200, { success: true });
+      } catch (err) {
+        sendJson(res, 500, { error: String((err as Error).message) });
+      }
+      return;
+    }
+
+    // POST /api/compositions/generate-script — AI-powered code generation for script nodes
+    if (req.method === 'POST' && pathname === '/api/compositions/generate-script') {
+      try {
+        const body = await readBody(req);
+        const { description, chatHistory, currentCode } = body || {};
+
+        if (!description && (!chatHistory || chatHistory.length === 0)) {
+          sendJson(res, 400, { error: 'description or chatHistory is required' });
+          return;
+        }
+
+        const toolDocs = await generateScriptToolDocs();
+        const systemPrompt = `You are a code generator for pipeline script nodes. The user describes what they want a node to do, and you generate JavaScript code.
+
+IMPORTANT: You MUST generate code that follows this EXACT format:
+
+1. Start with a JSDoc comment block containing @input and @output annotations
+2. Then an async function called execute(inputs, context)
+3. The function destructures inputs and uses context.llm.generate() for LLM calls
+4. The function returns an object with all declared outputs
+
+Port annotation format (one per line in the JSDoc):
+  @input <name> <type> "<description>"
+  @output <name> <type> "<description>"
+Types: string, number, boolean, string[]
+
+Available context methods:
+- context.llm.generate(prompt) — Call an LLM, returns a string
+- context.llm.generate(prompt, { temperature, maxTokens }) — With options
+- context.llm.generateJSON(prompt) — Call LLM and parse JSON response
+- context.log(message) — Log a message
+${toolDocs}
+Example:
+\`\`\`javascript
+/**
+ * @input theme string "The theme to write about"
+ * @output poem string "A generated poem"
+ * @output wordCount number "Number of words in the poem"
+ */
+async function execute(inputs, context) {
+  const { theme } = inputs;
+  const { llm } = context;
+
+  const poem = await llm.generate(
+    \\\`Write a short poem about "\${theme}". Return only the poem.\\\`
+  );
+
+  const wordCount = poem.split(/\\s+/).length;
+
+  return { poem, wordCount };
+}
+\`\`\`
+
+Rules:
+- Always include the JSDoc block with @input/@output annotations
+- Always use the execute(inputs, context) function signature
+- Keep code simple and readable — non-technical users will see it
+- Use template literals for LLM prompts
+- Return ALL declared outputs
+- Include clear prompt instructions when calling llm.generate()
+- Respond with ONLY the code block — no explanation before or after`;
+
+        const { runPrompt } = await import('./loop/llm-service.js');
+
+        const model = process.env.ANTHROPIC_API_KEY
+          ? 'claude-sonnet-4-20250514'
+          : process.env.OPENAI_API_KEY
+            ? 'gpt-4o-mini'
+            : process.env.GROQ_API_KEY
+              ? 'llama-3.1-70b-versatile'
+              : 'claude-sonnet-4-20250514';
+
+        // Build messages
+        const messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
+          { role: 'system', content: systemPrompt },
+        ];
+
+        // Add chat history if present
+        if (chatHistory && Array.isArray(chatHistory)) {
+          for (const msg of chatHistory) {
+            messages.push({ role: msg.role, content: msg.content });
+          }
+        }
+
+        // Add the current request
+        let userMessage = description || '';
+        if (currentCode) {
+          userMessage += `\n\nCurrent code:\n\`\`\`javascript\n${currentCode}\n\`\`\``;
+        }
+        if (userMessage.trim()) {
+          messages.push({ role: 'user', content: userMessage.trim() });
+        }
+
+        const llmResponse = await runPrompt(messages, model, { maxTokens: 4096, temperature: 0.7 });
+        const assistantMessage = llmResponse.content.trim();
+
+        // Extract code block from response
+        let code = assistantMessage;
+        const codeBlockMatch = assistantMessage.match(/```(?:javascript|js)?\s*\n([\s\S]*?)\n```/);
+        if (codeBlockMatch) {
+          code = codeBlockMatch[1].trim();
+        }
+
+        // Parse @input/@output annotations
+        const ports = parseScriptPorts(code);
+
+        debugLog.info('dashboard', 'Script generated', {
+          model,
+          inputCount: ports.inputs.length,
+          outputCount: ports.outputs.length,
+          codeLength: code.length,
+        });
+
+        sendJson(res, 200, {
+          success: true,
+          code,
+          inputs: ports.inputs,
+          outputs: ports.outputs,
+          assistantMessage,
+        });
+      } catch (err) {
+        debugLog.error('dashboard', 'Script generation failed', { error: String(err) });
+        sendJson(res, 500, { error: `Script generation failed: ${(err as Error).message}` });
+      }
+      return;
+    }
+
     // ── Composition API Routes ──────────────────────────────
 
     // GET /api/compositions — list all compositions
@@ -2603,6 +4055,42 @@ Rules:
         await writeFile(compPath, JSON.stringify(composition, null, 2), 'utf-8');
         debugLog.info('dashboard', `Created composition "${id}"`, { path: compPath });
         sendJson(res, 201, { success: true, composition, path: compPath });
+      } catch (err) {
+        sendJson(res, 500, { error: String(err) });
+      }
+      return;
+    }
+
+    // GET /api/compositions/:id/interface — get the composition's formal interface (inputs/outputs)
+    const compInterfaceMatch = pathname.match(/^\/api\/compositions\/([^/]+)\/interface$/);
+    if (req.method === 'GET' && compInterfaceMatch) {
+      const id = decodeURIComponent(compInterfaceMatch[1]);
+      try {
+        const discovered = await discoverCompositions(workDir);
+        const found = discovered.find(d => d.composition.id === id);
+        if (!found) {
+          sendJson(res, 404, { error: `Composition "${id}" not found` });
+          return;
+        }
+
+        const comp = found.composition;
+
+        // Build wfMap for input inference
+        const wfDiscovered = await discoverWorkflows(workDir);
+        const wfMap: Record<string, any> = {};
+        for (const node of comp.nodes) {
+          if (node.workflowId === '__approval_gate__' || node.workflowId === '__script__' || node.workflowId === '__output__' || node.workflowId === '__image_viewer__' || node.workflowId === '__branch__' || node.workflowId === '__delay__' || node.workflowId === '__gate__' || node.workflowId === '__for_each__' || node.workflowId === '__switch__') continue;
+          if (node.workflowId.startsWith('comp:')) continue;
+          const wfFound = wfDiscovered.find((d: any) => d.workflow.id === node.workflowId);
+          if (wfFound) {
+            wfMap[node.id] = wfFound.workflow;
+          }
+        }
+
+        const inputs = inferCompositionInputs(comp, wfMap);
+        const outputs = inferCompositionOutputs(comp);
+
+        sendJson(res, 200, { inputs, outputs, compositionId: id, compositionName: comp.name });
       } catch (err) {
         sendJson(res, 500, { error: String(err) });
       }
@@ -2765,7 +4253,7 @@ Rules:
         const wfDiscovered = await discoverWorkflows(workDir);
         const wfMap: Record<string, any> = {};
         for (const node of comp.nodes) {
-          if (node.workflowId === '__approval_gate__') continue; // Gate nodes don't need workflows
+          if (node.workflowId === '__approval_gate__' || node.workflowId === '__script__' || node.workflowId === '__output__' || node.workflowId === '__image_viewer__' || node.workflowId === '__branch__' || node.workflowId === '__delay__' || node.workflowId === '__gate__' || node.workflowId === '__for_each__' || node.workflowId === '__switch__' || node.workflowId.startsWith('comp:')) continue; // Special nodes don't need workflows
           const found = wfDiscovered.find(d => d.workflow.id === node.workflowId);
           if (!found) {
             sendJson(res, 400, { error: `The workflow "${node.workflowId}" was deleted or renamed. Remove it from the pipeline and re-add it.` });
@@ -2805,6 +4293,88 @@ Rules:
               status: 'pending',
               workflowId: '__approval_gate__',
               workflowName: node.label || 'Approval Gate',
+              stepsTotal: 1,
+              stepsCompleted: 0,
+              currentStep: '',
+            };
+          } else if (node.workflowId === '__script__') {
+            nodeStates[node.id] = {
+              status: 'pending',
+              workflowId: '__script__',
+              workflowName: node.label || 'Script',
+              stepsTotal: 1,
+              stepsCompleted: 0,
+              currentStep: '',
+              logs: [] as string[],
+            };
+          } else if (node.workflowId === '__output__') {
+            nodeStates[node.id] = {
+              status: 'pending',
+              workflowId: '__output__',
+              workflowName: node.label || 'Pipeline Output',
+              stepsTotal: 1,
+              stepsCompleted: 0,
+              currentStep: '',
+            };
+          } else if (node.workflowId === '__image_viewer__') {
+            nodeStates[node.id] = {
+              status: 'pending',
+              workflowId: '__image_viewer__',
+              workflowName: node.label || 'Image Viewer',
+              stepsTotal: 1,
+              stepsCompleted: 0,
+              currentStep: '',
+            };
+          } else if (node.workflowId === '__branch__') {
+            nodeStates[node.id] = {
+              status: 'pending',
+              workflowId: '__branch__',
+              workflowName: node.label || 'Branch',
+              stepsTotal: 1,
+              stepsCompleted: 0,
+              currentStep: '',
+            };
+          } else if (node.workflowId === '__delay__') {
+            nodeStates[node.id] = {
+              status: 'pending',
+              workflowId: '__delay__',
+              workflowName: node.label || 'Delay',
+              stepsTotal: 1,
+              stepsCompleted: 0,
+              currentStep: '',
+            };
+          } else if (node.workflowId === '__gate__') {
+            nodeStates[node.id] = {
+              status: 'pending',
+              workflowId: '__gate__',
+              workflowName: node.label || 'Gate',
+              stepsTotal: 1,
+              stepsCompleted: 0,
+              currentStep: '',
+            };
+          } else if (node.workflowId === '__for_each__') {
+            nodeStates[node.id] = {
+              status: 'pending',
+              workflowId: '__for_each__',
+              workflowName: node.label || 'ForEach Loop',
+              stepsTotal: 1,
+              stepsCompleted: 0,
+              currentStep: '',
+            };
+          } else if (node.workflowId === '__switch__') {
+            nodeStates[node.id] = {
+              status: 'pending',
+              workflowId: '__switch__',
+              workflowName: node.label || 'Switch',
+              stepsTotal: 1,
+              stepsCompleted: 0,
+              currentStep: '',
+            };
+          } else if (node.workflowId.startsWith('comp:')) {
+            nodeStates[node.id] = {
+              status: 'pending',
+              workflowId: node.workflowId,
+              workflowName: node.label || 'Sub-Pipeline',
               stepsTotal: 1,
               stepsCompleted: 0,
               currentStep: '',
@@ -2890,6 +4460,7 @@ Rules:
             nodesCompleted: r.nodesCompleted,
             nodeResults,
             outputFiles: allOutputFiles.length > 0 ? allOutputFiles : undefined,
+            pipelineOutputs: r.pipelineOutputs,
           });
         }
 
@@ -2938,6 +4509,8 @@ Rules:
                 if (approved) {
                   ns.status = 'completed';
                   ns.stepsCompleted = 1;
+                  ns.inputVariables = upstreamVars;
+                  ns.outputVariables = upstreamVars;
                   run.nodesCompleted++;
                   // Pass through upstream variables so downstream nodes can use them
                   nodeOutputs[nodeId] = upstreamVars;
@@ -2968,6 +4541,786 @@ Rules:
                     return;
                   }
                 }
+              }
+
+              // ── Script Node ─────────────────────────────────────
+              if (node?.workflowId === '__script__' && node.script) {
+                ns.status = 'running';
+                ns.currentStep = 'Running script...';
+                run.currentNodeId = nodeId;
+                const scriptStart = Date.now();
+
+                // Hoist variables needed by both try and catch (auto-fix)
+                const edgeInputs = gatherInputVariables(nodeId, comp.edges, nodeOutputs);
+                const mergedInputs: Record<string, unknown> = { ...initialVariables, ...edgeInputs };
+                ns.inputVariables = { ...mergedInputs };
+
+                const { runPrompt: scriptRunPrompt } = await import('./loop/llm-service.js');
+                const scriptModel = process.env.ANTHROPIC_API_KEY
+                  ? 'claude-sonnet-4-20250514'
+                  : process.env.OPENAI_API_KEY
+                    ? 'gpt-4o-mini'
+                    : process.env.GROQ_API_KEY
+                      ? 'llama-3.1-70b-versatile'
+                      : 'claude-sonnet-4-20250514';
+
+                const scriptLogs: string[] = ns.logs || [];
+                const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
+
+                // Build context.tools dynamically from all extension tools
+                const scriptTools: Record<string, (params: any) => Promise<any>> = {};
+                const allExtTools = extensionManager?.getAllTools() ?? [];
+                for (const extTool of allExtTools) {
+                  const toolHandler = extTool.handler;
+                  scriptTools[extTool.definition.name] = async (params: any) => {
+                    const result = await toolHandler(params, { workingDirectory: workDir } as any);
+                    if (typeof result === 'string') {
+                      try { return JSON.parse(result); } catch { return result; }
+                    }
+                    return result;
+                  };
+                }
+                // Fallback: if extensionManager unavailable, try nanobanana directly
+                if (Object.keys(scriptTools).length === 0) {
+                  try {
+                    const { nanobanana: nb } = await import('./loop/tools/nanobanana.js');
+                    scriptTools.nanobanana = async (p: any) => JSON.parse(await nb(p as any, workDir));
+                  } catch { /* nanobanana not available */ }
+                }
+
+                const context = {
+                    llm: {
+                      generate: async (prompt: string, opts?: { temperature?: number; maxTokens?: number; model?: string }) => {
+                        const resp = await scriptRunPrompt(
+                          [{ role: 'user', content: prompt }],
+                          opts?.model || scriptModel,
+                          { maxTokens: opts?.maxTokens || 4096, temperature: opts?.temperature ?? 0.9 }
+                        );
+                        return resp.content.trim();
+                      },
+                      generateJSON: async (prompt: string, _schema?: any, opts?: { temperature?: number; maxTokens?: number; model?: string }) => {
+                        const resp = await scriptRunPrompt(
+                          [{ role: 'user', content: prompt + '\n\nRespond with valid JSON only.' }],
+                          opts?.model || scriptModel,
+                          { maxTokens: opts?.maxTokens || 4096, temperature: opts?.temperature ?? 0.7 }
+                        );
+                        const text = resp.content.trim();
+                        // Extract JSON from possible markdown code block
+                        const jsonMatch = text.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
+                        return JSON.parse(jsonMatch ? jsonMatch[1].trim() : text);
+                      },
+                    },
+                    tools: scriptTools,
+                    log: (msg: string) => { scriptLogs.push(String(msg)); },
+                  };
+
+                try {
+                  // Execute the script code
+                  // Extract function body from the code — strip the function wrapper if present
+                  let fnBody = node.script.code;
+                  const fnMatch = fnBody.match(/async\s+function\s+execute\s*\([^)]*\)\s*\{([\s\S]*)\}/);
+                  if (fnMatch) {
+                    fnBody = fnMatch[1];
+                  }
+                  const fn = new AsyncFunction('inputs', 'context', 'require', fnBody);
+                  const outputs = await fn(mergedInputs, context, require);
+
+                  ns.durationMs = Date.now() - scriptStart;
+                  ns.status = 'completed';
+                  ns.stepsCompleted = 1;
+                  ns.logs = scriptLogs;
+                  ns.outputVariables = outputs || {};
+                  run.nodesCompleted++;
+                  nodeOutputs[nodeId] = outputs || {};
+
+                  debugLog.info('comp-run', `Script node "${nodeId}" completed`, {
+                    outputKeys: Object.keys(outputs || {}),
+                    durationMs: ns.durationMs,
+                  });
+                } catch (scriptErr: any) {
+                  const originalError = scriptErr?.message || String(scriptErr);
+
+                  // ── Auto-fix attempt for code bugs ──
+                  if (node.script && isCodeBug(scriptErr)) {
+                    ns.currentStep = 'Script failed — attempting auto-fix...';
+                    scriptLogs.push(`[auto-fix] Original error: ${originalError}`);
+                    debugLog.info('comp-run', `Script node "${nodeId}" failed with code bug, attempting auto-fix`, { error: originalError });
+
+                    try {
+                      // Build fix prompt
+                      const fixToolDocs = await generateScriptToolDocs();
+                      const fixSystemPrompt = `You are a code debugger for pipeline script nodes. A script failed during execution and you need to fix the bug.
+
+The script format:
+1. JSDoc comment with @input and @output annotations
+2. async function execute(inputs, context)
+3. Available: context.llm.generate(prompt), context.llm.generateJSON(prompt), context.log(message)${fixToolDocs ? '\n' + fixToolDocs : ''}
+4. Must return an object with all declared outputs
+
+CRITICAL RULES:
+- Do NOT change @input or @output annotations — ports are connected to other nodes
+- Do NOT change the function signature
+- Fix ONLY the bug described in the error
+- Keep the same overall logic and intent
+- Respond with ONLY the corrected code block — no explanation before or after`;
+
+                      const inputSummary = Object.entries(mergedInputs)
+                        .map(([k, v]) => {
+                          const val = typeof v === 'string' ? JSON.stringify(v.slice(0, 200)) : JSON.stringify(v);
+                          return `  ${k}: ${val}`;
+                        })
+                        .join('\n');
+
+                      const fixUserMessage = `The following script node failed with an error.
+
+**Error**: ${scriptErr?.name || 'Error'}: ${originalError}
+${scriptErr?.stack ? `**Stack trace**:\n${scriptErr.stack.split('\n').slice(0, 6).join('\n')}` : ''}
+
+**Script code**:
+\`\`\`javascript
+${node.script.code}
+\`\`\`
+
+**Inputs at time of failure**:
+${inputSummary || '  (none)'}
+
+${scriptLogs.length > 0 ? `**Logs before failure**:\n${scriptLogs.slice(-10).map((l: string) => `  ${l}`).join('\n')}` : ''}
+
+Fix the bug and return the corrected code. Do not change the @input/@output annotations.`;
+
+                      const fixMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
+                        { role: 'system', content: fixSystemPrompt },
+                        { role: 'user', content: fixUserMessage },
+                      ];
+
+                      // Call LLM for fix (low temperature for conservative changes)
+                      const fixResponse = await scriptRunPrompt(fixMessages, scriptModel, { maxTokens: 4096, temperature: 0.3 });
+                      let fixedCode = fixResponse.content.trim();
+
+                      // Extract code block if wrapped in markdown
+                      const codeBlockMatch = fixedCode.match(/```(?:javascript|js)?\s*\n([\s\S]*?)\n```/);
+                      if (codeBlockMatch) {
+                        fixedCode = codeBlockMatch[1].trim();
+                      }
+
+                      scriptLogs.push(`[auto-fix] LLM produced fixed code (${fixedCode.length} chars)`);
+
+                      // Re-execute the fixed code
+                      ns.currentStep = 'Re-running fixed script...';
+                      let fixedFnBody = fixedCode;
+                      const fixedFnMatch = fixedFnBody.match(/async\s+function\s+execute\s*\([^)]*\)\s*\{([\s\S]*)\}/);
+                      if (fixedFnMatch) {
+                        fixedFnBody = fixedFnMatch[1];
+                      }
+                      const fixedFn = new AsyncFunction('inputs', 'context', 'require', fixedFnBody);
+                      const fixedOutputs = await fixedFn(mergedInputs, context, require);
+
+                      // SUCCESS — persist the fix
+                      ns.durationMs = Date.now() - scriptStart;
+                      ns.status = 'completed';
+                      ns.stepsCompleted = 1;
+                      ns.logs = scriptLogs;
+                      ns.outputVariables = fixedOutputs || {};
+                      run.nodesCompleted++;
+                      nodeOutputs[nodeId] = fixedOutputs || {};
+
+                      scriptLogs.push('[auto-fix] Fixed script executed successfully');
+
+                      // Update code in memory
+                      node.script.code = fixedCode;
+                      if (!node.script.chatHistory) node.script.chatHistory = [];
+                      node.script.chatHistory.push(
+                        { role: 'user', content: `[Auto-fix] The script failed with: ${originalError}` },
+                        { role: 'assistant', content: `\`\`\`javascript\n${fixedCode}\n\`\`\`` }
+                      );
+
+                      // Persist to disk
+                      try {
+                        comp.metadata = comp.metadata || { createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+                        comp.metadata.updatedAt = new Date().toISOString();
+                        await writeFile(compFound.path, JSON.stringify(comp, null, 2), 'utf-8');
+                      } catch (saveErr) {
+                        scriptLogs.push(`[auto-fix] Warning: fix applied in memory but failed to save to disk: ${saveErr}`);
+                      }
+
+                      debugLog.info('comp-run', `Script node "${nodeId}" auto-fixed and completed`, {
+                        originalError,
+                        outputKeys: Object.keys(fixedOutputs || {}),
+                        durationMs: ns.durationMs,
+                      });
+                      continue; // Proceed to next node
+
+                    } catch (fixErr: any) {
+                      // Fix attempt also failed — report both errors
+                      const fixError = fixErr?.message || String(fixErr);
+                      scriptLogs.push(`[auto-fix] Fix attempt also failed: ${fixError}`);
+                      debugLog.error('comp-run', `Script node "${nodeId}" auto-fix failed`, { originalError, fixError });
+
+                      ns.durationMs = Date.now() - scriptStart;
+                      ns.status = 'failed';
+                      ns.error = `Script error: ${originalError}\nAuto-fix attempted but also failed: ${fixError}`;
+                      ns.logs = scriptLogs;
+                      // Fall through to failure policy below
+                    }
+                  } else {
+                    // External/infrastructure error — no auto-fix
+                    ns.durationMs = Date.now() - scriptStart;
+                    ns.status = 'failed';
+                    ns.error = `Script error: ${originalError}`;
+                    ns.logs = scriptLogs;
+                    scriptLogs.push(`[auto-fix] Skipped: error appears to be external/infrastructure (${scriptErr?.name || 'Error'})`);
+                    debugLog.error('comp-run', `Script node "${nodeId}" failed (external error, no auto-fix)`, { error: originalError });
+                  }
+
+                  // Apply failure policy (stop or skip)
+                  const scriptPolicy = node.onFailure || { action: 'stop' as const };
+                  if (scriptPolicy.action === 'skip') {
+                    ns.status = 'skipped';
+                    continue;
+                  } else {
+                    const downstream = getDownstreamNodes(nodeId, comp.edges);
+                    for (const downId of downstream) {
+                      if (run.nodeStates[downId]) {
+                        run.nodeStates[downId].status = 'skipped';
+                      }
+                    }
+                    run.done = true;
+                    run.success = false;
+                    run.error = ns.error;
+                    run.durationMs = Date.now() - run.startedAt;
+                    await finalizeCompRunRecord(compRunId, run, executionOrder);
+                    return;
+                  }
+                }
+                continue;
+              }
+
+              // ── Image Viewer Node (pass-through) ──────────────────
+              if (node?.workflowId === '__image_viewer__' && node.imageViewer) {
+                ns.status = 'running';
+                ns.currentStep = 'Displaying image...';
+                run.currentNodeId = nodeId;
+
+                const edgeInputs = gatherInputVariables(nodeId, comp.edges, nodeOutputs);
+                const mergedInputs: Record<string, unknown> = { ...initialVariables, ...edgeInputs };
+                ns.inputVariables = { ...mergedInputs };
+
+                // Resolve file path from edge input or config
+                const filePath = mergedInputs['file_path'] ?? node.imageViewer.filePath;
+
+                ns.status = 'completed';
+                ns.stepsCompleted = 1;
+                ns.outputVariables = { file_path: filePath };
+                nodeOutputs[nodeId] = { file_path: filePath };
+                run.nodesCompleted++;
+
+                debugLog.info('comp-run', `Image viewer "${nodeId}" pass-through`, {
+                  filePath,
+                });
+                continue;
+              }
+
+              // ── Branch Node (conditional routing) ─────────────────
+              if (node?.workflowId === '__branch__' && node.branchNode) {
+                ns.status = 'running';
+                ns.currentStep = 'Evaluating condition...';
+                run.currentNodeId = nodeId;
+
+                const edgeInputs = gatherInputVariables(nodeId, comp.edges, nodeOutputs);
+                const mergedInputs: Record<string, unknown> = { ...initialVariables, ...edgeInputs };
+                ns.inputVariables = { ...mergedInputs };
+
+                // Resolve condition: use edge input 'condition' if connected, else template from config
+                let conditionValue: unknown = edgeInputs['condition'];
+                if (conditionValue === undefined) {
+                  // Substitute {{var}} placeholders in the condition template
+                  let conditionStr = node.branchNode.condition || 'false';
+                  conditionStr = conditionStr.replace(/\{\{(\w+)\}\}/g, (_: string, varName: string) => {
+                    const val = mergedInputs[varName];
+                    if (val === undefined || val === null) return 'null';
+                    if (typeof val === 'string') return JSON.stringify(val);
+                    return String(val);
+                  });
+                  try {
+                    conditionValue = new Function(`return (${conditionStr});`)();
+                  } catch {
+                    conditionValue = false;
+                  }
+                }
+
+                const isTruthy = !!conditionValue;
+                const inactivePort = isTruthy ? 'on_false' : 'on_true';
+
+                // Skip nodes exclusively downstream of the inactive port
+                const toSkip = getNodesExclusivelyDownstreamOfPort(nodeId, inactivePort, comp.edges);
+                for (const skipId of toSkip) {
+                  if (run.nodeStates[skipId]) {
+                    run.nodeStates[skipId].status = 'skipped';
+                  }
+                }
+
+                ns.status = 'completed';
+                ns.stepsCompleted = 1;
+                ns.currentStep = `Took: ${isTruthy ? 'true' : 'false'}`;
+                // Pass through all inputs on both ports (downstream skip handles routing)
+                ns.outputVariables = { on_true: mergedInputs, on_false: mergedInputs, ...mergedInputs };
+                nodeOutputs[nodeId] = { ...mergedInputs };
+                run.nodesCompleted++;
+
+                debugLog.info('comp-run', `Branch "${nodeId}" evaluated: ${isTruthy}`, {
+                  skipped: [...toSkip],
+                });
+                continue;
+              }
+
+              // ── Delay Node (timed pause) ──────────────────────────
+              if (node?.workflowId === '__delay__' && node.delayNode) {
+                ns.status = 'running';
+                run.currentNodeId = nodeId;
+
+                const edgeInputs = gatherInputVariables(nodeId, comp.edges, nodeOutputs);
+                const mergedInputs: Record<string, unknown> = { ...initialVariables, ...edgeInputs };
+                ns.inputVariables = { ...mergedInputs };
+
+                // Read delay from edge input or config
+                const delayMs = typeof edgeInputs['delay_ms'] === 'number'
+                  ? edgeInputs['delay_ms'] as number
+                  : (node.delayNode.delayMs || 1000);
+
+                ns.currentStep = `Waiting ${delayMs}ms...`;
+
+                await new Promise<void>((resolve) => {
+                  const timer = setTimeout(resolve, delayMs);
+                  // Abort support
+                  const onAbort = () => { clearTimeout(timer); resolve(); };
+                  abort.signal.addEventListener('abort', onAbort, { once: true });
+                });
+
+                if (abort.signal.aborted) break;
+
+                ns.status = 'completed';
+                ns.stepsCompleted = 1;
+                ns.currentStep = 'Done';
+                ns.outputVariables = { ...mergedInputs };
+                nodeOutputs[nodeId] = { ...mergedInputs };
+                run.nodesCompleted++;
+
+                debugLog.info('comp-run', `Delay "${nodeId}" waited ${delayMs}ms`);
+                continue;
+              }
+
+              // ── Gate Node (conditional pass-through) ──────────────
+              if (node?.workflowId === '__gate__' && node.gateNode) {
+                ns.status = 'running';
+                ns.currentStep = 'Checking gate...';
+                run.currentNodeId = nodeId;
+
+                const edgeInputs = gatherInputVariables(nodeId, comp.edges, nodeOutputs);
+                const mergedInputs: Record<string, unknown> = { ...initialVariables, ...edgeInputs };
+                ns.inputVariables = { ...mergedInputs };
+
+                // Determine if gate is open: edge input 'open' overrides default
+                const isOpen = edgeInputs['open'] !== undefined
+                  ? !!edgeInputs['open']
+                  : node.gateNode.defaultOpen;
+
+                if (isOpen) {
+                  ns.status = 'completed';
+                  ns.stepsCompleted = 1;
+                  ns.currentStep = 'Gate: OPEN';
+                  // Wire data input → out output so downstream edges from gate:out carry the data value
+                  const outValue = edgeInputs['data'] !== undefined ? edgeInputs['data'] : mergedInputs;
+                  ns.outputVariables = { out: outValue, ...mergedInputs };
+                  nodeOutputs[nodeId] = { out: outValue, ...mergedInputs };
+                  run.nodesCompleted++;
+
+                  debugLog.info('comp-run', `Gate "${nodeId}" is OPEN`, { hasData: edgeInputs['data'] !== undefined });
+                } else {
+                  const onClosed = node.gateNode.onClosed || 'skip';
+                  if (onClosed === 'fail') {
+                    // Fail the entire pipeline
+                    ns.status = 'failed';
+                    ns.stepsCompleted = 1;
+                    ns.currentStep = 'Gate: CLOSED (pipeline failed)';
+                    ns.error = `Condition not met: ${node.label || 'Gate'}`;
+
+                    const downstream = getDownstreamNodes(nodeId, comp.edges);
+                    for (const downId of downstream) {
+                      if (run.nodeStates[downId]) {
+                        run.nodeStates[downId].status = 'skipped';
+                      }
+                    }
+                    run.done = true;
+                    run.success = false;
+                    run.error = ns.error;
+                    run.durationMs = Date.now() - run.startedAt;
+                    await finalizeCompRunRecord(compRunId, run, executionOrder);
+
+                    debugLog.info('comp-run', `Gate "${nodeId}" CLOSED — pipeline FAILED`);
+                    return;
+                  } else if (onClosed === 'stop') {
+                    ns.status = 'completed';
+                    ns.stepsCompleted = 1;
+                    ns.currentStep = 'Gate: CLOSED (stopping)';
+                    run.nodesCompleted++;
+
+                    // Skip all downstream and halt pipeline
+                    const downstream = getDownstreamNodes(nodeId, comp.edges);
+                    for (const downId of downstream) {
+                      if (run.nodeStates[downId]) {
+                        run.nodeStates[downId].status = 'skipped';
+                      }
+                    }
+                    run.done = true;
+                    run.success = true; // Gate close is not an error
+                    run.error = `Gate "${node.label || 'Gate'}" closed — pipeline stopped.`;
+                    run.durationMs = Date.now() - run.startedAt;
+                    await finalizeCompRunRecord(compRunId, run, executionOrder);
+
+                    debugLog.info('comp-run', `Gate "${nodeId}" CLOSED — stopping pipeline`);
+                    return;
+                  } else {
+                    // 'skip' — skip downstream nodes
+                    ns.status = 'completed';
+                    ns.stepsCompleted = 1;
+                    ns.currentStep = 'Gate: CLOSED (skipping downstream)';
+                    run.nodesCompleted++;
+
+                    const downstream = getDownstreamNodes(nodeId, comp.edges);
+                    for (const downId of downstream) {
+                      if (run.nodeStates[downId]) {
+                        run.nodeStates[downId].status = 'skipped';
+                      }
+                    }
+
+                    debugLog.info('comp-run', `Gate "${nodeId}" CLOSED — skipping ${downstream.size} downstream`);
+                  }
+                }
+                continue;
+              }
+
+              // ── ForEach Loop Node ─────────────────────────────────
+              if (node?.workflowId === '__for_each__' && node.forEachNode) {
+                ns.status = 'running';
+                ns.currentStep = 'Processing items...';
+                run.currentNodeId = nodeId;
+
+                const edgeInputs = gatherInputVariables(nodeId, comp.edges, nodeOutputs);
+                const mergedInputs: Record<string, unknown> = { ...initialVariables, ...edgeInputs };
+                ns.inputVariables = { ...mergedInputs };
+
+                let items = edgeInputs['items'];
+                if (typeof items === 'string') {
+                  try { items = JSON.parse(items); } catch { /* keep as string */ }
+                }
+
+                const itemsArray = Array.isArray(items) ? items : [];
+                const maxIter = node.forEachNode.maxIterations || 100;
+                const limited = itemsArray.slice(0, maxIter);
+
+                ns.currentStep = `Processing ${limited.length} items...`;
+
+                ns.status = 'completed';
+                ns.stepsCompleted = 1;
+                ns.currentStep = `Done — ${limited.length} items`;
+                ns.outputVariables = { results: limited, count: limited.length, current_item: limited[limited.length - 1] };
+                nodeOutputs[nodeId] = { results: limited, count: limited.length, current_item: limited[limited.length - 1] };
+                run.nodesCompleted++;
+
+                debugLog.info('comp-run', `ForEach "${nodeId}" processed ${limited.length} items`);
+                continue;
+              }
+
+              // ── Switch Node (multi-way routing) ───────────────────
+              if (node?.workflowId === '__switch__' && node.switchNode) {
+                ns.status = 'running';
+                ns.currentStep = 'Evaluating switch...';
+                run.currentNodeId = nodeId;
+
+                const edgeInputs = gatherInputVariables(nodeId, comp.edges, nodeOutputs);
+                const mergedInputs: Record<string, unknown> = { ...initialVariables, ...edgeInputs };
+                ns.inputVariables = { ...mergedInputs };
+
+                const switchValue = String(edgeInputs['value'] ?? '');
+                const cases = node.switchNode.cases || [];
+                const defaultPort = node.switchNode.defaultPort || 'on_default';
+
+                // Find matching case
+                let matchedPort: string | null = null;
+                for (const c of cases) {
+                  if (switchValue === c.value) {
+                    matchedPort = c.port;
+                    break;
+                  }
+                }
+
+                const activePort = matchedPort || defaultPort;
+
+                // Collect all output port names
+                const allPorts = [...cases.map((c: { value: string; port: string }) => c.port), defaultPort];
+                const inactivePorts = allPorts.filter((p: string) => p !== activePort);
+
+                // Skip nodes exclusively downstream of each inactive port
+                const allSkipped = new Set<string>();
+                for (const inactivePort of inactivePorts) {
+                  const toSkip = getNodesExclusivelyDownstreamOfPort(nodeId, inactivePort, comp.edges);
+                  for (const skipId of toSkip) {
+                    allSkipped.add(skipId);
+                  }
+                }
+                for (const skipId of allSkipped) {
+                  if (run.nodeStates[skipId]) {
+                    run.nodeStates[skipId].status = 'skipped';
+                  }
+                }
+
+                ns.status = 'completed';
+                ns.stepsCompleted = 1;
+                ns.currentStep = matchedPort ? `Matched: ${activePort}` : `Default: ${activePort}`;
+                ns.outputVariables = { ...mergedInputs };
+                nodeOutputs[nodeId] = { ...mergedInputs };
+                run.nodesCompleted++;
+
+                debugLog.info('comp-run', `Switch "${nodeId}" → ${activePort}`, {
+                  value: switchValue,
+                  skipped: [...allSkipped],
+                });
+                continue;
+              }
+
+              // ── Output Node (collector) ────────────────────────────
+              if (node?.workflowId === '__output__' && node.outputNode) {
+                ns.status = 'running';
+                ns.currentStep = 'Collecting outputs...';
+                run.currentNodeId = nodeId;
+
+                const edgeInputs = gatherInputVariables(nodeId, comp.edges, nodeOutputs);
+                const mergedInputs: Record<string, unknown> = { ...initialVariables, ...edgeInputs };
+                ns.inputVariables = { ...mergedInputs };
+
+                const pipelineOutputs: Record<string, unknown> = {};
+                for (const port of node.outputNode.ports) {
+                  pipelineOutputs[port.name] = mergedInputs[port.name];
+                }
+
+                ns.status = 'completed';
+                ns.stepsCompleted = 1;
+                ns.outputVariables = pipelineOutputs;
+                nodeOutputs[nodeId] = pipelineOutputs;
+                run.pipelineOutputs = pipelineOutputs;
+                run.nodesCompleted++;
+
+                debugLog.info('comp-run', `Output node "${nodeId}" collected`, {
+                  outputKeys: Object.keys(pipelineOutputs),
+                });
+                continue;
+              }
+
+              // ── Composition Node (sub-pipeline) ────────────────────
+              if (node?.workflowId.startsWith('comp:') && node.compositionRef) {
+                ns.status = 'running';
+                ns.currentStep = 'Running sub-pipeline...';
+                run.currentNodeId = nodeId;
+                const subStart = Date.now();
+
+                try {
+                  const subCompId = node.compositionRef.compositionId;
+
+                  // Cycle detection at runtime
+                  const visited = new Set<string>();
+                  visited.add(id); // current composition
+                  function checkCycleSync(cid: string): boolean {
+                    if (visited.has(cid)) return true;
+                    return false;
+                  }
+                  if (checkCycleSync(subCompId)) {
+                    throw new Error(`Circular pipeline reference detected: "${subCompId}" is already running`);
+                  }
+
+                  // Load sub-composition
+                  const subDiscovered = await discoverCompositions(workDir);
+                  const subFound = subDiscovered.find((d: any) => d.composition.id === subCompId);
+                  if (!subFound) {
+                    throw new Error(`Sub-pipeline "${subCompId}" not found`);
+                  }
+                  const subComp = subFound.composition;
+
+                  // Gather inputs
+                  const edgeInputs = gatherInputVariables(nodeId, comp.edges, nodeOutputs);
+                  const subInputs: Record<string, unknown> = { ...initialVariables, ...edgeInputs };
+                  ns.inputVariables = { ...subInputs };
+
+                  // Resolve sub-composition's workflows
+                  const subWfMap: Record<string, any> = {};
+                  for (const subNode of subComp.nodes) {
+                    if (subNode.workflowId === '__approval_gate__' || subNode.workflowId === '__script__' || subNode.workflowId === '__output__' || subNode.workflowId === '__image_viewer__' || subNode.workflowId === '__branch__' || subNode.workflowId === '__delay__' || subNode.workflowId === '__gate__' || subNode.workflowId === '__for_each__' || subNode.workflowId === '__switch__' || subNode.workflowId.startsWith('comp:')) continue;
+                    const subWfFound = wfDiscovered.find((d: any) => d.workflow.id === subNode.workflowId);
+                    if (!subWfFound) {
+                      throw new Error(`Sub-pipeline workflow "${subNode.workflowId}" not found`);
+                    }
+                    subWfMap[subNode.id] = subWfFound.workflow;
+                  }
+
+                  // Topological sort for sub-composition
+                  const subOrder = topoSort(subComp.nodes, subComp.edges);
+                  const subNodeOutputs: Record<string, Record<string, unknown>> = {};
+                  let subPipelineOutputs: Record<string, unknown> = {};
+
+                  // Execute sub-composition nodes inline
+                  for (const subNodeId of subOrder) {
+                    if (abort.signal.aborted) break;
+                    const subNode = subComp.nodes.find((n: any) => n.id === subNodeId);
+                    if (!subNode) continue;
+
+                    // Output node in sub-pipeline
+                    if (subNode.workflowId === '__output__' && subNode.outputNode) {
+                      const subEdgeInputs = gatherInputVariables(subNodeId, subComp.edges, subNodeOutputs);
+                      const subMerged: Record<string, unknown> = { ...subInputs, ...subEdgeInputs };
+                      for (const port of subNode.outputNode.ports) {
+                        subPipelineOutputs[port.name] = subMerged[port.name];
+                      }
+                      subNodeOutputs[subNodeId] = subPipelineOutputs;
+                      continue;
+                    }
+
+                    // Approval gate in sub-pipeline — skip (auto-approve)
+                    if (subNode.workflowId === '__approval_gate__') {
+                      const gateEdgeInputs = gatherInputVariables(subNodeId, subComp.edges, subNodeOutputs);
+                      subNodeOutputs[subNodeId] = { ...subInputs, ...gateEdgeInputs };
+                      continue;
+                    }
+
+                    // Script node in sub-pipeline
+                    if (subNode.workflowId === '__script__' && subNode.script) {
+                      const subEdgeInputs = gatherInputVariables(subNodeId, subComp.edges, subNodeOutputs);
+                      const subMerged: Record<string, unknown> = { ...subInputs, ...subEdgeInputs };
+
+                      let subFnBody = subNode.script.code;
+                      const subFnMatch = subFnBody.match(/async\s+function\s+execute\s*\([^)]*\)\s*\{([\s\S]*)\}/);
+                      if (subFnMatch) subFnBody = subFnMatch[1];
+
+                      const { runPrompt: subRunPrompt } = await import('./loop/llm-service.js');
+                      const subModel = process.env.ANTHROPIC_API_KEY ? 'claude-sonnet-4-20250514'
+                        : process.env.OPENAI_API_KEY ? 'gpt-4o-mini'
+                        : 'claude-sonnet-4-20250514';
+
+                      // Build tools for sub-pipeline scripts (same pattern as main script handler)
+                      const subScriptTools: Record<string, (params: any) => Promise<any>> = {};
+                      const subExtTools = extensionManager?.getAllTools() ?? [];
+                      for (const extTool of subExtTools) {
+                        const toolHandler = extTool.handler;
+                        subScriptTools[extTool.definition.name] = async (params: any) => {
+                          const result = await toolHandler(params, { workingDirectory: workDir } as any);
+                          if (typeof result === 'string') {
+                            try { return JSON.parse(result); } catch { return result; }
+                          }
+                          return result;
+                        };
+                      }
+                      if (Object.keys(subScriptTools).length === 0) {
+                        try {
+                          const { nanobanana: nb } = await import('./loop/tools/nanobanana.js');
+                          subScriptTools.nanobanana = async (p: any) => JSON.parse(await nb(p as any, workDir));
+                        } catch { /* tool not available */ }
+                      }
+
+                      const subScriptLogs: string[] = [];
+                      const subContext = {
+                        llm: {
+                          generate: async (prompt: string, opts?: any) => {
+                            const resp = await subRunPrompt([{ role: 'user', content: prompt }], opts?.model || subModel, { maxTokens: opts?.maxTokens || 4096, temperature: opts?.temperature ?? 0.9 });
+                            return resp.content.trim();
+                          },
+                          generateJSON: async (prompt: string, _schema?: any, opts?: any) => {
+                            const resp = await subRunPrompt([{ role: 'user', content: prompt + '\n\nRespond with valid JSON only.' }], opts?.model || subModel, { maxTokens: opts?.maxTokens || 4096, temperature: opts?.temperature ?? 0.7 });
+                            const text = resp.content.trim();
+                            const jsonMatch = text.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
+                            return JSON.parse(jsonMatch ? jsonMatch[1].trim() : text);
+                          },
+                        },
+                        tools: subScriptTools,
+                        log: (msg: string) => { subScriptLogs.push(String(msg)); },
+                      };
+
+                      const SubAsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
+                      const subFn = new SubAsyncFunction('inputs', 'context', 'require', subFnBody);
+                      const subOutputs = await subFn(subMerged, subContext, require);
+                      subNodeOutputs[subNodeId] = subOutputs || {};
+                      continue;
+                    }
+
+                    // Image viewer in sub-pipeline — pass-through
+                    if (subNode.workflowId === '__image_viewer__' && subNode.imageViewer) {
+                      const subEdgeInputs = gatherInputVariables(subNodeId, subComp.edges, subNodeOutputs);
+                      const subMerged: Record<string, unknown> = { ...subInputs, ...subEdgeInputs };
+                      const imgPath = subMerged['file_path'] ?? subNode.imageViewer.filePath;
+                      subNodeOutputs[subNodeId] = { file_path: imgPath };
+                      continue;
+                    }
+
+                    // Regular workflow node in sub-pipeline
+                    const subWf = subWfMap[subNodeId];
+                    if (!subWf) continue;
+
+                    const subEdgeInputs = gatherInputVariables(subNodeId, subComp.edges, subNodeOutputs);
+                    const subMergedVars: Record<string, unknown> = {};
+                    for (const v of (subWf.variables || [])) {
+                      if (v.default !== undefined) subMergedVars[v.name] = v.default;
+                    }
+                    Object.assign(subMergedVars, subInputs, subEdgeInputs);
+                    if (subNode.inputOverrides) {
+                      for (const [k, v] of Object.entries(subNode.inputOverrides)) {
+                        subMergedVars[k] = v;
+                      }
+                    }
+
+                    ns.currentStep = `Sub-pipeline: ${subWf.name}`;
+
+                    const subResult = await executeWorkflow(bridgeServer, subWf, subMergedVars, {
+                      log: (msg: string) => debugLog.info('comp-run', `[sub:${subWf.name}] ${msg}`),
+                      signal: abort.signal,
+                    });
+                    subNodeOutputs[subNodeId] = subResult.variables || {};
+                  }
+
+                  ns.durationMs = Date.now() - subStart;
+                  ns.status = 'completed';
+                  ns.stepsCompleted = 1;
+                  ns.outputVariables = subPipelineOutputs;
+                  run.nodesCompleted++;
+                  nodeOutputs[nodeId] = subPipelineOutputs;
+
+                  debugLog.info('comp-run', `Composition node "${nodeId}" completed`, {
+                    subCompId: node.compositionRef.compositionId,
+                    outputKeys: Object.keys(subPipelineOutputs),
+                    durationMs: ns.durationMs,
+                  });
+                } catch (compErr: any) {
+                  ns.durationMs = Date.now() - subStart;
+                  ns.status = 'failed';
+                  ns.error = `Sub-pipeline error: ${compErr?.message || String(compErr)}`;
+                  debugLog.error('comp-run', `Composition node "${nodeId}" failed`, { error: String(compErr) });
+
+                  const compPolicy = node.onFailure || { action: 'stop' as const };
+                  if (compPolicy.action === 'skip') {
+                    ns.status = 'skipped';
+                    continue;
+                  } else {
+                    const downstream = getDownstreamNodes(nodeId, comp.edges);
+                    for (const downId of downstream) {
+                      if (run.nodeStates[downId]) {
+                        run.nodeStates[downId].status = 'skipped';
+                      }
+                    }
+                    run.done = true;
+                    run.success = false;
+                    run.error = ns.error;
+                    run.durationMs = Date.now() - run.startedAt;
+                    await finalizeCompRunRecord(compRunId, run, executionOrder);
+                    return;
+                  }
+                }
+                continue;
               }
 
               // Determine failure policy for this node
@@ -3033,6 +5386,8 @@ Rules:
                     }
                   } catch { /* LLM import failed, skip */ }
                 }
+
+                ns.inputVariables = { ...mergedVars };
 
                 debugLog.info('comp-run', `Executing node "${nodeId}" attempt ${attempt}/${maxAttempts} (workflow: ${wf.name})`, {
                   inputVars: Object.keys(mergedVars),
@@ -3209,6 +5564,7 @@ Rules:
         pendingApprovals: runApprovals,
         error: activeCompRun.error,
         durationMs: activeCompRun.done ? activeCompRun.durationMs : Date.now() - activeCompRun.startedAt,
+        pipelineOutputs: activeCompRun.pipelineOutputs,
       });
       return;
     }
@@ -3836,6 +6192,7 @@ Rules:
           '--output-dir', TRAINING_DATA_DIR,
           '--source', source,
           '--crops-per-element', String(cropsPerElement),
+          '--interacted-only',
         ], {
           env: { ...process.env, PYTHONUNBUFFERED: '1' },
           cwd: join(homedir(), 'Documents', 'GitHub', 'woobury-models'),
@@ -3921,6 +6278,12 @@ Rules:
             export_onnx: exportOnnx,
             source: 'viewport',
             crops_per_element: body?.cropsPerElement || 10,
+            interacted_only: true,
+            patience: 15,
+            min_epochs: 10,
+            val_every: 5,
+            augmentation_p: 0.3,
+            max_apply: 3,
           };
 
           // Initialize remote training state
@@ -4029,8 +6392,8 @@ Rules:
         // Write config YAML for this run
         const configContent = [
           'input:',
-          '  max_side: 128',
-          '  letterbox_to: [128, 128]',
+          '  max_side: 224',
+          '  letterbox_to: [224, 224]',
           '  normalize: imagenet_mean_std',
           '',
           'model:',
@@ -4040,7 +6403,7 @@ Rules:
           '',
           'loss:',
           `  type: ${lossType}`,
-          '  ntxent_temperature: 0.07',
+          '  ntxent_temperature: 0.05',
           '  triplet_margin: 0.2',
           '  contrastive_margin: 0.8',
           '',
@@ -4057,12 +6420,22 @@ Rules:
           '  lr_schedule: cosine',
           '  mixed_precision: true',
           '',
+          'early_stopping:',
+          '  patience: 15',
+          '  min_epochs: 10',
+          '',
+          'evaluation:',
+          '  metrics: [roc_auc, pr_auc, eer, tar_at_fmr]',
+          '  fmr_targets: [0.001, 0.0001]',
+          '  val_every: 5',
+          '',
           'data:',
           '  train_frac: 0.7',
           '  val_frac: 0.15',
           '  site_holdout: false',
           '  pos_fraction: 0.5',
           '  augmentation_p: 0.3',
+          '  max_apply: 3',
           '',
         ].join('\n');
 
@@ -4147,6 +6520,12 @@ Rules:
                   break;
                 case 'complete':
                   activeTraining.bestAuc = evt.best_auc || activeTraining.bestAuc;
+                  break;
+                case 'early_stop':
+                  activeTraining.totalEpochs = evt.epoch;
+                  activeTraining.logs.push(
+                    `Early stopped at epoch ${evt.epoch} (no improvement for ${evt.patience} epochs)`
+                  );
                   break;
                 case 'error':
                   activeTraining.error = evt.message;
@@ -4438,6 +6817,262 @@ Rules:
       return;
     }
 
+    // GET /api/inference/status — check inference server status
+    if (req.method === 'GET' && pathname === '/api/inference/status') {
+      sendJson(res, 200, {
+        running: inferenceProc !== null,
+        model: inferenceModelPath,
+        port: INFERENCE_PORT,
+      });
+      return;
+    }
+
+    // GET /api/workflows/:id/training/status — poll per-workflow training progress
+    const wfTrainingMatch = pathname.match(/^\/api\/workflows\/([^/]+)\/training\/status$/);
+    if (req.method === 'GET' && wfTrainingMatch) {
+      const wfId = decodeURIComponent(wfTrainingMatch[1]);
+      const training = workflowTrainings.get(wfId);
+      if (!training) {
+        sendJson(res, 404, { error: 'No training found for this workflow' });
+      } else {
+        sendJson(res, 200, {
+          workflowId: training.workflowId,
+          phase: training.phase,
+          currentEpoch: training.currentEpoch,
+          totalEpochs: training.totalEpochs,
+          loss: training.loss,
+          bestAuc: training.bestAuc,
+          error: training.error,
+          startedAt: training.startedAt,
+          elapsed: Date.now() - training.startedAt,
+          modelDir: training.modelDir,
+          logs: training.logs.slice(-20),
+          worker: training.worker ? { name: training.worker.name, host: training.worker.host } : null,
+          nextVersion: training.nextVersion,
+          versionDir: training.versionDir,
+        });
+      }
+      return;
+    }
+
+    // GET /api/workflows/:id/training/data — training data stats for a workflow
+    const wfTrainingDataMatch = pathname.match(/^\/api\/workflows\/([^/]+)\/training\/data$/);
+    if (req.method === 'GET' && wfTrainingDataMatch) {
+      const wfId = decodeURIComponent(wfTrainingDataMatch[1]);
+      const workflowDataDir = join(homedir(), '.woodbury', 'data', 'workflows', wfId);
+      const snapshotsRoot = join(workflowDataDir, 'snapshots');
+      const cropsRoot = join(workflowDataDir, 'crops');
+
+      const result: {
+        snapshots: { total: number; fromRecording: number; fromExecution: number; totalElements: number; uniqueSelectors: number; interactionFiles: number; interactedSelectors: number; };
+        crops: { total: number; uniqueGroups: number; interacted: number; nonInteracted: number; } | null;
+        lastTraining: { version: string; backbone: string; epochs: number; embedDim: number; bestAuc: number; trainedAt: string; cropsPerElement: number; } | null;
+      } = {
+        snapshots: { total: 0, fromRecording: 0, fromExecution: 0, totalElements: 0, uniqueSelectors: 0, interactionFiles: 0, interactedSelectors: 0 },
+        crops: null,
+        lastTraining: null,
+      };
+
+      // Scan snapshot files
+      try {
+        const siteDirs = await readdir(snapshotsRoot).catch(() => [] as string[]);
+        const allSelectors = new Set<string>();
+        const allInteractedSelectors = new Set<string>();
+
+        for (const siteDir of siteDirs) {
+          const sitePath = join(snapshotsRoot, siteDir);
+          try {
+            const s = await stat(sitePath);
+            if (!s.isDirectory()) continue;
+          } catch { continue; }
+
+          const files = await readdir(sitePath).catch(() => [] as string[]);
+          for (const file of files) {
+            if (file.startsWith('interactions_') && file.endsWith('.json')) {
+              result.snapshots.interactionFiles++;
+              // Parse interaction file for interacted selectors
+              try {
+                const content = await readFile(join(sitePath, file), 'utf8');
+                const data = JSON.parse(content);
+                const selectors: string[] = data.interacted_selectors || [];
+                for (const sel of selectors) allInteractedSelectors.add(sel);
+              } catch { /* skip */ }
+            } else if (file.startsWith('snapshot_') && file.endsWith('.json') && !file.endsWith('_viewport.png') && !file.endsWith('_desktop.png')) {
+              result.snapshots.total++;
+              if (file.includes('_run-')) {
+                result.snapshots.fromExecution++;
+              } else {
+                result.snapshots.fromRecording++;
+              }
+              // Parse snapshot for element count
+              try {
+                const content = await readFile(join(sitePath, file), 'utf8');
+                const data = JSON.parse(content);
+                const elements: any[] = data.elements || [];
+                result.snapshots.totalElements += elements.length;
+                for (const el of elements) {
+                  if (el.selector) allSelectors.add(el.selector);
+                }
+              } catch { /* skip */ }
+            }
+          }
+        }
+        result.snapshots.uniqueSelectors = allSelectors.size;
+        result.snapshots.interactedSelectors = allInteractedSelectors.size;
+      } catch { /* snapshots dir doesn't exist */ }
+
+      // Scan crops metadata.jsonl
+      try {
+        const metaPath = join(cropsRoot, 'metadata.jsonl');
+        const content = await readFile(metaPath, 'utf8');
+        const lines = content.split('\n').filter(l => l.trim());
+        const groups = new Set<string>();
+        let interacted = 0;
+        let nonInteracted = 0;
+        for (const line of lines) {
+          try {
+            const entry = JSON.parse(line);
+            if (entry.group_id) groups.add(entry.group_id);
+            if (entry.interacted) interacted++;
+            else nonInteracted++;
+          } catch { /* skip bad lines */ }
+        }
+        result.crops = {
+          total: lines.length,
+          uniqueGroups: groups.size,
+          interacted,
+          nonInteracted,
+        };
+      } catch { /* no crops yet */ }
+
+      // Last training info from version registry
+      try {
+        const registry = await readVersionRegistry(join(workflowDataDir, 'model'));
+        if (registry && registry.versions.length > 0) {
+          // Find the latest complete version (by trainedAt)
+          const complete = registry.versions
+            .filter(v => v.status === 'complete')
+            .sort((a, b) => new Date(b.trainedAt).getTime() - new Date(a.trainedAt).getTime());
+          if (complete.length > 0) {
+            const latest = complete[0];
+            result.lastTraining = {
+              version: latest.version,
+              backbone: latest.backbone,
+              epochs: latest.epochs,
+              embedDim: latest.embedDim,
+              bestAuc: latest.bestAuc,
+              trainedAt: latest.trainedAt,
+              cropsPerElement: 10, // hardcoded in trainForWorkflowLocal
+            };
+          }
+        }
+      } catch { /* no version registry */ }
+
+      sendJson(res, 200, result);
+      return;
+    }
+
+    // GET /api/workflows/:id/model/versions — list all model versions
+    const wfVersionsMatch = pathname.match(/^\/api\/workflows\/([^/]+)\/model\/versions$/);
+    if (req.method === 'GET' && wfVersionsMatch) {
+      const wfId = decodeURIComponent(wfVersionsMatch[1]);
+      const wfModelDir = join(homedir(), '.woodbury', 'data', 'workflows', wfId, 'model');
+      const registry = await readVersionRegistry(wfModelDir);
+      if (!registry) {
+        sendJson(res, 200, { activeVersion: null, versions: [] });
+      } else {
+        sendJson(res, 200, registry);
+      }
+      return;
+    }
+
+    // POST /api/workflows/:id/model/activate — set a specific version as active
+    const wfActivateMatch = pathname.match(/^\/api\/workflows\/([^/]+)\/model\/activate$/);
+    if (req.method === 'POST' && wfActivateMatch) {
+      const wfId = decodeURIComponent(wfActivateMatch[1]);
+      const body = await readBody(req);
+      const targetVersion = body?.version;
+      if (!targetVersion) {
+        sendJson(res, 400, { error: 'Missing "version" in request body' });
+        return;
+      }
+
+      const wfModelDir = join(homedir(), '.woodbury', 'data', 'workflows', wfId, 'model');
+      const registry = await readVersionRegistry(wfModelDir);
+      if (!registry) {
+        sendJson(res, 404, { error: 'No version registry found' });
+        return;
+      }
+
+      const entry = registry.versions.find(v => v.version === targetVersion && v.status === 'complete');
+      if (!entry) {
+        sendJson(res, 404, { error: `Version ${targetVersion} not found or not complete` });
+        return;
+      }
+
+      registry.activeVersion = targetVersion;
+      await writeVersionRegistry(wfModelDir, registry);
+
+      // Update workflow JSON with new active model
+      const discovered = await discoverWorkflows(workDir);
+      const found = discovered.find(d => d.workflow.id === wfId);
+      if (found) {
+        try {
+          const wfContent = await readFile(found.path, 'utf8');
+          const wf = JSON.parse(wfContent);
+          wf.metadata.modelPath = entry.modelPath;
+          wf.metadata.modelVersion = targetVersion;
+          await writeFile(found.path, JSON.stringify(wf, null, 2));
+        } catch { /* best-effort */ }
+      }
+
+      sendJson(res, 200, { success: true, activeVersion: targetVersion });
+      return;
+    }
+
+    // POST /api/workflows/:id/training/retry — re-trigger training for a workflow
+    const wfRetryMatch = pathname.match(/^\/api\/workflows\/([^/]+)\/training\/retry$/);
+    if (req.method === 'POST' && wfRetryMatch) {
+      const wfId = decodeURIComponent(wfRetryMatch[1]);
+      const existing = workflowTrainings.get(wfId);
+      if (existing && existing.phase !== 'complete' && existing.phase !== 'error') {
+        sendJson(res, 409, { error: 'Training is still in progress' });
+        return;
+      }
+
+      // Find workflow file
+      const wfPath = existing?.workflowFilePath
+        || join(workDir, '.woodbury-work', 'workflows', `${wfId}.workflow.json`);
+
+      try {
+        const wfContent = await readFile(wfPath, 'utf8');
+        const wf = JSON.parse(wfContent);
+        const site = wf.site || 'unknown';
+
+        // Read optional training config from request body
+        let trainingConfig: Partial<WorkflowTrainingConfig> | undefined;
+        try {
+          const body = await readBody(req);
+          if (body && (body.backbone || body.epochs || body.embedDim)) {
+            trainingConfig = {};
+            if (body.backbone) trainingConfig.backbone = body.backbone;
+            if (body.epochs) trainingConfig.epochs = parseInt(body.epochs, 10);
+            if (body.embedDim) trainingConfig.embedDim = parseInt(body.embedDim, 10);
+          }
+        } catch { /* no body or invalid JSON — use defaults */ }
+
+        workflowTrainings.delete(wfId);
+        trainForWorkflow(wfId, site, wfPath, trainingConfig).catch(err => {
+          debugLog.info('workflow-train', `Retry training failed for ${wfId}: ${String(err)}`);
+        });
+
+        sendJson(res, 200, { success: true, workflowId: wfId });
+      } catch (err) {
+        sendJson(res, 500, { error: String(err) });
+      }
+      return;
+    }
+
     // ── Static File Serving ─────────────────────────────────
     const filePath =
       pathname === '/' ? '/index.html' : pathname.split('?')[0];
@@ -4512,6 +7147,7 @@ Rules:
     close: () => {
       relayHandle?.stop();
       stopScheduler();
+      stopInferenceServer();
       discoverySocket?.close();
       return new Promise<void>((resolve) => server.close(() => resolve()));
     },

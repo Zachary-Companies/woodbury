@@ -99,8 +99,8 @@ function initTraining() {
   main.innerHTML =
     '<div class="empty-state">' +
     '<div class="empty-state-icon">&#x1f9e0;</div>' +
-    '<h2>Model Training</h2>' +
-    '<p>Train Siamese encoders on captured UI element data.</p>' +
+    '<h2>Model Training ' + helpIcon('training-what') + '</h2>' +
+    '<p>Train visual recognition models on captured UI element data.</p>' +
     '</div>';
 
   loadTrainingSidebar();
@@ -206,10 +206,10 @@ async function loadTrainingMain() {
 
 function renderTrainingConfig(summary) {
   const main = document.querySelector('#main');
-  let html = '<div class="ext-header"><h2>Model Training</h2></div>';
+  let html = '<div class="ext-header"><h2>Model Training' + helpIcon('training-what') + '</h2></div>';
 
   // Data Summary
-  html += '<div class="training-section"><h3>Training Data</h3>';
+  html += '<div class="training-section"><h3>Training Data' + helpIcon('training-data') + '</h3>';
   if (summary.hasMetadata && summary.totalCrops > 0) {
     html += '<div class="training-stats">';
     html += statCard(summary.totalCrops, 'Crops');
@@ -237,7 +237,7 @@ function renderTrainingConfig(summary) {
   html += '</div>';
 
   // Config Form
-  html += '<div class="training-section"><h3>Configuration</h3>';
+  html += '<div class="training-section"><h3>Configuration' + helpIcon('training-config') + '</h3>';
   html += '<div class="training-form">';
 
   html += '<label>Architecture' +
@@ -279,7 +279,7 @@ function renderTrainingConfig(summary) {
   html += '</div>';
 
   // Workers section
-  html += '<div class="training-section"><h3>Workers</h3>';
+  html += '<div class="training-section"><h3>Workers' + helpIcon('training-workers') + '</h3>';
   html += '<div id="workers-list" style="margin-bottom:0.75rem;"><div style="color:#64748b;font-size:0.8rem;">Loading workers...</div></div>';
   html += '<div id="worker-add-form" style="display:none;margin-bottom:0.75rem;">';
   html += '<div style="display:flex;gap:0.5rem;flex-wrap:wrap;">';
@@ -293,7 +293,7 @@ function renderTrainingConfig(summary) {
   html += '</div>';
 
   // Train on selector
-  html += '<div class="training-section"><h3>Train On</h3>';
+  html += '<div class="training-section"><h3>Train On' + helpIcon('training-train-on') + '</h3>';
   html += '<div id="train-target" class="training-form">';
   html += '<label style="display:flex;align-items:center;gap:0.5rem;">' +
     '<input type="radio" name="train-target" value="local" checked /> ' +

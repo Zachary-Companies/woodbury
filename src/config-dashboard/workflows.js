@@ -11,6 +11,30 @@ let workflows = [];
 let selectedWorkflow = null;
 let detailView = 'visual'; // 'visual' | 'json' | 'run'
 let pipelineWorkflows = []; // for chaining
+let workflowTrainingPolls = {}; // workflowId -> intervalId
+
+// Per-workflow variable values typed by the user (survives tab switches)
+// { workflowId: { varName: value, ... } }
+var runVarValues = {};
+
+function saveRunVarValues(wfId) {
+  if (!wfId) return;
+  var vals = {};
+  document.querySelectorAll('.wf-run-input').forEach(function(el) {
+    var name = el.getAttribute('name');
+    if (name) vals[name] = el.value;
+  });
+  if (Object.keys(vals).length > 0) {
+    runVarValues[wfId] = vals;
+  }
+}
+
+function getRunVarValue(wfId, varName, fallback) {
+  if (runVarValues[wfId] && runVarValues[wfId][varName] !== undefined) {
+    return runVarValues[wfId][varName];
+  }
+  return fallback;
+}
 
 // ── Step icons ───────────────────────────────────────────────
 const STEP_ICONS = {
@@ -28,7 +52,52 @@ const STEP_ICONS = {
   loop: '&#x1f501;',
   try_catch: '&#x1f6e1;',
   set_variable: '&#x1f4dd;',
+  file_dialog: '&#x1f4c1;',
+  capture_download: '&#x1f4e5;',
 };
+
+// ── Variable auto-detection ─────────────────────────────────
+
+/**
+ * Scan all string fields in a step for {{varName}} references.
+ * Returns an array of variable names found.
+ */
+function extractStepVariables(step) {
+  var names = [];
+  var pattern = /\{\{([^}]+)\}\}/g;
+  var json = JSON.stringify(step);
+  var match;
+  while ((match = pattern.exec(json)) !== null) {
+    var name = match[1].trim().split('.')[0].split('[')[0]; // base name only
+    if (names.indexOf(name) === -1) names.push(name);
+  }
+  return names;
+}
+
+/**
+ * Ensure all {{variables}} used in steps exist in wf.variables.
+ * Auto-adds missing ones as required string variables.
+ * Returns the number of variables added.
+ */
+function ensureStepVariablesDeclared(wf, step) {
+  if (!wf.variables) wf.variables = [];
+  var existing = wf.variables.map(function(v) { return v.name; });
+  var referenced = extractStepVariables(step);
+  var added = 0;
+  for (var i = 0; i < referenced.length; i++) {
+    if (existing.indexOf(referenced[i]) === -1) {
+      wf.variables.push({
+        name: referenced[i],
+        description: '',
+        type: 'string',
+        required: true,
+      });
+      existing.push(referenced[i]);
+      added++;
+    }
+  }
+  return added;
+}
 
 // ── API ──────────────────────────────────────────────────────
 
@@ -77,11 +146,13 @@ function initWorkflows() {
   main.innerHTML =
     '<div class="empty-state">' +
     '<div class="empty-state-icon">&#x1f3ac;</div>' +
-    '<h2>Workflow Manager</h2>' +
+    '<h2>Workflow Manager ' + helpIcon('workflows-what') + '</h2>' +
     '<p>Select a workflow from the sidebar, or create a new one.</p>' +
     '</div>';
 
+  stopAllWorkflowTrainingPolls();
   selectedWorkflow = null;
+  initWorkflowDelegation();
   fetchWorkflows();
 }
 
@@ -105,13 +176,28 @@ function renderWorkflowSidebar() {
     html += workflows.map(function(wf) {
       var active = selectedWorkflow === wf.id ? ' active' : '';
       var smartCount = wf.smartWaitCount || 0;
+      var trainingBadge = '';
+      var ts = wf.metadata && wf.metadata.trainingStatus;
+      if (ts === 'complete') {
+        trainingBadge = '<span class="badge" style="background:#065f46;color:#6ee7b7;">model ready</span>';
+      } else if (ts === 'training' || ts === 'pending') {
+        trainingBadge = '<span class="badge" style="background:#4c1d95;color:#c4b5fd;"><span class="wf-training-pulse">&#x25cf;</span> training</span>';
+      } else if (ts === 'failed') {
+        trainingBadge = '<span class="badge" style="background:#7f1d1d;color:#fca5a5;">training failed</span>';
+      }
+      var isDesktop = wf.site === 'desktop';
+      var typeBadge = isDesktop
+        ? '<span class="badge" style="background:#1e3a5f;color:#7dd3fc;">desktop</span>'
+        : '';
       return '<div class="ext-item' + active + '" data-wf-id="' + escAttr(wf.id) + '">' +
         '<div class="ext-item-name">' + escHtml(wf.name) + '</div>' +
-        '<div class="ext-item-meta">' + escHtml(wf.site || '') + ' &middot; ' + wf.stepCount + ' steps</div>' +
+        '<div class="ext-item-meta">' + escHtml(isDesktop ? 'Desktop App' : (wf.site || '')) + ' &middot; ' + wf.stepCount + ' steps</div>' +
         '<div class="ext-item-badges">' +
           '<span class="badge badge-ok">' + escHtml(wf.source) + '</span>' +
+          typeBadge +
           (wf.variableCount > 0 ? '<span class="badge badge-partial">' + wf.variableCount + ' vars</span>' : '') +
           (smartCount > 0 ? '<span class="badge badge-webui">' + smartCount + ' smart</span>' : '') +
+          trainingBadge +
         '</div>' +
       '</div>';
     }).join('');
@@ -119,19 +205,55 @@ function renderWorkflowSidebar() {
 
   list.innerHTML = html;
 
-  // Wire sidebar click handlers
-  list.querySelectorAll('.ext-item').forEach(function(el) {
-    el.addEventListener('click', function() { selectWorkflow(el.dataset.wfId); });
-  });
+  // Event delegation is set up once in initWorkflowDelegation()
+  // No per-render addEventListener calls needed for sidebar items
+}
 
-  // Wire new workflow button
-  var newBtn = document.querySelector('#wf-btn-new');
-  if (newBtn) {
-    newBtn.addEventListener('click', function() {
-      selectedWorkflow = null;
-      // Deselect sidebar items
-      list.querySelectorAll('.ext-item').forEach(function(el) { el.classList.remove('active'); });
-      showNewWorkflowForm();
+// ── Event Delegation (set up once) ──────────────────────────
+// Delegated handlers on stable parent elements avoid timing issues
+// where clicks fire before per-element addEventListener runs.
+var _wfDelegationInit = false;
+var _wfCurrentDetail = null; // { wf, filePath, source } for delegated handlers
+
+function initWorkflowDelegation() {
+  if (_wfDelegationInit) return;
+  _wfDelegationInit = true;
+
+  // Sidebar: delegated click handler
+  var list = document.querySelector('#wf-list');
+  if (list) {
+    list.addEventListener('click', function(e) {
+      // Workflow item click
+      var item = e.target.closest('.ext-item[data-wf-id]');
+      if (item) {
+        selectWorkflow(item.dataset.wfId);
+        return;
+      }
+      // New workflow button
+      var newBtn = e.target.closest('#wf-btn-new');
+      if (newBtn) {
+        selectedWorkflow = null;
+        list.querySelectorAll('.ext-item').forEach(function(el) { el.classList.remove('active'); });
+        showNewWorkflowForm();
+        return;
+      }
+    });
+  }
+
+  // Main content: delegated click handler for detail view
+  var main = document.querySelector('#main');
+  if (main) {
+    main.addEventListener('click', function(e) {
+      // Tab bar clicks
+      var tab = e.target.closest('.wf-tab[data-view]');
+      if (tab && _wfCurrentDetail) {
+        detailView = tab.dataset.view;
+        if (typeof updateHash === 'function') {
+          updateHash('workflows', selectedWorkflow, detailView);
+        }
+        renderWorkflowDetail(_wfCurrentDetail.wf, _wfCurrentDetail.filePath, _wfCurrentDetail.source);
+        return;
+      }
     });
   }
 }
@@ -175,15 +297,36 @@ function showNewWorkflowForm() {
 
   // Record section — prominent, before manual steps
   html += '<div class="wf-section wf-record-section">';
-  html += '<div class="wf-section-header">&#x23fa; Record from Browser</div>';
+  html += '<div class="wf-section-header" id="wf-record-section-header">&#x23fa; Record Workflow' + helpIcon('workflows-recording') + '</div>';
   html += '<div class="wf-section-body">';
-  html += '<div class="wf-create-hint" style="margin-bottom:0.75rem;">Click <strong>Start Recording</strong>, then perform the actions in Chrome. Each click, keystroke, and navigation will be captured as a workflow step. Click <strong>Stop</strong> when done.</div>';
 
-  // Record options
+  // Recording mode selector
+  html += '<div style="display:flex;gap:8px;margin-bottom:0.75rem;align-items:center;">';
+  html += '<label style="display:flex;align-items:center;gap:5px;padding:6px 12px;border-radius:6px;border:1px solid #334155;cursor:pointer;font-size:0.78rem;color:#e2e8f0;user-select:none;">';
+  html += '<input type="radio" name="wf-record-mode" value="browser" checked style="accent-color:#7c3aed;margin:0;"> Browser';
+  html += '</label>';
+  html += '<label style="display:flex;align-items:center;gap:5px;padding:6px 12px;border-radius:6px;border:1px solid #334155;cursor:pointer;font-size:0.78rem;color:#e2e8f0;user-select:none;">';
+  html += '<input type="radio" name="wf-record-mode" value="desktop" style="accent-color:#7c3aed;margin:0;"> Desktop (any app)';
+  html += '</label>';
+  html += helpIcon('workflows-browser-vs-desktop');
+  html += '</div>';
+
+  // Desktop app name input (hidden by default, shown when Desktop mode is selected)
+  html += '<div id="wf-desktop-app-field" style="display:none;margin-bottom:0.75rem;">';
+  html += '<label class="wf-create-label" for="wf-desktop-app-name" style="font-size:0.78rem;color:#94a3b8;margin-bottom:4px;display:block;">Application Name</label>';
+  html += '<input class="wf-var-input" type="text" id="wf-desktop-app-name" placeholder="e.g. Finder, Spotify, Notepad" style="font-size:0.82rem;">';
+  html += '<div class="wf-create-hint" style="margin-top:4px;">The app will be launched and brought to focus when recording starts</div>';
+  html += '</div>';
+
+  html += '<div class="wf-create-hint" id="wf-record-hint" style="margin-bottom:0.75rem;">Click <strong>Start Recording</strong>, then perform the actions in Chrome. Each click, keystroke, and navigation will be captured as a workflow step. Click <strong>Stop</strong> when done.</div>';
+
+  // Record options (browser mode only)
+  html += '<div id="wf-record-browser-options">';
   html += '<label style="display:flex;align-items:center;gap:6px;margin-bottom:0.75rem;font-size:0.78rem;color:#94a3b8;cursor:pointer;user-select:none;">';
   html += '<input type="checkbox" id="wf-capture-crops" checked style="accent-color:#7c3aed;margin:0;">';
   html += 'Capture element screenshots for visual matching';
   html += '</label>';
+  html += '</div>';
 
   // Record controls
   html += '<div class="wf-record-controls" id="wf-record-controls">';
@@ -353,7 +496,7 @@ function renderNewVarsList() {
 
 // ── New Workflow: Step rows ──────────────────────────────────
 
-var STEP_TYPES = ['navigate', 'click', 'type', 'wait', 'keyboard', 'scroll', 'assert', 'set_variable'];
+var STEP_TYPES = ['navigate', 'click', 'type', 'wait', 'keyboard', 'scroll', 'assert', 'set_variable', 'file_dialog'];
 
 function renderNewStepsList() {
   var container = document.querySelector('#wf-new-steps-list');
@@ -453,6 +596,11 @@ function renderStepFields(step, idx) {
       html += '<input class="wf-var-input wf-ns-varname" type="text" placeholder="Variable name" value="' + escAttr(step.variable || '') + '" style="width:130px;">';
       html += '<input class="wf-var-input wf-ns-value" type="text" placeholder="Value or expression" value="' + escAttr(step.value || '') + '" style="flex:1;min-width:150px;">';
       break;
+    case 'file_dialog':
+      html += '<input class="wf-var-input wf-ns-filepath" type="text" placeholder="Absolute file path or {{var}}" value="' + escAttr(step.filePath || '') + '" style="flex:1;min-width:200px;">';
+      html += '<input class="wf-var-input wf-ns-selector" type="text" placeholder="Trigger selector (optional)" value="' + escAttr((step.trigger && step.trigger.selector) || '') + '" style="flex:1;min-width:120px;">';
+      html += '<input class="wf-var-input wf-ns-outvar" type="text" placeholder="Output variable" value="' + escAttr(step.outputVariable || 'selectedFile') + '" style="width:130px;">';
+      break;
     default:
       html += '<span style="color:#475569;font-size:0.75rem;">Configure in JSON editor after creation</span>';
   }
@@ -527,6 +675,18 @@ function wireStepFieldHandlers(row, idx) {
       if (valInput) valInput.addEventListener('input', function() { newWorkflowSteps[idx].value = valInput.value; });
       break;
     }
+    case 'file_dialog': {
+      var fpInput = row.querySelector('.wf-ns-filepath');
+      var selInput = row.querySelector('.wf-ns-selector');
+      var outVarInput = row.querySelector('.wf-ns-outvar');
+      if (fpInput) fpInput.addEventListener('input', function() { newWorkflowSteps[idx].filePath = fpInput.value; });
+      if (selInput) selInput.addEventListener('input', function() {
+        newWorkflowSteps[idx].trigger = newWorkflowSteps[idx].trigger || {};
+        newWorkflowSteps[idx].trigger.selector = selInput.value;
+      });
+      if (outVarInput) outVarInput.addEventListener('input', function() { newWorkflowSteps[idx].outputVariable = outVarInput.value; });
+      break;
+    }
   }
 }
 
@@ -540,6 +700,9 @@ function buildDefaultStep(type) {
     case 'scroll': return { type: 'scroll', x: 0, y: 0, amount: 3, label: '' };
     case 'assert': return { type: 'assert', target: { selector: '' }, expectedText: '', label: '' };
     case 'set_variable': return { type: 'set_variable', variable: '', value: '', label: '' };
+    case 'file_dialog': return { type: 'file_dialog', filePath: '', trigger: { selector: '' }, outputVariable: 'selectedFile', delayBeforeMs: 2000, delayAfterMs: 1000, label: '' };
+    case 'capture_download': return { type: 'capture_download', outputVariable: 'downloadedFiles', maxFiles: 1, label: '' };
+    case 'move_file': return { type: 'move_file', source: '', destination: '', label: '' };
     default: return { type: type, label: '' };
   }
 }
@@ -701,6 +864,27 @@ function renderStepEditor(step, idx, totalSteps) {
       html += '</div>';
       break;
 
+    case 'file_dialog':
+      html += '<div class="wf-se-row">';
+      html += '<span class="wf-se-label">File path</span>';
+      html += '<input class="wf-se-input wf-se-filepath" type="text" value="' + escAttr(step.filePath || '') + '" placeholder="Absolute path or {{variable}}">';
+      html += '</div>';
+      html += '<div class="wf-se-row">';
+      html += '<span class="wf-se-label">Trigger</span>';
+      html += '<input class="wf-se-input wf-se-selector" type="text" value="' + escAttr((step.trigger && step.trigger.selector) || '') + '" placeholder="CSS selector for upload button (optional)">';
+      html += '</div>';
+      html += '<div class="wf-se-row">';
+      html += '<span class="wf-se-label">Output var</span>';
+      html += '<input class="wf-se-input wf-se-output-var" type="text" value="' + escAttr(step.outputVariable || '') + '" placeholder="Variable for file path" style="max-width:200px;">';
+      html += '</div>';
+      html += '<div class="wf-se-row">';
+      html += '<span class="wf-se-label">Delay before</span>';
+      html += '<input class="wf-se-input wf-se-delay-before" type="number" value="' + escAttr(String(step.delayBeforeMs || '')) + '" placeholder="2000" style="max-width:100px;">';
+      html += '<span class="wf-se-label" style="margin-left:1rem;">Delay after</span>';
+      html += '<input class="wf-se-input wf-se-delay-after" type="number" value="' + escAttr(String(step.delayAfterMs || '')) + '" placeholder="1000" style="max-width:100px;">';
+      html += '</div>';
+      break;
+
     default:
       // Complex types: sub_workflow, conditional, loop, try_catch
       html += '<div class="wf-se-row">';
@@ -714,6 +898,7 @@ function renderStepEditor(step, idx, totalSteps) {
   html += '<button class="wf-se-btn wf-se-cancel">Cancel</button>';
   html += '<button class="wf-se-btn wf-se-up"' + (idx === 0 ? ' disabled' : '') + '>&uarr; Up</button>';
   html += '<button class="wf-se-btn wf-se-down"' + (idx >= totalSteps - 1 ? ' disabled' : '') + '>&darr; Down</button>';
+  html += '<button class="wf-se-btn wf-se-insert-below" style="color:#38bdf8;">+ Insert</button>';
   html += '<button class="wf-se-btn wf-se-btn-delete wf-se-delete" style="margin-left:auto;">Delete</button>';
   html += '</div>';
 
@@ -822,6 +1007,26 @@ function collectStepEditorValues(editor, step) {
       if (destInput) updated.destination = destInput.value;
       break;
     }
+    case 'file_dialog': {
+      var fpInput = editor.querySelector('.wf-se-filepath');
+      var selInput = editor.querySelector('.wf-se-selector');
+      var outVarInput = editor.querySelector('.wf-se-output-var');
+      var delayBeforeInput = editor.querySelector('.wf-se-delay-before');
+      var delayAfterInput = editor.querySelector('.wf-se-delay-after');
+      if (fpInput) updated.filePath = fpInput.value;
+      if (selInput) {
+        if (selInput.value) {
+          if (!updated.trigger) updated.trigger = {};
+          updated.trigger.selector = selInput.value;
+        } else {
+          delete updated.trigger;
+        }
+      }
+      if (outVarInput) updated.outputVariable = outVarInput.value || undefined;
+      if (delayBeforeInput) updated.delayBeforeMs = parseInt(delayBeforeInput.value) || undefined;
+      if (delayAfterInput) updated.delayAfterMs = parseInt(delayAfterInput.value) || undefined;
+      break;
+    }
   }
 
   return updated;
@@ -908,33 +1113,71 @@ function wireRecordingHandlers() {
   if (startBtn) {
     startBtn.addEventListener('click', startRecording);
   }
+
+  // Recording mode toggle: Browser vs Desktop
+  var modeRadios = document.querySelectorAll('input[name="wf-record-mode"]');
+  modeRadios.forEach(function(radio) {
+    radio.addEventListener('change', function() {
+      var isDesktop = this.value === 'desktop';
+      var siteField = document.querySelector('#wf-new-site');
+      var siteContainer = siteField ? siteField.closest('.wf-create-field') : null;
+      var hint = document.querySelector('#wf-record-hint');
+      var browserOpts = document.querySelector('#wf-record-browser-options');
+      var desktopAppField = document.querySelector('#wf-desktop-app-field');
+
+      // Hide/show site input (not needed for desktop)
+      if (siteContainer) siteContainer.style.display = isDesktop ? 'none' : '';
+
+      // Show/hide desktop app name input
+      if (desktopAppField) desktopAppField.style.display = isDesktop ? '' : 'none';
+
+      // Update hint text
+      if (hint) {
+        hint.innerHTML = isDesktop
+          ? 'Click <strong>Start Recording</strong>, then click anywhere on your screen. Each mouse click will be captured with its screen coordinates. Click <strong>Stop</strong> when done.'
+          : 'Click <strong>Start Recording</strong>, then perform the actions in Chrome. Each click, keystroke, and navigation will be captured as a workflow step. Click <strong>Stop</strong> when done.';
+      }
+
+      // Hide browser-specific options for desktop mode
+      if (browserOpts) browserOpts.style.display = isDesktop ? 'none' : '';
+    });
+  });
 }
 
 async function startRecording() {
   var nameInput = document.querySelector('#wf-new-name');
   var siteInput = document.querySelector('#wf-new-site');
 
-  if (!nameInput || !siteInput) return;
+  if (!nameInput) return;
 
   var name = nameInput.value.trim();
-  var site = siteInput.value.trim();
+
+  // Determine recording mode
+  var modeRadio = document.querySelector('input[name="wf-record-mode"]:checked');
+  var isDesktopMode = modeRadio && modeRadio.value === 'desktop';
+  var site = isDesktopMode ? 'desktop' : (siteInput ? siteInput.value.trim() : '');
+
+  // Get desktop app name if in desktop mode
+  var desktopAppInput = document.querySelector('#wf-desktop-app-name');
+  var appName = isDesktopMode && desktopAppInput ? desktopAppInput.value.trim() : '';
 
   if (!name) {
     toast('Enter a workflow name first', 'error');
     nameInput.focus();
     return;
   }
-  if (!site) {
+  if (!isDesktopMode && !site) {
     toast('Enter the target site (e.g. suno.com)', 'error');
-    siteInput.focus();
+    if (siteInput) siteInput.focus();
     return;
   }
 
   // Disable inputs during recording
   nameInput.disabled = true;
-  siteInput.disabled = true;
+  if (siteInput) siteInput.disabled = true;
   var descInput = document.querySelector('#wf-new-desc');
   if (descInput) descInput.disabled = true;
+  if (desktopAppInput) desktopAppInput.disabled = true;
 
   // Update controls to show recording state
   var controls = document.querySelector('#wf-record-controls');
@@ -966,13 +1209,14 @@ async function startRecording() {
     var res = await fetch('/api/recording/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: name, site: site, captureElementCrops: captureElementCrops }),
+      body: JSON.stringify({ name: name, site: site, captureElementCrops: captureElementCrops, appName: appName || undefined }),
     });
     var data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Start failed');
 
     document.querySelector('#wf-record-status').innerHTML =
-      '<span class="wf-rec-indicator wf-rec-active">&#x23fa;</span> Recording — interact with Chrome now';
+      '<span class="wf-rec-indicator wf-rec-active">&#x23fa;</span> Recording — ' +
+      (isDesktopMode ? ('click anywhere on screen' + (appName ? ' (' + appName + ')' : '')) : 'interact with Chrome now');
 
     // Start polling for captured steps
     startRecordingPoll();
@@ -997,6 +1241,8 @@ async function stopRecording() {
     // Select the newly created workflow
     if (data.workflow && data.workflow.id) {
       selectWorkflow(data.workflow.id);
+      // Start polling for model training (auto-triggered on recording stop)
+      startWorkflowTrainingPoll(data.workflow.id);
     } else {
       initWorkflows();
     }
@@ -1141,6 +1387,9 @@ function buildStepLabel(step, idx) {
     case 'scroll': return 'Scroll';
     case 'assert': return 'Assert ' + ((step.target && step.target.selector) || 'element');
     case 'set_variable': return 'Set ' + (step.variable || 'variable');
+    case 'file_dialog': return 'Select file ' + truncate(step.filePath || '', 40);
+    case 'capture_download': return 'Capture download';
+    case 'move_file': return 'Move ' + truncate(step.source || 'file', 25);
     default: return 'Step ' + (idx + 1);
   }
 }
@@ -1149,6 +1398,11 @@ function buildStepLabel(step, idx) {
 
 async function selectWorkflow(id) {
   selectedWorkflow = id;
+
+  // Update hash
+  if (typeof updateHash === 'function') {
+    updateHash('workflows', id, detailView);
+  }
 
   // Update sidebar
   document.querySelectorAll('#wf-list .ext-item').forEach(el => {
@@ -1161,6 +1415,15 @@ async function selectWorkflow(id) {
   try {
     const data = await fetchWorkflowDetail(id);
     renderWorkflowDetail(data.workflow, data.path, data.source);
+
+    // If workflow has active training, start polling
+    var ts = data.workflow.metadata && data.workflow.metadata.trainingStatus;
+    if (ts === 'pending' || ts === 'training') {
+      startWorkflowTrainingPoll(id);
+    } else {
+      // Check server-side for in-progress training (may not be in workflow JSON yet)
+      checkAndPollWorkflowTraining(id);
+    }
   } catch (err) {
     main.innerHTML =
       '<div class="empty-state"><div class="empty-state-icon">&#x26a0;</div>' +
@@ -1169,12 +1432,18 @@ async function selectWorkflow(id) {
 }
 
 function renderWorkflowDetail(wf, filePath, source) {
+  // Save any in-progress variable values before re-rendering
+  saveRunVarValues(wf.id);
+
+  // Store context for delegated handlers
+  _wfCurrentDetail = { wf: wf, filePath: filePath, source: source };
+
   const main = document.querySelector('#main');
   let html = '';
 
-  // Header
+  // Header row: title + delete
   html += '<div class="wf-detail-header">';
-  html += '<div>';
+  html += '<div style="min-width:0;">';
   html += '<h2>' + escHtml(wf.name) + '</h2>';
   html += '<div class="wf-detail-meta">';
   html += escHtml(wf.description || '') + '<br>';
@@ -1182,28 +1451,32 @@ function renderWorkflowDetail(wf, filePath, source) {
   html += '</div>';
   html += '</div>';
   html += '<div class="wf-detail-actions">';
+  html += '<button class="btn-danger" id="wf-btn-delete">Delete</button>';
+  html += '</div>';
+  html += '</div>';
 
-  // View toggle buttons
+  // Tab bar
+  html += '<div class="wf-tab-bar">';
   var views = [
     { key: 'visual', label: 'Visual' },
-    { key: 'run', label: '&#x25b6; Run' },
-    { key: 'json', label: '{ } JSON' },
+    { key: 'model', label: 'Model' },
+    { key: 'run', label: 'Run' },
+    { key: 'json', label: 'JSON' },
   ];
   for (var vi = 0; vi < views.length; vi++) {
     var v = views[vi];
-    html += '<button class="btn-secondary wf-view-btn' + (detailView === v.key ? ' wf-view-active' : '') + '" data-view="' + v.key + '">';
+    html += '<button class="wf-tab' + (detailView === v.key ? ' wf-tab-active' : '') + '" data-view="' + v.key + '">';
     html += v.label;
     html += '</button>';
   }
-
-  html += '<button class="btn-danger" id="wf-btn-delete">Delete</button>';
-  html += '</div>';
   html += '</div>';
 
   if (detailView === 'json') {
     html += renderJsonView(wf);
   } else if (detailView === 'run') {
     html += renderRunView(wf);
+  } else if (detailView === 'model') {
+    html += renderModelView(wf);
   } else {
     html += renderVisualView(wf, source);
   }
@@ -1229,12 +1502,21 @@ function renderVisualView(wf, source) {
     var d = new Date(wf.metadata.createdAt);
     html += infoChip('Created', d.toLocaleDateString());
   }
+  // Model status chip
+  if (wf.metadata && wf.metadata.trainingStatus === 'complete') {
+    var _verStr = wf.metadata.modelVersion ? 'v' + wf.metadata.modelVersion + ' ' : '';
+    html += infoChip('Model', _verStr + '(AUC ' + ((wf.metadata.trainingRun && wf.metadata.trainingRun.bestAuc) || 0).toFixed(3) + ')', '#10b981');
+  } else if (wf.metadata && (wf.metadata.trainingStatus === 'training' || wf.metadata.trainingStatus === 'pending')) {
+    html += infoChip('Model', 'Training...', '#c4b5fd');
+  } else if (wf.metadata && wf.metadata.trainingStatus === 'failed') {
+    html += infoChip('Model', 'Failed', '#ef4444');
+  }
   html += '</div>';
 
   // Variables section
   if (wf.variables && wf.variables.length > 0) {
     html += '<div class="wf-section">';
-    html += '<div class="wf-section-header">Variables (' + wf.variables.length + ')</div>';
+    html += '<div class="wf-section-header">Variables (' + wf.variables.length + ')' + helpIcon('workflows-variables') + '</div>';
     html += '<div class="wf-section-body">';
     for (var i = 0; i < wf.variables.length; i++) {
       var v = wf.variables[i];
@@ -1265,7 +1547,7 @@ function renderVisualView(wf, source) {
 
   // Steps section
   html += '<div class="wf-section">';
-  html += '<div class="wf-section-header">Steps (' + wf.steps.length + ')</div>';
+  html += '<div class="wf-section-header">Steps (' + wf.steps.length + ')' + helpIcon('workflows-steps') + '</div>';
   html += '<div class="wf-section-body">';
   for (var i = 0; i < wf.steps.length; i++) {
     var step = wf.steps[i];
@@ -1305,6 +1587,456 @@ function renderVisualView(wf, source) {
   return html;
 }
 
+// ── Model View ──────────────────────────────────────────────
+
+function renderModelView(wf) {
+  var html = '';
+  var ts = wf.metadata && wf.metadata.trainingStatus;
+  var tr = wf.metadata && wf.metadata.trainingRun;
+
+  // Live training status container (populated by polling)
+  html += '<div id="wf-training-status"></div>';
+
+  // Current model status section
+  html += '<div class="wf-section">';
+  html += '<div class="wf-section-header">Model Status' + helpIcon('workflows-model') + '</div>';
+  html += '<div class="wf-section-body">';
+
+  if (ts === 'complete') {
+    html += '<div style="display:flex;align-items:center;gap:0.75rem;margin-bottom:0.75rem;">';
+    html += '<span style="font-size:1.5rem;">&#x2705;</span>';
+    html += '<div>';
+    html += '<div style="font-size:0.9rem;font-weight:600;color:#6ee7b7;">Model Ready</div>';
+    html += '<div style="font-size:0.75rem;color:#64748b;">Visual verification enabled for this workflow</div>';
+    html += '</div>';
+    html += '</div>';
+
+    // Version badge
+    if (wf.metadata.modelVersion) {
+      html += '<div style="margin-bottom:0.75rem;">';
+      html += infoChip('Active Version', 'v' + escHtml(wf.metadata.modelVersion), '#6ee7b7');
+      html += '</div>';
+    }
+
+    // Quality gate result for last training run
+    if (tr && tr.version && tr.promoted === false) {
+      html += '<div style="background:#1e1b4b;border:1px solid #4c1d95;border-radius:6px;padding:0.6rem 0.75rem;margin-bottom:0.75rem;font-size:0.75rem;">';
+      html += '<span style="color:#c4b5fd;font-weight:600;">Quality Gate:</span> ';
+      html += '<span style="color:#fbbf24;">v' + escHtml(tr.version) + ' was trained but not promoted</span> ';
+      html += '<span style="color:#94a3b8;">(AUC ' + (tr.bestAuc || 0).toFixed(4) + ' &lt; active version)</span>';
+      html += '</div>';
+    }
+
+    // Stats
+    html += '<div style="display:flex;gap:1rem;flex-wrap:wrap;margin-bottom:0.75rem;">';
+    if (tr && tr.bestAuc) {
+      html += infoChip('Best AUC', tr.bestAuc.toFixed(4), '#10b981');
+    }
+    if (tr && tr.epochs) {
+      html += infoChip('Epochs', String(tr.epochs));
+    }
+    if (tr && tr.completedAt) {
+      var d = new Date(tr.completedAt);
+      html += infoChip('Trained', d.toLocaleDateString() + ' ' + d.toLocaleTimeString());
+    }
+    if (tr && tr.worker) {
+      html += infoChip('Worker', tr.worker, '#c4b5fd');
+    }
+    if (tr && tr.version) {
+      html += infoChip('Last Version', 'v' + escHtml(tr.version));
+    }
+    html += '</div>';
+
+    // Model path
+    if (wf.metadata.modelPath) {
+      html += '<div style="font-size:0.7rem;color:#475569;font-family:monospace;word-break:break-all;">';
+      html += escHtml(wf.metadata.modelPath);
+      html += '</div>';
+    }
+
+  } else if (ts === 'failed') {
+    html += '<div style="display:flex;align-items:center;gap:0.75rem;margin-bottom:0.75rem;">';
+    html += '<span style="font-size:1.5rem;">&#x274c;</span>';
+    html += '<div>';
+    html += '<div style="font-size:0.9rem;font-weight:600;color:#fca5a5;">Training Failed</div>';
+    if (tr && tr.error) {
+      html += '<div style="font-size:0.75rem;color:#ef4444;word-break:break-word;">' + escHtml(tr.error) + '</div>';
+    }
+    html += '</div>';
+    html += '</div>';
+
+  } else if (ts === 'training' || ts === 'pending') {
+    html += '<div style="display:flex;align-items:center;gap:0.75rem;">';
+    html += '<span style="font-size:1.5rem;" class="wf-training-pulse">&#x1f9e0;</span>';
+    html += '<div>';
+    html += '<div style="font-size:0.9rem;font-weight:600;color:#c4b5fd;">Training in Progress</div>';
+    html += '<div style="font-size:0.75rem;color:#64748b;">Model training will appear above when status updates</div>';
+    html += '</div>';
+    html += '</div>';
+
+  } else {
+    html += '<div style="display:flex;align-items:center;gap:0.75rem;">';
+    html += '<span style="font-size:1.5rem;">&#x1f6ab;</span>';
+    html += '<div>';
+    html += '<div style="font-size:0.9rem;font-weight:600;color:#94a3b8;">No Model</div>';
+    html += '<div style="font-size:0.75rem;color:#64748b;">This workflow has no trained model. Visual verification is not available.</div>';
+    html += '</div>';
+    html += '</div>';
+  }
+
+  html += '</div>';
+  html += '</div>';
+
+  // Training Data section
+  html += '<div class="wf-section">';
+  html += '<div class="wf-section-header">Training Data</div>';
+  html += '<div class="wf-section-body">';
+  html += '<div id="wf-training-data-stats"><span style="color:#64748b;font-size:0.75rem;">Loading...</span></div>';
+  html += '</div>';
+  html += '</div>';
+
+  // Training controls section
+  html += '<div class="wf-section">';
+  html += '<div class="wf-section-header">Training</div>';
+  html += '<div class="wf-section-body">';
+
+  html += '<div style="font-size:0.78rem;color:#94a3b8;margin-bottom:1rem;">';
+  html += 'Train a visual verification model from the element screenshots captured during this workflow\'s recording. ';
+  html += 'If a remote GPU worker is available, training will be dispatched there automatically.';
+  html += '</div>';
+
+  // Configuration form (compact)
+  html += '<div class="wf-model-config">';
+
+  html += '<div class="wf-model-config-row">';
+  html += '<label class="wf-model-config-label">Architecture</label>';
+  html += '<select id="wf-model-backbone" class="wf-model-select">';
+  html += '<option value="mobilenet_v3_small">MobileNet V3 Small (fastest)</option>';
+  html += '<option value="efficientnet_b0" selected>EfficientNet B0 (balanced)</option>';
+  html += '<option value="resnet18">ResNet-18 (most robust)</option>';
+  html += '</select>';
+  html += '</div>';
+
+  html += '<div class="wf-model-config-row">';
+  html += '<label class="wf-model-config-label">Epochs</label>';
+  html += '<input type="number" id="wf-model-epochs" class="wf-model-input" value="150" min="10" max="500">';
+  html += '</div>';
+
+  html += '<div class="wf-model-config-row">';
+  html += '<label class="wf-model-config-label">Embedding Dim</label>';
+  html += '<select id="wf-model-embed-dim" class="wf-model-select">';
+  html += '<option value="64">64</option>';
+  html += '<option value="128" selected>128</option>';
+  html += '<option value="256">256</option>';
+  html += '</select>';
+  html += '</div>';
+
+  html += '</div>'; // end config
+
+  // Action buttons
+  html += '<div style="display:flex;gap:0.75rem;margin-top:1rem;flex-wrap:wrap;">';
+
+  if (ts === 'training' || ts === 'pending') {
+    html += '<button class="btn-secondary" disabled style="opacity:0.5;font-size:0.8rem;padding:0.5rem 1.25rem;">Training in progress...</button>';
+  } else if (ts === 'complete') {
+    html += '<button class="btn-secondary" id="wf-btn-retrain" style="font-size:0.8rem;padding:0.5rem 1.25rem;">&#x1f504; Retrain Model</button>';
+  } else if (ts === 'failed') {
+    html += '<button class="btn-save" id="wf-btn-retrain" style="font-size:0.8rem;padding:0.5rem 1.25rem;">&#x1f504; Retry Training</button>';
+  } else {
+    html += '<button class="btn-save" id="wf-btn-retrain" style="font-size:0.8rem;padding:0.5rem 1.25rem;">&#x1f9e0; Train Model</button>';
+  }
+
+  html += '</div>';
+  html += '</div>';
+  html += '</div>';
+
+  // Version History section
+  html += '<div class="wf-section">';
+  html += '<div class="wf-section-header">Version History</div>';
+  html += '<div class="wf-section-body">';
+  html += '<div id="wf-version-history"><span style="color:#64748b;font-size:0.75rem;">Loading...</span></div>';
+  html += '</div>';
+  html += '</div>';
+
+  // Workers section (compact)
+  html += '<div class="wf-section">';
+  html += '<div class="wf-section-header">Workers</div>';
+  html += '<div class="wf-section-body">';
+  html += '<div style="font-size:0.78rem;color:#94a3b8;margin-bottom:0.75rem;">';
+  html += 'Remote GPU workers for faster training. Workers are auto-detected on the local network.';
+  html += '</div>';
+  html += '<div id="wf-workers-list"><span style="color:#64748b;font-size:0.75rem;">Loading...</span></div>';
+  html += '</div>';
+  html += '</div>';
+
+  return html;
+}
+
+function wireModelViewHandlers(wf) {
+  // Retrain button
+  var retrainBtn = document.getElementById('wf-btn-retrain');
+  if (retrainBtn) {
+    retrainBtn.addEventListener('click', async function() {
+      retrainBtn.disabled = true;
+      retrainBtn.textContent = 'Starting...';
+      try {
+        // Read config from the form
+        var configBody = {};
+        var backboneEl = document.getElementById('wf-model-backbone');
+        var epochsEl = document.getElementById('wf-model-epochs');
+        var embedDimEl = document.getElementById('wf-model-embed-dim');
+        if (backboneEl) configBody.backbone = backboneEl.value;
+        if (epochsEl) configBody.epochs = parseInt(epochsEl.value, 10);
+        if (embedDimEl) configBody.embedDim = parseInt(embedDimEl.value, 10);
+
+        var res = await fetch('/api/workflows/' + encodeURIComponent(wf.id) + '/training/retry', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(configBody),
+        });
+        var data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Failed to start training');
+        toast('Training started', 'success');
+        startWorkflowTrainingPoll(wf.id);
+      } catch (err) {
+        toast('Failed: ' + err.message, 'error');
+        retrainBtn.disabled = false;
+        retrainBtn.textContent = '\u{1f504} Retry Training';
+      }
+    });
+  }
+
+  // Load workers list, version history, and training data stats
+  loadModelViewWorkers();
+  loadVersionHistory(wf.id);
+  loadTrainingDataStats(wf.id);
+}
+
+async function loadModelViewWorkers() {
+  var listEl = document.getElementById('wf-workers-list');
+  if (!listEl) return;
+
+  try {
+    var res = await fetch('/api/workers');
+    var data = await res.json();
+    var workers = data.workers || [];
+
+    if (workers.length === 0) {
+      listEl.innerHTML = '<div style="color:#64748b;font-size:0.75rem;">No workers configured. Training will run locally. Workers are auto-discovered on the local network, or add one from the Training tab.</div>';
+      return;
+    }
+
+    var html = '';
+    for (var i = 0; i < workers.length; i++) {
+      var w = workers[i];
+      var statusColor = w.online ? (w.status === 'busy' ? '#f59e0b' : '#10b981') : '#64748b';
+      var statusText = w.online ? (w.status === 'busy' ? 'busy' : 'idle') : 'offline';
+      var gpuInfo = w.gpu ? escHtml(w.gpu) : 'CPU';
+
+      html += '<div style="display:flex;align-items:center;gap:0.75rem;padding:0.4rem 0;border-bottom:1px solid #1e293b;font-size:0.75rem;">';
+      html += '<span style="color:' + statusColor + ';font-size:0.8rem;">&#x25cf;</span>';
+      html += '<div style="flex:1;">';
+      html += '<span style="font-weight:600;color:#e2e8f0;">' + escHtml(w.name) + '</span>';
+      html += ' <span style="color:#64748b;">' + escHtml(w.host) + ':' + w.port + ' &middot; ' + gpuInfo + '</span>';
+      html += '</div>';
+      html += '<span style="font-size:0.65rem;color:' + statusColor + ';font-weight:600;text-transform:uppercase;">' + statusText + '</span>';
+      html += '</div>';
+    }
+
+    listEl.innerHTML = html;
+  } catch (err) {
+    listEl.innerHTML = '<div style="color:#64748b;font-size:0.75rem;">Failed to load workers</div>';
+  }
+}
+
+// ── Version History ──────────────────────────────────────────
+
+function compareSemVerJS(a, b) {
+  var pa = a.split('.').map(Number);
+  var pb = b.split('.').map(Number);
+  for (var i = 0; i < 3; i++) {
+    if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) - (pb[i] || 0);
+  }
+  return 0;
+}
+
+async function loadVersionHistory(workflowId) {
+  var container = document.getElementById('wf-version-history');
+  if (!container) return;
+
+  try {
+    var res = await fetch('/api/workflows/' + encodeURIComponent(workflowId) + '/model/versions');
+    var data = await res.json();
+    var versions = data.versions || [];
+
+    if (versions.length === 0) {
+      container.innerHTML = '<div style="color:#64748b;font-size:0.75rem;">No model versions yet. Train a model to create the first version.</div>';
+      return;
+    }
+
+    var activeVersion = data.activeVersion;
+
+    // Sort descending (newest first)
+    versions.sort(function(a, b) {
+      return compareSemVerJS(b.version, a.version);
+    });
+
+    var html = '<table class="wf-version-table">';
+    html += '<thead><tr>';
+    html += '<th>Version</th>';
+    html += '<th>AUC</th>';
+    html += '<th>Backbone</th>';
+    html += '<th>Epochs</th>';
+    html += '<th>Trained</th>';
+    html += '<th></th>';
+    html += '</tr></thead><tbody>';
+
+    for (var i = 0; i < versions.length; i++) {
+      var v = versions[i];
+      var isActive = v.version === activeVersion;
+      var isFailed = v.status === 'failed';
+      var rowClass = isActive ? ' wf-version-active' : (isFailed ? ' wf-version-failed' : '');
+
+      html += '<tr class="wf-version-row' + rowClass + '">';
+
+      // Version column
+      html += '<td class="wf-version-cell-version">';
+      html += 'v' + escHtml(v.version);
+      if (isActive) html += ' <span class="wf-version-badge-active">ACTIVE</span>';
+      if (isFailed) html += ' <span class="wf-version-badge-failed">FAILED</span>';
+      html += '</td>';
+
+      // AUC column
+      var aucColor = isFailed ? '#64748b' : (v.bestAuc >= 0.95 ? '#6ee7b7' : (v.bestAuc >= 0.90 ? '#fbbf24' : '#f87171'));
+      html += '<td style="color:' + aucColor + ';font-weight:600;">' + (isFailed ? '-' : v.bestAuc.toFixed(4)) + '</td>';
+
+      // Backbone column
+      var bbShort = (v.backbone || '').replace('mobilenet_v3_small', 'MNv3').replace('efficientnet_b0', 'EffB0').replace('resnet18', 'RN18');
+      html += '<td style="color:#94a3b8;">' + escHtml(bbShort) + '</td>';
+
+      // Epochs column
+      html += '<td style="color:#94a3b8;">' + (v.epochs || '-') + '</td>';
+
+      // Trained date column
+      var d = new Date(v.trainedAt);
+      html += '<td style="color:#64748b;">' + d.toLocaleDateString() + '</td>';
+
+      // Action column
+      html += '<td>';
+      if (!isActive && !isFailed) {
+        html += '<button class="btn-secondary wf-version-activate" data-version="' + escHtml(v.version) + '" style="font-size:0.6rem;padding:0.2rem 0.5rem;">Activate</button>';
+      }
+      html += '</td>';
+
+      html += '</tr>';
+    }
+
+    html += '</tbody></table>';
+    container.innerHTML = html;
+
+    // Wire up activate buttons
+    container.querySelectorAll('.wf-version-activate').forEach(function(btn) {
+      btn.addEventListener('click', async function() {
+        var version = btn.getAttribute('data-version');
+        btn.disabled = true;
+        btn.textContent = 'Activating...';
+        try {
+          var aRes = await fetch('/api/workflows/' + encodeURIComponent(workflowId) + '/model/activate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ version: version }),
+          });
+          var aData = await aRes.json();
+          if (!aRes.ok) throw new Error(aData.error || 'Activation failed');
+          toast('Activated v' + version, 'success');
+          selectWorkflow(workflowId);
+        } catch (err) {
+          toast('Failed: ' + err.message, 'error');
+          btn.disabled = false;
+          btn.textContent = 'Activate';
+        }
+      });
+    });
+
+  } catch (err) {
+    container.innerHTML = '<div style="color:#64748b;font-size:0.75rem;">Failed to load version history</div>';
+  }
+}
+
+// ── Training Data Stats ──────────────────────────────────────
+
+async function loadTrainingDataStats(workflowId) {
+  var container = document.getElementById('wf-training-data-stats');
+  if (!container) return;
+
+  try {
+    var res = await fetch('/api/workflows/' + encodeURIComponent(workflowId) + '/training/data');
+    var data = await res.json();
+    var snap = data.snapshots;
+    var crops = data.crops;
+    var last = data.lastTraining;
+    var html = '';
+
+    // Snapshots stats
+    html += '<div class="wf-td-section">';
+    html += '<div class="wf-td-title">Snapshots</div>';
+    if (snap.total === 0) {
+      html += '<div class="wf-td-empty">No snapshots yet. Record a workflow or run it successfully to collect training data.</div>';
+    } else {
+      html += '<div class="wf-td-grid">';
+      html += tdStat(snap.total, 'Snapshots', '#e2e8f0');
+      html += tdStat(snap.fromRecording, 'From Recording', '#c4b5fd');
+      html += tdStat(snap.fromExecution, 'From Runs', '#6ee7b7');
+      html += tdStat(snap.totalElements, 'Elements', '#94a3b8');
+      html += tdStat(snap.uniqueSelectors, 'Unique Selectors', '#94a3b8');
+      html += tdStat(snap.interactedSelectors, 'Interacted', '#fbbf24');
+      html += '</div>';
+    }
+    html += '</div>';
+
+    // Crops stats (only if data has been prepared)
+    if (crops) {
+      html += '<div class="wf-td-section">';
+      html += '<div class="wf-td-title">Prepared Crops</div>';
+      html += '<div class="wf-td-grid">';
+      html += tdStat(crops.total, 'Total Crops', '#e2e8f0');
+      html += tdStat(crops.uniqueGroups, 'Groups', '#94a3b8');
+      html += tdStat(crops.interacted, 'Positive', '#6ee7b7');
+      html += tdStat(crops.nonInteracted, 'Negative', '#94a3b8');
+      html += '</div>';
+      html += '</div>';
+    }
+
+    // Last training run info
+    if (last) {
+      html += '<div class="wf-td-section">';
+      html += '<div class="wf-td-title">Last Training (v' + escHtml(last.version) + ')</div>';
+      html += '<div class="wf-td-grid">';
+      var bbShort = (last.backbone || '').replace('mobilenet_v3_small', 'MobileNet V3').replace('efficientnet_b0', 'EfficientNet B0').replace('resnet18', 'ResNet-18');
+      html += tdStat(bbShort, 'Backbone', '#c4b5fd');
+      html += tdStat(last.epochs, 'Epochs', '#94a3b8');
+      html += tdStat(last.embedDim, 'Embed Dim', '#94a3b8');
+      html += tdStat(last.bestAuc.toFixed(4), 'Best AUC', last.bestAuc >= 0.95 ? '#6ee7b7' : (last.bestAuc >= 0.90 ? '#fbbf24' : '#f87171'));
+      html += tdStat(last.cropsPerElement + 'x', 'Crops/Element', '#94a3b8');
+      var d = new Date(last.trainedAt);
+      html += tdStat(d.toLocaleDateString(), 'Trained', '#64748b');
+      html += '</div>';
+      html += '</div>';
+    }
+
+    container.innerHTML = html;
+  } catch (err) {
+    container.innerHTML = '<div style="color:#64748b;font-size:0.75rem;">Failed to load training data stats</div>';
+  }
+}
+
+function tdStat(value, label, color) {
+  return '<div class="wf-td-stat">' +
+    '<div class="wf-td-stat-value" style="color:' + (color || '#e2e8f0') + ';">' + value + '</div>' +
+    '<div class="wf-td-stat-label">' + escHtml(label) + '</div>' +
+    '</div>';
+}
+
 // ── JSON View ────────────────────────────────────────────────
 
 function renderJsonView(wf) {
@@ -1329,13 +2061,20 @@ function renderRunView(wf) {
 
   // Workflow info
   html += '<div class="wf-section">';
-  html += '<div class="wf-section-header">&#x25b6; Run Workflow: ' + escHtml(wf.name) + '</div>';
+  html += '<div class="wf-section-header">&#x25b6; Run Workflow: ' + escHtml(wf.name) + helpIcon('workflows-run') + '</div>';
   html += '<div class="wf-section-body">';
 
+  var isDesktopWf = wf.site === 'desktop';
   html += '<div style="font-size:0.8rem;color:#94a3b8;margin-bottom:1rem;">';
   html += escHtml(wf.description || 'No description') + '<br>';
-  html += '<span style="color:#64748b;">Site: ' + escHtml(wf.site || 'any') + ' &middot; ' + wf.steps.length + ' steps</span>';
+  html += '<span style="color:#64748b;">' + (isDesktopWf ? 'Desktop App' : 'Site: ' + escHtml(wf.site || 'any')) + ' &middot; ' + wf.steps.length + ' steps</span>';
   html += '</div>';
+
+  if (isDesktopWf) {
+    html += '<div style="background:#1e293b;border:1px solid #334155;border-radius:6px;padding:0.75rem;margin-bottom:1rem;font-size:0.78rem;color:#94a3b8;">';
+    html += '<strong style="color:#7dd3fc;">Desktop workflow</strong> — this will control your mouse and keyboard to automate native applications. Make sure the target app is visible on screen before running.';
+    html += '</div>';
+  }
 
   // Variable input form (dynamic per workflow)
   if (wf.variables && wf.variables.length > 0) {
@@ -1377,15 +2116,17 @@ function renderRunView(wf) {
         inputType = 'number';
       }
 
+      var savedVal = getRunVarValue(wf.id, v.name, v.default !== undefined ? String(v.default) : '');
+
       if (isTextarea) {
         html += '<textarea class="wf-var-input wf-run-input" id="wf-run-var-' + escAttr(v.name) + '" name="' + escAttr(v.name) + '"';
         html += ' placeholder="' + escAttr(placeholder) + '"';
         html += ' style="min-height:80px;resize:vertical;">';
-        html += v.default !== undefined ? escHtml(String(v.default)) : '';
+        html += escHtml(savedVal);
         html += '</textarea>';
       } else {
         html += '<input class="wf-var-input wf-run-input" type="' + inputType + '" id="wf-run-var-' + escAttr(v.name) + '" name="' + escAttr(v.name) + '"';
-        html += ' value="' + (v.default !== undefined ? escAttr(String(v.default)) : '') + '"';
+        html += ' value="' + escAttr(savedVal) + '"';
         html += ' placeholder="' + escAttr(placeholder) + '">';
       }
 
@@ -1438,7 +2179,7 @@ function renderRunView(wf) {
 
   // Run + Debug buttons
   html += '<div class="save-row" style="gap:0.75rem;">';
-  html += '<button class="btn-save wf-run-btn" id="wf-btn-run" style="background:#10b981;">&#x25b6; Run Workflow</button>';
+  html += '<button class="btn-save wf-run-btn" id="wf-btn-run" style="background:#10b981;">&#x25b6; ' + (isDesktopWf ? 'Run Desktop Workflow' : 'Run Workflow') + '</button>';
   html += '<button class="btn-save wf-debug-btn" id="wf-btn-debug" style="background:#3b82f6;">&#x1f50d; Debug</button>';
   html += '<span class="save-status" id="wf-run-status"></span>';
   html += '</div>';
@@ -1490,13 +2231,7 @@ function renderPipelineList(currentWf) {
 // ── Event Wiring ─────────────────────────────────────────────
 
 function wireUpHandlers(wf, filePath, source) {
-  // View toggle buttons
-  document.querySelectorAll('.wf-view-btn').forEach(function(btn) {
-    btn.addEventListener('click', function() {
-      detailView = btn.dataset.view;
-      renderWorkflowDetail(wf, filePath, source);
-    });
-  });
+  // Tab clicks are handled by delegated listener in initWorkflowDelegation()
 
   // Delete
   var deleteBtn = document.querySelector('#wf-btn-delete');
@@ -1564,6 +2299,11 @@ function wireUpHandlers(wf, filePath, source) {
   // Render initial pipeline list
   if (detailView === 'run') {
     renderPipelineList(wf);
+  }
+
+  // Model view handlers
+  if (detailView === 'model') {
+    wireModelViewHandlers(wf);
   }
 
   // Run button
@@ -1801,11 +2541,14 @@ function wireUpHandlers(wf, filePath, source) {
         if (!step) return;
         var updated = collectStepEditorValues(editor, step);
         wf.steps[idx] = updated;
+        var varsAdded = ensureStepVariablesDeclared(wf, updated);
         saveBtn.disabled = true;
         saveBtn.textContent = 'Saving...';
         try {
           await saveWorkflow(wf.id, wf);
-          toast('Step ' + (idx + 1) + ' saved', 'success');
+          var msg = 'Step ' + (idx + 1) + ' saved';
+          if (varsAdded > 0) msg += ' — ' + varsAdded + ' variable' + (varsAdded > 1 ? 's' : '') + ' added';
+          toast(msg, 'success');
           renderWorkflowDetail(wf, filePath, source);
         } catch (err) {
           toast('Save failed: ' + err.message, 'error');
@@ -1879,6 +2622,51 @@ function wireUpHandlers(wf, filePath, source) {
           toast('Move failed: ' + err.message, 'error');
           downBtn.disabled = false;
         }
+      });
+    }
+
+    // Insert Step Below
+    var insertBtn = editor.querySelector('.wf-se-insert-below');
+    if (insertBtn) {
+      insertBtn.addEventListener('click', function() {
+        // Toggle inline type picker
+        var existing = editor.querySelector('.wf-se-insert-picker');
+        if (existing) { existing.remove(); return; }
+
+        var pickerHtml = '<div class="wf-se-insert-picker" style="margin-top:0.5rem;padding:0.5rem;background:#1e293b;border:1px solid #334155;border-radius:6px;">';
+        pickerHtml += '<div style="font-size:0.75rem;color:#94a3b8;margin-bottom:0.5rem;">Select step type to insert:</div>';
+        pickerHtml += '<div style="display:flex;flex-wrap:wrap;gap:0.35rem;">';
+        var allTypes = ['navigate', 'click', 'type', 'wait', 'keyboard', 'scroll', 'assert', 'set_variable', 'file_dialog', 'capture_download', 'move_file'];
+        for (var ti = 0; ti < allTypes.length; ti++) {
+          var t = allTypes[ti];
+          var tIcon = STEP_ICONS[t] || '&#x25cf;';
+          pickerHtml += '<button class="wf-se-btn wf-se-insert-type" data-insert-type="' + t + '" style="font-size:0.7rem;padding:0.25rem 0.5rem;">' + tIcon + ' ' + t + '</button>';
+        }
+        pickerHtml += '</div>';
+        pickerHtml += '</div>';
+
+        editor.insertAdjacentHTML('beforeend', pickerHtml);
+
+        editor.querySelectorAll('.wf-se-insert-type').forEach(function(typeBtn) {
+          typeBtn.addEventListener('click', async function() {
+            var newType = typeBtn.getAttribute('data-insert-type');
+            var newStep = buildDefaultStep(newType);
+            newStep.id = 'step-' + Date.now() + '-' + newType;
+            newStep.label = buildStepLabel(newStep, idx + 1);
+
+            wf.steps.splice(idx + 1, 0, newStep);
+            insertBtn.disabled = true;
+            try {
+              await saveWorkflow(wf.id, wf);
+              toast('Step inserted', 'success');
+              renderWorkflowDetail(wf, filePath, source);
+            } catch (err) {
+              toast('Insert failed: ' + err.message, 'error');
+              wf.steps.splice(idx + 1, 1);
+              insertBtn.disabled = false;
+            }
+          });
+        });
       });
     }
   });
@@ -2118,6 +2906,16 @@ function startRunPoll(wf) {
           indicator.classList.remove('wf-rec-active');
           indicator.innerHTML = data.success ? '&#x2705;' : '&#x274c;';
         }
+
+        // Show training data status badge
+        if (feedEl && data.trainingDataKept !== undefined) {
+          var tdBadge = data.trainingDataKept
+            ? '<div class="wf-run-training-badge wf-run-training-kept">&#x1f9e0; Run snapshots saved as training data</div>'
+            : '<div class="wf-run-training-badge wf-run-training-discarded">&#x1f5d1; Run snapshots discarded</div>';
+          feedEl.innerHTML += tdBadge;
+          feedEl.scrollTop = feedEl.scrollHeight;
+        }
+
         resetRunUI(wf);
         if (data.success) {
           toast('Workflow "' + data.workflowName + '" completed in ' + formatDuration(data.durationMs), 'success');
@@ -2372,6 +3170,232 @@ function generateVariableValue(v, wf) {
   if (type === 'string') return 'sample_' + v.name;
 
   return null;
+}
+
+// ── Per-Workflow Training Status Polling ─────────────────────
+
+function startWorkflowTrainingPoll(workflowId) {
+  // Don't double-poll
+  if (workflowTrainingPolls[workflowId]) return;
+
+  // Poll immediately, then every 3 seconds
+  pollWorkflowTrainingOnce(workflowId);
+  workflowTrainingPolls[workflowId] = setInterval(function() {
+    pollWorkflowTrainingOnce(workflowId);
+  }, 3000);
+}
+
+function stopWorkflowTrainingPoll(workflowId) {
+  if (workflowTrainingPolls[workflowId]) {
+    clearInterval(workflowTrainingPolls[workflowId]);
+    delete workflowTrainingPolls[workflowId];
+  }
+}
+
+function stopAllWorkflowTrainingPolls() {
+  Object.keys(workflowTrainingPolls).forEach(function(id) {
+    clearInterval(workflowTrainingPolls[id]);
+  });
+  workflowTrainingPolls = {};
+}
+
+async function checkAndPollWorkflowTraining(workflowId) {
+  // One-shot check if the server has an active training for this workflow
+  try {
+    var res = await fetch('/api/workflows/' + encodeURIComponent(workflowId) + '/training/status');
+    if (!res.ok) return;
+    var status = await res.json();
+    // If training is active (not complete/error), start polling
+    if (status.phase && status.phase !== 'complete' && status.phase !== 'error') {
+      startWorkflowTrainingPoll(workflowId);
+    } else {
+      // Still render the last status (completed/failed card)
+      if (selectedWorkflow === workflowId) {
+        var container = document.getElementById('wf-training-status');
+        if (container) {
+          container.innerHTML = renderWorkflowTrainingStatus(status, workflowId);
+          wireTrainingRetryBtn(workflowId);
+        }
+      }
+    }
+  } catch (err) {
+    // No training info available — that's fine
+  }
+}
+
+async function pollWorkflowTrainingOnce(workflowId) {
+  try {
+    var res = await fetch('/api/workflows/' + encodeURIComponent(workflowId) + '/training/status');
+    if (!res.ok) {
+      // 404 = no training found; stop polling
+      if (res.status === 404) {
+        stopWorkflowTrainingPoll(workflowId);
+      }
+      return;
+    }
+    var status = await res.json();
+
+    // Render into the training status div (only if this workflow is still selected)
+    if (selectedWorkflow === workflowId) {
+      var container = document.getElementById('wf-training-status');
+      if (container) {
+        container.innerHTML = renderWorkflowTrainingStatus(status, workflowId);
+        wireTrainingRetryBtn(workflowId);
+      }
+    }
+
+    // If training completed or failed, stop polling and refresh sidebar
+    if (status.phase === 'complete' || status.phase === 'error') {
+      stopWorkflowTrainingPoll(workflowId);
+      // Refresh sidebar to update badges
+      fetchWorkflows();
+      // Re-fetch detail to update info chips (modelPath, AUC, etc.)
+      if (selectedWorkflow === workflowId) {
+        // Small delay to let the workflow JSON file update
+        setTimeout(function() { selectWorkflow(workflowId); }, 1000);
+      }
+    }
+  } catch (err) {
+    // Network error — don't stop polling, it might recover
+  }
+}
+
+function renderWorkflowTrainingStatus(status, workflowId) {
+  var html = '';
+
+  if (status.phase === 'complete') {
+    // Completed training — show summary card
+    html += '<div class="wf-training-card wf-training-complete-card">';
+    html += '<div class="wf-training-card-header">';
+    html += '<div class="wf-training-card-title">&#x2705; Model Training Complete</div>';
+    html += '<span class="wf-training-card-phase" style="background:#065f46;color:#6ee7b7;">complete</span>';
+    html += '</div>';
+    html += '<div class="training-stats-row">';
+    if (status.bestAuc > 0) {
+      html += '<span>Best AUC: <strong style="color:#6ee7b7;">' + status.bestAuc.toFixed(4) + '</strong></span>';
+    }
+    if (status.totalEpochs > 0) {
+      html += '<span>Epochs: <strong>' + status.totalEpochs + '</strong></span>';
+    }
+    if (status.elapsed > 0) {
+      html += '<span>Duration: <strong>' + formatTrainingTime(status.elapsed / 1000) + '</strong></span>';
+    }
+    html += '</div>';
+    html += '</div>';
+    return html;
+  }
+
+  if (status.phase === 'error') {
+    // Failed training — show error card with retry
+    html += '<div class="wf-training-card wf-training-failed-card">';
+    html += '<div class="wf-training-card-header">';
+    html += '<div class="wf-training-card-title">&#x274c; Model Training Failed</div>';
+    html += '<span class="wf-training-card-phase" style="background:#7f1d1d;color:#fca5a5;">failed</span>';
+    html += '</div>';
+    if (status.error) {
+      html += '<div style="font-size:0.75rem;color:#fca5a5;margin-bottom:0.75rem;word-break:break-word;">' + escHtml(status.error) + '</div>';
+    }
+    html += '<button class="btn-secondary" id="wf-training-retry" style="font-size:0.72rem;padding:0.35rem 0.75rem;">&#x1f504; Retry Training</button>';
+    html += '</div>';
+    return html;
+  }
+
+  // Active training — show progress
+  html += '<div class="wf-training-card">';
+  html += '<div class="wf-training-card-header">';
+  var trainingTitle = 'Model Training';
+  if (status.worker && status.worker.name) {
+    trainingTitle += ' <span style="font-weight:400;color:#94a3b8;font-size:0.7rem;">on ' + escHtml(status.worker.name) + '</span>';
+  }
+  html += '<div class="wf-training-card-title"><span class="wf-training-pulse">&#x25cf;</span> ' + trainingTitle + '</div>';
+
+  var phaseLabel = status.phase || 'initializing';
+  var phaseColor = '#4c1d95';
+  var phaseText = '#c4b5fd';
+  if (phaseLabel === 'preparing') { phaseLabel = 'preparing data'; }
+  else if (phaseLabel === 'training') { phaseLabel = 'training'; phaseColor = '#4c1d95'; }
+  else if (phaseLabel === 'exporting') { phaseLabel = 'exporting ONNX'; phaseColor = '#065f46'; phaseText = '#6ee7b7'; }
+
+  html += '<span class="wf-training-card-phase" style="background:' + phaseColor + ';color:' + phaseText + ';">' + escHtml(phaseLabel) + '</span>';
+  html += '</div>';
+
+  // Progress bar
+  var pct = 0;
+  var barLabel = '';
+  if (status.phase === 'preparing') {
+    pct = 5;
+    barLabel = 'Preparing training data...';
+  } else if (status.phase === 'exporting') {
+    pct = 98;
+    barLabel = 'Exporting ONNX model...';
+  } else if (status.totalEpochs > 0) {
+    pct = Math.round((status.currentEpoch / status.totalEpochs) * 100);
+    barLabel = 'Epoch ' + status.currentEpoch + ' / ' + status.totalEpochs + ' (' + pct + '%)';
+  } else {
+    pct = 2;
+    barLabel = 'Initializing...';
+  }
+
+  html += '<div class="training-progress-bar-outer">';
+  html += '<div class="training-progress-bar-fill" style="width:' + pct + '%"></div>';
+  html += '<div class="training-progress-bar-text">' + barLabel + '</div>';
+  html += '</div>';
+
+  // Stats row
+  html += '<div class="training-stats-row">';
+  if (status.loss > 0) {
+    html += '<span>Loss: <strong>' + status.loss.toFixed(4) + '</strong></span>';
+  }
+  if (status.bestAuc > 0) {
+    html += '<span>Best AUC: <strong>' + status.bestAuc.toFixed(4) + '</strong></span>';
+  }
+  if (status.elapsed > 0) {
+    html += '<span>Elapsed: <strong>' + formatTrainingTime(status.elapsed / 1000) + '</strong></span>';
+  }
+  html += '</div>';
+
+  // Last few log lines
+  if (status.logs && status.logs.length > 0) {
+    html += '<div style="margin-top:0.5rem;max-height:80px;overflow-y:auto;font-family:monospace;font-size:0.6rem;color:#64748b;background:#0f172a;border-radius:4px;padding:0.4rem;">';
+    for (var i = 0; i < status.logs.length; i++) {
+      html += escHtml(status.logs[i]) + '<br>';
+    }
+    html += '</div>';
+  }
+
+  html += '</div>';
+  return html;
+}
+
+function wireTrainingRetryBtn(workflowId) {
+  var retryBtn = document.getElementById('wf-training-retry');
+  if (retryBtn) {
+    retryBtn.addEventListener('click', async function() {
+      retryBtn.disabled = true;
+      retryBtn.textContent = 'Retrying...';
+      try {
+        var res = await fetch('/api/workflows/' + encodeURIComponent(workflowId) + '/training/retry', {
+          method: 'POST',
+        });
+        var data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Retry failed');
+        toast('Training restarted', 'success');
+        startWorkflowTrainingPoll(workflowId);
+      } catch (err) {
+        toast('Retry failed: ' + err.message, 'error');
+        retryBtn.disabled = false;
+        retryBtn.textContent = '\u{1f504} Retry Training';
+      }
+    });
+  }
+}
+
+function formatTrainingTime(seconds) {
+  if (seconds < 60) return Math.round(seconds) + 's';
+  if (seconds < 3600) return Math.floor(seconds / 60) + 'm ' + Math.round(seconds % 60) + 's';
+  var h = Math.floor(seconds / 3600);
+  var m = Math.floor((seconds % 3600) / 60);
+  return h + 'h ' + m + 'm';
 }
 
 // ── Helpers ──────────────────────────────────────────────────

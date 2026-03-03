@@ -43,6 +43,49 @@ export interface WorkflowMetadata {
     viewportWidth?: number;
     viewportHeight?: number;
   };
+  /** Path to the ONNX model trained for this workflow's visual verification */
+  modelPath?: string;
+  /** Currently active model version (SemVer string, e.g. "1.2.0") */
+  modelVersion?: string;
+  /** Training status for this workflow's model */
+  trainingStatus?: 'pending' | 'training' | 'complete' | 'failed';
+  /** Training run metadata (most recent run) */
+  trainingRun?: {
+    startedAt: string;
+    completedAt?: string;
+    bestAuc?: number;
+    epochs?: number;
+    error?: string;
+    /** Version produced by this training run */
+    version?: string;
+    /** Whether this run's model became the active version */
+    promoted?: boolean;
+    /** Remote worker name (if dispatched remotely) */
+    worker?: string;
+  };
+}
+
+/** A single model version entry in the version registry */
+export interface ModelVersionEntry {
+  version: string;
+  bestAuc: number;
+  epochs: number;
+  backbone: string;
+  embedDim: number;
+  trainedAt: string;
+  durationMs: number;
+  worker?: string;
+  status: 'complete' | 'failed';
+  /** Whether this version was promoted to active when trained */
+  promotedOverActive: boolean;
+  /** Absolute path to the encoder.onnx for this version */
+  modelPath: string;
+}
+
+/** Version registry stored in model/versions.json */
+export interface ModelVersionRegistry {
+  activeVersion: string;
+  versions: ModelVersionEntry[];
 }
 
 export interface VariableDeclaration {
@@ -95,6 +138,8 @@ export interface ElementTarget {
    * when multiple elements match (e.g., 2 "Create" buttons on the same page).
    */
   context?: ElementContext;
+  /** Path to reference image captured during recording (for visual verification) */
+  referenceImage?: string;
 }
 
 /** Contextual clues about where an element lives on the page */
@@ -150,7 +195,7 @@ export interface ElementBounds {
 /** Result from resolving an element target */
 export interface ResolvedElement {
   /** The selector that matched */
-  matchedBy: 'selector' | 'fallback' | 'ariaLabel' | 'textContent' | 'description' | 'placeholder' | 'percentage';
+  matchedBy: 'selector' | 'fallback' | 'ariaLabel' | 'textContent' | 'description' | 'placeholder' | 'percentage' | 'visual';
   /** The actual selector or description used */
   matchedValue: string;
   /** Element position from the bridge */
@@ -326,6 +371,21 @@ export interface MoveFileStep extends StepBase {
   destination: string;
 }
 
+/** Navigate an OS file selection dialog to select a file */
+export interface FileDialogStep extends StepBase {
+  type: 'file_dialog';
+  /** Absolute file path to select (supports {{variables}}) */
+  filePath: string;
+  /** Optional element to click first to open the file dialog */
+  trigger?: ElementTarget;
+  /** Variable name to store the resolved file path (default: 'selectedFile') */
+  outputVariable?: string;
+  /** Delay in ms before interacting with the dialog (default: 2000) */
+  delayBeforeMs?: number;
+  /** Delay in ms after dialog completes (default: 1000) */
+  delayAfterMs?: number;
+}
+
 /** Scroll the page or an element */
 export interface ScrollStep extends StepBase {
   type: 'scroll';
@@ -406,6 +466,58 @@ export type VariableSource =
   | { type: 'url_param'; param: string }
   | { type: 'regex'; input: string; pattern: string; group?: number };
 
+// ────────────────────────────────────────────────────────────────
+//  Desktop Automation Steps (native app coordinate-based)
+// ────────────────────────────────────────────────────────────────
+
+/** Click at absolute screen coordinates (desktop / native app automation) */
+/** Launch an application by name at OS level */
+export interface DesktopLaunchAppStep extends StepBase {
+  type: 'desktop_launch_app';
+  /** Application name (e.g., "Blender", "Spotify", "Notepad") */
+  appName: string;
+  /** Delay after launch in ms (default: 2000) to let app initialize */
+  delayAfterMs?: number;
+}
+
+export interface DesktopClickStep extends StepBase {
+  type: 'desktop_click';
+  /** Absolute screen X coordinate (top-left origin) */
+  x: number;
+  /** Absolute screen Y coordinate (top-left origin) */
+  y: number;
+  /** Click variant */
+  action: 'click' | 'double_click' | 'right_click';
+  /** Frontmost application name at time of recording (metadata) */
+  app?: string;
+  /** Human-readable description of what was clicked */
+  description?: string;
+  /** Path to reference screenshot captured at time of recording */
+  screenshotRef?: string;
+  /** Delay after click in ms (default: 500) */
+  delayAfterMs?: number;
+}
+
+/** Type text at OS level (not into a browser element) */
+export interface DesktopTypeStep extends StepBase {
+  type: 'desktop_type';
+  /** Text to type (supports {{variables}}) */
+  value: string;
+  /** Delay after typing in ms (default: 300) */
+  delayAfterMs?: number;
+}
+
+/** Press a keyboard key/combo at OS level */
+export interface DesktopKeyboardStep extends StepBase {
+  type: 'desktop_keyboard';
+  /** Key name (e.g., "Return", "Escape", "a") */
+  key: string;
+  /** Modifier keys */
+  modifiers?: ('ctrl' | 'shift' | 'alt' | 'cmd')[];
+  /** Delay after keypress in ms (default: 300) */
+  delayAfterMs?: number;
+}
+
 /** Union of all step types */
 export type WorkflowStep =
   | NavigateStep
@@ -416,13 +528,18 @@ export type WorkflowStep =
   | DownloadStep
   | CaptureDownloadStep
   | MoveFileStep
+  | FileDialogStep
   | ScrollStep
   | KeyboardStep
   | SubWorkflowStep
   | ConditionalStep
   | LoopStep
   | TryCatchStep
-  | SetVariableStep;
+  | SetVariableStep
+  | DesktopLaunchAppStep
+  | DesktopClickStep
+  | DesktopTypeStep
+  | DesktopKeyboardStep;
 
 // ────────────────────────────────────────────────────────────────
 //  Expectations (workflow-level outcome checks)
@@ -497,6 +614,8 @@ export interface ExecutionOptions {
   stopOnFailure?: boolean;
   /** Timeout for the entire workflow in ms */
   timeoutMs?: number;
+  /** Visual verifier instance for ML-based element verification (optional) */
+  visualVerifier?: import('./visual-verifier.js').VisualVerifier | null;
 }
 
 export interface ExecutionResult {
@@ -573,6 +692,26 @@ export interface CompositionNode {
   onFailure?: NodeFailurePolicy;
   /** Approval gate configuration (only when workflowId is '__approval_gate__') */
   approvalGate?: ApprovalGateConfig;
+  /** Script node configuration (only when workflowId is '__script__') */
+  script?: ScriptNodeConfig;
+  /** Output node configuration (only when workflowId is '__output__') */
+  outputNode?: OutputNodeConfig;
+  /** Image viewer configuration (only when workflowId is '__image_viewer__') */
+  imageViewer?: ImageViewerNodeConfig;
+  /** Branch node configuration (only when workflowId is '__branch__') */
+  branchNode?: BranchNodeConfig;
+  /** Delay node configuration (only when workflowId is '__delay__') */
+  delayNode?: DelayNodeConfig;
+  /** Gate node configuration (only when workflowId is '__gate__') */
+  gateNode?: GateNodeConfig;
+  /** ForEach loop configuration (only when workflowId is '__for_each__') */
+  forEachNode?: ForEachLoopConfig;
+  /** Switch node configuration (only when workflowId is '__switch__') */
+  switchNode?: SwitchNodeConfig;
+  /** Port name aliases for external display (e.g., in sub-pipeline usage) */
+  portAliases?: Record<string, string>;
+  /** Sub-pipeline reference (only when workflowId starts with 'comp:') */
+  compositionRef?: { compositionId: string };
 }
 
 /** Configuration for an approval gate node in a composition */
@@ -585,6 +724,81 @@ export interface ApprovalGateConfig {
   timeoutMs?: number;
   /** What to do if rejected: 'stop' halts the pipeline (default), 'skip' continues */
   onReject?: 'stop' | 'skip';
+}
+
+/** Declaration of a script node input or output port */
+export interface PortDeclaration {
+  name: string;
+  type: 'string' | 'number' | 'boolean' | 'string[]';
+  description?: string;
+  required?: boolean;
+  default?: unknown;
+}
+
+/** Configuration for a script node in a composition */
+export interface ScriptNodeConfig {
+  /** Natural language description of what this node does */
+  description: string;
+  /** Generated JavaScript code (async function body) */
+  code: string;
+  /** Declared input ports (parsed from @input annotations) */
+  inputs: PortDeclaration[];
+  /** Declared output ports (parsed from @output annotations) */
+  outputs: PortDeclaration[];
+  /** Agent conversation history for iterative refinement */
+  chatHistory?: Array<{ role: 'user' | 'assistant'; content: string }>;
+}
+
+/** Configuration for an output node in a composition — collects pipeline results */
+export interface OutputNodeConfig {
+  /** Dynamic input ports — values flowing in become pipeline outputs */
+  ports: PortDeclaration[];
+}
+
+/** Configuration for an image viewer node in a composition */
+export interface ImageViewerNodeConfig {
+  /** Path to image file — can use {{variables}} */
+  filePath: string;
+  /** Display width in pixels */
+  width: number;
+  /** Display height in pixels */
+  height: number;
+}
+
+/** Configuration for a branch node — conditional if/else routing */
+export interface BranchNodeConfig {
+  /** Condition expression — can use {{variable}} syntax, evaluated as truthy/falsy */
+  condition: string;
+}
+
+/** Configuration for a delay node — timed pause */
+export interface DelayNodeConfig {
+  /** Delay in milliseconds */
+  delayMs: number;
+}
+
+/** Configuration for a gate node — conditional pass-through */
+export interface GateNodeConfig {
+  /** Whether the gate is open by default */
+  defaultOpen: boolean;
+  /** What to do when the gate is closed: 'skip' downstream, 'stop' pipeline, or 'fail' pipeline (mark as error) */
+  onClosed: 'skip' | 'stop' | 'fail';
+}
+
+/** Configuration for a for-each loop node — iterate over array */
+export interface ForEachLoopConfig {
+  /** Variable name for the current item, exposed to downstream nodes */
+  itemVariable: string;
+  /** Maximum number of iterations (safety cap) */
+  maxIterations: number;
+}
+
+/** Configuration for a switch node — multi-way routing */
+export interface SwitchNodeConfig {
+  /** Named cases to match against the input value */
+  cases: Array<{ value: string; port: string }>;
+  /** Output port name for when no case matches */
+  defaultPort: string;
 }
 
 /** Runtime state of a pending approval gate */
@@ -664,6 +878,8 @@ export interface RunRecord {
   variables: Record<string, unknown>;
   /** Files produced during execution */
   outputFiles?: string[];
+  /** Collected pipeline outputs from the output node (pipeline runs only) */
+  pipelineOutputs?: Record<string, unknown>;
   /** Batch ID if this run is part of a batch */
   batchId?: string;
   /** Schedule ID if triggered by a schedule */

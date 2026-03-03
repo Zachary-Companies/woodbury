@@ -450,6 +450,78 @@ async function handleMessage(message) {
 
     // ── Actions handled by background script (not content script) ──
 
+    // Capture viewport screenshot (works outside recording mode)
+    // Optional: pass params.crop = {left, top, width, height} to crop a region
+    if (action === 'capture_viewport') {
+      try {
+        const dataUrl = await chrome.tabs.captureVisibleTab(null, { format: 'png' });
+
+        if (params.crop && params.crop.width > 0 && params.crop.height > 0) {
+          // Crop using OffscreenCanvas (available in MV3 service workers)
+          const { left, top, width, height } = params.crop;
+          const response = await fetch(dataUrl);
+          const blob = await response.blob();
+          const bitmap = await createImageBitmap(blob, left, top, width, height);
+          const canvas = new OffscreenCanvas(width, height);
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(bitmap, 0, 0);
+          const croppedBlob = await canvas.convertToBlob({ type: 'image/png' });
+          const ab = await croppedBlob.arrayBuffer();
+          const bytes = new Uint8Array(ab);
+          let binary = '';
+          for (let i = 0; i < bytes.length; i += 8192) {
+            binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192));
+          }
+          const croppedDataUrl = 'data:image/png;base64,' + btoa(binary);
+          sendResponse({ id, success: true, data: { image: croppedDataUrl } });
+        } else {
+          sendResponse({ id, success: true, data: { image: dataUrl } });
+        }
+      } catch (err) {
+        sendResponse({ id, success: false, error: err.message });
+      }
+      return;
+    }
+
+    // Request page snapshot for execution training data (works outside recording mode)
+    // Combines capture_viewport + snapshot_interactive_elements, returns data directly
+    if (action === 'request_page_snapshot') {
+      try {
+        // 1. Capture viewport screenshot
+        const dataUrl = await chrome.tabs.captureVisibleTab(null, { format: 'png' });
+
+        // 2. Ask content script for all interactive elements
+        let snapshot;
+        try {
+          const resp = await chrome.tabs.sendMessage(tab.id, {
+            action: 'snapshot_interactive_elements',
+            params: {},
+          });
+          snapshot = resp?.data || resp;
+        } catch (err) {
+          sendResponse({ id, success: false, error: 'Content script query failed: ' + err.message });
+          return;
+        }
+
+        if (!snapshot?.elements?.length) {
+          sendResponse({ id, success: true, data: { viewportImage: dataUrl, snapshot: { elements: [], url: snapshot?.url, title: snapshot?.title, viewportWidth: snapshot?.viewportWidth, viewportHeight: snapshot?.viewportHeight } } });
+          return;
+        }
+
+        sendResponse({
+          id,
+          success: true,
+          data: {
+            viewportImage: dataUrl,
+            snapshot: snapshot,
+          },
+        });
+      } catch (err) {
+        sendResponse({ id, success: false, error: err.message });
+      }
+      return;
+    }
+
     // Navigate to a URL
     if (action === 'open') {
       const url = params.url;

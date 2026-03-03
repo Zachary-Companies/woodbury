@@ -1,0 +1,318 @@
+{
+  "version": "1.0",
+  "id": "Post to twitter",
+  "name": "Post To Twitter",
+  "description": "Recorded workflow for twitter.com",
+  "site": "twitter.com",
+  "variables": [
+    {
+      "name": "input_value",
+      "description": "Value to enter in the input field",
+      "type": "string",
+      "required": true,
+      "default": "C:\\fakepath\\generated_image_1772476231543.png"
+    },
+    {
+      "name": "file",
+      "description": "",
+      "type": "string",
+      "required": true
+    }
+  ],
+  "steps": [
+    {
+      "id": "step-1-navigate",
+      "label": "Navigate to https://twitter.com",
+      "type": "navigate",
+      "url": "https://twitter.com",
+      "waitMs": 2000
+    },
+    {
+      "id": "step-2-type-input",
+      "label": "Type \"\"",
+      "type": "type",
+      "target": {
+        "selector": "[data-testid=\"tweetTextarea_0\"]",
+        "fallbackSelectors": [
+          "div[aria-label=\"Post\\ text\"]",
+          "div.notranslate.public-DraftEditor-content"
+        ],
+        "ariaLabel": "Post text",
+        "expectedBounds": {
+          "left": 738,
+          "top": 76,
+          "width": 514,
+          "height": 28,
+          "tolerance": 80,
+          "pctX": 48.38,
+          "pctY": 8.23,
+          "pctW": 24.98,
+          "pctH": 2.56,
+          "viewportW": 2056,
+          "viewportH": 1093
+        },
+        "dataTestId": "tweetTextarea_0",
+        "context": {
+          "ancestors": [
+            "div",
+            "div",
+            "div",
+            "div"
+          ],
+          "landmark": {
+            "tag": "main",
+            "role": "main",
+            "label": "<main>"
+          }
+        },
+        "referenceImage": "/Users/andrewporter/.woodbury/data/workflows/Post to twitter/refs/step-2-type-input.png"
+      },
+      "value": "",
+      "clearFirst": true
+    },
+    {
+      "id": "step-4-wait",
+      "label": "Wait 3.5s",
+      "type": "wait",
+      "condition": {
+        "type": "delay",
+        "ms": 3529
+      }
+    },
+    {
+      "id": "step-5-type-input",
+      "label": "Type \"\"",
+      "type": "type",
+      "target": {
+        "selector": "[data-testid=\"tweetTextarea_0\"]",
+        "fallbackSelectors": [
+          "div[aria-label=\"Post\\ text\"]",
+          "div.notranslate.public-DraftEditor-content"
+        ],
+        "ariaLabel": "Post text",
+        "expectedBounds": {
+          "left": 738,
+          "top": 76,
+          "width": 514,
+          "height": 28,
+          "tolerance": 80,
+          "pctX": 48.38,
+          "pctY": 8.23,
+          "pctW": 24.98,
+          "pctH": 2.56,
+          "viewportW": 2056,
+          "viewportH": 1093
+        },
+        "dataTestId": "tweetTextarea_0",
+        "context": {
+          "ancestors": [
+            "div",
+            "div",
+            "div",
+            "div"
+          ],
+          "landmark": {
+            "tag": "main",
+            "role": "main",
+            "label": "<main>"
+          }
+        },
+        "referenceImage": "/Users/andrewporter/.woodbury/data/workflows/Post to twitter/refs/step-5-type-input.png"
+      },
+      "value": "",
+      "clearFirst": true
+    },
+    {
+      "id": "step-6-click-svg",
+      "label": "Click div:nth-of-type(1) > div > button > div ",
+      "type": "click",
+      "target": {
+        "selector": "div:nth-of-type(1) > div > button > div > svg",
+        "expectedBounds": {
+          "left": 738,
+          "top": 173,
+          "width": 20,
+          "height": 20,
+          "tolerance": 80,
+          "pctX": 36.36,
+          "pctY": 16.74,
+          "pctW": 0.97,
+          "pctH": 1.83,
+          "viewportW": 2056,
+          "viewportH": 1093
+        },
+        "context": {
+          "ancestors": [
+            "div",
+            "button[role=button] \"Add photos or video\"",
+            "div",
+            "div[role=presentation]"
+          ],
+          "landmark": {
+            "tag": "nav",
+            "role": "navigation",
+            "label": "<nav>"
+          }
+        },
+        "referenceImage": "/Users/andrewporter/.woodbury/data/workflows/Post to twitter/refs/step-6-click-svg.png"
+      },
+      "delayAfterMs": 300
+    },
+    {
+      "id": "step-7-click-input",
+      "label": "Click [data-testid=\"fileInput\"]",
+      "type": "click",
+      "target": {
+        "selector": "[data-testid=\"fileInput\"]",
+        "expectedBounds": {
+          "left": 730,
+          "top": 183,
+          "width": 0,
+          "height": 0,
+          "tolerance": 80,
+          "pctX": 35.48,
+          "pctY": 16.74,
+          "pctW": 0,
+          "pctH": 0.01,
+          "viewportW": 2056,
+          "viewportH": 1093
+        },
+        "dataTestId": "fileInput",
+        "context": {
+          "ancestors": [
+            "div",
+            "div[role=presentation]",
+            "div[role=tablist]",
+            "div"
+          ],
+          "landmark": {
+            "tag": "nav",
+            "role": "navigation",
+            "label": "<nav>"
+          }
+        }
+      },
+      "delayAfterMs": 300
+    },
+    {
+      "type": "file_dialog",
+      "filePath": "{{file}}",
+      "outputVariable": "selectedFile",
+      "delayBeforeMs": 2000,
+      "delayAfterMs": 1000,
+      "label": "Select file ",
+      "id": "step-1772478789962-file_dialog"
+    },
+    {
+      "id": "step-8-wait",
+      "label": "Wait 6.5s",
+      "type": "wait",
+      "condition": {
+        "type": "delay",
+        "ms": 6467
+      }
+    },
+    {
+      "id": "step-9-type-input",
+      "label": "Type {{input_value}}",
+      "type": "type",
+      "target": {
+        "selector": "[data-testid=\"fileInput\"]",
+        "expectedBounds": {
+          "left": 730,
+          "top": 183,
+          "width": 0,
+          "height": 0,
+          "tolerance": 80,
+          "pctX": 35.48,
+          "pctY": 16.74,
+          "pctW": 0,
+          "pctH": 0.01,
+          "viewportW": 2056,
+          "viewportH": 1093
+        },
+        "dataTestId": "fileInput",
+        "context": {
+          "ancestors": [
+            "div",
+            "div[role=presentation]",
+            "div[role=tablist]",
+            "div"
+          ],
+          "landmark": {
+            "tag": "nav",
+            "role": "navigation",
+            "label": "<nav>"
+          }
+        }
+      },
+      "value": "{{input_value}}",
+      "clearFirst": true
+    },
+    {
+      "id": "step-10-click-span",
+      "label": "Click span \"Post\"",
+      "type": "click",
+      "target": {
+        "selector": "button > div > div > span > span",
+        "textContent": "Post",
+        "expectedBounds": {
+          "left": 1204,
+          "top": 721,
+          "width": 33,
+          "height": 18,
+          "tolerance": 80,
+          "pctX": 59.34,
+          "pctY": 66.77,
+          "pctW": 1.59,
+          "pctH": 1.65,
+          "viewportW": 2056,
+          "viewportH": 1093
+        },
+        "context": {
+          "ancestors": [
+            "span",
+            "div",
+            "div",
+            "button[role=button]"
+          ],
+          "landmark": {
+            "tag": "main",
+            "role": "main",
+            "label": "<main>"
+          },
+          "nthWithSameText": 2,
+          "totalWithSameText": 2
+        },
+        "referenceImage": "/Users/andrewporter/.woodbury/data/workflows/Post to twitter/refs/step-10-click-span.png"
+      },
+      "delayAfterMs": 300
+    },
+    {
+      "id": "step-11-wait",
+      "label": "Wait 8.7s",
+      "type": "wait",
+      "condition": {
+        "type": "delay",
+        "ms": 8723
+      }
+    }
+  ],
+  "metadata": {
+    "createdAt": "2026-03-02T19:12:14.302Z",
+    "updatedAt": "2026-03-02T19:13:20.209Z",
+    "recordedBy": "recorder",
+    "modelPath": "/Users/andrewporter/.woodbury/data/workflows/Post to twitter/model/v1.0.0/encoder.onnx",
+    "modelVersion": "1.0.0",
+    "trainingStatus": "complete",
+    "trainingRun": {
+      "startedAt": "2026-03-02T19:12:42.691Z",
+      "completedAt": "2026-03-02T19:18:16.058Z",
+      "bestAuc": 0.961141,
+      "epochs": 25,
+      "version": "1.0.0",
+      "promoted": true,
+      "worker": "Andrews-MacBook-Pro.local"
+    }
+  }
+}

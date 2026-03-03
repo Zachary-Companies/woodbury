@@ -99,7 +99,7 @@ function initRuns() {
   main.innerHTML =
     '<div class="empty-state">' +
     '<div class="empty-state-icon">&#x1f4cb;</div>' +
-    '<h2>Run History</h2>' +
+    '<h2>Run History ' + helpIcon('runs-what') + '</h2>' +
     '<p>Every workflow and pipeline execution is recorded here.<br>Select a run from the sidebar to view its details.</p>' +
     '</div>';
 
@@ -113,7 +113,8 @@ function renderRunsSidebar() {
   var list = document.querySelector('#runs-list');
 
   // Filter bars
-  var html = '<div class="runs-filter-bar">';
+  var html = '<div class="runs-filter-bar" style="align-items:center;">';
+  html += helpIcon('runs-statuses');
   html += '<button class="runs-filter-btn' + (!runsFilter.status ? ' active' : '') + '" data-filter-status="">All</button>';
   html += '<button class="runs-filter-btn' + (runsFilter.status === 'completed' ? ' active' : '') + '" data-filter-status="completed">Passed</button>';
   html += '<button class="runs-filter-btn' + (runsFilter.status === 'failed' ? ' active' : '') + '" data-filter-status="failed">Failed</button>';
