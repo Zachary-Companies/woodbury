@@ -1,5 +1,8 @@
-const { app, BrowserWindow, Tray, Menu, nativeImage, dialog } = require('electron');
+const { app, BrowserWindow, Tray, Menu, nativeImage, dialog, shell } = require('electron');
 const path = require('path');
+
+// ── App identity (must be set before menus are built) ────────
+app.name = 'Woodbury';
 
 // ── Single instance lock ─────────────────────────────────────
 const gotLock = app.requestSingleInstanceLock();
@@ -97,6 +100,149 @@ function createWindow(url) {
   });
 }
 
+// ── Application Menu ─────────────────────────────────────────
+
+function createApplicationMenu() {
+  const isMac = process.platform === 'darwin';
+
+  const template = [
+    // App menu (macOS only)
+    ...(isMac
+      ? [
+          {
+            label: app.name,
+            submenu: [
+              { role: 'about', label: 'About Woodbury' },
+              { type: 'separator' },
+              {
+                label: 'Settings...',
+                accelerator: 'CmdOrCtrl+,',
+                click: () => {
+                  if (mainWindow) {
+                    mainWindow.show();
+                    mainWindow.focus();
+                    mainWindow.webContents.executeJavaScript(
+                      `document.querySelector('[data-tab="config"]')?.click()`
+                    );
+                  }
+                },
+              },
+              { type: 'separator' },
+              { role: 'hide', label: 'Hide Woodbury' },
+              { role: 'hideOthers' },
+              { role: 'unhide' },
+              { type: 'separator' },
+              { role: 'quit', label: 'Quit Woodbury' },
+            ],
+          },
+        ]
+      : []),
+
+    // File menu
+    {
+      label: 'File',
+      submenu: [
+        {
+          label: 'New Workflow',
+          accelerator: 'CmdOrCtrl+N',
+          click: () => {
+            if (mainWindow) {
+              mainWindow.show();
+              mainWindow.focus();
+              mainWindow.webContents.executeJavaScript(
+                `document.querySelector('[data-tab="workflows"]')?.click()`
+              );
+            }
+          },
+        },
+        { type: 'separator' },
+        isMac ? { role: 'close', label: 'Close Window' } : { role: 'quit', label: 'Quit Woodbury' },
+      ],
+    },
+
+    // Edit menu
+    {
+      label: 'Edit',
+      submenu: [
+        { role: 'undo' },
+        { role: 'redo' },
+        { type: 'separator' },
+        { role: 'cut' },
+        { role: 'copy' },
+        { role: 'paste' },
+        { role: 'selectAll' },
+      ],
+    },
+
+    // View menu
+    {
+      label: 'View',
+      submenu: [
+        { role: 'reload' },
+        { role: 'forceReload' },
+        { type: 'separator' },
+        { role: 'toggleDevTools' },
+        { type: 'separator' },
+        { role: 'resetZoom', label: 'Actual Size' },
+        { role: 'zoomIn' },
+        { role: 'zoomOut' },
+        { type: 'separator' },
+        { role: 'togglefullscreen' },
+      ],
+    },
+
+    // Window menu
+    {
+      label: 'Window',
+      submenu: [
+        { role: 'minimize' },
+        { role: 'zoom' },
+        ...(isMac
+          ? [{ type: 'separator' }, { role: 'front', label: 'Bring All to Front' }]
+          : []),
+      ],
+    },
+
+    // Help menu
+    {
+      label: 'Help',
+      submenu: [
+        {
+          label: 'Woodbury Documentation',
+          click: () => {
+            shell.openExternal('https://woodbury.dev');
+          },
+        },
+        { type: 'separator' },
+        {
+          label: 'Open Logs Folder',
+          click: () => {
+            const logsPath = path.join(
+              require('os').homedir(),
+              '.woodbury',
+              'logs'
+            );
+            shell.openPath(logsPath);
+          },
+        },
+        { type: 'separator' },
+        {
+          label: 'Toggle Developer Tools',
+          accelerator: isMac ? 'Alt+Command+I' : 'Ctrl+Shift+I',
+          click: () => {
+            if (mainWindow) {
+              mainWindow.webContents.toggleDevTools();
+            }
+          },
+        },
+      ],
+    },
+  ];
+
+  const menu = Menu.buildFromTemplate(template);
+  Menu.setApplicationMenu(menu);
+}
+
 // ── Tray ─────────────────────────────────────────────────────
 
 function createTray() {
@@ -160,6 +306,8 @@ app.on('ready', async () => {
       app.dock.setIcon(dockIcon);
     }
   }
+
+  createApplicationMenu();
 
   try {
     dashboardHandle = await startBackend();

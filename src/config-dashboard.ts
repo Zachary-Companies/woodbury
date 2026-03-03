@@ -43,6 +43,7 @@ import { WorkflowRecorder } from './workflow/recorder.js';
 import { bridgeServer, ensureBridgeServer } from './bridge-server.js';
 import { startRemoteRelay, type RelayHandle } from './remote-relay.js';
 import { ExecutionSnapshotCapture } from './workflow/execution-snapshots.js';
+import { startInferenceServer as startNodeInference, stopInferenceServer as stopNodeInference, type InferenceServer } from './inference/index.js';
 import { appendFileSync, mkdirSync, createReadStream, createWriteStream } from 'node:fs';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createSocket, type Socket as DgramSocket } from 'node:dgram';
@@ -1005,16 +1006,18 @@ export async function startDashboard(
   startScheduler();
 
   // ── Inference Server (visual element verification) ──────────
+  // Native Node.js inference using onnxruntime-node + sharp.
+  // Replaces the previous Python woobury_models.serve dependency.
   const INFERENCE_PORT = 8679;
-  let inferenceProc: ChildProcess | null = null;
+  let inferenceServer: InferenceServer | null = null;
   let inferenceModelPath: string | null = null;
 
   /**
-   * Start the inference server. Models are loaded on demand per-workflow.
+   * Start the Node.js inference server. Models are loaded on demand per-workflow.
    * Optionally pre-loads the latest model from MODELS_DIR as a default.
    */
   async function startInferenceServer(): Promise<void> {
-    if (inferenceProc) return; // already running
+    if (inferenceServer) return; // already running
 
     try {
       // Scan for a default model (latest encoder.onnx in MODELS_DIR)
@@ -1037,45 +1040,26 @@ export async function startDashboard(
         } catch { /* no onnx in this dir */ }
       }
 
-      // Build args — server starts even without a default model (loads on demand)
-      const args = [
-        '-m', 'woobury_models.serve',
-        '--port', String(INFERENCE_PORT),
-      ];
       if (bestModel) {
-        args.push('--model', bestModel);
         inferenceModelPath = bestModel;
-        debugLog.info('inference', `Starting inference server with default model: ${bestModel}`);
+        debugLog.info('inference', `Starting Node.js inference server with default model: ${bestModel}`);
       } else {
-        debugLog.info('inference', 'Starting inference server without default model (models loaded on demand)');
+        debugLog.info('inference', 'Starting Node.js inference server without default model (models loaded on demand)');
       }
 
-      inferenceProc = spawn('python', args, {
-        env: { ...process.env, PYTHONUNBUFFERED: '1' },
-        cwd: join(homedir(), 'Documents', 'GitHub', 'woobury-models'),
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
-
-      inferenceProc.stdout?.on('data', (chunk: Buffer) => {
-        debugLog.info('inference', chunk.toString().trim());
-      });
-      inferenceProc.stderr?.on('data', (chunk: Buffer) => {
-        debugLog.info('inference-err', chunk.toString().trim());
-      });
-      inferenceProc.on('close', (code) => {
-        debugLog.info('inference', `Inference server exited with code ${code}`);
-        inferenceProc = null;
-      });
+      inferenceServer = await startNodeInference(INFERENCE_PORT, bestModel ?? undefined);
+      debugLog.info('inference', `Node.js inference server running on port ${INFERENCE_PORT}`);
 
     } catch (err) {
       debugLog.info('inference', `Failed to start inference server: ${String(err)}`);
+      inferenceServer = null;
     }
   }
 
   function stopInferenceServer(): void {
-    if (inferenceProc) {
-      inferenceProc.kill('SIGTERM');
-      inferenceProc = null;
+    if (inferenceServer) {
+      stopNodeInference(inferenceServer);
+      inferenceServer = null;
       inferenceModelPath = null;
     }
   }
@@ -6820,7 +6804,7 @@ Fix the bug and return the corrected code. Do not change the @input/@output anno
     // GET /api/inference/status — check inference server status
     if (req.method === 'GET' && pathname === '/api/inference/status') {
       sendJson(res, 200, {
-        running: inferenceProc !== null,
+        running: inferenceServer !== null,
         model: inferenceModelPath,
         port: INFERENCE_PORT,
       });

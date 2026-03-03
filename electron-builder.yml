@@ -46,4 +46,8 @@ asarUnpack:
   - node_modules/uiohook-napi/**
   - node_modules/robotjs/**
   - node_modules/node-gyp-build/**
+  - node_modules/sharp/**
+  - node_modules/@img/**
+  - node_modules/onnxruntime-node/**
+  - node_modules/onnxruntime-common/**
   - tools/**

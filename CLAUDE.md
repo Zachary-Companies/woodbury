@@ -4,7 +4,91 @@ Instructions for Claude Code when working in the woodbury repository.
 
 ## Overview
 
-Woodbury is an interactive AI coding assistant CLI built on the agentic loop embedded locally in `src/loop/`. It provides a terminal-based REPL and one-shot mode for AI-assisted software engineering with 14 built-in tools.
+Woodbury is a desktop automation platform that records browser and desktop interactions and replays them as intelligent workflows. It combines a visual pipeline builder, an AI coding assistant (40+ tools), a Chrome extension, and a native Node.js visual AI inference engine into an Electron app.
+
+**Repo**: `~/Documents/GitHub/woodbury/` (TypeScript/Node.js/Electron)
+**Sister repo**: `~/Documents/GitHub/woobury-models/` (Python/PyTorch — training only)
+
+## Cross-Repo Architecture
+
+The Woodbury platform spans two repositories. The **ONNX model file** (`encoder.onnx`) is the only artifact that crosses the boundary:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  woodbury repo (this repo) — TypeScript/Node.js/Electron    │
+│                                                             │
+│  Record workflows ──→ Capture snapshots ──→ Store in        │
+│  (recorder.ts)        (Chrome ext)          ~/.woodbury/    │
+│                                                             │
+│  ┌─ src/inference/ ─────────────────────────────────────┐   │
+│  │  Node.js ONNX inference (onnxruntime-node + sharp)   │   │
+│  │  HTTP server on :8679, same API as Python serve.py   │   │
+│  │  Loads encoder.onnx ← trained in woobury-models      │   │
+│  └──────────────────────────────────────────────────────┘   │
+│                                                             │
+│  Replay workflows ──→ Visual verification ──→ Element match │
+│  (executor.ts)        (visual-verifier.ts)   via inference  │
+│                                                             │
+│  Dashboard triggers training via Python subprocess:         │
+│    spawn('python', ['-m', 'woobury_models.prepare', ...])   │
+│    spawn('python', ['-m', 'woobury_models.train', ...])     │
+│                                                             │
+├─────────────────────────────────────────────────────────────┤
+│                    ↕ encoder.onnx ↕                         │
+├─────────────────────────────────────────────────────────────┤
+│  woobury-models repo — Python/PyTorch                       │
+│                                                             │
+│  prepare.py ──→ dataset.py ──→ train.py ──→ export.py       │
+│  (crop elements)  (augment)    (Siamese)   (ONNX export)   │
+│                                                             │
+│  Output: ~/.woodbury/data/models/<run-id>/encoder.onnx      │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### What lives where
+
+| Concern | Repo | Key files |
+|---------|------|-----------|
+| Workflow recording | woodbury | `src/workflow/recorder.ts` |
+| Workflow execution | woodbury | `src/workflow/executor.ts` |
+| Visual verification (runtime) | woodbury | `src/workflow/visual-verifier.ts` |
+| ONNX inference (Node.js) | woodbury | `src/inference/*.ts` |
+| Snapshot capture during replay | woodbury | `src/workflow/execution-snapshots.ts` |
+| Dashboard + training UI | woodbury | `src/config-dashboard.ts` |
+| Chrome extension | woodbury | Chrome extension (content/background scripts) |
+| Electron app shell | woodbury | `electron/main.js` |
+| Data preparation (crops) | woobury-models | `prepare.py` |
+| Model training (PyTorch) | woobury-models | `train.py`, `model.py`, `losses.py`, `dataset.py` |
+| ONNX export | woobury-models | `export.py` |
+| Python inference (for training eval) | woobury-models | `inference.py`, `serve.py` |
+| Distributed training worker | woobury-models | `worker.py` |
+
+### Preprocessing Sync Contract
+
+The Node.js inference (`src/inference/image-utils.ts`) must match the Python preprocessing (`woobury_models.model.letterbox` + `config.py`). These constants must be identical:
+
+| Constant | Python (`config.py`) | Node.js (`image-utils.ts`) |
+|----------|---------------------|---------------------------|
+| `MAX_SIDE` | 224 | 224 |
+| `IMAGENET_MEAN` | (0.485, 0.456, 0.406) | [0.485, 0.456, 0.406] |
+| `IMAGENET_STD` | (0.229, 0.224, 0.225) | [0.229, 0.224, 0.225] |
+| Canvas size | 224×224 | 224×224 |
+| Letterbox | Resize long side to 224, black padding, center paste | Same |
+| Normalization | float32 /255, subtract mean, divide std | Same |
+| Transpose | HWC → CHW → (1, 3, 224, 224) | Same |
+
+**Resize algorithm**: Python uses PIL `BILINEAR`; Node.js uses Sharp `lanczos3`. This causes ~0.32% embedding divergence (cross-pipeline cosine similarity = 0.9968). This is acceptable — both pipelines are internally consistent.
+
+**If you change preprocessing in woobury-models, you MUST update `src/inference/image-utils.ts` to match.**
+
+### Data Lifecycle
+
+1. **Record**: User records a workflow → Chrome extension captures interactions → `recorder.ts` saves `snapshot_*.json` + screenshots to `~/.woodbury/data/training-crops/snapshots/`
+2. **Prepare**: Dashboard triggers `python -m woobury_models.prepare` → crops individual elements → `metadata.jsonl` + crop images
+3. **Train**: Dashboard triggers `python -m woobury_models.train --json-progress` → Siamese encoder → `encoder.onnx` saved to `~/.woodbury/data/models/<run-id>/`
+4. **Inference**: Node.js inference server (`src/inference/serve.ts`) loads `encoder.onnx` → serves HTTP API on port 8679
+5. **Verify**: During workflow replay, `visual-verifier.ts` asks the inference server to verify elements match their recorded appearance
+6. **More data**: `execution-snapshots.ts` captures snapshots during successful replays → feeds back into step 2
 
 ## Architecture
 
@@ -12,148 +96,136 @@ Woodbury is an interactive AI coding assistant CLI built on the agentic loop emb
 - `"type": "module"` in package.json
 - TypeScript compiles with `"module": "Node16"`, `"moduleResolution": "Node16"`
 - All relative imports use `.js` extensions
-- The agentic loop is embedded locally in `src/loop/` — no external CJS interop needed
+- The agentic loop is embedded locally in `src/loop/`
 
-### V1 Agent (XML Tool Calling)
-- Uses `Agent` class from the local agentic loop (`src/loop/`) with XML-based `<tool_call>` / `<final_answer>` format
-- Each `Agent.run()` call starts fresh — no built-in message history
-- Multi-turn conversation is achieved by packing prior turns into `<conversation_history>` XML tags in the user message
-- `ConversationManager` in `conversation.ts` handles history packing and token-budget trimming (~80k tokens)
+### Key Directories
 
-### Key Files
+| Directory | Purpose |
+|-----------|---------|
+| `src/` | Main application source (CLI, agent, tools, dashboard) |
+| `src/loop/` | Embedded agentic loop engine (40+ tools) |
+| `src/loop/tools/` | Tool implementations |
+| `src/workflow/` | Workflow recording, execution, visual verification |
+| `src/inference/` | Node.js ONNX inference (replaces Python serve.py) |
+| `src/config-dashboard/` | Dashboard web UI (Config, Workflows, Pipelines, Runs) |
+| `electron/` | Electron shell (main.js, preload.js, icons) |
+| `apps/woodbury-web/` | Marketing landing page (Next.js, Firebase) |
+| `docs/` | Extension authoring docs, API reference |
+
+### Key Files — Core
 
 | File | Purpose |
 |------|---------|
 | `src/index.ts` | Entry point (`#!/usr/bin/env node`), routes to REPL or one-shot |
 | `src/cli.ts` | Commander-based CLI argument parsing |
-| `src/types.ts` | Shared interfaces (`WoodburyConfig`, `Renderer`, `ConversationManager`, etc.) |
-| `src/repl.ts` | Interactive REPL loop with readline, Ctrl+C handling, slash command dispatch |
+| `src/types.ts` | Shared interfaces |
+| `src/repl.ts` | Interactive REPL loop with readline, Ctrl+C handling, slash commands |
 | `src/one-shot.ts` | Single-task execution mode |
-| `src/agent-factory.ts` | Creates `Agent` + `ToolRegistry` with all 14 tools, wires `onToolCall` to renderer |
-| `src/system-prompt.ts` | Builds dynamic system prompt (identity, environment, project context) |
-| `src/context-loader.ts` | Walks up directories to find `.woodbury.md` project context |
-| `src/conversation.ts` | Multi-turn history manager with `<conversation_history>` packing |
-| `src/renderer.ts` | Terminal output (chalk, ora spinner, marked-terminal markdown rendering) |
-| `src/logger.ts` | Logger implementation that routes to renderer (verbose-aware) |
-| `src/debug-log.ts` | File-based debug logging to `~/.woodbury/logs/` (activated by `--debug` or `WOODBURY_DEBUG=1`) |
-| `src/slash-commands.ts` | Slash command registry and handlers (`/help`, `/exit`, `/clear`, `/log`, etc.) |
-| `src/marked-terminal.d.ts` | Type declaration for `marked-terminal` package |
+| `src/agent-factory.ts` | Creates `Agent` + `ToolRegistry`, wires tools |
+| `src/system-prompt.ts` | Dynamic system prompt builder |
+| `src/context-loader.ts` | Walks up directories to find `.woodbury.md` |
+| `src/conversation.ts` | Multi-turn history manager |
+| `src/config-dashboard.ts` | Dashboard HTTP server, training orchestration, worker management |
+| `src/debug-log.ts` | File-based debug logging to `~/.woodbury/logs/` |
 
-### Extension System
-- Extensions live in `~/.woodbury/extensions/` (local dirs) and `~/.woodbury/extensions/node_modules/woodbury-ext-*` (npm)
-- Each extension has `package.json` with a `"woodbury"` field containing `name`, `displayName`, `description`, `provides`
-- Extensions export `activate(ctx)` and optionally `deactivate()`
-- The `ExtensionContext` provides: `registerTool()`, `registerCommand()`, `addSystemPrompt()`, `serveWebUI()`, `workingDirectory`, `log`, `bridgeServer`
+### Key Files — Inference Module
+
+The `src/inference/` module is a Node.js port of Python's `woobury_models.serve`. It provides visual AI element matching without requiring Python.
 
 | File | Purpose |
 |------|---------|
-| `src/extension-api.ts` | Public types for extension authors (`WoodburyExtension`, `ExtensionContext`, etc.) |
-| `src/extension-loader.ts` | Discovers extensions, validates manifests, `parseEnvFile()` / `writeEnvFile()` utilities, `EnvVarDeclaration` (with `type?: 'string' \| 'path'`) + `envDeclarations` on manifest |
-| `src/extension-manager.ts` | Lifecycle coordinator: load, activate (incl. `.env` loading → frozen `ctx.env`), aggregate tools/commands/prompts, serve web UIs, deactivate |
-| `src/extension-scaffold.ts` | `woodbury ext create` generates starter extension with all four capabilities; `initGitRepo()`, `ensureGhInstalled()`, `isToolInstalled()` helpers for git + GitHub integration |
-| `src/config-dashboard.ts` | Built-in web dashboard for managing extension env vars; `startDashboard()`, `maskValue()`, `DashboardHandle`; API routes: GET/PUT extensions env, POST browse dirs |
-| `src/config-dashboard/` | Static HTML/JS for the dashboard SPA (dark theme, folder picker modal); copied to `dist/` by `postbuild` script |
+| `src/inference/image-utils.ts` | `decodeBase64Image()`, `cropRegion()`, `preprocessImage()` (letterbox + ImageNet normalize) |
+| `src/inference/element-matcher.ts` | `ElementMatcher` class: ONNX session via `onnxruntime-node`, `embed()`, `compare()`, embedding cache |
+| `src/inference/model-cache.ts` | `ModelCache`: LRU cache (max 5 models), lazy loading, `embed()`, `embedBatch()`, `compare()` |
+| `src/inference/serve.ts` | `startInferenceServer(port, defaultModel?)` / `stopInferenceServer()`: HTTP server on port 8679 |
+| `src/inference/index.ts` | Barrel export |
 
-**Extension data flow:**
-1. `cli.ts` creates `ExtensionManager` → calls `loadAll()` → discovers + activates all extensions (during activation, reads `<ext-dir>/.env`, validates against `woodbury.env` declarations, provides frozen `ctx.env`)
-2. `cli.ts` starts config dashboard (`startDashboard()`) → passes `DashboardHandle` to `startRepl()`
-3. `ExtensionManager` is passed to `startRepl()` → merges extension commands with built-in slash commands
-4. `createAgent()` in `agent-factory.ts` receives `ExtensionManager` → registers extension tools in `ToolRegistry` → passes extension prompt sections to `buildSystemPrompt()`
-5. `system-prompt.ts` appends `## Extension Configuration` (dashboard awareness) + `## Extension Instructions` sections
-6. On exit, `repl.ts` closes dashboard handle, then calls `extensionManager.deactivateAll()`
+**Dependencies**: `onnxruntime-node` (ONNX inference via N-API), `sharp` (image processing via libvips)
 
-**Config dashboard flow:**
-1. `startDashboard()` creates HTTP server on `127.0.0.1:0` (auto-port)
-2. API routes call `discoverExtensions()` per-request for fresh data
-3. `GET /api/extensions` → list all extensions with env var status (masked values)
-4. `GET /api/extensions/:name/env` → single extension's env status
-5. `PUT /api/extensions/:name/env` → merge new values into `.env` file (empty = delete)
-6. `POST /api/browse` → list subdirectories for the folder picker
-7. Static files served from `dist/config-dashboard/` (copied by `postbuild`)
-8. `EnvVarDeclaration.type` controls dashboard UI: `'string'` → password input, `'path'` → text input + Browse button
+**HTTP API** (on `127.0.0.1:8679`):
 
-**Extension CLI subcommands** (in `cli.ts`):
-- `woodbury ext list` — discover and list extensions
-- `woodbury ext create <name>` — scaffold via `extension-scaffold.ts` (auto-inits git repo, generates `.gitignore`)
-- `woodbury ext create <name> --web` — scaffold with `site-knowledge/` templates for web-navigation extensions
-- `woodbury ext create <name> --github` — scaffold + init git + create GitHub repo + push (uses `gh` CLI; installs via brew if missing)
-- `woodbury ext create <name> --github --public` — same as above with public repo
-- `woodbury ext create <name> --no-git` — scaffold without git initialization
-- `woodbury ext install <pkg>` — `npm install` in `~/.woodbury/extensions/`
-- `woodbury ext install-git <url>` — git clone into `~/.woodbury/extensions/<name>/`, runs npm install + build if needed
-- `woodbury ext link <path>` — symlink local extension directory into `~/.woodbury/extensions/`
-- `woodbury ext uninstall <pkg>` — `npm uninstall` in `~/.woodbury/extensions/`
-- `woodbury ext configure <name>` — show/check env var status for an extension
-- `--no-extensions` flag disables all extension loading
+| Method | Path | Request | Response |
+|--------|------|---------|----------|
+| GET | `/health` | — | `{status: "ready", default_model, loaded_models}` |
+| POST | `/embed` | `{image, model?}` | `{embedding: float[]}` |
+| POST | `/compare` | `{image_a, image_b, model?}` | `{similarity: float}` |
+| POST | `/compare-region` | `{screenshot, bounds, reference, model?}` | `{similarity: float}` |
+| POST | `/search-region` | `{screenshot, candidates[], reference, model?}` | `{results[], best_index, best_similarity}` |
+| POST | `/search-region-weighted` | `{..., expected_pct, viewport, position_decay?}` | `{results[], best_index, best_similarity, best_composite}` |
+| POST | `/load-model` | `{model}` | `{loaded: true, embed_dim}` |
 
-**Site Knowledge Pattern (Web-Navigation Extensions):**
-- `scaffoldExtension(name, { webNavigation: true })` creates a `site-knowledge/` directory with 6 template files: `site-map.md`, `selectors.md`, `auth-flow.md`, `api-endpoints.md`, `forms.md`, `quirks.md`
-- The `--web` variant generates an alternate `index.js` that reads `site-knowledge/*.md` files at activation and injects them via `addSystemPrompt()`
-- The alternate index.js also scaffolds a `_navigate` tool (instead of `_hello`) and a `/knowledge` subcommand
-- `ScaffoldOptions` interface in `extension-scaffold.ts` has `webNavigation?: boolean`
-- Template files are structured markdown with tables and "Research Commands Used" sections
+All images are base64-encoded data URLs. The `model` field is optional — defaults to the pre-loaded model.
+
+**Startup**: `config-dashboard.ts` calls `startInferenceServer(8679, bestModel)` on app launch. Scans `~/.woodbury/data/models/` for the latest `encoder.onnx` to pre-load.
+
+### Key Files — Workflow Engine
+
+| File | Purpose |
+|------|---------|
+| `src/workflow/types.ts` | `WorkflowDocument`, `WorkflowStep`, step types (navigate, click, type, keyboard, desktop), `RecordingEvent` |
+| `src/workflow/recorder.ts` | `WorkflowRecorder`: captures Chrome extension events → `.workflow.json`. Captures element crops when `captureElementCrops: true` |
+| `src/workflow/executor.ts` | `WorkflowExecutor`: runs steps sequentially via bridge server. Uses `VisualVerifier` for element matching |
+| `src/workflow/visual-verifier.ts` | `VisualVerifier`: HTTP client for inference server. `verifyElement()` (threshold 0.75), `searchNearby()` (threshold 0.65, 200px radius) |
+| `src/workflow/execution-snapshots.ts` | `ExecutionSnapshotCapture`: captures snapshots during replay. Successful runs keep data; failed runs delete snapshots |
+| `src/workflow/resolver.ts` | `ElementResolver`: CSS selector resolution with fallback strategies |
+| `src/workflow/validator.ts` | `ConditionValidator`: precondition/postcondition checking |
+| `src/workflow/variable-sub.ts` | `substituteObject()`: `{{variable}}` substitution in workflow steps |
+| `src/workflow/loader.ts` | `discoverWorkflows()`, `loadWorkflow()`: find and parse `.workflow.json` files |
+
+### Extension System
+
+Extensions live in `~/.woodbury/extensions/`. Each exports `activate(ctx)` with `registerTool()`, `registerCommand()`, `addSystemPrompt()`, `serveWebUI()`. See [docs/extensions.md](docs/extensions.md).
+
+| File | Purpose |
+|------|---------|
+| `src/extension-api.ts` | Public types for extension authors |
+| `src/extension-loader.ts` | Discovery, manifest validation, env file utilities |
+| `src/extension-manager.ts` | Lifecycle: load, activate, aggregate, deactivate |
+| `src/extension-scaffold.ts` | `woodbury ext create` scaffolding |
 
 ## Build & Run
 
 ```bash
 npm run build          # TypeScript compilation
 npm run clean          # Remove dist/
-npm run all            # clean + build
 npm run setup          # install + build + npm link
-npm run start          # Run dist/index.js directly
-npm run dev            # tsc --watch
+npm run electron:dev   # Build + launch Electron app
+npm run electron:build # Build .dmg for macOS
+npm test               # Run Jest tests
 ```
 
 ## Debug Logging
 
-Woodbury has file-based debug logging that writes timestamped entries to `~/.woodbury/logs/`.
-
 **Activate:** `woodbury --debug` or `WOODBURY_DEBUG=1 woodbury`
-
 **Log location:** `~/.woodbury/logs/woodbury-<YYYY-MM-DD>-<HHmmss>.log`
-
-**View in REPL:** `/log` (shows path + last 20 lines), `/log 50` (last 50 lines)
-
-**What's logged:**
-- Startup: config, provider, model, API key status
-- Extensions: discovery, loading, activation, env var status
-- Agent: tool registry, system prompt, each run (timing, iterations, tool calls)
-- REPL: user input, slash commands, errors, abort, shutdown
-- Dashboard: API requests, env var updates
-
-**Implementation:** `src/debug-log.ts` exports a `debugLog` singleton. Auto-rotates (keeps 10 files, max 10 MB each). All logging is no-op when disabled — zero overhead in normal use.
+**View in REPL:** `/log` (shows path + last 20 lines), `/log 50`
 
 ## Dependencies
 
-- `src/loop/` — Agent core with all 14 tools (embedded locally)
-- `chalk` v5 — Terminal colors (ESM-only)
-- `ora` v8 — Spinner (ESM-only)
-- `marked` + `marked-terminal` — Markdown rendering in terminal
-- `commander` — CLI argument parsing
+- `onnxruntime-node` — ONNX model inference (native N-API, no electron-rebuild needed)
+- `sharp` — Image processing (letterbox, crop, resize via libvips)
+- `chalk` v5 — Terminal colors
+- `ora` v8 — Spinner
+- `marked` + `marked-terminal` — Markdown rendering
+- `commander` — CLI parsing
+- `ws` — WebSocket for Chrome extension bridge
+- `uiohook-napi` — Desktop input events
+- `electron` + `electron-builder` — Desktop app packaging
 
 ## Testing
 
-- **Framework:** Jest (primary, `src/__tests__/`) + Vitest (root `__tests__/` integration tests)
+- **Framework:** Jest (`src/__tests__/`)
 - **Config:** `jest.config.js` (ts-jest preset, node env, `.js` extension mapping)
-- **Mocks:** `src/__tests__/setup-mocks.js` (pre-framework, mocks chalk/marked-terminal/ora) + `src/__tests__/setup.ts` (post-framework, same mocks + process.exit)
-- **Run:** `npm test` (all), `npx jest <file>` (single), `npm run test:coverage` (with coverage)
-
-Extension-specific test files:
-| File | Tests |
-|------|-------|
-| `src/__tests__/extension-scaffold.test.ts` | Name validation, directory creation, package.json generation, index.js scaffolding, `--web` site-knowledge templates, `.gitignore` generation, `isToolInstalled()`, `initGitRepo()` git init + commit + `.gitignore` respect |
-| `src/__tests__/extension-loader.test.ts` | Discovery from local/npm/scoped dirs, manifest parsing, skipping invalid extensions |
-| `src/__tests__/extension-manager.test.ts` | Lifecycle (loadAll, activate, deactivate), context API (tools, commands, prompts, web UIs), aggregation |
-| `src/__tests__/extension-agent-factory.test.ts` | Tool registration in ToolRegistry, prompt section passthrough, error handling |
-| `src/__tests__/config-dashboard.test.ts` | `writeEnvFile()` serialization/round-trip, `maskValue()`, dashboard server start/stop, all API routes (GET/PUT extensions, browse dirs), env var merge/delete |
+- **Run:** `npm test` (all), `npx jest <file>` (single), `npm run test:coverage`
 
 ## Conventions
 
-- The `ToolRegistry` is constructed manually in `agent-factory.ts` (not via `createAgentWithDefaultTools`) so we keep a reference to it for the `/tools` slash command
-- `allowDangerousTools` defaults to `true` (developer power tool); `--safe` flag disables it
-- The renderer pauses the ora spinner before printing tool call output, then resumes it
-- Ctrl+C during agent execution aborts via `AbortController`; at idle prompt, double Ctrl+C exits
-- Extensions use CJS `module.exports` for compatibility (entry points are dynamically imported via `file://` URL)
-- Extension tool names should be prefixed with the extension name (underscored): `social_post`, `social_draft`
-- The chalk mock in test setup includes `visible` in the chainable colors list (needed for theme-aware text colors)
-- The Agent mock in `agent-factory.test.ts` must include `progressLogger: { disabled: false }` since `setOnToken()` toggles it
+- All relative imports use `.js` extensions (ESM)
+- The `ToolRegistry` is constructed manually in `agent-factory.ts`
+- `allowDangerousTools` defaults to `true`; `--safe` flag disables it
+- Ctrl+C during execution aborts via `AbortController`; double Ctrl+C at idle exits
+- Extension tool names are prefixed: `social_post`, `social_draft`
+- Training commands still shell out to Python (`python -m woobury_models.prepare/train`) — this is intentional, training stays in the Python repo
+- The inference server is pure Node.js — no Python required for end-user element matching
+- Workflow snapshots go to `~/.woodbury/data/training-crops/snapshots/<site_id>/`
+- Trained models live at `~/.woodbury/data/models/<run-id>/encoder.onnx`
