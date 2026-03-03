@@ -145,7 +145,7 @@ release/
 *.zip
 
 # Firebase cache
-.firebase/
+**/.firebase/
 
 # Claude Code local config
 .claude/
