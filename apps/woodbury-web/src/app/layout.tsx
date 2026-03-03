@@ -5,8 +5,13 @@ import { Inter } from 'next/font/google'
 const inter = Inter({ subsets: ['latin'] })
 
 export const metadata: Metadata = {
-  title: 'Woodbury Web REPL',
-  description: 'Advanced AI agent REPL with complete transparency and control',
+  title: 'Woodbury — Automate Your Browser, No Code Required',
+  description: 'Record your actions, replay them with AI. Woodbury turns your clicks into automated workflows — no coding needed. Built for Mac + Chrome.',
+  openGraph: {
+    title: 'Woodbury — AI-Powered Browser Automation',
+    description: 'Record your actions, replay them with AI. No coding needed.',
+    type: 'website',
+  },
 }
 
 export default function RootLayout({
@@ -15,8 +20,8 @@ export default function RootLayout({
   children: React.ReactNode
 }) {
   return (
-    <html lang="en">
-      <body className={inter.className}>{children}</body>
+    <html lang="en" className="dark">
+      <body className={`${inter.className} bg-[#0f172a] text-white antialiased`}>{children}</body>
     </html>
   )
 }

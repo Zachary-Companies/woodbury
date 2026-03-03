@@ -5788,7 +5788,7 @@ async function showScheduleModal() {
 
   // Variables section
   html += '<div class="comp-schedule-form-row">';
-  html += '<label>Variables <span style="color:#64748b;">(optional JSON)</span></label>';
+  html += '<label>Variables <span style="color:#64748b;">(optional)</span></label>';
   html += '<textarea id="comp-schedule-vars" class="comp-schedule-textarea" rows="3" placeholder=\'{"key": "value"}\'></textarea>';
   html += '</div>';
 

@@ -170,7 +170,7 @@ function renderWorkflowSidebar() {
   if (workflows.length === 0) {
     html += '<div style="padding:1rem;color:#64748b;font-size:0.8rem;">' +
       'No workflows yet.<br><br>' +
-      '<span style="color:#94a3b8;">Use <code style="background:#0f172a;padding:2px 6px;border-radius:3px;">/record</code> in the CLI or click <strong>+ New Workflow</strong> above.</span>' +
+      '<span style="color:#94a3b8;">Click <strong>+ New Workflow</strong> above to get started.</span>' +
       '</div>';
   } else {
     html += workflows.map(function(wf) {
@@ -503,7 +503,7 @@ function renderNewStepsList() {
   if (!container) return;
 
   if (newWorkflowSteps.length === 0) {
-    container.innerHTML = '<div style="font-size:0.75rem;color:#475569;">No steps added yet. Steps can also be added later via the JSON editor.</div>';
+    container.innerHTML = '<div style="font-size:0.75rem;color:#475569;">No steps added yet. You can add steps here or record them from the browser.</div>';
     return;
   }
 
@@ -602,7 +602,7 @@ function renderStepFields(step, idx) {
       html += '<input class="wf-var-input wf-ns-outvar" type="text" placeholder="Output variable" value="' + escAttr(step.outputVariable || 'selectedFile') + '" style="width:130px;">';
       break;
     default:
-      html += '<span style="color:#475569;font-size:0.75rem;">Configure in JSON editor after creation</span>';
+      html += '<span style="color:#475569;font-size:0.75rem;">This step type can be configured after creation</span>';
   }
   return html;
 }
@@ -888,7 +888,7 @@ function renderStepEditor(step, idx, totalSteps) {
     default:
       // Complex types: sub_workflow, conditional, loop, try_catch
       html += '<div class="wf-se-row">';
-      html += '<span style="color:#64748b;font-size:0.75rem;font-style:italic;">Complex step type — edit in JSON editor for full control</span>';
+      html += '<span style="color:#64748b;font-size:0.75rem;font-style:italic;">Advanced step type — use the JSON tab for full editing control</span>';
       html += '</div>';
   }
 
@@ -3314,7 +3314,7 @@ function renderWorkflowTrainingStatus(status, workflowId) {
   var phaseText = '#c4b5fd';
   if (phaseLabel === 'preparing') { phaseLabel = 'preparing data'; }
   else if (phaseLabel === 'training') { phaseLabel = 'training'; phaseColor = '#4c1d95'; }
-  else if (phaseLabel === 'exporting') { phaseLabel = 'exporting ONNX'; phaseColor = '#065f46'; phaseText = '#6ee7b7'; }
+  else if (phaseLabel === 'exporting') { phaseLabel = 'finishing up'; phaseColor = '#065f46'; phaseText = '#6ee7b7'; }
 
   html += '<span class="wf-training-card-phase" style="background:' + phaseColor + ';color:' + phaseText + ';">' + escHtml(phaseLabel) + '</span>';
   html += '</div>';
@@ -3327,10 +3327,10 @@ function renderWorkflowTrainingStatus(status, workflowId) {
     barLabel = 'Preparing training data...';
   } else if (status.phase === 'exporting') {
     pct = 98;
-    barLabel = 'Exporting ONNX model...';
+    barLabel = 'Packaging model for browser...';
   } else if (status.totalEpochs > 0) {
     pct = Math.round((status.currentEpoch / status.totalEpochs) * 100);
-    barLabel = 'Epoch ' + status.currentEpoch + ' / ' + status.totalEpochs + ' (' + pct + '%)';
+    barLabel = 'Round ' + status.currentEpoch + ' of ' + status.totalEpochs + ' (' + pct + '%)';
   } else {
     pct = 2;
     barLabel = 'Initializing...';

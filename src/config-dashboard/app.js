@@ -636,13 +636,13 @@ var HELP_CONTENT = {
       '<li><strong>Architecture</strong> &mdash; The model size. MobileNet is smallest and fastest. ' +
       'EfficientNet is a good middle ground. ResNet is the largest but most accurate. ' +
       'For most cases, MobileNet works great.</li>' +
-      '<li><strong>Epochs</strong> &mdash; How many times the model studies all your data. ' +
-      'More epochs = more learning, but takes longer. 50&ndash;100 is typical.</li>' +
+      '<li><strong>Epochs</strong> &mdash; How many rounds of learning the model goes through. ' +
+      'More rounds = better results, but takes longer. 50&ndash;100 is typical.</li>' +
       '<li><strong>Learning Rate</strong> &mdash; How quickly the model adjusts itself. ' +
       'The default (0.0003) works well for most cases.</li>' +
-      '<li><strong>Embedding Dim</strong> &mdash; The size of the model\'s internal memory. ' +
-      '64 is the default and works well.</li>' +
-      '<li><strong>Export ONNX</strong> &mdash; Keep this set to "Yes" so the trained model is ready to use in the browser extension.</li>' +
+      '<li><strong>Model Precision</strong> &mdash; How detailed the model\'s recognition is. ' +
+      'Standard (64) works well for most cases. Higher values are more precise but slower.</li>' +
+      '<li><strong>Auto-export for browser</strong> &mdash; Keep this set to "Yes" so the trained model is ready to use right away.</li>' +
       '</ul>' +
       '</div>'
   },

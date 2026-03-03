@@ -130,7 +130,7 @@ async function loadTrainingSidebar() {
         '<div class="training-sidebar-meta">' + date + '</div>' +
         '<div>' +
           (hasModel ? '<span class="training-sidebar-badge badge-auc">Model</span> ' : '') +
-          (m.hasOnnx ? '<span class="training-sidebar-badge badge-auc">ONNX</span> ' : '') +
+          (m.hasOnnx ? '<span class="training-sidebar-badge badge-auc">Exported</span> ' : '') +
         '</div>' +
       '</div>';
     }
@@ -247,7 +247,7 @@ function renderTrainingConfig(summary) {
     '<option value="resnet18">ResNet-18 (11.2M params, most robust)</option>' +
     '</select></label>';
 
-  html += '<label>Epochs' +
+  html += '<label>Training Rounds' +
     '<input type="number" id="train-epochs" value="50" min="5" max="500">' +
     '</label>';
 
@@ -255,25 +255,25 @@ function renderTrainingConfig(summary) {
     '<input type="number" id="train-lr" value="0.0003" step="0.0001" min="0.00001" max="0.01">' +
     '</label>';
 
-  html += '<label>Loss Function' +
+  html += '<label>Training Method' +
     '<select id="train-loss">' +
-    '<option value="ntxent" selected>NT-Xent (contrastive)</option>' +
-    '<option value="arcface">ArcFace (angular margin)</option>' +
-    '<option value="triplet">Triplet</option>' +
-    '<option value="contrastive">Contrastive</option>' +
+    '<option value="ntxent" selected>Standard (recommended)</option>' +
+    '<option value="arcface">ArcFace (higher accuracy, slower)</option>' +
+    '<option value="triplet">Triplet (simple comparisons)</option>' +
+    '<option value="contrastive">Contrastive (pair-based)</option>' +
     '</select></label>';
 
-  html += '<label>Embedding Dim' +
+  html += '<label>Model Precision' +
     '<select id="train-embed-dim">' +
-    '<option value="64" selected>64</option>' +
-    '<option value="128">128</option>' +
-    '<option value="256">256</option>' +
+    '<option value="64" selected>Standard (64)</option>' +
+    '<option value="128">High (128)</option>' +
+    '<option value="256">Maximum (256)</option>' +
     '</select></label>';
 
-  html += '<label>Export ONNX' +
+  html += '<label>Auto-export for browser' +
     '<select id="train-export-onnx">' +
-    '<option value="true" selected>Yes (auto-export after training)</option>' +
-    '<option value="false">No</option>' +
+    '<option value="true" selected>Yes (ready to use after training)</option>' +
+    '<option value="false">No (training only)</option>' +
     '</select></label>';
 
   html += '</div>';
