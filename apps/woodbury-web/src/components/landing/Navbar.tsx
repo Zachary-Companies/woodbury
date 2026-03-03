@@ -32,7 +32,7 @@ export default function Navbar() {
         {/* CTA */}
         <div className="hidden md:block">
           <a
-            href="https://github.com/mephisto83/woodbury/releases/download/v1.0.11/Woodbury-1.0.11-arm64.dmg"
+            href="https://github.com/Zachary-Companies/woodbury/releases/download/v1.0.11/Woodbury-1.0.11-arm64.dmg"
             className="rounded-full bg-white px-5 py-2.5 text-sm font-medium text-slate-900 transition-all hover:bg-slate-200"
           >
             Download App

@@ -117,7 +117,7 @@ export default function PrivacyPage() {
       <Section title="Contact">
         <p>
           For questions about this privacy policy, please open an issue on
-          the <a href="https://github.com/mephisto83/woodbury" className="text-purple-400 hover:text-purple-300 underline" target="_blank" rel="noopener noreferrer">Woodbury GitHub repository</a>.
+          the <a href="https://github.com/Zachary-Companies/woodbury" className="text-purple-400 hover:text-purple-300 underline" target="_blank" rel="noopener noreferrer">Woodbury GitHub repository</a>.
         </p>
       </Section>
     </main>

@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/mephisto83/woodbury/releases/download/v1.0.11/Woodbury-1.0.11-arm64.dmg"><strong>Download for Mac</strong></a> · <a href="https://woobury-ai.web.app">Website</a> · <a href="docs/extensions.md">Extension Docs</a>
+  <a href="https://github.com/Zachary-Companies/woodbury/releases/download/v1.0.11/Woodbury-1.0.11-arm64.dmg"><strong>Download for Mac</strong></a> · <a href="https://woobury-ai.web.app">Website</a> · <a href="docs/extensions.md">Extension Docs</a>
 </p>
 
 ---
@@ -43,13 +43,13 @@ Woodbury is a desktop automation platform that lets you record browser and deskt
 
 | Platform | Link |
 |----------|------|
-| macOS (Apple Silicon) | [Woodbury-1.0.11-arm64.dmg](https://github.com/mephisto83/woodbury/releases/download/v1.0.11/Woodbury-1.0.11-arm64.dmg) |
+| macOS (Apple Silicon) | [Woodbury-1.0.11-arm64.dmg](https://github.com/Zachary-Companies/woodbury/releases/download/v1.0.11/Woodbury-1.0.11-arm64.dmg) |
 
 ## Getting Started
 
 ### Desktop App (recommended)
 
-1. Download the `.dmg` from the [latest release](https://github.com/mephisto83/woodbury/releases/latest)
+1. Download the `.dmg` from the [latest release](https://github.com/Zachary-Companies/woodbury/releases/latest)
 2. Drag **Woodbury** into your Applications folder
 3. Open Woodbury — the dashboard launches automatically
 4. Add your API key (Anthropic, OpenAI, or Groq) in the Config tab
@@ -59,7 +59,7 @@ Woodbury is a desktop automation platform that lets you record browser and deskt
 Requires Node.js 22+ and an [Anthropic API key](https://console.anthropic.com/) (or OpenAI/Groq).
 
 ```bash
-git clone https://github.com/mephisto83/woodbury.git
+git clone https://github.com/Zachary-Companies/woodbury.git
 cd woodbury
 npm run setup
 ```
@@ -147,7 +147,7 @@ The Chrome extension captures every interaction and converts it into a `Workflow
 
 ### Visual AI
 
-Woodbury trains site-specific Siamese neural networks to verify UI elements across visual variations. See [woobury-models](https://github.com/mephisto83/woobury-models) for the training system.
+Woodbury trains site-specific Siamese neural networks to verify UI elements across visual variations. See [woobury-models](https://github.com/Zachary-Companies/woobury-models) for the training system.
 
 - **Input**: 224×224 letterboxed element crops
 - **Output**: 64-dim L2-normalized embeddings
@@ -257,8 +257,8 @@ Create a `.woodbury.md` file in your project root to provide project-specific in
 ## Links
 
 - **Website**: [woobury-ai.web.app](https://woobury-ai.web.app)
-- **Visual AI Models**: [woobury-models](https://github.com/mephisto83/woobury-models)
-- **Releases**: [GitHub Releases](https://github.com/mephisto83/woodbury/releases)
+- **Visual AI Models**: [woobury-models](https://github.com/Zachary-Companies/woobury-models)
+- **Releases**: [GitHub Releases](https://github.com/Zachary-Companies/woodbury/releases)
 
 ## License
 

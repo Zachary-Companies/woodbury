@@ -6,7 +6,7 @@ Woodbury is a free, open-source desktop automation platform for Mac that lets an
 
 The core idea is: record yourself doing something in Chrome, and Woodbury turns that recording into a replayable workflow that runs itself automatically. But it goes far beyond simple macro recording — Woodbury understands what elements look like, not just where they are, so your automations keep working even when websites update.
 
-Woodbury is open source under the MIT license, available at github.com/mephisto83/woodbury.
+Woodbury is open source under the MIT license, available at github.com/Zachary-Companies/woodbury.
 
 ---
 

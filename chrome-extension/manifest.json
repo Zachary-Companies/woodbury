@@ -3,7 +3,7 @@
   "name": "Woodbury Bridge",
   "version": "1.0.0",
   "description": "Connects Chrome to the Woodbury desktop app for browser automation. Record, replay, and debug workflows.",
-  "homepage_url": "https://github.com/mephisto83/woodbury",
+  "homepage_url": "https://github.com/Zachary-Companies/woodbury",
   "offline_enabled": false,
   "permissions": [
     "activeTab",

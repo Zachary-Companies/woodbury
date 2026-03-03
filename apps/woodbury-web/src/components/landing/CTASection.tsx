@@ -23,13 +23,13 @@ export default function CTASection() {
             {/* CTA buttons */}
             <div className="mt-10 flex flex-col items-center justify-center gap-4 sm:flex-row">
               <a
-                href="https://github.com/mephisto83/woodbury/releases/download/v1.0.11/Woodbury-1.0.11-arm64.dmg"
+                href="https://github.com/Zachary-Companies/woodbury/releases/download/v1.0.11/Woodbury-1.0.11-arm64.dmg"
                 className="rounded-full bg-white px-8 py-3.5 text-sm font-semibold text-slate-900 shadow-lg shadow-purple-500/10 transition-all hover:bg-slate-200 hover:shadow-purple-500/20"
               >
                 Download for Mac
               </a>
               <a
-                href="https://github.com/mephisto83/woodbury"
+                href="https://github.com/Zachary-Companies/woodbury"
                 className="rounded-full border border-white/10 px-8 py-3.5 text-sm font-medium text-slate-300 transition-all hover:border-white/20 hover:text-white"
               >
                 View on GitHub
