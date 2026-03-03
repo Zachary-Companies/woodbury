@@ -2,7 +2,7 @@
 
 ## What is Woodbury?
 
-Woodbury is a free, open-source desktop automation platform for Mac that lets anyone automate their browser and desktop applications without writing code. It's built as an Electron app with a Chrome extension, a visual pipeline builder, an AI coding assistant with over 40 built-in tools, and a custom visual AI system that can recognize UI elements even when websites change their design.
+Woodbury is a free, open-source desktop automation platform for Mac and Windows that lets anyone automate their browser and desktop applications without writing code. It's built as an Electron app with a Chrome extension, a visual pipeline builder, an AI coding assistant with over 40 built-in tools, and a custom visual AI system that can recognize UI elements even when websites change their design.
 
 The core idea is: record yourself doing something in Chrome, and Woodbury turns that recording into a replayable workflow that runs itself automatically. But it goes far beyond simple macro recording — Woodbury understands what elements look like, not just where they are, so your automations keep working even when websites update.
 
@@ -584,7 +584,7 @@ You can delete the entire `~/.woodbury/` directory at any time to remove all sto
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  Electron Desktop App (.dmg for Mac)                         │
+│  Electron Desktop App (.dmg for Mac, .exe for Windows)       │
 │  ┌──────────────────────────────────────────────────────┐   │
 │  │  Dashboard (HTTP :9001)                               │   │
 │  │  ├── Config Tab (extension API keys)                 │   │
@@ -676,7 +676,7 @@ No coding knowledge is required. If you can click a mouse, you can build automat
 
 ## Getting Started
 
-1. Download the Woodbury desktop app from GitHub (free, open source, Mac only currently)
+1. Download the Woodbury desktop app from GitHub (free, open source, available for Mac and Windows)
 2. Install the Woodbury Bridge Chrome extension from the Chrome Web Store
 3. Open Woodbury — the dashboard launches automatically
 4. Add your AI API key (Anthropic, OpenAI, or Groq) in the Config tab
@@ -685,3 +685,40 @@ No coding knowledge is required. If you can click a mouse, you can build automat
 7. Hit replay and watch it run automatically
 
 The whole setup takes about 5 minutes.
+
+---
+
+## Platform Support
+
+Woodbury runs on both macOS and Windows:
+
+### macOS
+- **Installer**: `.dmg` (Apple Silicon / arm64)
+- **Desktop automation**: Native Swift-based desktop hook for mouse/keyboard capture, with uiohook-napi as fallback
+- **App launch**: Uses `open -a "AppName"` via the shell
+- **Window chrome**: Hidden title bar with macOS traffic light buttons (close/minimize/zoom)
+- **Tray**: Template icon that adapts to light/dark menu bar
+
+### Windows
+- **Installer**: `.exe` via NSIS (x64), with option to choose installation directory
+- **Desktop automation**: uiohook-napi (cross-platform N-API bindings for keyboard/mouse hooks)
+- **App launch**: Uses PowerShell `Start-Process` to launch applications
+- **Window chrome**: Standard Windows title bar
+- **Tray**: System tray icon with context menu
+
+### Cross-Platform Architecture
+The vast majority of Woodbury's codebase is platform-independent — Node.js, Electron, and the Chrome extension run identically on both platforms. Platform-specific behavior is isolated to a few areas:
+
+- **Electron main process** (`electron/main.js`): Conditionally applies macOS-only UI features (hidden title bar, traffic light positioning, drag region CSS) using `process.platform === 'darwin'` guards
+- **Build scripts** (`package.json`): Cross-platform `postinstall` and `postbuild` scripts that use inline Node.js instead of shell-specific commands (`chmod`, `plutil`, `rm -rf`)
+- **Workflow recorder** (`src/workflow/recorder.ts`): Platform-specific error messages — macOS hints about Accessibility permissions, Windows hints about running as Administrator
+- **Shell execution**: Falls back to `cmd.exe` on Windows when bash is unavailable
+- **Native modules**: ONNX Runtime, Sharp, uiohook-napi, and ws all ship with Windows prebuilds and are unpacked from the asar archive at runtime
+
+### CI/CD
+Both Mac and Windows installers are built automatically via GitHub Actions:
+
+- **macOS**: Builds on `macos-latest` using `electron-builder --mac`, producing a `.dmg`
+- **Windows**: Builds on `windows-latest` using `electron-builder --win`, producing an `.exe` via NSIS
+- **Triggers**: Runs on push to version tags (`v*`) or manual workflow dispatch
+- **Releases**: Artifacts are automatically uploaded to the corresponding GitHub release
