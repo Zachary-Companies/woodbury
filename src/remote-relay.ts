@@ -37,14 +37,14 @@ import { debugLog } from './debug-log.js';
 // ── Firebase Config ──────────────────────────────────────────
 
 const firebaseConfig = {
-  apiKey: 'AIzaSyCJqvdjlTvh7uvZKRtN0fSHgjJVJtvMEvw',
-  authDomain: 'woobury-ai.firebaseapp.com',
-  databaseURL: 'https://woobury-ai-default-rtdb.firebaseio.com',
-  projectId: 'woobury-ai',
-  storageBucket: 'woobury-ai.firebasestorage.app',
-  messagingSenderId: '824143171411',
-  appId: '1:824143171411:web:3f0a186067a58050c25ba6',
-  measurementId: 'G-Q73W3SE08T',
+  apiKey: process.env.FIREBASE_API_KEY || '',
+  authDomain: process.env.FIREBASE_AUTH_DOMAIN || 'woobury-ai.firebaseapp.com',
+  databaseURL: process.env.FIREBASE_DATABASE_URL || 'https://woobury-ai-default-rtdb.firebaseio.com',
+  projectId: process.env.FIREBASE_PROJECT_ID || 'woobury-ai',
+  storageBucket: process.env.FIREBASE_STORAGE_BUCKET || 'woobury-ai.firebasestorage.app',
+  messagingSenderId: process.env.FIREBASE_MESSAGING_SENDER_ID || '824143171411',
+  appId: process.env.FIREBASE_APP_ID || '',
+  measurementId: process.env.FIREBASE_MEASUREMENT_ID || 'G-Q73W3SE08T',
 };
 
 const WEB_APP_URL = 'https://woobury-ai.web.app';

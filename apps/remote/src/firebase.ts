@@ -6,14 +6,14 @@ import { getDatabase } from 'firebase/database';
 import { getAuth } from 'firebase/auth';
 
 const firebaseConfig = {
-  apiKey: 'AIzaSyCJqvdjlTvh7uvZKRtN0fSHgjJVJtvMEvw',
-  authDomain: 'woobury-ai.firebaseapp.com',
-  databaseURL: 'https://woobury-ai-default-rtdb.firebaseio.com',
-  projectId: 'woobury-ai',
-  storageBucket: 'woobury-ai.firebasestorage.app',
-  messagingSenderId: '824143171411',
-  appId: '1:824143171411:web:3f0a186067a58050c25ba6',
-  measurementId: 'G-Q73W3SE08T',
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || '',
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || 'woobury-ai.firebaseapp.com',
+  databaseURL: import.meta.env.VITE_FIREBASE_DATABASE_URL || 'https://woobury-ai-default-rtdb.firebaseio.com',
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || 'woobury-ai',
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || 'woobury-ai.firebasestorage.app',
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || '824143171411',
+  appId: import.meta.env.VITE_FIREBASE_APP_ID || '',
+  measurementId: import.meta.env.VITE_FIREBASE_MEASUREMENT_ID || 'G-Q73W3SE08T',
 };
 
 export const app = initializeApp(firebaseConfig);
