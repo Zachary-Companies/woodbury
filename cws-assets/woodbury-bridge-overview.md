@@ -310,6 +310,14 @@ For faster training on remote GPU machines, Woodbury includes a distributed trai
 - UDP beacon every 10 seconds on port 8678 for auto-discovery on the local network
 - Dashboard provides UI for adding/removing workers, selecting training targets, and monitoring progress
 
+**Built-in Worker Mode**: Any Woodbury desktop instance can act as a training worker. From the Training tab, click "Start Worker" to turn that machine into a training target. Woodbury automatically detects whether Python and woobury-models are installed, starts the worker process, and broadcasts its presence on the network. Other Woodbury instances on the same LAN will auto-discover it and can send training jobs to it. The worker machine's dashboard shows incoming job progress in real time.
+
+Setup on a remote machine:
+1. Install the Woodbury desktop app
+2. Install Python 3.10+ and woobury-models: `pip install git+https://github.com/Zachary-Companies/woobury-models.git`
+3. Open the Training tab and click "Start Worker"
+4. Enable "Start worker automatically" to have it start on launch
+
 Worker endpoints:
 - `GET /health` — Status, GPU info, busy/idle, Python and PyTorch versions
 - `POST /jobs` — Submit a training job with data
@@ -380,6 +388,8 @@ Manage visual AI model training:
 - Start training locally or on a remote GPU worker
 - Live progress visualization (loss curve, metrics, ETA)
 - Worker management (add, remove, probe remote workers)
+- Built-in worker mode: turn any Woodbury instance into a training worker with one click
+- Auto-discovery of workers on the local network via UDP beacon
 - Run history for completed training sessions
 
 ---

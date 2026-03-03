@@ -468,6 +468,305 @@ export async function startDashboard(
   const TRAINING_DATA_DIR = join(homedir(), '.woodbury', 'data', 'training-crops');
   const MODELS_DIR = join(homedir(), '.woodbury', 'data', 'models');
   const WORKERS_FILE = join(homedir(), '.woodbury', 'data', 'workers.json');
+  const WORKER_CONFIG_FILE = join(homedir(), '.woodbury', 'worker-config.json');
+
+  // ── Configurable woobury-models path ──
+  interface WorkerSettings {
+    autoStart: boolean;
+    port: number;
+    wooburyModelsPath: string | null;
+  }
+
+  const DEFAULT_WORKER_SETTINGS: WorkerSettings = {
+    autoStart: false,
+    port: 8677,
+    wooburyModelsPath: null,
+  };
+
+  async function loadWorkerSettings(): Promise<WorkerSettings> {
+    try {
+      const content = await readFile(WORKER_CONFIG_FILE, 'utf-8');
+      return { ...DEFAULT_WORKER_SETTINGS, ...JSON.parse(content) };
+    } catch { return { ...DEFAULT_WORKER_SETTINGS }; }
+  }
+
+  async function saveWorkerSettings(settings: WorkerSettings) {
+    await mkdir(join(homedir(), '.woodbury'), { recursive: true });
+    await writeFile(WORKER_CONFIG_FILE, JSON.stringify(settings, null, 2));
+  }
+
+  /**
+   * Resolve the cwd for spawning Python woobury_models commands.
+   * Returns null if pip-installed (no cwd needed), otherwise returns the path.
+   */
+  let _resolvedModelsCwd: string | null | undefined = undefined; // undefined = not yet resolved
+  async function resolveModelsCwd(): Promise<string | null> {
+    if (_resolvedModelsCwd !== undefined) return _resolvedModelsCwd;
+
+    const settings = await loadWorkerSettings();
+
+    // 1. Use explicit configured path if set
+    if (settings.wooburyModelsPath) {
+      _resolvedModelsCwd = settings.wooburyModelsPath;
+      return _resolvedModelsCwd;
+    }
+
+    // 2. Check if pip-installed (no cwd needed)
+    try {
+      const { execSync } = require('child_process');
+      execSync('python -c "import woobury_models"', { timeout: 5000, stdio: 'pipe' });
+      _resolvedModelsCwd = null; // pip-installed, no cwd needed
+      return _resolvedModelsCwd;
+    } catch {}
+
+    // Also try python3
+    try {
+      const { execSync } = require('child_process');
+      execSync('python3 -c "import woobury_models"', { timeout: 5000, stdio: 'pipe' });
+      _resolvedModelsCwd = null;
+      return _resolvedModelsCwd;
+    } catch {}
+
+    // 3. Fall back to conventional dev path
+    const devPath = join(homedir(), 'Documents', 'GitHub', 'woobury-models');
+    _resolvedModelsCwd = devPath;
+    return _resolvedModelsCwd;
+  }
+
+  /** Resolve the python command name (python vs python3) */
+  let _pythonCmd: string | null = null;
+  async function resolvePythonCmd(): Promise<string> {
+    if (_pythonCmd) return _pythonCmd;
+    try {
+      const { execSync } = require('child_process');
+      execSync('python --version', { timeout: 5000, stdio: 'pipe' });
+      _pythonCmd = 'python';
+      return _pythonCmd;
+    } catch {}
+    try {
+      const { execSync } = require('child_process');
+      execSync('python3 --version', { timeout: 5000, stdio: 'pipe' });
+      _pythonCmd = 'python3';
+      return _pythonCmd;
+    } catch {}
+    _pythonCmd = 'python'; // default, will fail with clear error
+    return _pythonCmd;
+  }
+
+  // ── Local worker management ──
+  let localWorker: {
+    process: ChildProcess;
+    port: number;
+    logs: string[];
+    startedAt: number;
+  } | null = null;
+
+  let _pythonCheckCache: {
+    pythonAvailable: boolean;
+    pythonVersion: string | null;
+    pythonCmd: string;
+    wooburyModelsInstalled: boolean;
+    gpuAvailable: boolean;
+    gpuName: string | null;
+    checkedAt: number;
+  } | null = null;
+
+  async function checkPythonEnvironment(forceRefresh = false) {
+    if (_pythonCheckCache && !forceRefresh && (Date.now() - _pythonCheckCache.checkedAt) < 60000) {
+      return _pythonCheckCache;
+    }
+
+    const { execSync } = require('child_process');
+    const result = {
+      pythonAvailable: false,
+      pythonVersion: null as string | null,
+      pythonCmd: 'python',
+      wooburyModelsInstalled: false,
+      gpuAvailable: false,
+      gpuName: null as string | null,
+      checkedAt: Date.now(),
+    };
+
+    // Check Python
+    for (const cmd of ['python', 'python3']) {
+      try {
+        const ver = execSync(`${cmd} --version`, { timeout: 5000, stdio: 'pipe' }).toString().trim();
+        result.pythonAvailable = true;
+        result.pythonVersion = ver.replace('Python ', '');
+        result.pythonCmd = cmd;
+        break;
+      } catch {}
+    }
+
+    if (!result.pythonAvailable) {
+      _pythonCheckCache = result;
+      return result;
+    }
+
+    // Check woobury-models
+    const cwd = await resolveModelsCwd();
+    const spawnOpts: any = { timeout: 10000, stdio: 'pipe' };
+    if (cwd) spawnOpts.cwd = cwd;
+
+    try {
+      execSync(`${result.pythonCmd} -c "import woobury_models; print('ok')"`, spawnOpts);
+      result.wooburyModelsInstalled = true;
+    } catch {}
+
+    // Check GPU
+    try {
+      const gpuCheck = execSync(
+        `${result.pythonCmd} -c "import torch; print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else '')"`,
+        spawnOpts
+      ).toString().trim().split('\n');
+      result.gpuAvailable = gpuCheck[0] === 'True';
+      result.gpuName = gpuCheck[1] || null;
+    } catch {
+      // Also check for MPS (Apple Silicon)
+      try {
+        const mpsCheck = execSync(
+          `${result.pythonCmd} -c "import torch; print(torch.backends.mps.is_available())"`,
+          spawnOpts
+        ).toString().trim();
+        if (mpsCheck === 'True') {
+          result.gpuAvailable = true;
+          result.gpuName = 'Apple Silicon (MPS)';
+        }
+      } catch {}
+    }
+
+    _pythonCheckCache = result;
+    return result;
+  }
+
+  async function startLocalWorker(): Promise<{ success: boolean; error?: string }> {
+    if (localWorker) {
+      return { success: true }; // Already running
+    }
+
+    const env = await checkPythonEnvironment();
+    if (!env.pythonAvailable) {
+      return { success: false, error: 'Python is not installed or not in PATH' };
+    }
+    if (!env.wooburyModelsInstalled) {
+      return { success: false, error: 'woobury-models is not installed. Run: pip install git+https://github.com/Zachary-Companies/woobury-models.git' };
+    }
+
+    const settings = await loadWorkerSettings();
+    const port = settings.port || 8677;
+    const pythonCmd = env.pythonCmd;
+    const cwd = await resolveModelsCwd();
+
+    const spawnOpts: any = {
+      env: { ...process.env, PYTHONUNBUFFERED: '1' },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    };
+    if (cwd) spawnOpts.cwd = cwd;
+
+    const proc = spawn(pythonCmd, ['-m', 'woobury_models.worker', '--port', String(port)], spawnOpts);
+
+    const logs: string[] = [];
+    const maxLogs = 200;
+
+    proc.stdout?.on('data', (data: Buffer) => {
+      const lines = data.toString().split('\n').filter(l => l.trim());
+      for (const line of lines) {
+        if (logs.length < maxLogs) logs.push(line);
+        else { logs.shift(); logs.push(line); }
+      }
+    });
+
+    proc.stderr?.on('data', (data: Buffer) => {
+      const lines = data.toString().split('\n').filter(l => l.trim());
+      for (const line of lines) {
+        if (logs.length < maxLogs) logs.push(`[stderr] ${line}`);
+        else { logs.shift(); logs.push(`[stderr] ${line}`); }
+      }
+    });
+
+    proc.on('close', (code) => {
+      if (localWorker?.process === proc) {
+        logs.push(`Worker exited with code ${code}`);
+        localWorker = null;
+      }
+    });
+
+    proc.on('error', (err) => {
+      logs.push(`Worker error: ${err.message}`);
+      if (localWorker?.process === proc) {
+        localWorker = null;
+      }
+    });
+
+    localWorker = { process: proc, port, logs, startedAt: Date.now() };
+
+    // Wait a moment for the worker to start, then verify
+    await new Promise(r => setTimeout(r, 2000));
+
+    if (!localWorker) {
+      return { success: false, error: 'Worker process exited immediately. Check logs.' };
+    }
+
+    // Try to probe health
+    try {
+      await probeWorker('127.0.0.1', port);
+    } catch {
+      // Give it one more second
+      await new Promise(r => setTimeout(r, 2000));
+      try {
+        await probeWorker('127.0.0.1', port);
+      } catch {
+        // Worker might still be starting up — don't fail, just warn
+        logs.push('Warning: Worker started but health check not yet responding');
+      }
+    }
+
+    if (verbose) console.log(`[dashboard] Local worker started on port ${port}`);
+    return { success: true };
+  }
+
+  async function stopLocalWorker(): Promise<{ success: boolean }> {
+    if (!localWorker) return { success: true };
+
+    const proc = localWorker.process;
+    localWorker.logs.push('Stopping worker...');
+
+    // Try graceful shutdown first
+    proc.kill('SIGTERM');
+
+    // Wait up to 5 seconds for graceful exit
+    await new Promise<void>((resolve) => {
+      const timeout = setTimeout(() => {
+        try { proc.kill('SIGKILL'); } catch {}
+        resolve();
+      }, 5000);
+
+      proc.once('close', () => {
+        clearTimeout(timeout);
+        resolve();
+      });
+    });
+
+    localWorker = null;
+    if (verbose) console.log('[dashboard] Local worker stopped');
+    return { success: true };
+  }
+
+  // Auto-start worker if configured
+  (async () => {
+    try {
+      const settings = await loadWorkerSettings();
+      if (settings.autoStart) {
+        if (verbose) console.log('[dashboard] Auto-starting local worker...');
+        const result = await startLocalWorker();
+        if (!result.success) {
+          console.error('[dashboard] Auto-start worker failed:', result.error);
+        }
+      }
+    } catch (err) {
+      console.error('[dashboard] Worker auto-start error:', err);
+    }
+  })();
 
   // Worker management
   interface WorkerConfig {
@@ -1711,22 +2010,27 @@ export async function startDashboard(
     cropsDir: string,
     modelDir: string,
   ): Promise<void> {
+      const modelsCwd = await resolveModelsCwd();
+      const pythonCmd = await resolvePythonCmd();
+
       // Phase 1: Prepare training data from snapshots
       debugLog.info('workflow-train', `Preparing training data for ${training.workflowId}`);
       training.phase = 'preparing';
 
       await new Promise<void>((resolve, reject) => {
-        const proc = spawn('python', [
+        const spawnOpts: any = {
+          env: { ...process.env, PYTHONUNBUFFERED: '1' },
+        };
+        if (modelsCwd) spawnOpts.cwd = modelsCwd;
+
+        const proc = spawn(pythonCmd, [
           '-m', 'woobury_models.prepare',
           '--snapshots-dir', snapshotsDir,
           '--output-dir', cropsDir,
           '--source', 'viewport',
           '--crops-per-element', '15',
           '--interacted-only',
-        ], {
-          env: { ...process.env, PYTHONUNBUFFERED: '1' },
-          cwd: join(homedir(), 'Documents', 'GitHub', 'woobury-models'),
-        });
+        ], spawnOpts);
 
         training.process = proc;
 
@@ -1801,17 +2105,19 @@ export async function startDashboard(
       await writeFile(configPath, configContent);
 
       await new Promise<void>((resolve, reject) => {
-        const proc = spawn('python', [
+        const trainSpawnOpts: any = {
+          env: { ...process.env, PYTHONUNBUFFERED: '1' },
+        };
+        if (modelsCwd) trainSpawnOpts.cwd = modelsCwd;
+
+        const proc = spawn(pythonCmd, [
           '-m', 'woobury_models.train',
           '--json-progress',
           '--config', configPath,
           '--data-dir', cropsDir,
           '--output-dir', modelDir,
           '--export-onnx',
-        ], {
-          env: { ...process.env, PYTHONUNBUFFERED: '1' },
-          cwd: join(homedir(), 'Documents', 'GitHub', 'woobury-models'),
-        });
+        ], trainSpawnOpts);
 
         training.process = proc;
 
@@ -6187,17 +6493,21 @@ Fix the bug and return the corrected code. Do not change the @input/@output anno
           startedAt: Date.now(),
         };
 
-        const proc = spawn('python', [
+        const prepModelsCwd = await resolveModelsCwd();
+        const prepPythonCmd = await resolvePythonCmd();
+        const prepSpawnOpts: any = {
+          env: { ...process.env, PYTHONUNBUFFERED: '1' },
+        };
+        if (prepModelsCwd) prepSpawnOpts.cwd = prepModelsCwd;
+
+        const proc = spawn(prepPythonCmd, [
           '-m', 'woobury_models.prepare',
           '--snapshots-dir', join(TRAINING_DATA_DIR, 'snapshots'),
           '--output-dir', TRAINING_DATA_DIR,
           '--source', source,
           '--crops-per-element', String(cropsPerElement),
           '--interacted-only',
-        ], {
-          env: { ...process.env, PYTHONUNBUFFERED: '1' },
-          cwd: join(homedir(), 'Documents', 'GitHub', 'woobury-models'),
-        });
+        ], prepSpawnOpts);
 
         activeTraining.process = proc;
 
@@ -6473,10 +6783,14 @@ Fix the bug and return the corrected code. Do not change the @input/@output anno
         ];
         if (exportOnnx) args.push('--export-onnx');
 
-        const proc = spawn('python', args, {
+        const trainModelsCwd = await resolveModelsCwd();
+        const trainPythonCmd = await resolvePythonCmd();
+        const trainSpawnOpts: any = {
           env: { ...process.env, PYTHONUNBUFFERED: '1' },
-          cwd: join(homedir(), 'Documents', 'GitHub', 'woobury-models'),
-        });
+        };
+        if (trainModelsCwd) trainSpawnOpts.cwd = trainModelsCwd;
+
+        const proc = spawn(trainPythonCmd, args, trainSpawnOpts);
 
         activeTraining.process = proc;
 
@@ -6779,6 +7093,149 @@ Fix the bug and return the corrected code. Do not change the @input/@output anno
         }
         await saveWorkers(filtered);
         sendJson(res, 200, { success: true });
+      } catch (err) {
+        sendJson(res, 500, { error: String(err) });
+      }
+      return;
+    }
+
+    // ── Local Worker Management ─────────────────────────────
+
+    // GET /api/worker/python-check — check Python/woobury-models/GPU availability
+    if (req.method === 'GET' && pathname === '/api/worker/python-check') {
+      try {
+        const forceRefresh = url.searchParams.get('refresh') === '1';
+        const result = await checkPythonEnvironment(forceRefresh);
+        sendJson(res, 200, result);
+      } catch (err) {
+        sendJson(res, 500, { error: String(err) });
+      }
+      return;
+    }
+
+    // POST /api/worker/start — start local training worker
+    if (req.method === 'POST' && pathname === '/api/worker/start') {
+      try {
+        const result = await startLocalWorker();
+        if (result.success) {
+          sendJson(res, 200, { success: true, port: localWorker?.port });
+        } else {
+          sendJson(res, 400, { success: false, error: result.error });
+        }
+      } catch (err) {
+        sendJson(res, 500, { error: String(err) });
+      }
+      return;
+    }
+
+    // POST /api/worker/stop — stop local training worker
+    if (req.method === 'POST' && pathname === '/api/worker/stop') {
+      try {
+        await stopLocalWorker();
+        sendJson(res, 200, { success: true });
+      } catch (err) {
+        sendJson(res, 500, { error: String(err) });
+      }
+      return;
+    }
+
+    // GET /api/worker/status — get local worker status + job progress
+    if (req.method === 'GET' && pathname === '/api/worker/status') {
+      try {
+        if (!localWorker) {
+          sendJson(res, 200, { running: false });
+          return;
+        }
+
+        const status: any = {
+          running: true,
+          port: localWorker.port,
+          uptime: Date.now() - localWorker.startedAt,
+          startedAt: localWorker.startedAt,
+        };
+
+        // Probe the worker for health + job status
+        try {
+          const health = await probeWorker('127.0.0.1', localWorker.port);
+          status.health = health;
+          status.online = true;
+        } catch {
+          status.online = false;
+        }
+
+        // If the worker has an active job, get its progress
+        if (status.online) {
+          try {
+            const jobStatus: any = await new Promise((resolve, reject) => {
+              const req = httpRequest({
+                hostname: '127.0.0.1',
+                port: localWorker!.port,
+                path: '/jobs/current',
+                method: 'GET',
+                timeout: 3000,
+              }, (res) => {
+                let body = '';
+                res.on('data', (chunk: string) => body += chunk);
+                res.on('end', () => { try { resolve(JSON.parse(body)); } catch { reject(new Error('bad json')); } });
+              });
+              req.on('error', reject);
+              req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
+              req.end();
+            });
+            if (jobStatus && jobStatus.phase) {
+              status.job = jobStatus;
+            }
+          } catch {
+            // No active job
+          }
+        }
+
+        sendJson(res, 200, status);
+      } catch (err) {
+        sendJson(res, 500, { error: String(err) });
+      }
+      return;
+    }
+
+    // GET /api/worker/logs — get worker subprocess logs
+    if (req.method === 'GET' && pathname === '/api/worker/logs') {
+      try {
+        const lines = parseInt(url.searchParams.get('lines') || '50');
+        const logs = localWorker ? localWorker.logs.slice(-lines) : [];
+        sendJson(res, 200, { logs, running: !!localWorker });
+      } catch (err) {
+        sendJson(res, 500, { error: String(err) });
+      }
+      return;
+    }
+
+    // GET /api/worker/settings — get worker settings
+    if (req.method === 'GET' && pathname === '/api/worker/settings') {
+      try {
+        const settings = await loadWorkerSettings();
+        sendJson(res, 200, settings);
+      } catch (err) {
+        sendJson(res, 500, { error: String(err) });
+      }
+      return;
+    }
+
+    // PUT /api/worker/settings — update worker settings
+    if (req.method === 'PUT' && pathname === '/api/worker/settings') {
+      try {
+        const body = await readBody(req);
+        const current = await loadWorkerSettings();
+        const updated: WorkerSettings = {
+          autoStart: body?.autoStart ?? current.autoStart,
+          port: body?.port ?? current.port,
+          wooburyModelsPath: body?.wooburyModelsPath !== undefined ? body.wooburyModelsPath : current.wooburyModelsPath,
+        };
+        await saveWorkerSettings(updated);
+        // Reset resolved path cache if path changed
+        if (body?.wooburyModelsPath !== undefined) {
+          _resolvedModelsCwd = undefined;
+        }
+        sendJson(res, 200, { success: true, settings: updated });
       } catch (err) {
         sendJson(res, 500, { error: String(err) });
       }

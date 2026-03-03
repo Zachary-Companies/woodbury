@@ -66,6 +66,59 @@ async function cancelTraining() {
   return res.json();
 }
 
+// Local Worker API
+async function fetchPythonCheck(refresh) {
+  const qs = refresh ? '?refresh=1' : '';
+  const res = await fetch('/api/worker/python-check' + qs);
+  if (!res.ok) throw new Error('Failed to check Python');
+  return res.json();
+}
+
+async function fetchWorkerStatus() {
+  const res = await fetch('/api/worker/status');
+  if (!res.ok) throw new Error('Failed to get worker status');
+  return res.json();
+}
+
+async function startWorker() {
+  const res = await fetch('/api/worker/start', { method: 'POST' });
+  if (!res.ok) {
+    const data = await res.json();
+    throw new Error(data.error || 'Failed to start worker');
+  }
+  return res.json();
+}
+
+async function stopWorker() {
+  const res = await fetch('/api/worker/stop', { method: 'POST' });
+  if (!res.ok) throw new Error('Failed to stop worker');
+  return res.json();
+}
+
+async function fetchWorkerLogs(lines) {
+  const res = await fetch('/api/worker/logs?lines=' + (lines || 50));
+  if (!res.ok) throw new Error('Failed to get worker logs');
+  return res.json();
+}
+
+async function fetchWorkerSettings() {
+  const res = await fetch('/api/worker/settings');
+  if (!res.ok) throw new Error('Failed to get worker settings');
+  return res.json();
+}
+
+async function updateWorkerSettings(settings) {
+  const res = await fetch('/api/worker/settings', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(settings),
+  });
+  if (!res.ok) throw new Error('Failed to update worker settings');
+  return res.json();
+}
+
+let workerStatusPollInterval = null;
+
 // Worker API
 async function fetchWorkers() {
   const res = await fetch('/api/workers');
@@ -309,8 +362,16 @@ function renderTrainingConfig(summary) {
   html += '</div>';
   html += '</div>';
 
+  // ── This Machine as Worker ──
+  html += '<div class="training-section" style="border-top:1px solid #334155;padding-top:1.25rem;margin-top:1.5rem;">';
+  html += '<h3>&#x1f4e1; This Machine as Worker' + helpIcon('training-worker-mode') + '</h3>';
+  html += '<p style="color:#94a3b8;font-size:0.8rem;margin-bottom:0.75rem;">Run this machine as a training worker so other Woodbury instances on your network can send training jobs to it.</p>';
+  html += '<div id="worker-mode-panel"><div style="color:#64748b;font-size:0.8rem;">Checking environment...</div></div>';
+  html += '</div>';
+
   main.innerHTML = html;
   loadWorkersSection();
+  loadWorkerModePanel();
 
   // Wire up prepare button
   const prepareBtn = document.querySelector('#btn-prepare');
@@ -474,6 +535,258 @@ async function loadWorkersSection() {
         saveBtn.textContent = 'Add';
       }
     });
+  }
+}
+
+// ── Worker Mode Panel ───────────────────────────────────────
+
+async function loadWorkerModePanel() {
+  const panel = document.querySelector('#worker-mode-panel');
+  if (!panel) return;
+
+  let html = '';
+
+  // Check environment
+  let env;
+  try {
+    env = await fetchPythonCheck();
+  } catch {
+    panel.innerHTML = '<div style="color:#ef4444;font-size:0.8rem;">Failed to check Python environment.</div>';
+    return;
+  }
+
+  // Environment status indicators
+  html += '<div style="display:flex;flex-direction:column;gap:0.35rem;margin-bottom:0.75rem;font-size:0.8rem;">';
+  html += '<div>' + (env.pythonAvailable ? '&#x2705;' : '&#x274c;') + ' Python ' +
+    (env.pythonVersion ? '<span style="color:#94a3b8;">(' + escHtml(env.pythonVersion) + ')</span>' : '<span style="color:#ef4444;">not found</span>') + '</div>';
+  html += '<div>' + (env.wooburyModelsInstalled ? '&#x2705;' : '&#x274c;') + ' woobury-models ' +
+    (env.wooburyModelsInstalled ? '' : '<span style="color:#ef4444;">not installed</span>') + '</div>';
+  html += '<div>' + (env.gpuAvailable ? '&#x2705;' : '&#x26a0;&#xfe0f;') + ' GPU ' +
+    (env.gpuName ? '<span style="color:#94a3b8;">(' + escHtml(env.gpuName) + ')</span>' :
+      '<span style="color:#f59e0b;">CPU only — training will be slower</span>') + '</div>';
+  html += '</div>';
+
+  if (!env.wooburyModelsInstalled) {
+    html += '<div style="color:#94a3b8;font-size:0.75rem;margin-bottom:0.75rem;background:#1e293b;padding:0.5rem 0.75rem;border-radius:6px;border:1px solid #334155;">';
+    html += '<strong>Install woobury-models:</strong><br>';
+    html += '<code style="color:#7dd3fc;font-size:0.7rem;">pip install git+https://github.com/Zachary-Companies/woobury-models.git</code>';
+    html += '</div>';
+    html += '<button class="btn-train" id="btn-refresh-env" style="padding:4px 12px;font-size:0.8rem;background:#334155;">Refresh</button>';
+    panel.innerHTML = html;
+    document.querySelector('#btn-refresh-env')?.addEventListener('click', async () => {
+      panel.innerHTML = '<div style="color:#64748b;font-size:0.8rem;">Checking environment...</div>';
+      try { await fetchPythonCheck(true); } catch {}
+      loadWorkerModePanel();
+    });
+    return;
+  }
+
+  // Worker status
+  let workerStatus;
+  try {
+    workerStatus = await fetchWorkerStatus();
+  } catch {
+    workerStatus = { running: false };
+  }
+
+  // Worker settings
+  let settings;
+  try {
+    settings = await fetchWorkerSettings();
+  } catch {
+    settings = { autoStart: false, port: 8677 };
+  }
+
+  if (workerStatus.running) {
+    const uptimeStr = workerStatus.uptime ? formatTime(workerStatus.uptime / 1000) : '—';
+    const statusColor = workerStatus.online ? '#22c55e' : '#f59e0b';
+    const statusText = workerStatus.online ? 'Online' : 'Starting...';
+
+    html += '<div style="display:flex;align-items:center;gap:0.75rem;margin-bottom:0.75rem;">';
+    html += '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + statusColor + ';"></span>';
+    html += '<span style="font-size:0.85rem;color:#e2e8f0;"><strong>' + statusText + '</strong> &middot; Port ' + workerStatus.port + ' &middot; Uptime ' + uptimeStr + '</span>';
+    html += '</div>';
+
+    // GPU info from health probe
+    if (workerStatus.health) {
+      const h = workerStatus.health;
+      html += '<div style="display:flex;gap:1rem;flex-wrap:wrap;margin-bottom:0.75rem;font-size:0.8rem;color:#94a3b8;">';
+      if (h.gpu) html += '<span>GPU: ' + escHtml(h.gpu) + '</span>';
+      if (h.status) html += '<span>Status: <strong style="color:' + (h.status === 'idle' ? '#22c55e' : '#f59e0b') + ';">' + escHtml(h.status) + '</strong></span>';
+      if (h.python_version) html += '<span>Python ' + escHtml(h.python_version) + '</span>';
+      if (h.torch_version) html += '<span>PyTorch ' + escHtml(h.torch_version) + '</span>';
+      html += '</div>';
+    }
+
+    // Active job progress
+    if (workerStatus.job && workerStatus.job.phase && workerStatus.job.phase !== 'idle') {
+      html += renderWorkerJobProgress(workerStatus.job);
+    }
+
+    // Stop button
+    html += '<div style="display:flex;align-items:center;gap:0.75rem;margin-top:0.5rem;">';
+    html += '<button class="btn-train" id="btn-stop-worker" style="padding:4px 12px;font-size:0.8rem;background:#dc2626;">Stop Worker</button>';
+    html += '<button class="btn-train" id="btn-worker-logs-toggle" style="padding:4px 12px;font-size:0.8rem;background:#334155;">Show Logs</button>';
+    html += '</div>';
+
+    // Collapsible logs
+    html += '<div id="worker-logs-container" style="display:none;margin-top:0.75rem;">';
+    html += '<div class="training-log" id="worker-log-output" style="max-height:150px;">Loading...</div>';
+    html += '</div>';
+  } else {
+    html += '<div style="display:flex;align-items:center;gap:0.75rem;margin-bottom:0.75rem;">';
+    html += '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#64748b;"></span>';
+    html += '<span style="font-size:0.85rem;color:#94a3b8;">Worker not running</span>';
+    html += '</div>';
+
+    html += '<button class="btn-train btn-train-start" id="btn-start-worker" style="padding:6px 16px;font-size:0.85rem;">Start Worker</button>';
+  }
+
+  // Auto-start toggle
+  html += '<div style="margin-top:0.75rem;display:flex;align-items:center;gap:0.5rem;">';
+  html += '<label style="display:flex;align-items:center;gap:0.5rem;font-size:0.8rem;color:#94a3b8;cursor:pointer;">';
+  html += '<input type="checkbox" id="worker-autostart" ' + (settings.autoStart ? 'checked' : '') + ' />';
+  html += 'Start worker automatically when Woodbury launches</label>';
+  html += '</div>';
+
+  panel.innerHTML = html;
+
+  // Wire up buttons
+  const startBtn = document.querySelector('#btn-start-worker');
+  if (startBtn) {
+    startBtn.addEventListener('click', async () => {
+      startBtn.disabled = true;
+      startBtn.textContent = 'Starting...';
+      try {
+        await startWorker();
+        if (typeof toast === 'function') toast('Worker started', 'success');
+        startWorkerStatusPolling();
+        loadWorkerModePanel();
+      } catch (err) {
+        if (typeof toast === 'function') toast('Failed: ' + err.message, 'error');
+        startBtn.disabled = false;
+        startBtn.textContent = 'Start Worker';
+      }
+    });
+  }
+
+  const stopBtn = document.querySelector('#btn-stop-worker');
+  if (stopBtn) {
+    stopBtn.addEventListener('click', async () => {
+      stopBtn.disabled = true;
+      stopBtn.textContent = 'Stopping...';
+      try {
+        await stopWorker();
+        stopWorkerStatusPolling();
+        if (typeof toast === 'function') toast('Worker stopped', 'success');
+        loadWorkerModePanel();
+      } catch (err) {
+        if (typeof toast === 'function') toast('Failed: ' + err.message, 'error');
+        stopBtn.disabled = false;
+        stopBtn.textContent = 'Stop Worker';
+      }
+    });
+  }
+
+  const logsToggle = document.querySelector('#btn-worker-logs-toggle');
+  const logsContainer = document.querySelector('#worker-logs-container');
+  if (logsToggle && logsContainer) {
+    logsToggle.addEventListener('click', async () => {
+      const isHidden = logsContainer.style.display === 'none';
+      logsContainer.style.display = isHidden ? 'block' : 'none';
+      logsToggle.textContent = isHidden ? 'Hide Logs' : 'Show Logs';
+      if (isHidden) {
+        try {
+          const data = await fetchWorkerLogs(50);
+          const logOutput = document.querySelector('#worker-log-output');
+          if (logOutput) {
+            logOutput.textContent = data.logs.length > 0 ? data.logs.join('\n') : '(no output yet)';
+            logOutput.scrollTop = logOutput.scrollHeight;
+          }
+        } catch {}
+      }
+    });
+  }
+
+  const autoStartCheck = document.querySelector('#worker-autostart');
+  if (autoStartCheck) {
+    autoStartCheck.addEventListener('change', async () => {
+      try {
+        await updateWorkerSettings({ autoStart: autoStartCheck.checked });
+        if (typeof toast === 'function') toast(autoStartCheck.checked ? 'Auto-start enabled' : 'Auto-start disabled', 'success');
+      } catch (err) {
+        if (typeof toast === 'function') toast('Failed to save setting', 'error');
+        autoStartCheck.checked = !autoStartCheck.checked;
+      }
+    });
+  }
+
+  // Start polling if worker is running
+  if (workerStatus.running) {
+    startWorkerStatusPolling();
+  }
+}
+
+function renderWorkerJobProgress(job) {
+  let html = '<div style="background:#1e293b;border:1px solid #334155;border-radius:8px;padding:0.75rem;margin-bottom:0.75rem;">';
+  html += '<div style="font-size:0.8rem;color:#7dd3fc;margin-bottom:0.5rem;">&#x1f3cb; Incoming Training Job</div>';
+
+  const phase = job.phase || 'unknown';
+  const pct = job.total_epochs > 0 && job.current_epoch ? Math.round((job.current_epoch / job.total_epochs) * 100) : 0;
+
+  // Progress bar
+  html += '<div class="training-progress-bar-outer" style="height:16px;margin-bottom:0.5rem;">';
+  let barClass = 'training-progress-bar-fill';
+  if (job.done && job.success) barClass += ' done-success';
+  else if (job.done && !job.success) barClass += ' done-fail';
+  html += '<div class="' + barClass + '" style="width:' + pct + '%"></div>';
+  html += '<div class="training-progress-bar-text" style="font-size:0.7rem;">';
+  if (phase === 'preparing') html += 'Preparing data...';
+  else if (phase === 'training') html += 'Epoch ' + (job.current_epoch || 0) + ' / ' + (job.total_epochs || '?') + ' (' + pct + '%)';
+  else if (phase === 'exporting') html += 'Exporting model...';
+  else if (job.done) html += job.success ? 'Complete' : 'Failed';
+  else html += escHtml(phase);
+  html += '</div></div>';
+
+  // Stats
+  html += '<div style="display:flex;gap:1rem;flex-wrap:wrap;font-size:0.75rem;color:#94a3b8;">';
+  if (job.loss) html += '<span>Loss: <strong>' + job.loss.toFixed(4) + '</strong></span>';
+  if (job.best_auc) html += '<span>Best AUC: <strong>' + job.best_auc.toFixed(4) + '</strong></span>';
+  if (job.eta_s > 0) html += '<span>ETA: <strong>' + formatTime(job.eta_s) + '</strong></span>';
+  if (job.device) html += '<span>Device: ' + escHtml(job.device) + '</span>';
+  html += '</div>';
+
+  if (job.error) {
+    html += '<div style="color:#ef4444;font-size:0.75rem;margin-top:0.5rem;">' + escHtml(job.error) + '</div>';
+  }
+
+  html += '</div>';
+  return html;
+}
+
+function startWorkerStatusPolling() {
+  stopWorkerStatusPolling();
+  workerStatusPollInterval = setInterval(async () => {
+    const panel = document.querySelector('#worker-mode-panel');
+    if (!panel) {
+      stopWorkerStatusPolling();
+      return;
+    }
+    // Only refresh if the worker section is visible and has job progress
+    try {
+      const status = await fetchWorkerStatus();
+      if (status.running && status.job && status.job.phase && status.job.phase !== 'idle') {
+        // Refresh the panel to show updated progress
+        loadWorkerModePanel();
+      }
+    } catch {}
+  }, 3000);
+}
+
+function stopWorkerStatusPolling() {
+  if (workerStatusPollInterval) {
+    clearInterval(workerStatusPollInterval);
+    workerStatusPollInterval = null;
   }
 }
 
