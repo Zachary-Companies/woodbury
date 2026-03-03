@@ -147,7 +147,7 @@ The Chrome extension captures every interaction and converts it into a `Workflow
 
 ### Visual AI
 
-Woodbury trains site-specific Siamese neural networks to verify UI elements across visual variations. See [woobury-models](https://github.com/mephisto83/woobury-models) for the training system.
+Woodbury trains site-specific Siamese neural networks to verify UI elements across visual variations. See [woobury-models](https://github.com/Zachary-Companies/woobury-models) for the training system.
 
 - **Input**: 224×224 letterboxed element crops
 - **Output**: 64-dim L2-normalized embeddings
@@ -257,7 +257,7 @@ Create a `.woodbury.md` file in your project root to provide project-specific in
 ## Links
 
 - **Website**: [woobury-ai.web.app](https://woobury-ai.web.app)
-- **Visual AI Models**: [woobury-models](https://github.com/mephisto83/woobury-models)
+- **Visual AI Models**: [woobury-models](https://github.com/Zachary-Companies/woobury-models)
 - **Releases**: [GitHub Releases](https://github.com/Zachary-Companies/woodbury/releases)
 
 ## License
