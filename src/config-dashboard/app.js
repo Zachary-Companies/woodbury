@@ -841,5 +841,118 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 });
 
+// ── Bridge Status Polling ────────────────────────────────────
+
+var _bridgeConnected = false;
+var _bridgeDismissed = false;
+var _bridgeExtensionPath = '';
+var _bridgeFirstConnect = true;
+
+async function checkBridgeStatus() {
+  try {
+    var res = await fetch('/api/bridge/status');
+    var data = await res.json();
+    var wasConnected = _bridgeConnected;
+    _bridgeConnected = data.extensionConnected;
+    _bridgeExtensionPath = data.extensionPath || '';
+
+    // Update sidebar dot
+    var dot = document.getElementById('bridge-dot');
+    var text = document.getElementById('bridge-text');
+    if (dot && text) {
+      if (_bridgeConnected) {
+        dot.className = 'status-dot connected';
+        text.textContent = 'Extension connected';
+      } else {
+        dot.className = 'status-dot disconnected';
+        text.textContent = 'Extension not connected';
+      }
+    }
+
+    // Update banner
+    var banner = document.getElementById('setup-banner');
+    var disconnectedEl = document.getElementById('banner-disconnected');
+    var connectedEl = document.getElementById('banner-connected');
+    if (banner && disconnectedEl && connectedEl) {
+      if (_bridgeConnected) {
+        disconnectedEl.style.display = 'none';
+        connectedEl.style.display = '';
+        banner.classList.add('connected-state');
+        banner.classList.remove('hidden');
+        // Auto-hide connected banner after 5s
+        setTimeout(function() {
+          banner.classList.add('hidden');
+        }, 5000);
+        // Show toast on first connection
+        if (!wasConnected && !_bridgeFirstConnect) {
+          toast('Chrome extension connected', 'success');
+        }
+      } else if (!_bridgeDismissed) {
+        disconnectedEl.style.display = '';
+        connectedEl.style.display = 'none';
+        banner.classList.remove('connected-state');
+        banner.classList.remove('hidden');
+      }
+    }
+
+    // Fill in extension path
+    var pathEl = document.getElementById('copy-ext-path');
+    if (pathEl && _bridgeExtensionPath) {
+      pathEl.textContent = _bridgeExtensionPath;
+    }
+
+    _bridgeFirstConnect = false;
+  } catch (e) {
+    // Silently ignore — dashboard server may not be ready yet
+  }
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+  // Dismiss button
+  var dismissBtn = document.getElementById('banner-dismiss');
+  if (dismissBtn) {
+    dismissBtn.addEventListener('click', function() {
+      _bridgeDismissed = true;
+      var banner = document.getElementById('setup-banner');
+      if (banner) banner.classList.add('hidden');
+    });
+  }
+
+  // Toggle manual install steps
+  var manualBtn = document.getElementById('btn-manual-install');
+  if (manualBtn) {
+    manualBtn.addEventListener('click', function() {
+      var steps = document.getElementById('manual-steps');
+      if (steps) steps.classList.toggle('visible');
+    });
+  }
+
+  // Copy-to-clipboard for code elements in manual steps
+  var copyPath = document.getElementById('copy-ext-path');
+  if (copyPath) {
+    copyPath.addEventListener('click', function() {
+      if (navigator.clipboard && copyPath.textContent) {
+        navigator.clipboard.writeText(copyPath.textContent).then(function() {
+          toast('Path copied to clipboard', 'success');
+        });
+      }
+    });
+  }
+  var copyUrl = document.getElementById('copy-ext-url');
+  if (copyUrl) {
+    copyUrl.addEventListener('click', function() {
+      if (navigator.clipboard) {
+        navigator.clipboard.writeText('chrome://extensions').then(function() {
+          toast('Copied to clipboard', 'success');
+        });
+      }
+    });
+  }
+
+  // Start polling
+  checkBridgeStatus();
+  setInterval(checkBridgeStatus, 3000);
+});
+
 // ── Init ─────────────────────────────────────────────────────
 fetchExtensions();

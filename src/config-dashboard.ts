@@ -44,7 +44,7 @@ import { bridgeServer, ensureBridgeServer } from './bridge-server.js';
 import { startRemoteRelay, type RelayHandle } from './remote-relay.js';
 import { ExecutionSnapshotCapture } from './workflow/execution-snapshots.js';
 import { startInferenceServer as startNodeInference, stopInferenceServer as stopNodeInference, type InferenceServer } from './inference/index.js';
-import { appendFileSync, mkdirSync, createReadStream, createWriteStream } from 'node:fs';
+import { appendFileSync, mkdirSync, existsSync, createReadStream, createWriteStream } from 'node:fs';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createSocket, type Socket as DgramSocket } from 'node:dgram';
 
@@ -2180,6 +2180,23 @@ export async function startDashboard(
     }
 
     // ── API Routes ───────────────────────────────────────────
+
+    // GET /api/bridge/status — Chrome extension connection status
+    if (req.method === 'GET' && pathname === '/api/bridge/status') {
+      // Resolve the bundled chrome-extension path (works in both dev and packaged Electron)
+      const candidates = [
+        join(__dirname, '..', 'chrome-extension'),             // dev: dist/../chrome-extension
+        join(__dirname, '..', '..', 'chrome-extension'),       // packaged: app.asar/../chrome-extension
+      ];
+      const extensionPath = candidates.find(p => existsSync(p)) || candidates[0];
+
+      sendJson(res, 200, {
+        bridgeRunning: bridgeServer.isStarted,
+        extensionConnected: bridgeServer.isConnected,
+        extensionPath,
+      });
+      return;
+    }
 
     // GET /api/file?path=... — serve local files (images only) for preview
     if (req.method === 'GET' && pathname === '/api/file') {
@@ -7111,6 +7128,9 @@ Fix the bug and return the corrected code. Do not change the @input/@output anno
   if (verbose) {
     console.log(`[dashboard] Config dashboard at ${dashboardUrl}`);
   }
+
+  // Start bridge server early so the extension can connect immediately
+  ensureBridgeServer().catch(() => {});
 
   // Start remote relay (Firebase RTDB connection)
   let relayHandle: RelayHandle | null = null;

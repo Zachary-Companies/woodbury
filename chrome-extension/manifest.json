@@ -2,7 +2,9 @@
   "manifest_version": 3,
   "name": "Woodbury Bridge",
   "version": "1.0.0",
-  "description": "Connects Chrome to Woodbury AI assistant for precise DOM element targeting and browser control.",
+  "description": "Connects Chrome to the Woodbury desktop app for browser automation. Record, replay, and debug workflows.",
+  "homepage_url": "https://github.com/mephisto83/woodbury",
+  "offline_enabled": false,
   "permissions": [
     "activeTab",
     "tabs",
@@ -13,6 +15,9 @@
     "storage",
     "downloads"
   ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'"
+  },
   "side_panel": {
     "default_path": "sidepanel.html"
   },

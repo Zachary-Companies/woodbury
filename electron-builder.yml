@@ -12,6 +12,7 @@ files:
   - dist/**/*
   - node_modules/**/*
   - electron/**/*
+  - chrome-extension/**/*
   - configs/**/*
   - tools/desktop-hook
   - package.json

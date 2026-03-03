@@ -3646,6 +3646,128 @@
     .comp-node-switch .comp-node-header { background: linear-gradient(135deg, #f9731633 0%, #ea580c22 100%); border-bottom-color: #f9731633; }
     .comp-tb-btn-switch { background: #f9731622 !important; border-color: #f9731644 !important; color: #f97316 !important; }
     .comp-tb-btn-switch:hover { background: #f9731633 !important; }
+
+    /* ── Bridge Status Indicator ──────────────────────── */
+    .bridge-status {
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      padding: 0.35rem 1.25rem 0;
+      font-size: 0.7rem;
+      color: #64748b;
+    }
+    .status-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .status-dot.connected { background: #22c55e; box-shadow: 0 0 4px #22c55e88; }
+    .status-dot.disconnected { background: #64748b; }
+
+    /* ── Extension Setup Banner ───────────────────────── */
+    .setup-banner {
+      background: linear-gradient(135deg, #1e1b4b 0%, #172554 100%);
+      border: 1px solid #312e81;
+      border-radius: 8px;
+      padding: 1.25rem 1.5rem;
+      margin: 1rem;
+      position: relative;
+    }
+    .setup-banner.hidden { display: none; }
+    .setup-banner.connected-state {
+      background: linear-gradient(135deg, #052e16 0%, #022c22 100%);
+      border-color: #166534;
+      padding: 0.75rem 1.5rem;
+    }
+    .setup-banner h3 {
+      font-size: 0.95rem;
+      color: #e2e8f0;
+      margin-bottom: 0.5rem;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    .setup-banner p {
+      font-size: 0.8rem;
+      color: #94a3b8;
+      margin-bottom: 0.75rem;
+      line-height: 1.5;
+    }
+    .setup-banner .banner-actions {
+      display: flex;
+      gap: 0.75rem;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .setup-banner .btn-primary {
+      background: #7c3aed;
+      color: white;
+      border: none;
+      padding: 0.4rem 1rem;
+      border-radius: 6px;
+      font-size: 0.8rem;
+      cursor: pointer;
+      text-decoration: none;
+      display: inline-block;
+    }
+    .setup-banner .btn-primary:hover { background: #6d28d9; }
+    .setup-banner .btn-secondary {
+      background: transparent;
+      color: #94a3b8;
+      border: 1px solid #334155;
+      padding: 0.4rem 1rem;
+      border-radius: 6px;
+      font-size: 0.8rem;
+      cursor: pointer;
+    }
+    .setup-banner .btn-secondary:hover { color: #e2e8f0; border-color: #475569; }
+    .setup-banner .btn-dismiss {
+      position: absolute;
+      top: 0.5rem;
+      right: 0.75rem;
+      background: none;
+      border: none;
+      color: #475569;
+      font-size: 1.1rem;
+      cursor: pointer;
+      padding: 0.25rem;
+      line-height: 1;
+    }
+    .setup-banner .btn-dismiss:hover { color: #94a3b8; }
+    .manual-steps {
+      display: none;
+      margin-top: 0.75rem;
+      padding: 0.75rem;
+      background: #0f172a;
+      border-radius: 6px;
+      border: 1px solid #1e293b;
+    }
+    .manual-steps.visible { display: block; }
+    .manual-steps ol {
+      list-style: decimal;
+      padding-left: 1.25rem;
+      font-size: 0.78rem;
+      color: #94a3b8;
+      line-height: 1.8;
+    }
+    .manual-steps code {
+      background: #1e293b;
+      padding: 0.15rem 0.4rem;
+      border-radius: 3px;
+      font-family: 'SF Mono', Monaco, monospace;
+      font-size: 0.72rem;
+      color: #a78bfa;
+      cursor: pointer;
+    }
+    .manual-steps code:hover { background: #334155; }
+    .connected-check {
+      color: #22c55e;
+      font-size: 0.85rem;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
   </style>
 </head>
 <body>
@@ -3653,6 +3775,10 @@
     <div class="sidebar-header">
       <h1>Woodbury</h1>
       <p>Dashboard</p>
+      <div id="bridge-status" class="bridge-status">
+        <span class="status-dot disconnected" id="bridge-dot"></span>
+        <span id="bridge-text">Checking extension...</span>
+      </div>
     </div>
     <div class="nav-tabs">
       <button class="nav-tab active" data-tab="config">Config</button>
@@ -3683,6 +3809,33 @@
   </div>
 
   <div class="main" id="main">
+    <!-- Chrome Extension Setup Banner -->
+    <div id="setup-banner" class="setup-banner hidden">
+      <button class="btn-dismiss" id="banner-dismiss" title="Dismiss">&times;</button>
+      <div id="banner-disconnected">
+        <h3>Chrome Extension Required</h3>
+        <p>Woodbury needs the Chrome extension to record and replay browser workflows.</p>
+        <div class="banner-actions">
+          <a class="btn-primary" href="https://chromewebstore.google.com" target="_blank" id="cws-link">Install from Chrome Web Store</a>
+          <button class="btn-secondary" id="btn-manual-install">Load manually</button>
+        </div>
+        <div class="manual-steps" id="manual-steps">
+          <ol>
+            <li>Open <code id="copy-ext-url">chrome://extensions</code> in Chrome</li>
+            <li>Enable <strong>Developer mode</strong> (toggle in top-right)</li>
+            <li>Click <strong>Load unpacked</strong></li>
+            <li>Select this folder: <code id="copy-ext-path"></code></li>
+          </ol>
+        </div>
+      </div>
+      <div id="banner-connected" style="display:none;">
+        <div class="connected-check">
+          <span style="font-size:1.1rem;">&#x2714;</span>
+          <span>Chrome extension connected</span>
+        </div>
+      </div>
+    </div>
+
     <div class="empty-state">
       <div class="empty-state-icon">&#x1f511;</div>
       <h2>Extension Config Dashboard</h2>
