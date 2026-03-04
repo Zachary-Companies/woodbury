@@ -537,10 +537,10 @@ export class WorkflowExecutor {
   // ── Step executors ──────────────────────────────────────────
 
   private async execNavigate(step: NavigateStep): Promise<void> {
-    await this.bridge.send('open', { url: step.url }, 30000);
-
-    // Bring Chrome to the foreground and maximise the window
+    // Bring Chrome to the foreground and maximise immediately (fire-and-forget)
     focusAndMaximizeChrome();
+
+    await this.bridge.send('open', { url: step.url }, 30000);
 
     if (step.waitMs) {
       await this.delay(step.waitMs);
