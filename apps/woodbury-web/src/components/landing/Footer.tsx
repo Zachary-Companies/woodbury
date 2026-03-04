@@ -22,14 +22,20 @@ export default function Footer() {
             <div>
               <h4 className="mb-3 text-xs font-semibold uppercase tracking-wider text-slate-500">Product</h4>
               <div className="flex flex-col gap-2">
-                <a href="#features" className="text-sm text-slate-400 transition-colors hover:text-white">
+                <a href="/#features" className="text-sm text-slate-400 transition-colors hover:text-white">
                   Features
                 </a>
-                <a href="#how-it-works" className="text-sm text-slate-400 transition-colors hover:text-white">
+                <a href="/#how-it-works" className="text-sm text-slate-400 transition-colors hover:text-white">
                   How It Works
                 </a>
-                <a href="#use-cases" className="text-sm text-slate-400 transition-colors hover:text-white">
+                <a href="/#use-cases" className="text-sm text-slate-400 transition-colors hover:text-white">
                   Use Cases
+                </a>
+                <a href="/extensions" className="text-sm text-slate-400 transition-colors hover:text-white">
+                  Extensions
+                </a>
+                <a href="/workflows" className="text-sm text-slate-400 transition-colors hover:text-white">
+                  Workflows
                 </a>
               </div>
             </div>

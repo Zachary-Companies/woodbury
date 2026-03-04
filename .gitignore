@@ -149,3 +149,4 @@ release/
 
 # Claude Code local config
 .claude/
+woobury-ai-firebase-adminsdk.json

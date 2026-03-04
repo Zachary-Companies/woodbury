@@ -27,7 +27,9 @@
     "electron:build": "npm run build && electron-builder --mac",
     "electron:build:mac": "npm run build && electron-builder --mac",
     "electron:build:win": "npm run build && electron-builder --win",
-    "electron:pack": "npm run build && electron-builder --mac --dir"
+    "electron:pack": "npm run build && electron-builder --mac --dir",
+    "deploy:web": "npm run build && cd apps/woodbury-web && npm run build && npx firebase deploy --only hosting",
+    "deploy:all": "npm run build && cd apps/woodbury-web && npm run build && npx firebase deploy --only hosting,firestore && cd ../.. && electron-builder --mac --arm64 --dir"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.77.0",

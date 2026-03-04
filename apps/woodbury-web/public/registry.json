@@ -1,0 +1,102 @@
+{
+  "version": 1,
+  "updatedAt": "2026-03-03T00:00:00Z",
+  "extensions": [
+    {
+      "name": "nanobanana",
+      "displayName": "Nano Banana Image Generator",
+      "description": "Generate and edit images using Google Gemini models. Supports flash (fast/cheap) and pro (4K) modes with multiple aspect ratios.",
+      "version": "1.0.0",
+      "author": "Zachary Companies",
+      "category": "media",
+      "provides": ["tools", "prompts"],
+      "gitUrl": "https://github.com/Zachary-Companies/woodbury-ext-nanobanana.git",
+      "repoUrl": "https://github.com/Zachary-Companies/woodbury-ext-nanobanana",
+      "icon": "image",
+      "tags": ["image", "ai", "gemini", "generation"],
+      "platforms": ["darwin", "win32"],
+      "featured": true
+    },
+    {
+      "name": "elevenlabs",
+      "displayName": "ElevenLabs Text-to-Speech",
+      "description": "Convert text to natural-sounding speech using ElevenLabs AI voices. Supports multiple voices, formats, and voice settings.",
+      "version": "1.0.0",
+      "author": "Zachary Companies",
+      "category": "media",
+      "provides": ["tools", "prompts"],
+      "gitUrl": "https://github.com/Zachary-Companies/woodbury-ext-elevenlabs.git",
+      "repoUrl": "https://github.com/Zachary-Companies/woodbury-ext-elevenlabs",
+      "icon": "audio",
+      "tags": ["audio", "tts", "speech", "ai", "elevenlabs"],
+      "platforms": ["darwin", "win32"],
+      "featured": true
+    },
+    {
+      "name": "instagram",
+      "displayName": "Instagram Poster",
+      "description": "Post images to Instagram with captions via browser automation. Uses the Woodbury Bridge Chrome extension to control Instagram's web interface.",
+      "version": "1.0.0",
+      "author": "Zachary Companies",
+      "category": "social",
+      "provides": ["tools", "prompts"],
+      "gitUrl": "https://github.com/Zachary-Companies/woodbury-ext-instagram.git",
+      "repoUrl": "https://github.com/Zachary-Companies/woodbury-ext-instagram",
+      "icon": "share",
+      "tags": ["instagram", "social media", "posting", "browser"],
+      "platforms": ["darwin", "win32"],
+      "featured": true
+    },
+    {
+      "name": "automat",
+      "displayName": "Blender Automat Video Renderer",
+      "description": "Render videos from JSON project definitions using Blender's headless mode. Supports scene composition, validation, and batch rendering.",
+      "version": "1.0.0",
+      "author": "Zachary Companies",
+      "category": "media",
+      "provides": ["tools", "prompts"],
+      "gitUrl": "https://github.com/Zachary-Companies/woodbury-ext-automat.git",
+      "repoUrl": "https://github.com/Zachary-Companies/woodbury-ext-automat",
+      "icon": "video",
+      "tags": ["video", "blender", "render", "3d", "animation"],
+      "platforms": ["darwin", "win32"],
+      "featured": false
+    },
+    {
+      "name": "social-scheduler",
+      "displayName": "Social Scheduler",
+      "description": "Schedule and automate social media posting with a built-in web dashboard. Manage content calendars, queue posts, and automate publishing across platforms.",
+      "version": "0.1.0",
+      "author": "Zachary Companies",
+      "category": "social",
+      "provides": ["tools", "commands", "prompts", "webui"],
+      "gitUrl": "https://github.com/Zachary-Companies/woodbury-ext-social-scheduler.git",
+      "repoUrl": "https://github.com/Zachary-Companies/woodbury-ext-social-scheduler",
+      "icon": "calendar",
+      "tags": ["social media", "scheduling", "dashboard", "automation"],
+      "platforms": ["darwin", "win32"],
+      "featured": true
+    },
+    {
+      "name": "suno-create",
+      "displayName": "Suno Create",
+      "description": "Workflow-based automation for Suno music generation. Dynamically discovers workflow definitions and creates tools for each.",
+      "version": "1.0.0",
+      "author": "Zachary Companies",
+      "category": "automation",
+      "provides": ["tools", "commands", "prompts"],
+      "gitUrl": "https://github.com/Zachary-Companies/woodbury-ext-suno-create.git",
+      "repoUrl": "https://github.com/Zachary-Companies/woodbury-ext-suno-create",
+      "icon": "music",
+      "tags": ["music", "suno", "workflow", "automation"],
+      "platforms": ["darwin", "win32"],
+      "featured": false
+    }
+  ],
+  "categories": [
+    { "id": "all", "label": "All Extensions" },
+    { "id": "media", "label": "Media & Creative" },
+    { "id": "social", "label": "Social Media" },
+    { "id": "automation", "label": "Automation" }
+  ]
+}

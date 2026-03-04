@@ -1,6 +1,11 @@
 appId: com.zachary.woodbury
 productName: Woodbury
 
+protocols:
+  - name: Woodbury Extension Install
+    schemes:
+      - woodbury
+
 directories:
   output: release
 

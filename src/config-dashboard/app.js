@@ -738,6 +738,16 @@ function switchTab(tab, opts) {
     if (typeof initTraining === 'function') {
       initTraining();
     }
+  } else if (tab === 'marketplace') {
+    selectedExtension = null;
+    if (typeof initMarketplace === 'function') {
+      initMarketplace();
+    }
+  } else if (tab === 'social') {
+    selectedExtension = null;
+    if (typeof initSocial === 'function') {
+      initSocial();
+    }
   }
 }
 
@@ -770,7 +780,7 @@ function parseHash() {
 
 function handleHash() {
   var state = parseHash();
-  var validTabs = ['config', 'workflows', 'compositions', 'runs', 'training'];
+  var validTabs = ['config', 'workflows', 'compositions', 'runs', 'training', 'marketplace'];
   var tab = validTabs.indexOf(state.tab) !== -1 ? state.tab : 'config';
 
   // Only switch tab if it changed
@@ -799,6 +809,36 @@ function handleHash() {
 
 window.addEventListener('hashchange', handleHash);
 
+// ── Update Check ─────────────────────────────────────────────
+async function checkForUpdates() {
+  try {
+    var res = await fetch('/api/app/update-check');
+    var data = await res.json();
+
+    // Show current version in sidebar
+    var versionEl = document.getElementById('sidebar-version');
+    if (versionEl && data.currentVersion && data.currentVersion !== '?.?.?') {
+      versionEl.textContent = 'v' + data.currentVersion;
+    }
+
+    // Show update banner if available
+    if (data.updateAvailable) {
+      var banner = document.getElementById('update-banner');
+      if (banner) {
+        var releaseUrl = data.releaseUrl || 'https://github.com/Zachary-Companies/woodbury/releases/latest';
+        banner.style.display = '';
+        banner.className = 'update-banner';
+        banner.innerHTML =
+          '<strong>Update available:</strong> v' + data.latestVersion +
+          (data.releaseNotes ? ' &mdash; ' + data.releaseNotes : '') +
+          '<br><a href="' + releaseUrl + '" target="_blank">Download update &rarr;</a>';
+      }
+    }
+  } catch (e) {
+    // Silently fail — update check is non-critical
+  }
+}
+
 document.addEventListener('DOMContentLoaded', () => {
   document.querySelectorAll('.nav-tab').forEach(btn => {
     btn.addEventListener('click', () => switchTab(btn.dataset.tab));
@@ -806,7 +846,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Restore state from hash on initial load
   var state = parseHash();
-  var validTabs = ['config', 'workflows', 'compositions', 'runs', 'training'];
+  var validTabs = ['config', 'workflows', 'compositions', 'runs', 'training', 'marketplace'];
   var initialTab = validTabs.indexOf(state.tab) !== -1 ? state.tab : 'config';
 
   // Set detailView early so workflow render picks it up
@@ -839,6 +879,9 @@ document.addEventListener('DOMContentLoaded', () => {
     }, 100);
     setTimeout(function() { clearInterval(checkCompReady); }, 5000);
   }
+
+  // Check for app updates
+  checkForUpdates();
 });
 
 // ── Bridge Status Polling ────────────────────────────────────

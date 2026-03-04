@@ -91,6 +91,14 @@
   box-shadow: 0 0 80px rgba(139, 92, 246, 0.15), 0 25px 50px rgba(0, 0, 0, 0.5);
 }
 
+/* Download button glow */
+.download-btn {
+  box-shadow: 0 0 40px rgba(139, 92, 246, 0.3), 0 10px 30px rgba(139, 92, 246, 0.2);
+}
+.download-btn:hover {
+  box-shadow: 0 0 60px rgba(139, 92, 246, 0.45), 0 15px 40px rgba(139, 92, 246, 0.3);
+}
+
 /* Fade-in animation */
 @keyframes fadeInUp {
   from {

@@ -1451,6 +1451,7 @@ function renderWorkflowDetail(wf, filePath, source) {
   html += '</div>';
   html += '</div>';
   html += '<div class="wf-detail-actions">';
+  html += '<button class="btn-primary" id="wf-btn-publish" style="background:linear-gradient(135deg,#7c3aed,#6d28d9);margin-right:0.5rem;">Publish</button>';
   html += '<button class="btn-danger" id="wf-btn-delete">Delete</button>';
   html += '</div>';
   html += '</div>';
@@ -2232,6 +2233,16 @@ function renderPipelineList(currentWf) {
 
 function wireUpHandlers(wf, filePath, source) {
   // Tab clicks are handled by delegated listener in initWorkflowDelegation()
+
+  // Publish
+  var publishBtn = document.querySelector('#wf-btn-publish');
+  if (publishBtn) {
+    publishBtn.addEventListener('click', function() {
+      if (typeof openPublishDialog === 'function') {
+        openPublishDialog(wf, filePath);
+      }
+    });
+  }
 
   // Delete
   var deleteBtn = document.querySelector('#wf-btn-delete');

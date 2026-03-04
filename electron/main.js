@@ -11,33 +11,61 @@ if (!gotLock) {
   return;
 }
 
+// ── Custom Protocol ──────────────────────────────────────────
+const PROTOCOL = 'woodbury';
+if (process.defaultApp) {
+  // Dev mode: pass the script path so Electron can relaunch correctly
+  if (process.argv.length >= 2) {
+    app.setAsDefaultProtocolClient(PROTOCOL, process.execPath, [path.resolve(process.argv[1])]);
+  }
+} else {
+  app.setAsDefaultProtocolClient(PROTOCOL);
+}
+
 // ── State ────────────────────────────────────────────────────
 let mainWindow = null;
 let tray = null;
 let dashboardHandle = null;
+let pendingProtocolUrl = null; // Queued URL from cold launch
 app.isQuitting = false;
 
 // ── Backend startup ──────────────────────────────────────────
 // Require the compiled dashboard and extension manager directly.
 // This runs the backend in the same Node.js process as Electron.
 
+function withTimeout(promise, ms, label) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms)
+    ),
+  ]);
+}
+
 async function startBackend() {
   const distDir = path.join(__dirname, '..', 'dist');
+  console.log('[electron] distDir:', distDir);
+
+  console.log('[electron] Requiring config-dashboard...');
   const { startDashboard } = require(path.join(distDir, 'config-dashboard'));
+  console.log('[electron] Requiring extension-manager...');
   const { ExtensionManager } = require(path.join(distDir, 'extension-manager'));
+  console.log('[electron] Modules loaded.');
 
-  // Load extensions (same as cli.ts)
+  // Create extension manager but start dashboard immediately (don't wait for extensions)
   const extensionManager = new ExtensionManager(process.cwd(), false);
-  try {
-    await extensionManager.loadAll();
-  } catch (err) {
-    console.error('[electron] Extension loading error:', err.message || err);
-    // Non-fatal — dashboard works without extensions
-  }
 
-  // Start the dashboard HTTP server
+  // Start the dashboard HTTP server right away
+  console.log('[electron] Starting dashboard on port 9001...');
   const handle = await startDashboard(false, extensionManager, process.cwd(), 9001);
   console.log(`[electron] Dashboard running at ${handle.url}`);
+
+  // Load extensions in the background with a timeout
+  console.log('[electron] Loading extensions in background...');
+  withTimeout(extensionManager.loadAll(), 15000, 'Extension loading')
+    .then(() => console.log('[electron] Extensions loaded.'))
+    .catch((err) => console.error('[electron] Extension loading error:', err.message || err));
+
   return handle;
 }
 
@@ -305,9 +333,134 @@ function createTray() {
   });
 }
 
+// ── Protocol URL handler ─────────────────────────────────────
+
+async function handleProtocolUrl(url) {
+  try {
+    const parsed = new URL(url);
+    // woodbury://install/nanobanana?git=https://github.com/...
+    if (parsed.hostname === 'install' || parsed.pathname.startsWith('/install')) {
+      const name = (parsed.hostname === 'install' ? parsed.pathname : parsed.pathname.replace(/^\/install\/?/, '')).replace(/^\//, '');
+      const gitUrl = parsed.searchParams.get('git');
+
+      if (name && gitUrl && dashboardHandle) {
+        // Show and focus the window
+        if (mainWindow) {
+          mainWindow.show();
+          mainWindow.focus();
+        }
+
+        // Navigate to marketplace tab and trigger install
+        if (mainWindow) {
+          mainWindow.webContents.executeJavaScript(`
+            // Switch to marketplace tab
+            if (typeof switchTab === 'function') switchTab('marketplace');
+            // Wait for init, then auto-install
+            setTimeout(function() {
+              if (typeof installExtension === 'function') {
+                installExtension(${JSON.stringify(name)}, ${JSON.stringify(gitUrl)}).then(function(result) {
+                  if (typeof initMarketplace === 'function') initMarketplace();
+                });
+              }
+            }, 1500);
+          `).catch(() => {});
+        }
+
+        // Also do the install via API as a fallback
+        const http = require('http');
+        const postData = JSON.stringify({ name, gitUrl });
+        const req = http.request({
+          hostname: '127.0.0.1',
+          port: dashboardHandle.port,
+          path: '/api/marketplace/install',
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(postData) },
+        });
+        req.write(postData);
+        req.end();
+      }
+    }
+
+    // woodbury://workflow/install/{workflowId} — install a shared workflow
+    if (parsed.hostname === 'workflow' || parsed.pathname.startsWith('/workflow')) {
+      const pathParts = parsed.pathname.replace(/^\//, '').split('/');
+      // pathParts = ['install', '{workflowId}'] or ['workflow', 'install', '{workflowId}']
+      let action, workflowId;
+      if (parsed.hostname === 'workflow') {
+        action = pathParts[0];
+        workflowId = pathParts[1];
+      } else {
+        action = pathParts[1];
+        workflowId = pathParts[2];
+      }
+
+      if (action === 'install' && workflowId && dashboardHandle) {
+        // Show and focus the window
+        if (mainWindow) {
+          mainWindow.show();
+          mainWindow.focus();
+        }
+
+        // Download the shared workflow via API
+        const http = require('http');
+        const postData = JSON.stringify({ workflowId });
+        const req = http.request({
+          hostname: '127.0.0.1',
+          port: dashboardHandle.port,
+          path: '/api/marketplace/download',
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(postData) },
+        }, (res) => {
+          let body = '';
+          res.on('data', (chunk) => { body += chunk; });
+          res.on('end', () => {
+            try {
+              const result = JSON.parse(body);
+              if (result.success && mainWindow) {
+                mainWindow.webContents.executeJavaScript(`
+                  if (typeof switchTab === 'function') switchTab('workflows');
+                  setTimeout(function() {
+                    if (typeof showNotification === 'function') {
+                      showNotification('Workflow installed successfully!', 'success');
+                    } else {
+                      alert('Workflow installed successfully!');
+                    }
+                  }, 500);
+                `).catch(() => {});
+              } else if (mainWindow) {
+                const errorMsg = result.error || 'Unknown error';
+                mainWindow.webContents.executeJavaScript(`
+                  alert('Failed to install workflow: ' + ${JSON.stringify(errorMsg)});
+                `).catch(() => {});
+              }
+            } catch {}
+          });
+        });
+        req.on('error', () => {});
+        req.write(postData);
+        req.end();
+      }
+    }
+  } catch (err) {
+    console.error('[electron] Protocol URL error:', err.message || err);
+  }
+}
+
+// macOS: handle protocol URLs (may fire before 'ready' on cold launch)
+app.on('open-url', (event, url) => {
+  event.preventDefault();
+  if (dashboardHandle) {
+    handleProtocolUrl(url);
+  } else {
+    // Backend not ready yet — queue it for after startup
+    pendingProtocolUrl = url;
+  }
+});
+
 // ── App lifecycle ────────────────────────────────────────────
 
 app.on('ready', async () => {
+  console.log('[electron] ready event fired');
   // Set dock icon (needed in dev mode — packaged .app gets it from Info.plist)
   if (process.platform === 'darwin' && app.dock) {
     const dockIcon = nativeImage.createFromPath(path.join(__dirname, 'icons', 'icon.png'));
@@ -322,6 +475,17 @@ app.on('ready', async () => {
     dashboardHandle = await startBackend();
     createWindow(dashboardHandle.url);
     createTray();
+
+    // Process any protocol URL that arrived before the backend was ready
+    // macOS: queued from open-url event; Windows: passed via process.argv
+    if (!pendingProtocolUrl && process.platform === 'win32') {
+      pendingProtocolUrl = process.argv.find(arg => arg.startsWith(PROTOCOL + '://'));
+    }
+    if (pendingProtocolUrl) {
+      console.log('[electron] Processing queued protocol URL:', pendingProtocolUrl);
+      handleProtocolUrl(pendingProtocolUrl);
+      pendingProtocolUrl = null;
+    }
   } catch (err) {
     console.error('[electron] Failed to start:', err);
     dialog.showErrorBox(
@@ -352,12 +516,18 @@ app.on('before-quit', () => {
   }
 });
 
-// Second instance attempted — focus existing window
-app.on('second-instance', () => {
+// Second instance attempted — focus existing window (also handles protocol URLs on Windows)
+app.on('second-instance', (event, commandLine) => {
   if (mainWindow) {
     if (mainWindow.isMinimized()) mainWindow.restore();
     mainWindow.show();
     mainWindow.focus();
+  }
+
+  // On Windows, the protocol URL is passed as a command line argument
+  const protocolUrl = commandLine.find(arg => arg.startsWith(PROTOCOL + '://'));
+  if (protocolUrl) {
+    handleProtocolUrl(protocolUrl);
   }
 });
 

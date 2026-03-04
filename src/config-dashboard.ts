@@ -26,6 +26,7 @@ import {
   discoverExtensions,
   parseEnvFile,
   writeEnvFile,
+  EXTENSIONS_DIR,
   type ExtensionManifest,
 } from './extension-loader.js';
 import type { ExtensionManager } from './extension-manager.js';
@@ -45,12 +46,19 @@ import { startRemoteRelay, type RelayHandle } from './remote-relay.js';
 import { ExecutionSnapshotCapture } from './workflow/execution-snapshots.js';
 import { startInferenceServer as startNodeInference, stopInferenceServer as stopNodeInference, type InferenceServer } from './inference/index.js';
 import { appendFileSync, mkdirSync, existsSync, createReadStream, createWriteStream } from 'node:fs';
+import * as socialStorage from './social/storage.js';
+import { getScriptMeta } from './social/scripts/index.js';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createSocket, type Socket as DgramSocket } from 'node:dgram';
 
 // Shared recording log
 const _REC_LOG_DIR = join(homedir(), '.woodbury', 'logs');
 const _REC_LOG_PATH = join(_REC_LOG_DIR, 'recording.log');
+
+// Marketplace registry cache
+let _registryCache: any = null;
+let _registryCacheTime = 0;
+
 function dashRecLog(level: string, msg: string, data?: any): void {
   try {
     mkdirSync(_REC_LOG_DIR, { recursive: true });
@@ -1284,6 +1292,25 @@ export async function startDashboard(
     } catch (err) {
       debugLog.info('scheduler', `Scheduler tick error: ${String(err)}`);
     }
+
+    // ── Social Scheduler Tick ──────────────────────────────
+    try {
+      const duePosts = await socialStorage.getDuePosts();
+      if (duePosts.length > 0) {
+        debugLog.info('scheduler', `Found ${duePosts.length} due social post(s)`);
+        for (const post of duePosts) {
+          try {
+            // Mark as 'posting' to prevent double-fire
+            await socialStorage.updatePost(post.id, { status: 'posting' as const });
+            debugLog.info('scheduler', `Social post "${post.id}" marked as posting (${post.content.text.slice(0, 50)}...)`);
+          } catch (err) {
+            debugLog.info('scheduler', `Failed to mark social post "${post.id}": ${String(err)}`);
+          }
+        }
+      }
+    } catch (err) {
+      debugLog.info('scheduler', `Social scheduler tick error: ${String(err)}`);
+    }
   }
 
   function startScheduler(): void {
@@ -2504,6 +2531,68 @@ export async function startDashboard(
       return;
     }
 
+    // GET /api/app/update-check — check for app updates
+    if (req.method === 'GET' && pathname === '/api/app/update-check') {
+      function compareVersions(a: string, b: string): number {
+        const pa = a.split('.').map(Number);
+        const pb = b.split('.').map(Number);
+        for (let i = 0; i < 3; i++) {
+          if ((pa[i] || 0) > (pb[i] || 0)) return 1;
+          if ((pa[i] || 0) < (pb[i] || 0)) return -1;
+        }
+        return 0;
+      }
+
+      try {
+        // Read current version from package.json
+        const pkgPath = join(__dirname, '..', 'package.json');
+        const pkg = JSON.parse(await readFile(pkgPath, 'utf-8'));
+        const currentVersion: string = pkg.version;
+
+        // Fetch latest version from woodbury.bot
+        const https = await import('node:https');
+        const versionData: any = await new Promise((resolve, reject) => {
+          https.get('https://woodbury.bot/version.json', (resp: any) => {
+            let body = '';
+            resp.on('data', (chunk: string) => { body += chunk; });
+            resp.on('end', () => {
+              try { resolve(JSON.parse(body)); }
+              catch { reject(new Error('Invalid version.json')); }
+            });
+          }).on('error', reject);
+        });
+
+        const latestVersion: string = versionData.version;
+        const updateAvailable = compareVersions(latestVersion, currentVersion) > 0;
+
+        sendJson(res, 200, {
+          currentVersion,
+          latestVersion,
+          updateAvailable,
+          releaseDate: versionData.releaseDate,
+          releaseNotes: versionData.releaseNotes,
+          downloadUrls: versionData.downloadUrls,
+          releaseUrl: versionData.releaseUrl,
+        });
+      } catch (err: any) {
+        // Still return current version even if remote check fails
+        let currentVersion = '?.?.?';
+        try {
+          const pkgPath = join(__dirname, '..', 'package.json');
+          const pkg = JSON.parse(await readFile(pkgPath, 'utf-8'));
+          currentVersion = pkg.version;
+        } catch {}
+
+        sendJson(res, 200, {
+          currentVersion,
+          latestVersion: null,
+          updateAvailable: false,
+          error: 'Could not check for updates',
+        });
+      }
+      return;
+    }
+
     // GET /api/file?path=... — serve local files (images only) for preview
     if (req.method === 'GET' && pathname === '/api/file') {
       const filePath = url.searchParams.get('path');
@@ -2659,6 +2748,511 @@ export async function startDashboard(
         sendJson(res, 200, { success: true, ...status });
       } catch (err) {
         sendJson(res, 500, { error: String(err) });
+      }
+      return;
+    }
+
+    // ── Marketplace API ─────────────────────────────────────────
+
+    // GET /api/marketplace/registry — fetch and cache the extension registry
+    if (req.method === 'GET' && pathname === '/api/marketplace/registry') {
+      try {
+        // Cache registry for 1 hour
+        const now = Date.now();
+        if (_registryCache && now - _registryCacheTime < 3600000) {
+          sendJson(res, 200, _registryCache);
+          return;
+        }
+
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 10000);
+        const resp = await fetch('https://woodbury.bot/registry.json', {
+          signal: controller.signal,
+        });
+        clearTimeout(timeout);
+
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        _registryCache = data;
+        _registryCacheTime = now;
+        sendJson(res, 200, data);
+      } catch (err) {
+        // Serve stale cache if available
+        if (_registryCache) {
+          sendJson(res, 200, _registryCache);
+        } else {
+          sendJson(res, 502, {
+            error: `Failed to fetch registry: ${err instanceof Error ? err.message : err}`,
+          });
+        }
+      }
+      return;
+    }
+
+    // POST /api/marketplace/install — install an extension from git
+    if (req.method === 'POST' && pathname === '/api/marketplace/install') {
+      try {
+        const body = await readBody(req);
+        const { gitUrl, name } = body || {};
+
+        if (!gitUrl || typeof gitUrl !== 'string') {
+          sendJson(res, 400, { error: 'gitUrl is required' });
+          return;
+        }
+
+        // Security: only allow Zachary-Companies org repos
+        if (!gitUrl.startsWith('https://github.com/Zachary-Companies/')) {
+          sendJson(res, 400, { error: 'Only extensions from Zachary-Companies are supported' });
+          return;
+        }
+
+        const repoName = gitUrl
+          .replace(/\.git$/, '')
+          .replace(/\/$/, '')
+          .split('/')
+          .pop() || '';
+        if (!repoName) {
+          sendJson(res, 400, { error: 'Could not determine repo name from URL' });
+          return;
+        }
+
+        const cloneDir = join(EXTENSIONS_DIR, repoName);
+
+        // Check if already installed
+        if (existsSync(cloneDir)) {
+          sendJson(res, 409, { error: 'Extension already installed', directory: cloneDir });
+          return;
+        }
+
+        // Ensure extensions directory exists
+        await mkdir(EXTENSIONS_DIR, { recursive: true });
+
+        // Try git clone first, fall back to zip download
+        const { execSync } = require('child_process') as typeof import('child_process');
+        let installed = false;
+
+        try {
+          execSync(`git clone "${gitUrl}" "${cloneDir}"`, { timeout: 30000, stdio: 'pipe' });
+          installed = true;
+        } catch {
+          // git not available — try zip download
+          debugLog.info('marketplace', 'git clone failed, trying zip download');
+          try {
+            const zipUrl = gitUrl
+              .replace(/\.git$/, '')
+              .replace(/\/$/, '') + '/archive/refs/heads/main.zip';
+            const zipResp = await fetch(zipUrl);
+            if (!zipResp.ok) throw new Error(`HTTP ${zipResp.status}`);
+
+            // Write zip to temp file
+            const tmpZip = join(EXTENSIONS_DIR, `_tmp_${repoName}.zip`);
+            const buffer = Buffer.from(await zipResp.arrayBuffer());
+            await writeFile(tmpZip, buffer);
+
+            // Extract
+            await mkdir(cloneDir, { recursive: true });
+            execSync(`unzip -o "${tmpZip}" -d "${EXTENSIONS_DIR}"`, { timeout: 15000, stdio: 'pipe' });
+
+            // Zip extracts to <repoName>-main/, rename to <repoName>/
+            const extractedDir = join(EXTENSIONS_DIR, `${repoName}-main`);
+            if (existsSync(extractedDir)) {
+              const { renameSync, rmSync } = require('fs');
+              if (existsSync(cloneDir)) rmSync(cloneDir, { recursive: true });
+              renameSync(extractedDir, cloneDir);
+            }
+
+            // Clean up zip
+            try { await unlink(tmpZip); } catch { /* ignore */ }
+            installed = true;
+          } catch (zipErr) {
+            sendJson(res, 500, {
+              error: `Installation failed. git and zip download both failed: ${zipErr instanceof Error ? zipErr.message : zipErr}`,
+            });
+            return;
+          }
+        }
+
+        if (!installed) {
+          sendJson(res, 500, { error: 'Installation failed' });
+          return;
+        }
+
+        // Read package.json for validation
+        let extName = name || repoName;
+        try {
+          const pkgRaw = await readFile(join(cloneDir, 'package.json'), 'utf-8');
+          const pkg = JSON.parse(pkgRaw);
+          if (pkg.woodbury?.name) extName = pkg.woodbury.name;
+
+          // Install npm deps if any
+          if (pkg.dependencies && Object.keys(pkg.dependencies).length > 0) {
+            try { execSync('npm install', { cwd: cloneDir, timeout: 60000, stdio: 'pipe' }); } catch { /* non-fatal */ }
+          }
+          // Build if build script exists
+          if (pkg.scripts?.build) {
+            try { execSync('npm run build', { cwd: cloneDir, timeout: 60000, stdio: 'pipe' }); } catch { /* non-fatal */ }
+          }
+        } catch {
+          // No package.json or invalid — still allow install
+        }
+
+        debugLog.info('marketplace', `Installed extension "${extName}" to ${cloneDir}`);
+        sendJson(res, 200, {
+          success: true,
+          name: extName,
+          directory: cloneDir,
+          message: 'Extension installed. Restart Woodbury to activate.',
+        });
+      } catch (err) {
+        sendJson(res, 500, { error: `Install failed: ${err instanceof Error ? err.message : err}` });
+      }
+      return;
+    }
+
+    // POST /api/marketplace/uninstall — remove an extension
+    if (req.method === 'POST' && pathname === '/api/marketplace/uninstall') {
+      try {
+        const body = await readBody(req);
+        const { name } = body || {};
+
+        if (!name || typeof name !== 'string') {
+          sendJson(res, 400, { error: 'name is required' });
+          return;
+        }
+
+        // Sanitize name to prevent path traversal
+        if (name.includes('/') || name.includes('..') || name.includes('\\')) {
+          sendJson(res, 400, { error: 'Invalid extension name' });
+          return;
+        }
+
+        // Find the extension
+        const manifests = await discoverExtensions();
+        const manifest = manifests.find((m) => m.name === name);
+
+        if (!manifest) {
+          sendJson(res, 404, { error: `Extension "${name}" not found` });
+          return;
+        }
+
+        // Deactivate if currently loaded
+        if (extensionManager) {
+          try { await extensionManager.deactivate(name); } catch { /* ignore */ }
+        }
+
+        // Remove the directory
+        const { rm } = await import('fs/promises');
+        await rm(manifest.directory, { recursive: true, force: true });
+
+        debugLog.info('marketplace', `Uninstalled extension "${name}" from ${manifest.directory}`);
+        sendJson(res, 200, { success: true, name, message: 'Extension removed.' });
+      } catch (err) {
+        sendJson(res, 500, { error: `Uninstall failed: ${err instanceof Error ? err.message : err}` });
+      }
+      return;
+    }
+
+    // ── Workflow Marketplace API Routes ─────────────────────
+
+    // GET /api/marketplace/auth-status — check marketplace sign-in
+    if (req.method === 'GET' && pathname === '/api/marketplace/auth-status') {
+      try {
+        const { getCurrentUser } = await import('./marketplace/firebase-client.js');
+        const user = getCurrentUser();
+        if (user) {
+          sendJson(res, 200, {
+            signedIn: true,
+            uid: user.uid,
+            displayName: user.displayName,
+            email: user.email,
+            photoURL: user.photoURL,
+          });
+        } else {
+          sendJson(res, 200, { signedIn: false });
+        }
+      } catch {
+        sendJson(res, 200, { signedIn: false });
+      }
+      return;
+    }
+
+    // POST /api/marketplace/auth/signin — Google OAuth for marketplace
+    if (req.method === 'POST' && pathname === '/api/marketplace/auth/signin') {
+      try {
+        const body = await readBody(req);
+        if (!body?.idToken) {
+          sendJson(res, 400, { error: 'Missing idToken' });
+          return;
+        }
+        const { signInWithGoogleToken } = await import('./marketplace/firebase-client.js');
+        const user = await signInWithGoogleToken(body.idToken);
+        sendJson(res, 200, {
+          success: true,
+          uid: user.uid,
+          displayName: user.displayName,
+          email: user.email,
+        });
+      } catch (err) {
+        sendJson(res, 500, { error: `Sign-in failed: ${err instanceof Error ? err.message : err}` });
+      }
+      return;
+    }
+
+    // POST /api/marketplace/auth/signout — Sign out of marketplace
+    if (req.method === 'POST' && pathname === '/api/marketplace/auth/signout') {
+      try {
+        const { signOut } = await import('./marketplace/firebase-client.js');
+        await signOut();
+        sendJson(res, 200, { success: true });
+      } catch (err) {
+        sendJson(res, 500, { error: `Sign-out failed: ${err instanceof Error ? err.message : err}` });
+      }
+      return;
+    }
+
+    // GET /api/marketplace/shared-workflows — browse shared workflows
+    if (req.method === 'GET' && pathname === '/api/marketplace/shared-workflows') {
+      try {
+        const { browseWorkflows } = await import('./marketplace/firebase-client.js');
+        const url = new URL(req.url || '/', `http://${req.headers.host}`);
+        const category = url.searchParams.get('category') || undefined;
+        const sortBy = (url.searchParams.get('sortBy') as 'downloadCount' | 'publishedAt' | 'rating') || undefined;
+        const maxResults = parseInt(url.searchParams.get('limit') || '50', 10);
+        const workflows = await browseWorkflows({ category, sortBy, maxResults });
+        sendJson(res, 200, { workflows });
+      } catch (err) {
+        sendJson(res, 500, { error: `Failed to browse workflows: ${err instanceof Error ? err.message : err}` });
+      }
+      return;
+    }
+
+    // POST /api/marketplace/publish — upload workflow + model to cloud
+    if (req.method === 'POST' && pathname === '/api/marketplace/publish') {
+      try {
+        const body = await readBody(req);
+        if (!body?.workflowPath || !body?.metadata) {
+          sendJson(res, 400, { error: 'Missing workflowPath or metadata' });
+          return;
+        }
+        const { publishWorkflow } = await import('./marketplace/firebase-client.js');
+        const workflow = await loadWorkflow(body.workflowPath);
+        const result = await publishWorkflow(workflow, body.metadata, body.existingWorkflowId);
+        sendJson(res, result.success ? 200 : 500, result);
+      } catch (err) {
+        sendJson(res, 500, { error: `Publish failed: ${err instanceof Error ? err.message : err}` });
+      }
+      return;
+    }
+
+    // POST /api/marketplace/download — download + install a shared workflow
+    if (req.method === 'POST' && pathname === '/api/marketplace/download') {
+      try {
+        const body = await readBody(req);
+        if (!body?.workflowId) {
+          sendJson(res, 400, { error: 'Missing workflowId' });
+          return;
+        }
+        const { downloadSharedWorkflow } = await import('./marketplace/firebase-client.js');
+        const result = await downloadSharedWorkflow(body.workflowId, body.version);
+        sendJson(res, result.success ? 200 : 500, result);
+      } catch (err) {
+        sendJson(res, 500, { error: `Download failed: ${err instanceof Error ? err.message : err}` });
+      }
+      return;
+    }
+
+    // GET /api/marketplace/updates — check for updates to installed shared workflows
+    if (req.method === 'GET' && pathname === '/api/marketplace/updates') {
+      try {
+        const { checkForUpdates: checkWorkflowUpdates } = await import('./marketplace/firebase-client.js');
+        const updates = await checkWorkflowUpdates();
+        sendJson(res, 200, { updates });
+      } catch (err) {
+        sendJson(res, 500, { error: `Update check failed: ${err instanceof Error ? err.message : err}` });
+      }
+      return;
+    }
+
+    // POST /api/marketplace/update — update an installed shared workflow
+    if (req.method === 'POST' && pathname === '/api/marketplace/update') {
+      try {
+        const body = await readBody(req);
+        if (!body?.workflowId) {
+          sendJson(res, 400, { error: 'Missing workflowId' });
+          return;
+        }
+        const { downloadSharedWorkflow } = await import('./marketplace/firebase-client.js');
+        const result = await downloadSharedWorkflow(body.workflowId, body.version);
+        sendJson(res, result.success ? 200 : 500, result);
+      } catch (err) {
+        sendJson(res, 500, { error: `Update failed: ${err instanceof Error ? err.message : err}` });
+      }
+      return;
+    }
+
+    // ── Social Scheduler API Routes ─────────────────────────
+
+    // GET /api/social/posts — list posts with optional filters
+    if (req.method === 'GET' && pathname === '/api/social/posts') {
+      try {
+        const filters: Record<string, string> = {};
+        if (url.searchParams.get('status')) filters.status = url.searchParams.get('status')!;
+        if (url.searchParams.get('platform')) filters.platform = url.searchParams.get('platform')!;
+        if (url.searchParams.get('from')) filters.from = url.searchParams.get('from')!;
+        if (url.searchParams.get('to')) filters.to = url.searchParams.get('to')!;
+        if (url.searchParams.get('tag')) filters.tag = url.searchParams.get('tag')!;
+        const posts = await socialStorage.listPosts(filters);
+        sendJson(res, 200, posts);
+      } catch (err) {
+        sendJson(res, 500, { error: `Failed to list posts: ${err instanceof Error ? err.message : err}` });
+      }
+      return;
+    }
+
+    // POST /api/social/posts — create a new post
+    if (req.method === 'POST' && pathname === '/api/social/posts') {
+      try {
+        const body = await readBody(req);
+        const post = await socialStorage.createPost(body || {});
+        sendJson(res, 201, post);
+      } catch (err) {
+        sendJson(res, 500, { error: `Failed to create post: ${err instanceof Error ? err.message : err}` });
+      }
+      return;
+    }
+
+    // GET /api/social/posts/:id — get single post
+    const socialPostMatch = pathname.match(/^\/api\/social\/posts\/([^/]+)$/);
+    if (req.method === 'GET' && socialPostMatch) {
+      try {
+        const post = await socialStorage.getPost(socialPostMatch[1]);
+        if (!post) {
+          sendJson(res, 404, { error: 'Post not found' });
+        } else {
+          sendJson(res, 200, post);
+        }
+      } catch (err) {
+        sendJson(res, 500, { error: `Failed to get post: ${err instanceof Error ? err.message : err}` });
+      }
+      return;
+    }
+
+    // PUT /api/social/posts/:id — update post
+    if (req.method === 'PUT' && socialPostMatch) {
+      try {
+        const body = await readBody(req);
+        const updated = await socialStorage.updatePost(socialPostMatch[1], body || {});
+        sendJson(res, 200, updated);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        sendJson(res, msg.includes('not found') ? 404 : 500, { error: msg });
+      }
+      return;
+    }
+
+    // DELETE /api/social/posts/:id — delete post + media
+    if (req.method === 'DELETE' && socialPostMatch) {
+      try {
+        await socialStorage.deletePost(socialPostMatch[1]);
+        sendJson(res, 200, { success: true });
+      } catch (err) {
+        sendJson(res, 500, { error: `Failed to delete post: ${err instanceof Error ? err.message : err}` });
+      }
+      return;
+    }
+
+    // GET /api/social/stats — status counts
+    if (req.method === 'GET' && pathname === '/api/social/stats') {
+      try {
+        const counts = await socialStorage.getStatusCounts();
+        sendJson(res, 200, counts);
+      } catch (err) {
+        sendJson(res, 500, { error: `Failed to get stats: ${err instanceof Error ? err.message : err}` });
+      }
+      return;
+    }
+
+    // GET /api/social/today — posts scheduled for today
+    if (req.method === 'GET' && pathname === '/api/social/today') {
+      try {
+        const posts = await socialStorage.getTodayPosts();
+        sendJson(res, 200, posts);
+      } catch (err) {
+        sendJson(res, 500, { error: `Failed to get today's posts: ${err instanceof Error ? err.message : err}` });
+      }
+      return;
+    }
+
+    // GET /api/social/due — posts due for posting now
+    if (req.method === 'GET' && pathname === '/api/social/due') {
+      try {
+        const posts = await socialStorage.getDuePosts();
+        sendJson(res, 200, posts);
+      } catch (err) {
+        sendJson(res, 500, { error: `Failed to get due posts: ${err instanceof Error ? err.message : err}` });
+      }
+      return;
+    }
+
+    // GET /api/social/config — get scheduler config
+    if (req.method === 'GET' && pathname === '/api/social/config') {
+      try {
+        const config = await socialStorage.getConfig();
+        sendJson(res, 200, config);
+      } catch (err) {
+        sendJson(res, 500, { error: `Failed to get config: ${err instanceof Error ? err.message : err}` });
+      }
+      return;
+    }
+
+    // PUT /api/social/config — update scheduler config
+    if (req.method === 'PUT' && pathname === '/api/social/config') {
+      try {
+        const body = await readBody(req);
+        const config = await socialStorage.updateConfig(body || {});
+        sendJson(res, 200, config);
+      } catch (err) {
+        sendJson(res, 500, { error: `Failed to update config: ${err instanceof Error ? err.message : err}` });
+      }
+      return;
+    }
+
+    // GET /api/social/platforms — list platform connectors
+    if (req.method === 'GET' && pathname === '/api/social/platforms') {
+      try {
+        const connectors = await socialStorage.listConnectors();
+        sendJson(res, 200, connectors);
+      } catch (err) {
+        sendJson(res, 500, { error: `Failed to list platforms: ${err instanceof Error ? err.message : err}` });
+      }
+      return;
+    }
+
+    // GET /api/social/scripts — list platform scripts + metadata
+    if (req.method === 'GET' && pathname === '/api/social/scripts') {
+      try {
+        const meta = getScriptMeta();
+        sendJson(res, 200, meta);
+      } catch (err) {
+        sendJson(res, 500, { error: `Failed to get scripts: ${err instanceof Error ? err.message : err}` });
+      }
+      return;
+    }
+
+    // POST /api/social/generate — AI text generation (stub)
+    if (req.method === 'POST' && pathname === '/api/social/generate') {
+      try {
+        const body = await readBody(req);
+        const prompt = body?.prompt || '';
+        const tone = body?.tone || 'professional';
+        const platforms = body?.platforms || [];
+        // For now, return a stub response — actual LLM integration is via the agent
+        sendJson(res, 200, {
+          text: `[Generated text for: "${prompt}" — tone: ${tone}, platforms: ${platforms.join(', ')}]`,
+          note: 'AI text generation is handled by the agent. Use the /social-generate slash command.',
+        });
+      } catch (err) {
+        sendJson(res, 500, { error: `Generation failed: ${err instanceof Error ? err.message : err}` });
       }
       return;
     }
