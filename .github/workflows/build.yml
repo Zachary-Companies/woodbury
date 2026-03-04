@@ -57,7 +57,10 @@ jobs:
           cache: npm
 
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --ignore-scripts
+
+      - name: Download Electron
+        run: node node_modules/electron/install.js
 
       - name: Build TypeScript
         run: npm run build
