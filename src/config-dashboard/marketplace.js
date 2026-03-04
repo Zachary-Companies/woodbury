@@ -272,7 +272,7 @@ function renderMarketplaceDetail(ext) {
 
   var installed = isExtensionInstalled(ext.name);
 
-  var html = '<div style="padding:24px;max-width:720px;">';
+  var html = '<div style="padding:24px;">';
 
   // Back button
   html += '<button onclick="renderMarketplaceMain()" style="background:none;border:none;color:#94a3b8;cursor:pointer;font-size:13px;padding:0;margin-bottom:20px;display:flex;align-items:center;gap:4px;">';
@@ -291,17 +291,17 @@ function renderMarketplaceDetail(ext) {
   }
   html += '</div>';
 
-  // Description
-  html += '<div style="background:rgba(30,41,59,0.6);border:1px solid rgba(255,255,255,0.06);border-radius:12px;padding:20px;margin-bottom:16px;">';
+  // Responsive grid for detail sections
+  html += '<div class="grid-12">';
+
+  // Description - full width
+  html += '<div class="col-12" style="background:rgba(30,41,59,0.6);border:1px solid rgba(255,255,255,0.06);border-radius:12px;padding:20px;">';
   html += '<h3 style="margin:0 0 8px;font-size:14px;font-weight:600;color:#e2e8f0;">About</h3>';
   html += '<p style="color:#94a3b8;font-size:14px;line-height:1.6;margin:0;">' + escapeHtml(ext.description) + '</p>';
   html += '</div>';
 
-  // Details grid
-  html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px;">';
-
-  // Provides
-  html += '<div style="background:rgba(30,41,59,0.6);border:1px solid rgba(255,255,255,0.06);border-radius:12px;padding:20px;">';
+  // Provides - half width
+  html += '<div class="col-6" style="background:rgba(30,41,59,0.6);border:1px solid rgba(255,255,255,0.06);border-radius:12px;padding:20px;">';
   html += '<h3 style="margin:0 0 8px;font-size:14px;font-weight:600;color:#e2e8f0;">Provides</h3>';
   html += '<div style="display:flex;flex-wrap:wrap;gap:6px;">';
   for (var p = 0; p < ext.provides.length; p++) {
@@ -310,8 +310,8 @@ function renderMarketplaceDetail(ext) {
   html += '</div>';
   html += '</div>';
 
-  // Platforms
-  html += '<div style="background:rgba(30,41,59,0.6);border:1px solid rgba(255,255,255,0.06);border-radius:12px;padding:20px;">';
+  // Platforms - half width
+  html += '<div class="col-6" style="background:rgba(30,41,59,0.6);border:1px solid rgba(255,255,255,0.06);border-radius:12px;padding:20px;">';
   html += '<h3 style="margin:0 0 8px;font-size:14px;font-weight:600;color:#e2e8f0;">Platforms</h3>';
   html += '<div style="display:flex;flex-wrap:wrap;gap:6px;">';
   var platLabels = { darwin: 'macOS', win32: 'Windows', linux: 'Linux' };
@@ -321,11 +321,9 @@ function renderMarketplaceDetail(ext) {
   html += '</div>';
   html += '</div>';
 
-  html += '</div>';
-
-  // Tags
+  // Tags - full width
   if (ext.tags && ext.tags.length) {
-    html += '<div style="background:rgba(30,41,59,0.6);border:1px solid rgba(255,255,255,0.06);border-radius:12px;padding:20px;margin-bottom:16px;">';
+    html += '<div class="col-12" style="background:rgba(30,41,59,0.6);border:1px solid rgba(255,255,255,0.06);border-radius:12px;padding:20px;">';
     html += '<h3 style="margin:0 0 8px;font-size:14px;font-weight:600;color:#e2e8f0;">Tags</h3>';
     html += '<div style="display:flex;flex-wrap:wrap;gap:6px;">';
     for (var t = 0; t < ext.tags.length; t++) {
@@ -335,8 +333,8 @@ function renderMarketplaceDetail(ext) {
     html += '</div>';
   }
 
-  // Actions
-  html += '<div style="display:flex;gap:12px;margin-top:24px;">';
+  // Actions - full width
+  html += '<div class="col-12" style="display:flex;gap:12px;margin-top:8px;">';
   if (installed) {
     html += '<button class="mp-remove-btn btn-secondary" data-mp-remove="' + ext.name + '" style="padding:10px 24px;border-radius:8px;font-size:14px;">Remove Extension</button>';
   } else {
@@ -347,12 +345,20 @@ function renderMarketplaceDetail(ext) {
   }
   html += '</div>';
 
-  // Manual install
-  html += '<div style="margin-top:16px;padding:16px;border-radius:8px;background:rgba(0,0,0,0.2);border:1px solid rgba(255,255,255,0.05);">';
+  // Manual install - full width
+  html += '<div class="col-12" style="padding:16px;border-radius:8px;background:rgba(0,0,0,0.2);border:1px solid rgba(255,255,255,0.05);">';
   html += '<div style="font-size:12px;color:#64748b;margin-bottom:6px;">Manual install via terminal:</div>';
   html += '<code style="font-size:13px;color:#c4b5fd;word-break:break-all;">woodbury ext install-git ' + escapeHtml(ext.gitUrl) + '</code>';
   html += '</div>';
 
+  // Configuration section (installed extensions only) - full width
+  if (installed) {
+    html += '<div id="mp-config-section" class="col-12">';
+    html += '<div class="loading"><div class="spinner"></div> Loading configuration...</div>';
+    html += '</div>';
+  }
+
+  html += '</div>'; // close grid-12
   html += '</div>';
 
   main.innerHTML = html;
@@ -364,6 +370,14 @@ function renderMarketplaceDetail(ext) {
   main.querySelectorAll('.mp-remove-btn').forEach(function(btn) {
     btn.addEventListener('click', function() { handleUninstall(btn); });
   });
+
+  // Load config for installed extensions
+  if (installed) {
+    var instExt = findInstalledExtension(ext.name);
+    if (instExt) {
+      loadMarketplaceExtConfig(instExt.name);
+    }
+  }
 }
 
 // ── Install / Uninstall Handlers ─────────────────────────────
@@ -487,7 +501,160 @@ function findExtension(name) {
   return marketplaceRegistry.extensions.find(function(e) { return e.name === name; }) || null;
 }
 
+function findInstalledExtension(name) {
+  return marketplaceInstalled.find(function(inst) {
+    return inst.name === name || inst.name === 'woodbury-ext-' + name;
+  }) || null;
+}
+
 function escapeHtml(str) {
   if (typeof str !== 'string') return '';
   return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+// ── Extension Config in Marketplace ─────────────────────────
+
+async function loadMarketplaceExtConfig(name) {
+  var section = document.getElementById('mp-config-section');
+  if (!section) return;
+
+  try {
+    var ext = await fetchExtensionEnv(name);
+    var vars = ext.vars || [];
+
+    var html = '';
+    html += '<div style="background:rgba(30,41,59,0.6);border:1px solid rgba(255,255,255,0.06);border-radius:12px;padding:20px;">';
+    html += '<h3 style="margin:0 0 16px;font-size:14px;font-weight:600;color:#e2e8f0;display:flex;align-items:center;gap:8px;">';
+    html += '<svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M10.343 3.94c.09-.542.56-.94 1.11-.94h1.093c.55 0 1.02.398 1.11.94l.149.894c.07.424.384.764.78.93.398.164.855.142 1.205-.108l.737-.527a1.125 1.125 0 011.45.12l.773.774c.39.389.44 1.002.12 1.45l-.527.737c-.25.35-.272.806-.107 1.204.165.397.505.71.93.78l.893.15c.543.09.94.56.94 1.109v1.094c0 .55-.397 1.02-.94 1.11l-.893.149c-.425.07-.765.383-.93.78-.165.398-.143.854.107 1.204l.527.738c.32.447.269 1.06-.12 1.45l-.774.773a1.125 1.125 0 01-1.449.12l-.738-.527c-.35-.25-.806-.272-1.203-.107-.397.165-.71.505-.781.929l-.149.894c-.09.542-.56.94-1.11.94h-1.094c-.55 0-1.019-.398-1.11-.94l-.148-.894c-.071-.424-.384-.764-.781-.93-.398-.164-.854-.142-1.204.108l-.738.527c-.447.32-1.06.269-1.45-.12l-.773-.774a1.125 1.125 0 01-.12-1.45l.527-.737c.25-.35.273-.806.108-1.204-.165-.397-.505-.71-.93-.78l-.894-.15c-.542-.09-.94-.56-.94-1.109v-1.094c0-.55.398-1.02.94-1.11l.894-.149c.424-.07.765-.383.93-.78.165-.398.143-.854-.108-1.204l-.526-.738a1.125 1.125 0 01.12-1.45l.773-.773a1.125 1.125 0 011.45-.12l.737.527c.35.25.807.272 1.204.107.397-.165.71-.505.78-.929l.15-.894z"/><path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>';
+    html += 'Configuration</h3>';
+
+    if (vars.length === 0) {
+      html += '<div style="color:#64748b;font-size:13px;text-align:center;padding:12px;">This extension has no configuration keys.</div>';
+    } else {
+      // Restart notice
+      html += '<div style="display:flex;align-items:center;gap:8px;padding:8px 12px;background:rgba(124,58,237,0.08);border:1px solid rgba(124,58,237,0.15);border-radius:8px;margin-bottom:16px;font-size:12px;color:#a78bfa;">';
+      html += '<span>&#x1f504;</span> Changes take effect after restarting Woodbury.';
+      html += '</div>';
+
+      for (var i = 0; i < vars.length; i++) {
+        var v = vars[i];
+        var isPath = v.type === 'path';
+
+        html += '<div class="mp-var-card" data-var="' + escapeHtml(v.name) + '" style="padding:12px 0;border-bottom:1px solid rgba(255,255,255,0.04);">';
+
+        // Header row
+        html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap;">';
+        html += '<span style="font-family:monospace;font-size:13px;font-weight:600;color:#e2e8f0;">' + escapeHtml(v.name) + '</span>';
+        html += v.required
+          ? '<span style="font-size:10px;padding:2px 6px;border-radius:99px;background:rgba(239,68,68,0.15);color:#f87171;">required</span>'
+          : '<span style="font-size:10px;padding:2px 6px;border-radius:99px;background:rgba(100,116,139,0.2);color:#94a3b8;">optional</span>';
+        html += v.isSet
+          ? '<span style="font-size:10px;padding:2px 6px;border-radius:99px;background:rgba(34,197,94,0.15);color:#4ade80;">set</span>'
+          : '<span style="font-size:10px;padding:2px 6px;border-radius:99px;background:rgba(239,68,68,0.1);color:#f87171;">not set</span>';
+        html += '</div>';
+
+        if (v.description) {
+          html += '<div style="font-size:12px;color:#64748b;margin-bottom:8px;">' + escapeHtml(v.description) + '</div>';
+        }
+
+        // Input row
+        html += '<div style="display:flex;gap:6px;align-items:center;">';
+        if (isPath) {
+          var curVal = v.rawValue || '';
+          html += '<input class="mp-var-input" type="text" name="' + escapeHtml(v.name) + '" value="' + escapeHtml(curVal) + '" placeholder="' + (curVal ? escapeHtml(curVal) : '/path/to/folder') + '" style="flex:1;padding:7px 10px;border-radius:6px;border:1px solid rgba(255,255,255,0.1);background:rgba(0,0,0,0.2);color:#fff;font-size:13px;outline:none;">';
+          html += '<button class="mp-btn-browse" data-for="' + escapeHtml(v.name) + '" style="padding:7px 12px;border-radius:6px;border:1px solid rgba(255,255,255,0.1);background:rgba(139,92,246,0.1);color:#c4b5fd;font-size:12px;cursor:pointer;white-space:nowrap;">Browse</button>';
+        } else {
+          html += '<input class="mp-var-input" type="password" name="' + escapeHtml(v.name) + '" placeholder="' + (v.maskedValue ? escapeHtml(v.maskedValue) : 'Enter value...') + '" style="flex:1;padding:7px 10px;border-radius:6px;border:1px solid rgba(255,255,255,0.1);background:rgba(0,0,0,0.2);color:#fff;font-size:13px;outline:none;">';
+          html += '<button class="mp-btn-toggle" data-for="' + escapeHtml(v.name) + '" style="padding:7px 10px;border-radius:6px;border:1px solid rgba(255,255,255,0.1);background:transparent;color:#94a3b8;font-size:14px;cursor:pointer;" title="Toggle visibility">&#x1f441;</button>';
+        }
+        if (v.isSet) {
+          html += '<button class="mp-btn-clear" data-clear="' + escapeHtml(v.name) + '" style="padding:7px 10px;border-radius:6px;border:1px solid rgba(255,255,255,0.1);background:transparent;color:#94a3b8;font-size:14px;cursor:pointer;" title="Remove value">&#x2715;</button>';
+        }
+        html += '</div>';
+        html += '</div>';
+      }
+
+      // Save button
+      html += '<div style="display:flex;align-items:center;gap:12px;margin-top:16px;">';
+      html += '<button id="mp-btn-save" style="padding:8px 20px;border-radius:8px;border:none;background:linear-gradient(135deg,#7c3aed,#6d28d9);color:#fff;font-size:13px;font-weight:600;cursor:pointer;">Save Changes</button>';
+      html += '<span id="mp-save-status" style="font-size:12px;color:#64748b;"></span>';
+      html += '</div>';
+    }
+
+    html += '</div>';
+    section.innerHTML = html;
+
+    // Wire toggle buttons
+    section.querySelectorAll('.mp-btn-toggle').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        var input = section.querySelector('input[name="' + btn.dataset.for + '"]');
+        if (input) input.type = input.type === 'password' ? 'text' : 'password';
+      });
+    });
+
+    // Wire browse buttons
+    section.querySelectorAll('.mp-btn-browse').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        var inputName = btn.dataset.for;
+        var input = section.querySelector('input[name="' + inputName + '"]');
+        var startDir = (input && input.value.trim()) || '';
+        if (typeof openFolderPicker === 'function') {
+          openFolderPicker(inputName, startDir);
+        }
+      });
+    });
+
+    // Wire clear buttons
+    section.querySelectorAll('.mp-btn-clear').forEach(function(btn) {
+      btn.addEventListener('click', async function() {
+        var varName = btn.dataset.clear;
+        if (!confirm('Remove ' + varName + '?')) return;
+        try {
+          var clearVars = {};
+          clearVars[varName] = '';
+          await saveExtensionEnv(name, clearVars);
+          if (typeof toast === 'function') toast(varName + ' removed', 'success');
+          loadMarketplaceExtConfig(name);
+        } catch (err) {
+          if (typeof toast === 'function') toast('Failed: ' + err.message, 'error');
+        }
+      });
+    });
+
+    // Wire save button
+    var saveBtn = document.getElementById('mp-btn-save');
+    if (saveBtn) {
+      saveBtn.addEventListener('click', async function() {
+        var inputs = section.querySelectorAll('.mp-var-input');
+        var saveVars = {};
+        var count = 0;
+        inputs.forEach(function(input) {
+          if (input.value.trim()) {
+            saveVars[input.name] = input.value.trim();
+            count++;
+          }
+        });
+        if (count === 0) {
+          if (typeof toast === 'function') toast('No changes to save', 'error');
+          return;
+        }
+        saveBtn.disabled = true;
+        var statusEl = document.getElementById('mp-save-status');
+        if (statusEl) statusEl.textContent = 'Saving...';
+        try {
+          await saveExtensionEnv(name, saveVars);
+          if (typeof toast === 'function') toast(count + ' value(s) saved', 'success');
+          loadMarketplaceExtConfig(name);
+        } catch (err) {
+          if (typeof toast === 'function') toast('Failed: ' + err.message, 'error');
+        } finally {
+          saveBtn.disabled = false;
+          if (statusEl) statusEl.textContent = '';
+        }
+      });
+    }
+
+  } catch (err) {
+    section.innerHTML = '<div style="color:#f87171;font-size:13px;padding:12px;">Failed to load config: ' + escapeHtml(err.message) + '</div>';
+  }
 }

@@ -92,6 +92,15 @@ async function socialFetchConfig() {
   return res.json();
 }
 
+async function socialSaveConfig(data) {
+  var res = await fetch('/api/social/config', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  });
+  return res.json();
+}
+
 async function socialFetchScripts() {
   var res = await fetch('/api/social/scripts');
   return res.json();
@@ -166,50 +175,86 @@ function socialRenderSidebar() {
   var sidebar = document.querySelector('#social-list');
   if (!sidebar) return;
 
-  var filterBtns =
-    '<div style="padding:0.5rem;">' +
-    '<button class="wf-new-btn" id="social-new-post-btn" style="margin-bottom:0.5rem;background:linear-gradient(135deg,#7c3aed,#6d28d9);">' +
-    '+ New Post</button>' +
-    '<div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:0.5rem;">' +
-    socialFilterBtn('all', 'All') +
-    socialFilterBtn('draft', 'Draft') +
-    socialFilterBtn('scheduled', 'Scheduled') +
-    socialFilterBtn('posted', 'Posted') +
-    socialFilterBtn('failed', 'Failed') +
+  // Stats mini-counts
+  var counts = socialStats || {};
+
+  var html =
+    '<div class="ss-sidebar">' +
+
+    // ── New Post button ──
+    '<button class="ss-new-btn" id="social-new-post-btn">' +
+    '<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>' +
+    '<span>New Post</span>' +
+    '</button>' +
+
+    // ── Filter pills ──
+    '<div class="ss-filters">' +
+    socialFilterPill('all', 'All', counts.total) +
+    socialFilterPill('draft', 'Drafts', counts.draft) +
+    socialFilterPill('scheduled', 'Scheduled', counts.scheduled) +
+    socialFilterPill('posted', 'Posted', counts.posted) +
+    socialFilterPill('failed', 'Failed', counts.failed) +
     '</div>' +
-    '<div style="display:flex;gap:4px;margin-bottom:0.5rem;">' +
-    '<button class="social-view-btn' + (socialView === 'overview' ? ' active' : '') + '" data-social-view="overview">\ud83d\udcca Overview</button>' +
-    '<button class="social-view-btn' + (socialView === 'calendar' ? ' active' : '') + '" data-social-view="calendar">\ud83d\udcc5 Calendar</button>' +
+
+    // ── View switcher ──
+    '<div class="ss-view-switch">' +
+    '<button class="ss-view-btn' + (socialView === 'overview' || socialView === 'detail' || socialView === 'create' ? ' active' : '') + '" data-social-view="overview">' +
+    '<svg width="13" height="13" viewBox="0 0 16 16" fill="none"><rect x="1.5" y="1.5" width="5" height="5" rx="1" stroke="currentColor" stroke-width="1.3"/><rect x="9.5" y="1.5" width="5" height="5" rx="1" stroke="currentColor" stroke-width="1.3"/><rect x="1.5" y="9.5" width="5" height="5" rx="1" stroke="currentColor" stroke-width="1.3"/><rect x="9.5" y="9.5" width="5" height="5" rx="1" stroke="currentColor" stroke-width="1.3"/></svg>' +
+    'Overview</button>' +
+    '<button class="ss-view-btn' + (socialView === 'calendar' ? ' active' : '') + '" data-social-view="calendar">' +
+    '<svg width="13" height="13" viewBox="0 0 16 16" fill="none"><rect x="2" y="3" width="12" height="11" rx="1.5" stroke="currentColor" stroke-width="1.3"/><path d="M2 6.5h12M5.5 1.5v3M10.5 1.5v3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>' +
+    'Calendar</button>' +
+    '<button class="ss-view-btn' + (socialView === 'settings' ? ' active' : '') + '" id="social-settings-btn">' +
+    '<svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M6.9 1.7l-.2 1.2c-.5.2-.9.5-1.3.8l-1.1-.4-1.1 1.9 1 .8c-.1.3-.1.5-.1.8s0 .5.1.8l-1 .8 1.1 1.9 1.1-.4c.4.3.8.6 1.3.8l.2 1.2h2.2l.2-1.2c.5-.2.9-.5 1.3-.8l1.1.4 1.1-1.9-1-.8c.1-.3.1-.5.1-.8s0-.5-.1-.8l1-.8-1.1-1.9-1.1.4c-.4-.3-.8-.6-1.3-.8l-.2-1.2H6.9z" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="8" cy="8" r="1.8" stroke="currentColor" stroke-width="1.2"/></svg>' +
+    '</button>' +
     '</div>' +
+
+    // ── Divider ──
+    '<div class="ss-divider"></div>' +
+
+    // ── Post list header ──
+    '<div class="ss-list-header">' +
+    '<span>Posts</span>' +
+    '<span class="ss-list-count">' + socialPosts.length + '</span>' +
     '</div>';
 
-  var postItems = socialPosts.map(function (post) {
-    var isSelected = socialSelectedPost && socialSelectedPost.id === post.id;
-    var preview = (post.content.text || '').slice(0, 60) || '(no text)';
-    var platforms = post.platforms.filter(function (p) { return p.enabled; })
-      .map(function (p) { return socialPlatformBadge(p.platform, true); }).join('');
-    var time = post.scheduledAt ? socialFormatDateTime(post.scheduledAt) : 'Draft';
-
-    return '<div class="ext-item' + (isSelected ? ' active' : '') + '" data-social-post="' + post.id + '">' +
-      '<div style="display:flex;align-items:center;gap:6px;margin-bottom:2px;">' +
-      socialStatusDot(post.status) +
-      '<span style="font-size:0.8rem;color:#e2e8f0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' +
-      socialEsc(preview) + '</span>' +
-      '</div>' +
-      '<div style="display:flex;align-items:center;gap:4px;">' +
-      platforms +
-      '<span style="font-size:0.65rem;color:#64748b;margin-left:auto;">' + socialEsc(time) + '</span>' +
-      '</div>' +
-      '</div>';
-  }).join('');
-
+  // ── Post items ──
   if (socialPosts.length === 0) {
-    postItems = '<div style="padding:1rem;color:#64748b;font-size:0.8rem;text-align:center;">' +
-      'No posts' + (socialFilter !== 'all' ? ' with status "' + socialFilter + '"' : '') + '.' +
+    html += '<div class="ss-empty">' +
+      '<div class="ss-empty-icon">\ud83d\udcdd</div>' +
+      '<div>No posts' + (socialFilter !== 'all' ? ' with "' + socialFilter + '" status' : ' yet') + '</div>' +
       '</div>';
+  } else {
+    html += '<div class="ss-post-list">';
+    socialPosts.forEach(function (post) {
+      var isSelected = socialSelectedPost && socialSelectedPost.id === post.id;
+      var preview = (post.content.text || '').slice(0, 55) || '(no text)';
+      var platforms = post.platforms.filter(function (p) { return p.enabled; });
+      var platformIcons = { instagram: '\ud83d\udcf7', twitter: '\ud83d\udc26', youtube: '\u25b6\ufe0f' };
+      var platStr = platforms.map(function (p) { return platformIcons[p.platform] || ''; }).join(' ');
+      var time = post.scheduledAt ? socialFormatDateTime(post.scheduledAt) : 'Draft';
+      var statusColors = {
+        draft: '#64748b', scheduled: '#3b82f6', posting: '#f59e0b',
+        posted: '#22c55e', partial: '#f97316', failed: '#ef4444',
+      };
+      var sColor = statusColors[post.status] || '#64748b';
+
+      html += '<div class="ss-post-item' + (isSelected ? ' active' : '') + '" data-social-post="' + post.id + '">' +
+        '<div class="ss-post-top">' +
+        '<span class="ss-post-dot" style="background:' + sColor + ';"></span>' +
+        '<span class="ss-post-preview">' + socialEsc(preview) + '</span>' +
+        '</div>' +
+        '<div class="ss-post-bottom">' +
+        '<span class="ss-post-platforms">' + platStr + '</span>' +
+        '<span class="ss-post-time">' + socialEsc(time) + '</span>' +
+        '</div>' +
+        '</div>';
+    });
+    html += '</div>';
   }
 
-  sidebar.innerHTML = filterBtns + postItems;
+  html += '</div>';
+  sidebar.innerHTML = html;
 
   // Wire events
   sidebar.querySelector('#social-new-post-btn').addEventListener('click', function () {
@@ -219,14 +264,14 @@ function socialRenderSidebar() {
     socialRenderSidebar();
   });
 
-  sidebar.querySelectorAll('.social-filter-btn').forEach(function (btn) {
+  sidebar.querySelectorAll('.ss-filter-pill').forEach(function (btn) {
     btn.addEventListener('click', function () {
       socialFilter = btn.dataset.socialFilter;
       socialRefresh();
     });
   });
 
-  sidebar.querySelectorAll('.social-view-btn').forEach(function (btn) {
+  sidebar.querySelectorAll('.ss-view-btn[data-social-view]').forEach(function (btn) {
     btn.addEventListener('click', function () {
       socialView = btn.dataset.socialView;
       socialSelectedPost = null;
@@ -235,6 +280,16 @@ function socialRenderSidebar() {
       socialRenderSidebar();
     });
   });
+
+  var settingsBtn = sidebar.querySelector('#social-settings-btn');
+  if (settingsBtn) {
+    settingsBtn.addEventListener('click', function () {
+      socialView = 'settings';
+      socialSelectedPost = null;
+      socialRenderSettings();
+      socialRenderSidebar();
+    });
+  }
 
   sidebar.querySelectorAll('[data-social-post]').forEach(function (item) {
     item.addEventListener('click', function () {
@@ -250,6 +305,15 @@ function socialRenderSidebar() {
 function socialFilterBtn(value, label) {
   var active = socialFilter === value ? ' active' : '';
   return '<button class="social-filter-btn' + active + '" data-social-filter="' + value + '">' + label + '</button>';
+}
+
+function socialFilterPill(value, label, count) {
+  var active = socialFilter === value ? ' active' : '';
+  var c = (typeof count === 'number') ? count : 0;
+  return '<button class="ss-filter-pill' + active + '" data-social-filter="' + value + '">' +
+    '<span class="ss-filter-label">' + label + '</span>' +
+    '<span class="ss-filter-count">' + c + '</span>' +
+    '</button>';
 }
 
 async function socialRefresh() {
@@ -381,88 +445,134 @@ function socialRenderDetail() {
     return;
   }
 
-  var platforms = post.platforms.map(function (p) {
-    return '<div style="display:flex;align-items:center;gap:8px;padding:6px 0;">' +
+  // Status label mapping
+  var statusLabels = {
+    draft: 'Draft', scheduled: 'Scheduled', posting: 'Posting',
+    posted: 'Posted', partial: 'Partial', failed: 'Failed',
+  };
+  var statusColors = {
+    draft: '#64748b', scheduled: '#3b82f6', posting: '#f59e0b',
+    posted: '#22c55e', partial: '#f97316', failed: '#ef4444',
+  };
+  var statusColor = statusColors[post.status] || '#64748b';
+
+  // Platform status rows
+  var platformRows = post.platforms.map(function (p) {
+    var pColor = statusColors[p.status] || '#64748b';
+    return '<div class="sd-platform-row">' +
+      '<div class="sd-platform-row-left">' +
       socialPlatformBadge(p.platform) +
-      socialStatusDot(p.status) +
-      '<span style="font-size:0.75rem;color:#94a3b8;">' + p.status + '</span>' +
-      (p.error ? '<span style="font-size:0.7rem;color:#ef4444;">(' + socialEsc(p.error) + ')</span>' : '') +
-      (p.postUrl ? '<a href="' + socialEsc(p.postUrl) + '" target="_blank" style="font-size:0.7rem;color:#7c3aed;">View</a>' : '') +
+      '</div>' +
+      '<div class="sd-platform-row-right">' +
+      '<span class="sd-platform-status" style="color:' + pColor + ';">' +
+      socialStatusDot(p.status) + ' ' + (statusLabels[p.status] || p.status) +
+      '</span>' +
+      (p.error ? '<span class="sd-platform-error">' + socialEsc(p.error) + '</span>' : '') +
+      (p.postUrl ? '<a href="' + socialEsc(p.postUrl) + '" target="_blank" class="sd-platform-link">View post &rarr;</a>' : '') +
+      '</div>' +
       '</div>';
   }).join('');
 
-  var tags = (post.tags || []).map(function (t) {
-    return '<span class="social-tag">' + socialEsc(t) + '</span>';
-  }).join(' ');
+  // Content preview (first 100 chars for the hero card)
+  var preview = (post.content.text || '').slice(0, 100);
+  if ((post.content.text || '').length > 100) preview += '...';
 
   var html =
-    '<div style="padding:1.5rem;">' +
-    // Header
-    '<div style="display:flex;align-items:center;gap:12px;margin-bottom:1.5rem;">' +
-    '<button class="btn-secondary" id="social-back-btn" style="padding:4px 8px;">&larr;</button>' +
-    '<h2 style="color:#fff;font-size:1.25rem;flex:1;">Post Detail</h2>' +
-    socialStatusDot(post.status) +
-    '<span style="color:#94a3b8;font-size:0.85rem;">' + post.status + '</span>' +
+    '<div class="sd-container">' +
+
+    // ── Header bar ──
+    '<div class="sd-header">' +
+    '<button class="sd-back-btn" id="social-back-btn">' +
+    '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M10 12L6 8l4-4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>' +
+    '</button>' +
+    '<div class="sd-header-title">Post Detail</div>' +
+    '<div class="sd-status-pill" style="background:' + statusColor + '20;color:' + statusColor + ';border-color:' + statusColor + '40;">' +
+    socialStatusDot(post.status) + ' ' + (statusLabels[post.status] || post.status) +
+    '</div>' +
     '</div>' +
 
-    // Content
-    '<div style="margin-bottom:1rem;">' +
-    '<label style="display:block;font-size:0.75rem;color:#94a3b8;margin-bottom:4px;">Content</label>' +
-    '<textarea id="social-edit-text" class="wf-run-input" style="width:100%;min-height:100px;resize:vertical;">' +
+    // ── Content card ──
+    '<div class="sd-card">' +
+    '<div class="sd-card-header">' +
+    '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M13.3 2H2.7C2.3 2 2 2.3 2 2.7v10.6c0 .4.3.7.7.7h10.6c.4 0 .7-.3.7-.7V2.7c0-.4-.3-.7-.7-.7zM5 5h6M5 8h6M5 11h3" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>' +
+    '<span>Content</span>' +
+    '</div>' +
+    '<textarea id="social-edit-text" class="sd-textarea" placeholder="Write your post...">' +
     socialEsc(post.content.text) + '</textarea>' +
     '</div>' +
 
-    // Platforms
-    '<div style="margin-bottom:1rem;">' +
-    '<label style="display:block;font-size:0.75rem;color:#94a3b8;margin-bottom:4px;">Platforms</label>' +
-    '<div id="social-edit-platforms">' +
-    socialPlatformCheckboxes(post) +
+    // ── Platforms card ──
+    '<div class="sd-card">' +
+    '<div class="sd-card-header">' +
+    '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 1v14M1 8h14" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><circle cx="8" cy="8" r="6.5" stroke="currentColor" stroke-width="1.2"/></svg>' +
+    '<span>Platforms</span>' +
+    '</div>' +
+    '<div class="sd-platforms-grid" id="social-edit-platforms">' +
+    socialPlatformToggles(post) +
     '</div>' +
     '</div>' +
 
-    // Schedule
-    '<div style="display:flex;gap:0.75rem;margin-bottom:1rem;">' +
-    '<div style="flex:1;">' +
-    '<label style="display:block;font-size:0.75rem;color:#94a3b8;margin-bottom:4px;">Schedule Date</label>' +
-    '<input type="date" id="social-edit-date" class="wf-run-input" style="width:100%;" value="' +
+    // ── Schedule card ──
+    '<div class="sd-card">' +
+    '<div class="sd-card-header">' +
+    '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><rect x="2" y="3" width="12" height="11" rx="1.5" stroke="currentColor" stroke-width="1.2"/><path d="M2 6.5h12M5 1.5v3M11 1.5v3" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>' +
+    '<span>Schedule</span>' +
+    '</div>' +
+    '<div class="sd-schedule-row">' +
+    '<div class="sd-field">' +
+    '<label class="sd-label">Date</label>' +
+    '<input type="date" id="social-edit-date" class="sd-input" value="' +
     (post.scheduledAt ? new Date(post.scheduledAt).toISOString().split('T')[0] : '') + '" />' +
     '</div>' +
-    '<div style="flex:1;">' +
-    '<label style="display:block;font-size:0.75rem;color:#94a3b8;margin-bottom:4px;">Schedule Time</label>' +
-    '<input type="time" id="social-edit-time" class="wf-run-input" style="width:100%;" value="' +
+    '<div class="sd-field">' +
+    '<label class="sd-label">Time</label>' +
+    '<input type="time" id="social-edit-time" class="sd-input" value="' +
     (post.scheduledAt ? new Date(post.scheduledAt).toTimeString().slice(0, 5) : '') + '" />' +
     '</div>' +
     '</div>' +
+    '</div>' +
 
-    // Tags
-    '<div style="margin-bottom:1rem;">' +
-    '<label style="display:block;font-size:0.75rem;color:#94a3b8;margin-bottom:4px;">Tags (comma-separated)</label>' +
-    '<input type="text" id="social-edit-tags" class="wf-run-input" style="width:100%;" value="' +
+    // ── Tags card ──
+    '<div class="sd-card">' +
+    '<div class="sd-card-header">' +
+    '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M1.5 8.7V2.5c0-.6.4-1 1-1h6.2L14.5 7l-6 6.5-7-4.8z" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="5" cy="5" r="1" fill="currentColor"/></svg>' +
+    '<span>Tags</span>' +
+    '</div>' +
+    '<input type="text" id="social-edit-tags" class="sd-input" placeholder="marketing, product, launch" value="' +
     socialEsc((post.tags || []).join(', ')) + '" />' +
     '</div>' +
 
-    // Platform statuses
-    '<div style="margin-bottom:1rem;">' +
-    '<label style="display:block;font-size:0.75rem;color:#94a3b8;margin-bottom:4px;">Platform Status</label>' +
-    '<div style="border:1px solid #1e293b;border-radius:8px;padding:8px 12px;">' +
-    platforms +
+    // ── Platform status card ──
+    '<div class="sd-card">' +
+    '<div class="sd-card-header">' +
+    '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 14A6 6 0 108 2a6 6 0 000 12z" stroke="currentColor" stroke-width="1.2"/><path d="M8 5v3l2 1.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>' +
+    '<span>Delivery Status</span>' +
+    '</div>' +
+    '<div class="sd-platform-statuses">' +
+    platformRows +
     '</div>' +
     '</div>' +
 
-    // Meta
-    '<div style="font-size:0.7rem;color:#64748b;margin-bottom:1rem;">' +
-    'Created: ' + socialFormatDateTime(post.createdAt) +
-    ' &middot; Updated: ' + socialFormatDateTime(post.updatedAt) +
-    ' &middot; ID: ' + post.id.slice(0, 8) +
+    // ── Meta footer ──
+    '<div class="sd-meta">' +
+    'Created ' + socialFormatDateTime(post.createdAt) +
+    ' &middot; Updated ' + socialFormatDateTime(post.updatedAt) +
+    ' &middot; <span style="font-family:monospace;">' + post.id.slice(0, 8) + '</span>' +
     '</div>' +
 
-    // Actions
-    '<div style="display:flex;gap:0.5rem;">' +
-    '<button class="btn-primary" id="social-save-btn">Save Changes</button>' +
+    // ── Action bar ──
+    '<div class="sd-actions">' +
+    '<button class="sd-btn sd-btn-primary" id="social-save-btn">' +
+    '<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M12.7 1.3H3.3c-1.1 0-2 .9-2 2v9.4c0 1.1.9 2 2 2h9.4c1.1 0 2-.9 2-2V3.3c0-1.1-.9-2-2-2z" stroke="currentColor" stroke-width="1.2"/><path d="M11.3 14.7V9.3H4.7v5.4M4.7 1.3v4h5.3" stroke="currentColor" stroke-width="1.2"/></svg>' +
+    'Save Changes</button>' +
     (post.status === 'draft' || post.status === 'failed'
-      ? '<button class="btn-primary" id="social-schedule-btn" style="background:#3b82f6;">Schedule</button>'
+      ? '<button class="sd-btn sd-btn-schedule" id="social-schedule-btn">' +
+        '<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M14 8A6 6 0 112 8a6 6 0 0112 0z" stroke="currentColor" stroke-width="1.2"/><path d="M8 4.7V8l2.7 1.3" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>' +
+        'Schedule Now</button>'
       : '') +
-    '<button class="btn-secondary" id="social-delete-btn" style="color:#ef4444;">Delete</button>' +
+    '<button class="sd-btn sd-btn-delete" id="social-delete-btn">' +
+    '<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M2.7 4.7h10.6M6 4.7V3.3c0-.7.6-1.3 1.3-1.3h1.4c.7 0 1.3.6 1.3 1.3v1.4M12 4.7l-.5 8c0 .7-.6 1.3-1.3 1.3H5.8c-.7 0-1.3-.6-1.3-1.3l-.5-8" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>' +
+    'Delete</button>' +
     '</div>' +
 
     '</div>';
@@ -475,6 +585,20 @@ function socialRenderDetail() {
     socialView = 'overview';
     socialRenderOverview();
     socialRenderSidebar();
+  });
+
+  // Platform toggle interaction
+  main.querySelectorAll('.sd-platform-toggle input[type="checkbox"]').forEach(function (cb) {
+    cb.addEventListener('change', function () {
+      var toggle = cb.closest('.sd-platform-toggle');
+      if (cb.checked) {
+        toggle.classList.add('sd-platform-toggle-active');
+        toggle.querySelector('.sd-platform-check').textContent = '\u2713';
+      } else {
+        toggle.classList.remove('sd-platform-toggle-active');
+        toggle.querySelector('.sd-platform-check').textContent = '';
+      }
+    });
   });
 
   main.querySelector('#social-save-btn').addEventListener('click', async function () {
@@ -524,6 +648,27 @@ function socialPlatformCheckboxes(post) {
     return '<label style="display:inline-flex;align-items:center;gap:6px;margin-right:12px;font-size:0.85rem;color:#e2e8f0;cursor:pointer;">' +
       '<input type="checkbox" class="social-platform-cb" value="' + p + '"' + checked + ' />' +
       socialPlatformBadge(p, true) +
+      '</label>';
+  }).join('');
+}
+
+function socialPlatformToggles(post) {
+  var allPlatforms = ['instagram', 'twitter', 'youtube'];
+  var icons = { instagram: '\ud83d\udcf7', twitter: '\ud83d\udc26', youtube: '\u25b6\ufe0f' };
+  var labels = { instagram: 'Instagram', twitter: 'Twitter', youtube: 'YouTube' };
+  var enabled = {};
+  (post ? post.platforms : []).forEach(function (p) {
+    if (p.enabled) enabled[p.platform] = true;
+  });
+
+  return allPlatforms.map(function (p) {
+    var checked = enabled[p] ? ' checked' : '';
+    var active = enabled[p] ? ' sd-platform-toggle-active' : '';
+    return '<label class="sd-platform-toggle' + active + '" data-platform="' + p + '">' +
+      '<input type="checkbox" class="social-platform-cb" value="' + p + '"' + checked + ' style="display:none;" />' +
+      '<span class="sd-platform-icon">' + icons[p] + '</span>' +
+      '<span class="sd-platform-name">' + labels[p] + '</span>' +
+      '<span class="sd-platform-check">' + (enabled[p] ? '\u2713' : '') + '</span>' +
       '</label>';
   }).join('');
 }
@@ -786,5 +931,180 @@ function socialRenderCalendar() {
         socialRenderSidebar();
       }
     });
+  });
+}
+
+// ── Settings ────────────────────────────────────────────────
+
+async function socialRenderSettings() {
+  var main = document.querySelector('#main');
+  main.innerHTML = '<div class="empty-state"><div class="spinner" style="margin:0 auto 16px;"></div><h2>Loading settings...</h2></div>';
+
+  try {
+    socialConfig = await socialFetchConfig();
+  } catch (err) {
+    main.innerHTML = '<div class="empty-state"><div class="empty-state-icon">\u26a0\ufe0f</div><h2>Failed to load settings</h2><p>' + socialEsc(String(err)) + '</p></div>';
+    return;
+  }
+
+  var cfg = socialConfig;
+
+  // Common timezones
+  var timezones = [
+    'America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles',
+    'America/Anchorage', 'Pacific/Honolulu', 'America/Toronto', 'America/Vancouver',
+    'Europe/London', 'Europe/Paris', 'Europe/Berlin', 'Europe/Moscow',
+    'Asia/Tokyo', 'Asia/Shanghai', 'Asia/Kolkata', 'Asia/Dubai',
+    'Australia/Sydney', 'Pacific/Auckland',
+  ];
+  var tzOptions = timezones.map(function (tz) {
+    var sel = (cfg.defaultTimezone === tz) ? ' selected' : '';
+    return '<option value="' + tz + '"' + sel + '>' + tz.replace(/_/g, ' ') + '</option>';
+  }).join('');
+
+  // Default platforms
+  var allPlats = ['instagram', 'twitter', 'youtube'];
+  var platLabels = { instagram: '\ud83d\udcf7 Instagram', twitter: '\ud83d\udc26 Twitter', youtube: '\u25b6\ufe0f YouTube' };
+  var defPlats = cfg.defaultPlatforms || [];
+
+  var html =
+    '<div class="sd-container">' +
+
+    // ── Header ──
+    '<div class="sd-header">' +
+    '<button class="sd-back-btn" id="social-settings-back">' +
+    '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M10 12L6 8l4-4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>' +
+    '</button>' +
+    '<div class="sd-header-title">Settings</div>' +
+    '</div>' +
+
+    // ── Grid ──
+    '<div class="grid-12">' +
+
+    // ── Timezone ──
+    '<div class="sd-card col-6">' +
+    '<div class="sd-card-header">' +
+    '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6.5" stroke="currentColor" stroke-width="1.2"/><path d="M8 3.5V8l3 2" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>' +
+    '<span>Default Timezone</span>' +
+    '</div>' +
+    '<select id="social-cfg-tz" class="sd-input" style="width:100%;">' + tzOptions + '</select>' +
+    '</div>' +
+
+    // ── Default Platforms ──
+    '<div class="sd-card col-6">' +
+    '<div class="sd-card-header">' +
+    '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 1v14M1 8h14" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><circle cx="8" cy="8" r="6.5" stroke="currentColor" stroke-width="1.2"/></svg>' +
+    '<span>Default Platforms</span>' +
+    '</div>' +
+    '<div style="display:flex;flex-wrap:wrap;gap:8px;">' +
+    allPlats.map(function (p) {
+      var checked = defPlats.indexOf(p) !== -1 ? ' checked' : '';
+      return '<label style="display:flex;align-items:center;gap:6px;padding:8px 14px;background:#1e293b;border:1px solid #334155;border-radius:8px;cursor:pointer;font-size:0.85rem;color:#e2e8f0;">' +
+        '<input type="checkbox" class="social-cfg-plat" value="' + p + '"' + checked + '>' +
+        platLabels[p] +
+        '</label>';
+    }).join('') +
+    '</div>' +
+    '</div>' +
+
+    // ── LLM Settings ──
+    '<div class="sd-card col-6">' +
+    '<div class="sd-card-header">' +
+    '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2 4.5h12M2 8h8M2 11.5h10" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>' +
+    '<span>AI Text Generation</span>' +
+    '</div>' +
+    '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">' +
+    '<div class="sd-field">' +
+    '<label class="sd-label">Text Provider</label>' +
+    '<input type="text" id="social-cfg-text-provider" class="sd-input" value="' + socialEsc((cfg.llm || {}).textProvider || '') + '" placeholder="anthropic" />' +
+    '</div>' +
+    '<div class="sd-field">' +
+    '<label class="sd-label">Text Model</label>' +
+    '<input type="text" id="social-cfg-text-model" class="sd-input" value="' + socialEsc((cfg.llm || {}).textModel || '') + '" placeholder="claude-opus-4-5-20251101" />' +
+    '</div>' +
+    '</div>' +
+    '</div>' +
+
+    // ── Posting Behavior ──
+    '<div class="sd-card col-6">' +
+    '<div class="sd-card-header">' +
+    '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M14 8A6 6 0 112 8a6 6 0 0112 0z" stroke="currentColor" stroke-width="1.2"/><path d="M8 4.7V8l2.7 1.3" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>' +
+    '<span>Posting Behavior</span>' +
+    '</div>' +
+    '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;">' +
+    '<div class="sd-field">' +
+    '<label class="sd-label">Delay Between Platforms (ms)</label>' +
+    '<input type="number" id="social-cfg-delay" class="sd-input" value="' + ((cfg.posting || {}).delayBetweenPlatforms || 5000) + '" />' +
+    '</div>' +
+    '<div class="sd-field">' +
+    '<label class="sd-label">Retry Limit</label>' +
+    '<input type="number" id="social-cfg-retry-limit" class="sd-input" value="' + ((cfg.posting || {}).retryLimit || 2) + '" />' +
+    '</div>' +
+    '<div class="sd-field">' +
+    '<label class="sd-label">Retry Delay (ms)</label>' +
+    '<input type="number" id="social-cfg-retry-delay" class="sd-input" value="' + ((cfg.posting || {}).retryDelay || 10000) + '" />' +
+    '</div>' +
+    '</div>' +
+    '</div>' +
+
+    '</div>' +
+
+    // ── Save ──
+    '<div class="sd-actions">' +
+    '<button class="sd-btn sd-btn-primary" id="social-cfg-save">' +
+    '<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M12.7 1.3H3.3c-1.1 0-2 .9-2 2v9.4c0 1.1.9 2 2 2h9.4c1.1 0 2-.9 2-2V3.3c0-1.1-.9-2-2-2z" stroke="currentColor" stroke-width="1.2"/><path d="M11.3 14.7V9.3H4.7v5.4M4.7 1.3v4h5.3" stroke="currentColor" stroke-width="1.2"/></svg>' +
+    'Save Settings</button>' +
+    '</div>' +
+
+    '</div>';
+
+  main.innerHTML = html;
+
+  // Wire back button
+  main.querySelector('#social-settings-back').addEventListener('click', function () {
+    socialView = 'overview';
+    socialRenderOverview();
+    socialRenderSidebar();
+  });
+
+  // Wire save
+  main.querySelector('#social-cfg-save').addEventListener('click', async function () {
+    var btn = main.querySelector('#social-cfg-save');
+    btn.disabled = true;
+    btn.innerHTML = 'Saving...';
+
+    var platforms = [];
+    main.querySelectorAll('.social-cfg-plat').forEach(function (cb) {
+      if (cb.checked) platforms.push(cb.value);
+    });
+
+    var data = {
+      defaultTimezone: main.querySelector('#social-cfg-tz').value,
+      defaultPlatforms: platforms,
+      llm: {
+        textProvider: main.querySelector('#social-cfg-text-provider').value.trim(),
+        textModel: main.querySelector('#social-cfg-text-model').value.trim(),
+      },
+      posting: {
+        delayBetweenPlatforms: parseInt(main.querySelector('#social-cfg-delay').value, 10) || 5000,
+        retryLimit: parseInt(main.querySelector('#social-cfg-retry-limit').value, 10) || 2,
+        retryDelay: parseInt(main.querySelector('#social-cfg-retry-delay').value, 10) || 10000,
+      },
+    };
+
+    try {
+      await socialSaveConfig(data);
+      if (typeof toast === 'function') toast('Settings saved', 'success');
+      btn.disabled = false;
+      btn.innerHTML =
+        '<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M12.7 1.3H3.3c-1.1 0-2 .9-2 2v9.4c0 1.1.9 2 2 2h9.4c1.1 0 2-.9 2-2V3.3c0-1.1-.9-2-2-2z" stroke="currentColor" stroke-width="1.2"/><path d="M11.3 14.7V9.3H4.7v5.4M4.7 1.3v4h5.3" stroke="currentColor" stroke-width="1.2"/></svg>' +
+        'Save Settings';
+    } catch (err) {
+      if (typeof toast === 'function') toast('Save failed: ' + err, 'error');
+      btn.disabled = false;
+      btn.innerHTML =
+        '<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M12.7 1.3H3.3c-1.1 0-2 .9-2 2v9.4c0 1.1.9 2 2 2h9.4c1.1 0 2-.9 2-2V3.3c0-1.1-.9-2-2-2z" stroke="currentColor" stroke-width="1.2"/><path d="M11.3 14.7V9.3H4.7v5.4M4.7 1.3v4h5.3" stroke="currentColor" stroke-width="1.2"/></svg>' +
+        'Save Settings';
+    }
   });
 }

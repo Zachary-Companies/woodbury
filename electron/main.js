@@ -142,6 +142,16 @@ function createWindow(url) {
 
 // ── Application Menu ─────────────────────────────────────────
 
+function goTab(tab) {
+  if (mainWindow) {
+    mainWindow.show();
+    mainWindow.focus();
+    mainWindow.webContents.executeJavaScript(
+      `if (typeof switchTab === 'function') switchTab(${JSON.stringify(tab)});`
+    ).catch(() => {});
+  }
+}
+
 function createApplicationMenu() {
   const isMac = process.platform === 'darwin';
 
@@ -157,15 +167,7 @@ function createApplicationMenu() {
               {
                 label: 'Settings...',
                 accelerator: 'CmdOrCtrl+,',
-                click: () => {
-                  if (mainWindow) {
-                    mainWindow.show();
-                    mainWindow.focus();
-                    mainWindow.webContents.executeJavaScript(
-                      `document.querySelector('[data-tab="config"]')?.click()`
-                    );
-                  }
-                },
+                click: () => goTab('marketplace'),
               },
               { type: 'separator' },
               { role: 'hide', label: 'Hide Woodbury' },
@@ -211,6 +213,19 @@ function createApplicationMenu() {
         { role: 'copy' },
         { role: 'paste' },
         { role: 'selectAll' },
+      ],
+    },
+
+    // Go menu — tab shortcuts
+    {
+      label: 'Go',
+      submenu: [
+        { label: 'Workflows', accelerator: 'CmdOrCtrl+1', click: () => goTab('workflows') },
+        { label: 'Pipelines', accelerator: 'CmdOrCtrl+2', click: () => goTab('compositions') },
+        { label: 'Runs', accelerator: 'CmdOrCtrl+3', click: () => goTab('runs') },
+        { label: 'Training', accelerator: 'CmdOrCtrl+4', click: () => goTab('training') },
+        { label: 'Marketplace', accelerator: 'CmdOrCtrl+5', click: () => goTab('marketplace') },
+        { label: 'Social', accelerator: 'CmdOrCtrl+6', click: () => goTab('social') },
       ],
     },
 
