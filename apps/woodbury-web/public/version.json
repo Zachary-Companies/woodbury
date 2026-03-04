@@ -1,10 +1,10 @@
 {
-  "version": "1.1.3",
+  "version": "1.1.4",
   "releaseDate": "2026-03-03",
   "downloadUrls": {
-    "mac": "https://github.com/Zachary-Companies/woodbury/releases/latest/download/Woodbury-1.1.3-arm64.dmg",
-    "windows": "https://github.com/Zachary-Companies/woodbury/releases/latest/download/Woodbury.Setup.1.1.3.exe"
+    "mac": "https://github.com/Zachary-Companies/woodbury/releases/latest/download/Woodbury-1.1.4-arm64.dmg",
+    "windows": "https://github.com/Zachary-Companies/woodbury/releases/latest/download/Woodbury.Setup.1.1.4.exe"
   },
-  "releaseNotes": "One-click auto-updates, workflow discovery fix, and social scheduler.",
+  "releaseNotes": "Chrome now comes to front and maximizes automatically when Woodbury navigates to it.",
   "releaseUrl": "https://github.com/Zachary-Companies/woodbury/releases/latest"
 }
