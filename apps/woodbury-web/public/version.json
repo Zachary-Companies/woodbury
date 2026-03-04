@@ -1,9 +1,9 @@
 {
-  "version": "1.1.4",
+  "version": "1.1.5",
   "releaseDate": "2026-03-03",
   "downloadUrls": {
-    "mac": "https://github.com/Zachary-Companies/woodbury/releases/latest/download/Woodbury-1.1.4-arm64.dmg",
-    "windows": "https://github.com/Zachary-Companies/woodbury/releases/latest/download/Woodbury.Setup.1.1.4.exe"
+    "mac": "https://github.com/Zachary-Companies/woodbury/releases/latest/download/Woodbury-1.1.5-arm64.dmg",
+    "windows": "https://github.com/Zachary-Companies/woodbury/releases/latest/download/Woodbury.Setup.1.1.5.exe"
   },
   "releaseNotes": "Chrome now comes to front and maximizes automatically when Woodbury navigates to it.",
   "releaseUrl": "https://github.com/Zachary-Companies/woodbury/releases/latest"
