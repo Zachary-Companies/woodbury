@@ -1,10 +1,10 @@
 {
-  "version": "1.1.8",
+  "version": "1.1.9",
   "releaseDate": "2026-03-03",
   "downloadUrls": {
-    "mac": "https://github.com/Zachary-Companies/woodbury/releases/latest/download/Woodbury-1.1.8-arm64.dmg",
-    "windows": "https://github.com/Zachary-Companies/woodbury/releases/latest/download/Woodbury-Setup-1.1.8.exe"
+    "mac": "https://github.com/Zachary-Companies/woodbury/releases/latest/download/Woodbury-1.1.9-arm64.dmg",
+    "windows": "https://github.com/Zachary-Companies/woodbury/releases/latest/download/Woodbury-Setup-1.1.9.exe"
   },
-  "releaseNotes": "One-click Install update button replaces download link.",
+  "releaseNotes": "Go menu shortcuts, dashboard UI improvements, Chrome focus fix for workflows.",
   "releaseUrl": "https://github.com/Zachary-Companies/woodbury/releases/latest"
 }
