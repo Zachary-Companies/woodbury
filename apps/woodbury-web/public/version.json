@@ -1,10 +1,10 @@
 {
-  "version": "1.1.0",
-  "releaseDate": "2026-03-04",
+  "version": "1.1.1",
+  "releaseDate": "2026-03-03",
   "downloadUrls": {
-    "mac": "https://github.com/Zachary-Companies/woodbury/releases/latest/download/Woodbury-1.1.0-arm64.dmg",
-    "windows": "https://github.com/Zachary-Companies/woodbury/releases/latest/download/Woodbury.Setup.1.1.0.exe"
+    "mac": "https://github.com/Zachary-Companies/woodbury/releases/latest/download/Woodbury-1.1.1-arm64.dmg",
+    "windows": "https://github.com/Zachary-Companies/woodbury/releases/latest/download/Woodbury.Setup.1.1.1.exe"
   },
-  "releaseNotes": "Extension marketplace, workflow sharing, and integrated social scheduler.",
+  "releaseNotes": "Fix workflow discovery for installed app, stable working directory.",
   "releaseUrl": "https://github.com/Zachary-Companies/woodbury/releases/latest"
 }
