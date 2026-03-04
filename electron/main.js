@@ -1,5 +1,6 @@
 const { app, BrowserWindow, Tray, Menu, nativeImage, dialog, shell } = require('electron');
 const path = require('path');
+const os = require('os');
 
 // ── App identity (must be set before menus are built) ────────
 app.name = 'Woodbury';
@@ -52,12 +53,17 @@ async function startBackend() {
   const { ExtensionManager } = require(path.join(distDir, 'extension-manager'));
   console.log('[electron] Modules loaded.');
 
+  // Use home directory as a stable working directory for the Electron app.
+  // process.cwd() is unpredictable for installed apps (depends on how the app is launched),
+  // which causes workflow/composition discovery to fail when looking in project-local dirs.
+  const workDir = os.homedir();
+
   // Create extension manager but start dashboard immediately (don't wait for extensions)
-  const extensionManager = new ExtensionManager(process.cwd(), false);
+  const extensionManager = new ExtensionManager(workDir, false);
 
   // Start the dashboard HTTP server right away
   console.log('[electron] Starting dashboard on port 9001...');
-  const handle = await startDashboard(false, extensionManager, process.cwd(), 9001);
+  const handle = await startDashboard(false, extensionManager, workDir, 9001);
   console.log(`[electron] Dashboard running at ${handle.url}`);
 
   // Load extensions in the background with a timeout
