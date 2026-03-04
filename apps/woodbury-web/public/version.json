@@ -1,10 +1,10 @@
 {
-  "version": "1.1.7",
+  "version": "1.1.8",
   "releaseDate": "2026-03-03",
   "downloadUrls": {
-    "mac": "https://github.com/Zachary-Companies/woodbury/releases/latest/download/Woodbury-1.1.7-arm64.dmg",
-    "windows": "https://github.com/Zachary-Companies/woodbury/releases/latest/download/Woodbury-Setup-1.1.7.exe"
+    "mac": "https://github.com/Zachary-Companies/woodbury/releases/latest/download/Woodbury-1.1.8-arm64.dmg",
+    "windows": "https://github.com/Zachary-Companies/woodbury/releases/latest/download/Woodbury-Setup-1.1.8.exe"
   },
-  "releaseNotes": "Increased bridge timeout to 30s, Chrome focus/maximize fires before page load.",
+  "releaseNotes": "One-click Install update button replaces download link.",
   "releaseUrl": "https://github.com/Zachary-Companies/woodbury/releases/latest"
 }
