@@ -13,6 +13,7 @@
 
 import { promises as fs, appendFileSync, mkdirSync, writeFileSync, unlinkSync, existsSync } from 'fs';
 import { join } from 'path';
+import { focusAndMaximizeChrome } from '../browser-utils.js';
 import { homedir } from 'os';
 import { bridgeServer, ensureBridgeServer } from '../bridge-server.js';
 import { execSync, spawn, fork, type ChildProcess } from 'child_process';
@@ -2064,7 +2065,7 @@ export class WorkflowRecorder {
       const BrowserController = mod.BrowserController;
       await BrowserController.openChrome({ url });
       await this.delay(2000);
-      try { BrowserController.bringAppToFront({ appName: 'Google Chrome' }); } catch { /* ok */ }
+      try { focusAndMaximizeChrome(); } catch { /* ok */ }
       opened = true;
     } catch {
       // Not available — fall through

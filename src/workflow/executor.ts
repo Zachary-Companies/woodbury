@@ -10,6 +10,7 @@ import { promises as fs, appendFileSync, mkdirSync, existsSync } from 'fs';
 import { resolve as pathResolve, dirname, join, basename } from 'path';
 import { execSync, spawn as cpSpawn } from 'child_process';
 import { homedir } from 'os';
+import { focusAndMaximizeChrome } from '../browser-utils.js';
 
 // Execution log — writes to ~/.woodbury/logs/execution.log
 const _EXEC_LOG_DIR = join(homedir(), '.woodbury', 'logs');
@@ -537,6 +538,9 @@ export class WorkflowExecutor {
 
   private async execNavigate(step: NavigateStep): Promise<void> {
     await this.bridge.send('open', { url: step.url });
+
+    // Bring Chrome to the foreground and maximise the window
+    focusAndMaximizeChrome();
 
     if (step.waitMs) {
       await this.delay(step.waitMs);

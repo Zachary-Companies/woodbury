@@ -1,4 +1,5 @@
 import { ToolDefinition, ToolHandler, ToolContext } from '../types.js';
+import { focusAndMaximizeChrome } from '../../browser-utils.js';
 
 export const ffBrowserDefinition: ToolDefinition = {
   name: 'browser',
@@ -58,8 +59,8 @@ export const ffBrowserHandler: ToolHandler = async (params: any, context?: ToolC
       await BrowserController.openChrome({ url: params.url });
       // Wait for the page to load
       await new Promise(resolve => setTimeout(resolve, waitMs));
-      // Bring Chrome to front
-      BrowserController.bringAppToFront({ appName: 'Google Chrome' });
+      // Bring Chrome to front and maximise
+      focusAndMaximizeChrome();
       await new Promise(resolve => setTimeout(resolve, 500));
 
       return `# Browser: Opened URL\n\n- URL: ${params.url}\n- Waited: ${waitMs}ms for page load\n- Chrome brought to foreground\n\nUse the \`screenshot\` tool to capture what's on screen, then \`vision_analyze\` to understand the page.`;
@@ -77,7 +78,11 @@ export const ffBrowserHandler: ToolHandler = async (params: any, context?: ToolC
 
     } else if (action === 'focus') {
       const appName = params.appName || 'Google Chrome';
-      await BrowserController.bringAppToFront({ appName });
+      if (appName === 'Google Chrome') {
+        focusAndMaximizeChrome();
+      } else {
+        await BrowserController.bringAppToFront({ appName });
+      }
       await new Promise(resolve => setTimeout(resolve, 500));
       return `# Browser: App Focused\n\n- Application "${appName}" brought to foreground.\n\nUse the \`screenshot\` tool to see the current state.`;
 
