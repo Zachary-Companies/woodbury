@@ -825,17 +825,34 @@ async function checkForUpdates() {
     if (data.updateAvailable) {
       var banner = document.getElementById('update-banner');
       if (banner) {
-        var releaseUrl = data.releaseUrl || 'https://github.com/Zachary-Companies/woodbury/releases/latest';
         banner.style.display = '';
         banner.className = 'update-banner';
         banner.innerHTML =
           '<strong>Update available:</strong> v' + data.latestVersion +
           (data.releaseNotes ? ' &mdash; ' + data.releaseNotes : '') +
-          '<br><a href="' + releaseUrl + '" target="_blank">Download update &rarr;</a>';
+          '<br><button onclick="installUpdate(this)" class="update-btn">Install update &rarr;</button>';
       }
     }
   } catch (e) {
     // Silently fail — update check is non-critical
+  }
+}
+
+async function installUpdate(btn) {
+  btn.disabled = true;
+  btn.textContent = 'Installing...';
+  try {
+    var res = await fetch('/api/app/update-install', { method: 'POST' });
+    var data = await res.json();
+    if (!res.ok) {
+      btn.textContent = 'Failed — try again';
+      btn.disabled = false;
+      return;
+    }
+    btn.textContent = 'Downloading — check title bar for progress...';
+  } catch (e) {
+    btn.textContent = 'Failed — try again';
+    btn.disabled = false;
   }
 }
 

@@ -2531,6 +2531,25 @@ export async function startDashboard(
       return;
     }
 
+    // POST /api/app/update-install — trigger the auto-updater to download & install
+    if (req.method === 'POST' && pathname === '/api/app/update-install') {
+      const updater = (global as any).woodburyAutoUpdater;
+      if (!updater) {
+        sendJson(res, 503, { error: 'Auto-updater not available (running in dev mode?)' });
+        return;
+      }
+      try {
+        // Tell the updater to skip the "Download?" dialog and start immediately
+        (global as any).woodburyAutoDownloadNext = true;
+        await updater.checkForUpdates();
+        sendJson(res, 200, { status: 'ok', message: 'Update check triggered — download will start automatically' });
+      } catch (err: any) {
+        (global as any).woodburyAutoDownloadNext = false;
+        sendJson(res, 500, { error: err.message || 'Update check failed' });
+      }
+      return;
+    }
+
     // GET /api/app/update-check — check for app updates
     if (req.method === 'GET' && pathname === '/api/app/update-check') {
       function compareVersions(a: string, b: string): number {

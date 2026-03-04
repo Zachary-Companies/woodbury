@@ -360,12 +360,26 @@ function setupAutoUpdater() {
   autoUpdater.autoDownload = false;
   autoUpdater.autoInstallOnAppQuit = true;
 
+  // Expose globally so the dashboard HTTP server can trigger updates
+  global.woodburyAutoUpdater = autoUpdater;
+  // When true, skip the "Download?" dialog and download immediately
+  global.woodburyAutoDownloadNext = false;
+
   autoUpdater.on('checking-for-update', () => {
     console.log('[updater] Checking for updates...');
   });
 
   autoUpdater.on('update-available', (info) => {
     console.log('[updater] Update available:', info.version);
+
+    // If triggered from dashboard, skip dialog and download immediately
+    if (global.woodburyAutoDownloadNext) {
+      global.woodburyAutoDownloadNext = false;
+      console.log('[updater] Auto-downloading (triggered from dashboard)');
+      autoUpdater.downloadUpdate();
+      return;
+    }
+
     dialog.showMessageBox(mainWindow, {
       type: 'info',
       title: 'Update Available',
