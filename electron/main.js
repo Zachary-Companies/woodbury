@@ -339,6 +339,104 @@ function createTray() {
   });
 }
 
+// ── Auto-updater ─────────────────────────────────────────────
+
+function setupAutoUpdater() {
+  // Only run in packaged app — electron-updater won't work in dev mode
+  if (process.defaultApp) {
+    console.log('[updater] Skipping auto-updater in dev mode');
+    return;
+  }
+
+  let autoUpdater;
+  try {
+    autoUpdater = require('electron-updater').autoUpdater;
+  } catch (err) {
+    console.error('[updater] Failed to load electron-updater:', err.message);
+    return;
+  }
+
+  // Don't download automatically — ask the user first
+  autoUpdater.autoDownload = false;
+  autoUpdater.autoInstallOnAppQuit = true;
+
+  autoUpdater.on('checking-for-update', () => {
+    console.log('[updater] Checking for updates...');
+  });
+
+  autoUpdater.on('update-available', (info) => {
+    console.log('[updater] Update available:', info.version);
+    dialog.showMessageBox(mainWindow, {
+      type: 'info',
+      title: 'Update Available',
+      message: `Woodbury v${info.version} is available.`,
+      detail: 'Would you like to download it now? The app will continue running while it downloads.',
+      buttons: ['Download', 'Later'],
+      defaultId: 0,
+      cancelId: 1,
+    }).then(({ response }) => {
+      if (response === 0) {
+        console.log('[updater] User chose to download');
+        autoUpdater.downloadUpdate();
+      }
+    });
+  });
+
+  autoUpdater.on('update-not-available', () => {
+    console.log('[updater] No updates available');
+  });
+
+  autoUpdater.on('download-progress', (progress) => {
+    const pct = Math.round(progress.percent);
+    console.log(`[updater] Download progress: ${pct}%`);
+    // Update the window title with progress
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.setTitle(pct < 100 ? `Woodbury — Downloading update ${pct}%` : 'Woodbury');
+    }
+  });
+
+  autoUpdater.on('update-downloaded', (info) => {
+    console.log('[updater] Update downloaded:', info.version);
+    // Reset window title
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.setTitle('Woodbury');
+    }
+    dialog.showMessageBox(mainWindow, {
+      type: 'info',
+      title: 'Update Ready',
+      message: `Woodbury v${info.version} has been downloaded.`,
+      detail: 'Restart now to install the update?',
+      buttons: ['Restart', 'Later'],
+      defaultId: 0,
+      cancelId: 1,
+    }).then(({ response }) => {
+      if (response === 0) {
+        console.log('[updater] User chose to restart');
+        app.isQuitting = true;
+        autoUpdater.quitAndInstall();
+      }
+    });
+  });
+
+  autoUpdater.on('error', (err) => {
+    console.error('[updater] Error:', err.message || err);
+  });
+
+  // Check for updates after a short delay (let the app finish loading)
+  setTimeout(() => {
+    autoUpdater.checkForUpdates().catch((err) => {
+      console.error('[updater] Check failed:', err.message || err);
+    });
+  }, 5000);
+
+  // Re-check every 4 hours
+  setInterval(() => {
+    autoUpdater.checkForUpdates().catch((err) => {
+      console.error('[updater] Periodic check failed:', err.message || err);
+    });
+  }, 4 * 60 * 60 * 1000);
+}
+
 // ── Protocol URL handler ─────────────────────────────────────
 
 async function handleProtocolUrl(url) {
@@ -481,6 +579,7 @@ app.on('ready', async () => {
     dashboardHandle = await startBackend();
     createWindow(dashboardHandle.url);
     createTray();
+    setupAutoUpdater();
 
     // Process any protocol URL that arrived before the backend was ready
     // macOS: queued from open-url event; Windows: passed via process.argv

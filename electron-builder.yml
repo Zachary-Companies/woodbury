@@ -1,6 +1,11 @@
 appId: com.zachary.woodbury
 productName: Woodbury
 
+publish:
+  provider: github
+  owner: Zachary-Companies
+  repo: woodbury
+
 protocols:
   - name: Woodbury Extension Install
     schemes:
@@ -31,6 +36,9 @@ mac:
   icon: electron/icons/icon.png
   target:
     - target: dmg
+      arch:
+        - arm64
+    - target: zip
       arch:
         - arm64
   entitlements: electron/entitlements.mac.plist
