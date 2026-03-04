@@ -945,7 +945,7 @@ export interface Schedule {
 
 /** Minimal bridge server interface for the workflow executor */
 export interface BridgeInterface {
-  send(action: string, params?: Record<string, unknown>): Promise<unknown>;
+  send(action: string, params?: Record<string, unknown>, timeout?: number): Promise<unknown>;
   readonly isConnected: boolean;
 }
 

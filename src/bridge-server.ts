@@ -34,7 +34,7 @@ function bridgeLog(level: string, msg: string, data?: any): void {
     appendFileSync(BRIDGE_LOG_PATH, line + '\n');
   } catch { /* never break the bridge */ }
 }
-const REQUEST_TIMEOUT = 15000; // 15 seconds
+const REQUEST_TIMEOUT = 30000; // 30 seconds
 
 export interface BridgeRequest {
   id: string;
