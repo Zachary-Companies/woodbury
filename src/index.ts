@@ -28,10 +28,17 @@ export type {
 export type { ToolDefinition, ToolHandler } from './extension-api';
 
 // Main entry point
-if (require.main === module) {
+// In Electron, require.main !== module, so also check for Electron process type
+const isElectron = !!(process.versions as any).electron;
+if (require.main === module || isElectron) {
+  if (isElectron) {
+    // When loaded as Electron's main entry in dev mode (npx electron .),
+    // delegate to the proper Electron main process file
+    require('../electron/main');
+  } else {
   // Check if this is being run directly
   const args = process.argv.slice(2);
-  
+
   if (args.length === 0) {
     // No arguments, start CLI
     require('./cli');
@@ -78,6 +85,7 @@ ${colors.textBright('Environment Variables:')}
       require('./cli');
     }
   }
+  } // close non-Electron branch
 }
 
 // Setup process handlers

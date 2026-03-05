@@ -44,12 +44,89 @@ import { WorkflowRecorder } from './workflow/recorder.js';
 import { bridgeServer, ensureBridgeServer } from './bridge-server.js';
 import { startRemoteRelay, type RelayHandle } from './remote-relay.js';
 import { ExecutionSnapshotCapture } from './workflow/execution-snapshots.js';
+import { VisualVerifier } from './workflow/visual-verifier.js';
 import { startInferenceServer as startNodeInference, stopInferenceServer as stopNodeInference, type InferenceServer } from './inference/index.js';
 import { appendFileSync, mkdirSync, existsSync, createReadStream, createWriteStream } from 'node:fs';
 import * as socialStorage from './social/storage.js';
 import { getScriptMeta } from './social/scripts/index.js';
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, exec, type ChildProcess } from 'node:child_process';
 import { createSocket, type Socket as DgramSocket } from 'node:dgram';
+import sharp from 'sharp';
+
+// ────────────────────────────────────────────────────────────────
+//  Sliding-window candidate generation for visual element search
+// ────────────────────────────────────────────────────────────────
+
+interface SlidingWindowBounds {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * Generate a grid of candidate crop regions around an expected position.
+ * Works purely from pixel coordinates — no DOM required (desktop-app friendly).
+ *
+ * @param screenshotW  Screenshot width in pixels
+ * @param screenshotH  Screenshot height in pixels
+ * @param centerX      Expected element center X in screenshot pixels
+ * @param centerY      Expected element center Y in screenshot pixels
+ * @param refW         Reference image width in pixels (element crop at native DPR)
+ * @param refH         Reference image height in pixels
+ * @param options      Optional tuning parameters
+ */
+function generateSlidingWindowCandidates(
+  screenshotW: number,
+  screenshotH: number,
+  centerX: number,
+  centerY: number,
+  refW: number,
+  refH: number,
+  options?: {
+    scales?: number[];        // window size multipliers (default [0.8, 1.0, 1.25])
+    searchRadius?: number;    // radius as multiplier of ref size (default 2.0)
+    searchRadiusX?: number;   // absolute pixel radius X (overrides searchRadius * refW)
+    searchRadiusY?: number;   // absolute pixel radius Y (overrides searchRadius * refH)
+    strideFactor?: number;    // stride as fraction of window size (default 0.4)
+    maxCandidates?: number;   // hard cap (default 200)
+  },
+): SlidingWindowBounds[] {
+  const scales = options?.scales ?? [0.8, 1.0, 1.25];
+  const searchRadius = options?.searchRadius ?? 2.0;
+  const strideFactor = options?.strideFactor ?? 0.4;
+  const maxCandidates = options?.maxCandidates ?? 200;
+
+  const candidates: SlidingWindowBounds[] = [];
+  const radiusX = options?.searchRadiusX ?? (refW * searchRadius);
+  const radiusY = options?.searchRadiusY ?? (refH * searchRadius);
+
+  for (const scale of scales) {
+    if (candidates.length >= maxCandidates) break;
+
+    const winW = Math.round(refW * scale);
+    const winH = Math.round(refH * scale);
+    if (winW < 4 || winH < 4) continue;
+
+    const strideX = Math.max(4, Math.round(winW * strideFactor));
+    const strideY = Math.max(4, Math.round(winH * strideFactor));
+
+    const startX = Math.max(0, Math.round(centerX - radiusX - winW / 2));
+    const startY = Math.max(0, Math.round(centerY - radiusY - winH / 2));
+    const endX = Math.min(screenshotW - winW, Math.round(centerX + radiusX - winW / 2));
+    const endY = Math.min(screenshotH - winH, Math.round(centerY + radiusY - winH / 2));
+
+    for (let y = startY; y <= endY; y += strideY) {
+      for (let x = startX; x <= endX; x += strideX) {
+        if (candidates.length >= maxCandidates) break;
+        candidates.push({ left: x, top: y, width: winW, height: winH });
+      }
+      if (candidates.length >= maxCandidates) break;
+    }
+  }
+
+  return candidates;
+}
 
 // Shared recording log
 const _REC_LOG_DIR = join(homedir(), '.woodbury', 'logs');
@@ -418,12 +495,69 @@ export async function startDashboard(
     workflowId: string;
     workflowName: string;
     workflow: any;
+    flatSteps: any[];  // flattened list of all steps (including nested sub-steps)
     variables: Record<string, unknown>;
     currentIndex: number;
     completedIndices: number[];
     failedIndices: number[];
     stepResults: any[];
   } | null = null;
+
+  /**
+   * Flatten nested workflow steps (conditional/loop/try_catch) into a flat list.
+   * Each step gets a `_debugLabel` prefix showing its nesting context.
+   */
+  function flattenSteps(steps: any[], prefix = ''): any[] {
+    const flat: any[] = [];
+    for (const step of steps) {
+      if (step.type === 'conditional') {
+        // Add a marker step for the conditional evaluation
+        flat.push({
+          ...step,
+          _debugLabel: prefix + (step.label || 'Conditional'),
+          _isControlFlow: true,
+          _controlFlowType: 'conditional',
+        });
+        // Flatten thenSteps
+        if (step.thenSteps && step.thenSteps.length > 0) {
+          flat.push(...flattenSteps(step.thenSteps, prefix + 'Then → '));
+        }
+        // Flatten elseSteps
+        if (step.elseSteps && step.elseSteps.length > 0) {
+          flat.push(...flattenSteps(step.elseSteps, prefix + 'Else → '));
+        }
+      } else if (step.type === 'loop') {
+        flat.push({
+          ...step,
+          _debugLabel: prefix + (step.label || 'Loop'),
+          _isControlFlow: true,
+          _controlFlowType: 'loop',
+        });
+        if (step.steps && step.steps.length > 0) {
+          flat.push(...flattenSteps(step.steps, prefix + 'Loop → '));
+        }
+      } else if (step.type === 'try_catch') {
+        flat.push({
+          ...step,
+          _debugLabel: prefix + (step.label || 'Try/Catch'),
+          _isControlFlow: true,
+          _controlFlowType: 'try_catch',
+        });
+        if (step.trySteps && step.trySteps.length > 0) {
+          flat.push(...flattenSteps(step.trySteps, prefix + 'Try → '));
+        }
+        if (step.catchSteps && step.catchSteps.length > 0) {
+          flat.push(...flattenSteps(step.catchSteps, prefix + 'Catch → '));
+        }
+      } else {
+        flat.push({
+          ...step,
+          _debugLabel: prefix + (step.label || step.id || step.type),
+        });
+      }
+    }
+    return flat;
+  }
 
   // Batch run state
   let activeBatchRun: {
@@ -1399,6 +1533,7 @@ export async function startDashboard(
     backbone: string;
     epochs: number;
     embedDim: number;
+    sources?: string[];  // ['recording', 'execution', 'debug'] — undefined = all
   }
 
   const defaultTrainingConfig: WorkflowTrainingConfig = {
@@ -2050,14 +2185,20 @@ export async function startDashboard(
         };
         if (modelsCwd) spawnOpts.cwd = modelsCwd;
 
-        const proc = spawn(pythonCmd, [
+        const prepareArgs = [
           '-m', 'woobury_models.prepare',
           '--snapshots-dir', snapshotsDir,
           '--output-dir', cropsDir,
           '--source', 'viewport',
           '--crops-per-element', '15',
           '--interacted-only',
-        ], spawnOpts);
+        ];
+        // Add source filtering if specified (e.g. --sources recording debug)
+        const cfgSources = training.config.sources;
+        if (cfgSources && cfgSources.length > 0 && cfgSources.length < 3) {
+          prepareArgs.push('--sources', ...cfgSources);
+        }
+        const proc = spawn(pythonCmd, prepareArgs, spawnOpts);
 
         training.process = proc;
 
@@ -3319,6 +3460,7 @@ export async function startDashboard(
           source: d.source,
           extensionName: d.extensionName,
           path: d.path,
+          format: d.format || 'json',
           stepCount: d.workflow.steps.length,
           variableCount: d.workflow.variables.length,
           variables: d.workflow.variables.map(v => ({
@@ -3895,14 +4037,18 @@ Rules:
           }
         }
 
-        // Build step overlay data
-        const overlaySteps = wf.steps.map((step: any, i: number) => {
+        // Flatten nested steps for debug mode — each sub-step is individually steppable
+        const flatSteps = flattenSteps(wf.steps);
+
+        // Build step overlay data from flattened list
+        const overlaySteps = flatSteps.map((step: any, i: number) => {
           const eb = step.target?.expectedBounds;
           return {
             index: i,
             id: step.id,
             type: step.type,
-            label: step.label || step.id || `Step ${i + 1}`,
+            label: step._debugLabel || step.label || step.id || `Step ${i + 1}`,
+            isControlFlow: step._isControlFlow || false,
             hasPosition: !!(eb && typeof eb.pctX === 'number' && typeof eb.pctY === 'number'),
             pctX: eb?.pctX ?? null,
             pctY: eb?.pctY ?? null,
@@ -3919,6 +4065,8 @@ Rules:
             // move_file fields
             source: step.type === 'move_file' ? (step.source ?? null) : null,
             destination: step.type === 'move_file' ? (step.destination ?? null) : null,
+            // reference image info (for capture element UI)
+            hasReferenceImage: !!(step.target?.referenceImage && existsSync(step.target.referenceImage)),
           };
         });
 
@@ -3935,11 +4083,12 @@ Rules:
           debugLog.warn('debug-mode', 'Failed to show overlay', { error: String(overlayErr) });
         }
 
-        // Init debug session
+        // Init debug session with flattened steps
         debugSession = {
           workflowId: id,
           workflowName: wf.name,
           workflow: wf,
+          flatSteps,
           variables: mergedVars,
           currentIndex: 0,
           completedIndices: [],
@@ -3962,7 +4111,7 @@ Rules:
         if (!debugSession || debugSession.workflowId !== id) {
           sendJson(res, 400, { error: 'No debug session active for this workflow' }); return;
         }
-        if (debugSession.currentIndex >= debugSession.workflow.steps.length) {
+        if (debugSession.currentIndex >= debugSession.flatSteps.length) {
           sendJson(res, 400, { error: 'All steps completed' }); return;
         }
 
@@ -3985,7 +4134,69 @@ Rules:
         }
 
         const stepIdx = debugSession.currentIndex;
-        const step = debugSession.workflow.steps[stepIdx];
+        const step = debugSession.flatSteps[stepIdx];
+
+        // Skip control-flow marker steps (conditional/loop/try_catch wrappers)
+        if (step._isControlFlow) {
+          debugSession.completedIndices.push(stepIdx);
+          debugSession.stepResults.push({
+            index: stepIdx,
+            label: step._debugLabel || step.label || step.id,
+            type: step.type,
+            status: 'skipped',
+          });
+          debugSession.currentIndex = stepIdx + 1;
+          const hasMore = debugSession.currentIndex < debugSession.flatSteps.length;
+          sendJson(res, 200, {
+            success: true,
+            stepIndex: stepIdx,
+            stepResult: {
+              label: step._debugLabel || step.label || step.id,
+              type: step.type,
+              status: 'skipped',
+            },
+            hasMore,
+            nextIndex: hasMore ? debugSession.currentIndex : null,
+          });
+          return;
+        }
+
+        // Visual pre-verification for click/type steps
+        let visualVerification: any = null;
+        if ((step.type === 'click' || step.type === 'type') &&
+            step.target?.referenceImage && step.target?.expectedBounds &&
+            existsSync(step.target.referenceImage)) {
+          try {
+            const verifier = new VisualVerifier(
+              `http://127.0.0.1:${INFERENCE_PORT}`,
+              debugSession.workflow?.metadata?.modelPath || undefined,
+            );
+            if (await verifier.isAvailable()) {
+              const pi = await bridgeServer.send('get_page_info', {}) as any;
+              const vpW = pi?.viewport?.width || step.target.expectedBounds.viewportW || 1920;
+              const vpH = pi?.viewport?.height || step.target.expectedBounds.viewportH || 1080;
+              const eb = step.target.expectedBounds;
+              const pos = {
+                left: Math.round(((eb.pctX ?? 0) / 100) * vpW - ((eb.pctW || 2) / 200) * vpW),
+                top: Math.round(((eb.pctY ?? 0) / 100) * vpH - ((eb.pctH || 2) / 200) * vpH),
+                width: Math.round(((eb.pctW || 2) / 100) * vpW),
+                height: Math.round(((eb.pctH || 2) / 100) * vpH),
+              };
+              const vr = await verifier.verifyElement(bridgeServer as any, pos, step.target.referenceImage);
+              visualVerification = { ran: true, verified: vr?.verified ?? null, similarity: vr?.similarity ?? null };
+              if (vr && !vr.verified) {
+                const expPct = (eb.pctX != null) ? { x: eb.pctX, y: eb.pctY! } : undefined;
+                const sr = await verifier.searchNearby(bridgeServer as any, pos, step.target.referenceImage, undefined, vr.screenshotDataUrl, expPct);
+                if (sr) {
+                  visualVerification.searchResult = { found: sr.found, similarity: sr.similarity, position: sr.position, candidatesChecked: sr.candidatesChecked };
+                }
+              }
+            }
+          } catch (vErr) {
+            debugLog.warn('debug-mode', `Visual pre-verify failed: ${vErr}`);
+            visualVerification = { ran: false, error: String(vErr) };
+          }
+        }
 
         // Execute single step
         const result = await executeSingleStep(bridgeServer, step, debugSession.variables, {
@@ -4020,10 +4231,11 @@ Rules:
               status: result.success ? 'success' : 'failed',
               error: result.error,
             },
+            stepDetail: result.stepDetail || null,
           });
         } catch {}
 
-        const hasMore = debugSession.currentIndex < debugSession.workflow.steps.length;
+        const hasMore = debugSession.currentIndex < debugSession.flatSteps.length;
         sendJson(res, 200, {
           success: true,
           stepIndex: stepIdx,
@@ -4034,6 +4246,8 @@ Rules:
             error: result.error,
           },
           coordinateInfo: result.coordinateInfo,
+          stepDetail: result.stepDetail || null,
+          visualVerification,
           hasMore,
           nextIndex: hasMore ? debugSession.currentIndex : null,
         });
@@ -4276,6 +4490,872 @@ Rules:
       return;
     }
 
+    // POST /api/workflows/:id/debug/capture-element — identify & capture reference image at adjusted position
+    const captureElementMatch = pathname.match(/^\/api\/workflows\/([^/]+)\/debug\/capture-element$/);
+    if (req.method === 'POST' && captureElementMatch) {
+      const id = decodeURIComponent(captureElementMatch[1]);
+      try {
+        const body = await readBody(req);
+        const { stepIndex, pctX, pctY } = body;
+
+        // Validate inputs
+        if (stepIndex == null || typeof stepIndex !== 'number' || stepIndex < 0) {
+          sendJson(res, 400, { error: 'Invalid stepIndex' }); return;
+        }
+        if (typeof pctX !== 'number' || pctX < 0 || pctX > 100 ||
+            typeof pctY !== 'number' || pctY < 0 || pctY > 100) {
+          sendJson(res, 400, { error: 'pctX and pctY must be numbers 0-100' }); return;
+        }
+
+        // Validate debug session
+        if (!debugSession || debugSession.workflowId !== id) {
+          sendJson(res, 400, { error: 'No debug session active for this workflow' }); return;
+        }
+        const flatStep = debugSession.flatSteps[stepIndex] as any;
+        if (!flatStep) {
+          sendJson(res, 400, { error: `Step ${stepIndex} not found in flat steps` }); return;
+        }
+        if (flatStep.type !== 'click' && flatStep.type !== 'type') {
+          sendJson(res, 400, { error: 'Capture element only supported for click/type steps' }); return;
+        }
+
+        // Find actual step in nested workflow by ID
+        function findStepById(steps: any[], targetId: string): any | null {
+          for (const s of steps) {
+            if (s.id === targetId) return s;
+            for (const key of ['thenSteps', 'elseSteps', 'steps', 'trySteps', 'catchSteps']) {
+              if (s[key]) { const f = findStepById(s[key], targetId); if (f) return f; }
+            }
+          }
+          return null;
+        }
+        const step = findStepById(debugSession.workflow.steps, flatStep.id) || flatStep;
+
+        // Ensure bridge is connected
+        await ensureBridgeServer();
+        if (!bridgeServer.isConnected) {
+          sendJson(res, 503, { error: 'Chrome extension is not connected.' }); return;
+        }
+
+        // Get viewport dimensions
+        const pageInfo = await bridgeServer.send('get_page_info', {}) as any;
+        const vpW = pageInfo?.viewport?.width || pageInfo?.innerWidth || 1920;
+        const vpH = pageInfo?.viewport?.height || pageInfo?.innerHeight || 1080;
+
+        // Convert pctX/pctY to pixel coordinates
+        const pixelX = (pctX / 100) * vpW;
+        const pixelY = (pctY / 100) * vpH;
+
+        // Hit-test: find the element at the target point
+        // matchedBounds = DPR-scaled pixel coords for screenshot cropping (captureVisibleTab returns DPR-scaled image)
+        // cssBounds = CSS pixel coords for expectedBounds storage
+        let matchedElement: any = null;
+        let matchedBounds: { left: number; top: number; width: number; height: number } | null = null;
+        let cssBounds: { left: number; top: number; width: number; height: number } | null = null;
+        let containingElements: any[] = [];
+        const dpr: number = body.dpr || 1;
+
+        // If caller provided exact element bounds (from page pick, already DPR-scaled for crop)
+        const providedBounds = body.elementBounds;
+        if (providedBounds && providedBounds.width > 0 && providedBounds.height > 0) {
+          matchedBounds = {
+            left: Math.round(providedBounds.left),
+            top: Math.round(providedBounds.top),
+            width: Math.round(providedBounds.width),
+            height: Math.round(providedBounds.height),
+          };
+          // CSS bounds = DPR-scaled bounds / dpr
+          cssBounds = {
+            left: Math.round(providedBounds.left / dpr),
+            top: Math.round(providedBounds.top / dpr),
+            width: Math.round(providedBounds.width / dpr),
+            height: Math.round(providedBounds.height / dpr),
+          };
+        } else {
+          // Get all clickable elements and hit-test
+          const elementsResult = await bridgeServer.send('get_clickable_elements', {}) as any;
+          const elements: any[] = Array.isArray(elementsResult) ? elementsResult :
+                                  Array.isArray(elementsResult?.elements) ? elementsResult.elements : [];
+
+          containingElements = elements.filter((el: any) => {
+            const b = el.position || el.bounds;
+            if (!b || !b.width || !b.height) return false;
+            return pixelX >= b.left && pixelX <= b.left + b.width &&
+                   pixelY >= b.top && pixelY <= b.top + b.height;
+          });
+
+          if (containingElements.length > 0) {
+            // Pick the smallest containing element (most specific)
+            containingElements.sort((a: any, b: any) => {
+              const aB = a.position || a.bounds;
+              const bB = b.position || b.bounds;
+              return (aB.width * aB.height) - (bB.width * bB.height);
+            });
+            matchedElement = containingElements[0];
+            const b = matchedElement.position || matchedElement.bounds;
+            matchedBounds = { left: b.left, top: b.top, width: b.width, height: b.height };
+          } else {
+            // Fallback: find closest element by center-to-point distance
+            let minDist = Infinity;
+            for (const el of elements) {
+              const b = el.position || el.bounds;
+              if (!b || !b.width || !b.height) continue;
+              const cx = b.left + b.width / 2;
+              const cy = b.top + b.height / 2;
+              const dist = Math.sqrt((cx - pixelX) ** 2 + (cy - pixelY) ** 2);
+              if (dist < minDist) {
+                minDist = dist;
+                matchedElement = el;
+                matchedBounds = { left: b.left, top: b.top, width: b.width, height: b.height };
+              }
+            }
+          }
+        }
+
+        // Final fallback: 60x60px default crop centered on the point
+        const DEFAULT_CROP_SIZE = 60;
+        if (!matchedBounds) {
+          matchedBounds = {
+            left: Math.max(0, Math.round(pixelX - DEFAULT_CROP_SIZE / 2)),
+            top: Math.max(0, Math.round(pixelY - DEFAULT_CROP_SIZE / 2)),
+            width: DEFAULT_CROP_SIZE,
+            height: DEFAULT_CROP_SIZE,
+          };
+        }
+
+        // Add padding around the element crop (in the same coordinate space as matchedBounds)
+        const paddingPx: number = body.padding != null ? Number(body.padding) : 8;
+        const padScale = providedBounds ? dpr : 1; // scale padding to match bounds coordinate space
+        const pad = Math.round(paddingPx * padScale);
+        if (pad > 0) {
+          matchedBounds.left -= pad;
+          matchedBounds.top -= pad;
+          matchedBounds.width += pad * 2;
+          matchedBounds.height += pad * 2;
+        }
+
+        // Clamp bounds to viewport and enforce minimum size
+        // When DPR-scaled (from picker), clamp against DPR-scaled viewport
+        const clampW = providedBounds ? vpW * dpr : vpW;
+        const clampH = providedBounds ? vpH * dpr : vpH;
+        matchedBounds.left = Math.max(0, Math.round(matchedBounds.left));
+        matchedBounds.top = Math.max(0, Math.round(matchedBounds.top));
+        matchedBounds.width = Math.min(Math.round(matchedBounds.width), clampW - matchedBounds.left);
+        matchedBounds.height = Math.min(Math.round(matchedBounds.height), clampH - matchedBounds.top);
+        if (matchedBounds.width < 4) matchedBounds.width = 4;
+        if (matchedBounds.height < 4) matchedBounds.height = 4;
+
+        // Capture cropped screenshot — hide debug overlay markers so they don't appear in the reference image
+        // Use returnFull to get both crop + full screenshot in a single captureVisibleTab call
+        // (avoids Chrome's MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND quota)
+        let cropImage: string | null = null;
+        let fullScreenImage: string | null = null;
+
+        const screenshotDataUrl: string | undefined = body.screenshotDataUrl;
+
+        if (screenshotDataUrl) {
+          // Pre-captured screenshot (from pick with sidepanel closed — correct element positions)
+          fullScreenImage = screenshotDataUrl;
+          const ssB64 = screenshotDataUrl.replace(/^data:image\/[^;]+;base64,/, '');
+          const ssBuf = Buffer.from(ssB64, 'base64');
+
+          try {
+            const ssMeta = await sharp(ssBuf).metadata();
+            const ssW = ssMeta.width || vpW;
+            const ssH = ssMeta.height || vpH;
+
+            // matchedBounds are DPR-scaled when providedBounds, CSS pixels otherwise
+            // Screenshot from captureVisibleTab is always DPR-scaled
+            const cropLeft = Math.max(0, Math.round(matchedBounds.left));
+            const cropTop = Math.max(0, Math.round(matchedBounds.top));
+            const cropW = Math.min(ssW - cropLeft, Math.round(matchedBounds.width));
+            const cropH = Math.min(ssH - cropTop, Math.round(matchedBounds.height));
+
+            if (cropW > 1 && cropH > 1) {
+              const cropBuf = await sharp(ssBuf)
+                .extract({ left: cropLeft, top: cropTop, width: cropW, height: cropH })
+                .png()
+                .toBuffer();
+              cropImage = `data:image/png;base64,${cropBuf.toString('base64')}`;
+            } else {
+              cropImage = fullScreenImage;
+            }
+          } catch (sharpErr) {
+            debugLog.warn('debug-mode', `Failed to crop from pre-captured screenshot: ${sharpErr}`);
+            cropImage = fullScreenImage;
+          }
+        } else {
+          const cropResult = await bridgeServer.send('capture_viewport', {
+            crop: { ...matchedBounds, dprScaled: !!providedBounds },
+            hideOverlay: true,
+            returnFull: true,
+          }) as any;
+          cropImage = cropResult?.data?.image || cropResult?.image || null;
+          fullScreenImage = cropResult?.data?.fullImage || cropResult?.fullImage || null;
+        }
+
+        if (!cropImage) {
+          sendJson(res, 500, { error: 'Failed to capture element crop' }); return;
+        }
+
+        // Save crop to disk: ~/.woodbury/data/workflows/{name}/refs/{stepId}.png
+        const workflowName = debugSession.workflowName;
+        const stepId = step.id || flatStep.id;
+        const refsDir = join(homedir(), '.woodbury', 'data', 'workflows', workflowName, 'refs');
+        mkdirSync(refsDir, { recursive: true });
+        const cropPath = join(refsDir, `${stepId}.png`);
+
+        const base64Data = cropImage.replace(/^data:image\/[^;]+;base64,/, '');
+        const buffer = Buffer.from(base64Data, 'base64');
+        await writeFile(cropPath, buffer);
+
+        // Save full screenshot alongside the crop
+        let screenshotPath: string | null = null;
+        if (fullScreenImage) {
+          screenshotPath = join(refsDir, `${stepId}_screenshot.png`);
+          const ssBase64 = fullScreenImage.replace(/^data:image\/[^;]+;base64,/, '');
+          await writeFile(screenshotPath, Buffer.from(ssBase64, 'base64'));
+        }
+
+        // Save all clickable elements at this moment so Element Finder can search
+        // against the saved screenshot context (even if the live page has changed)
+        let savedElementsPath: string | null = null;
+        try {
+          const allElementsResult = await bridgeServer.send('get_clickable_elements', {}) as any;
+          const allElements: any[] = Array.isArray(allElementsResult) ? allElementsResult :
+                                      Array.isArray(allElementsResult?.elements) ? allElementsResult.elements : [];
+          if (allElements.length > 0) {
+            savedElementsPath = join(refsDir, `${stepId}_elements.json`);
+            await writeFile(savedElementsPath, JSON.stringify({
+              viewport: { width: vpW, height: vpH },
+              elements: allElements.map((el: any) => ({
+                position: el.position || el.bounds,
+                tag: el.tag || el.tagName,
+                text: (el.text || el.textContent || '').slice(0, 100),
+                selector: el.selector,
+                role: el.role,
+              })),
+            }, null, 2));
+          }
+        } catch (elErr) {
+          debugLog.warn('debug-mode', `Failed to save clickable elements: ${elErr}`);
+        }
+
+        // Build expectedBounds using CSS pixel values (not DPR-scaled)
+        const ebBounds = cssBounds || matchedBounds;
+        const expectedBounds = {
+          left: ebBounds.left,
+          top: ebBounds.top,
+          width: ebBounds.width,
+          height: ebBounds.height,
+          tolerance: 80,
+          pctX,
+          pctY,
+          pctW: (ebBounds.width / vpW) * 100,
+          pctH: (ebBounds.height / vpH) * 100,
+          viewportW: vpW,
+          viewportH: vpH,
+        };
+
+        // Update step in-memory
+        if (!step.target) step.target = {};
+        step.target.referenceImage = cropPath;
+        step.target.expectedBounds = expectedBounds;
+        if (screenshotPath) step.target.screenshotPath = screenshotPath;
+        if (savedElementsPath) step.target.savedElementsPath = savedElementsPath;
+        // Persist picked element bounds so re-capture uses the same element
+        if (providedBounds) {
+          step.target.pickedBounds = { left: providedBounds.left, top: providedBounds.top, width: providedBounds.width, height: providedBounds.height };
+          step.target.pickedDpr = dpr;
+        }
+
+        // Persist to disk (same pattern as debug/update-step)
+        try {
+          const discovered = await discoverWorkflows(workDir);
+          const found = discovered.find((d: any) => d.workflow.id === id);
+          if (found) {
+            const wf = found.workflow;
+            const diskStep = findStepById(wf.steps, stepId);
+            if (diskStep) {
+              if (!diskStep.target) diskStep.target = {};
+              diskStep.target.referenceImage = cropPath;
+              diskStep.target.expectedBounds = expectedBounds;
+              if (screenshotPath) diskStep.target.screenshotPath = screenshotPath;
+              if (savedElementsPath) diskStep.target.savedElementsPath = savedElementsPath;
+              if (providedBounds) {
+                diskStep.target.pickedBounds = { left: providedBounds.left, top: providedBounds.top, width: providedBounds.width, height: providedBounds.height };
+                diskStep.target.pickedDpr = dpr;
+              }
+              if (wf.metadata) wf.metadata.updatedAt = new Date().toISOString();
+              await writeFile(found.path, JSON.stringify(wf, null, 2), 'utf-8');
+              debugLog.info('debug-mode', `Saved capture-element for step ${stepId}: ${cropPath}`);
+            }
+          }
+        } catch (diskErr) {
+          debugLog.warn('debug-mode', `Failed to persist capture-element to disk: ${diskErr}`);
+        }
+
+        // Build element info for display
+        const elementInfo = matchedElement ? {
+          tag: matchedElement.tag || matchedElement.tagName || matchedElement.role || 'unknown',
+          text: (matchedElement.text || matchedElement.textContent || '').slice(0, 100),
+          role: matchedElement.role || null,
+          selector: matchedElement.selector || null,
+        } : null;
+
+        // ── Save as training data snapshot ──
+        // Create a snapshot entry in the training-crops/snapshots directory so
+        // prepare.py automatically picks it up for model training.
+        try {
+          const pageUrl: string = pageInfo?.url || pageInfo?.pageUrl || '';
+          let siteId = 'unknown';
+          try { siteId = new URL(pageUrl).hostname || 'unknown'; } catch {}
+
+          const ts = Date.now();
+          const snapshotDir = join(homedir(), '.woodbury', 'data', 'training-crops', 'snapshots', siteId);
+          mkdirSync(snapshotDir, { recursive: true });
+
+          // Build the element entry using CSS pixel bounds (not DPR-scaled)
+          const elBounds = cssBounds || {
+            left: Math.round((pctX / 100) * vpW),
+            top: Math.round((pctY / 100) * vpH),
+            width: 60, height: 60,
+          };
+          const elSelector = matchedElement?.selector || elementInfo?.selector || `step_${stepId}`;
+          const elTag = matchedElement?.tag || matchedElement?.tagName || elementInfo?.tag || 'unknown';
+          const elText = (matchedElement?.text || matchedElement?.textContent || elementInfo?.text || '').slice(0, 200);
+          const elAriaLabel = matchedElement?.ariaLabel || matchedElement?.aria_label || '';
+          const elRole = matchedElement?.role || elementInfo?.role || '';
+
+          const snapshotName = `snapshot_capture_${ts}`;
+
+          // Save the full screenshot as the viewport image for this snapshot
+          const viewportImgName = `${snapshotName}_viewport.png`;
+          if (fullScreenImage) {
+            const ssData = fullScreenImage.replace(/^data:image\/[^;]+;base64,/, '');
+            await writeFile(join(snapshotDir, viewportImgName), Buffer.from(ssData, 'base64'));
+          }
+
+          // Snapshot JSON — single-element snapshot of the captured element
+          const snapshotJson = {
+            site_id: siteId,
+            page_url: pageUrl,
+            page_title: pageInfo?.title || '',
+            viewport_width: vpW,
+            viewport_height: vpH,
+            timestamp: ts / 1000,
+            viewport_image: viewportImgName,
+            source: 'capture-element',
+            workflow_id: id,
+            workflow_name: workflowName,
+            step_id: stepId,
+            step_index: stepIndex,
+            elements: [{
+              selector: elSelector,
+              tag: elTag,
+              text: elText,
+              aria_label: elAriaLabel,
+              role: elRole,
+              type: flatStep.type || 'click',
+              bounds: {
+                left: elBounds.left,
+                top: elBounds.top,
+                width: elBounds.width,
+                height: elBounds.height,
+              },
+            }],
+          };
+          await writeFile(join(snapshotDir, `${snapshotName}.json`), JSON.stringify(snapshotJson, null, 2));
+
+          // Interactions JSON — mark this element as interacted (with step index for step-based grouping)
+          const interactionsJson = {
+            site_id: siteId,
+            recording_name: workflowName,
+            timestamp: ts / 1000,
+            total_steps: debugSession.flatSteps.length,
+            source: 'capture-element',
+            interacted_selectors: [elSelector],
+            interacted_elements: {
+              [elSelector]: [{
+                action: flatStep.type || 'click',
+                stepIndex,
+                text: elText,
+                tag: elTag,
+              }],
+            },
+          };
+          await writeFile(join(snapshotDir, `interactions_${ts}.json`), JSON.stringify(interactionsJson, null, 2));
+
+          debugLog.info('debug-mode', `Saved training snapshot for step ${stepId} in ${snapshotDir}`);
+        } catch (trainErr) {
+          debugLog.warn('debug-mode', `Failed to save training snapshot: ${trainErr}`);
+        }
+
+        sendJson(res, 200, {
+          success: true,
+          elementCrop: cropImage,
+          elementInfo,
+          referenceImagePath: cropPath,
+          screenshotPath: screenshotPath || null,
+          expectedBounds,
+          viewport: { width: vpW, height: vpH },
+          matchedByFallback: containingElements.length === 0,
+          pickedBounds: providedBounds ? { left: providedBounds.left, top: providedBounds.top, width: providedBounds.width, height: providedBounds.height } : null,
+          pickedDpr: providedBounds ? dpr : null,
+        });
+      } catch (err) {
+        sendJson(res, 500, { error: String(err) });
+      }
+      return;
+    }
+
+    // POST /api/click-extension-icon — click the Woodbury extension icon in Chrome's toolbar
+    // This provides a real user gesture so chrome.sidePanel.open() works
+    if (req.method === 'POST' && (pathname === '/api/click-extension-icon' || pathname === '/api/simulate-keystroke')) {
+      try {
+        const platform = process.platform;
+        let cmd: string;
+
+        if (platform === 'darwin') {
+          // Use accessibility API to find and click the Woodbury Bridge button
+          cmd = `osascript <<'APPLESCRIPT'
+tell application "Google Chrome" to activate
+delay 0.3
+tell application "System Events"
+    tell process "Google Chrome"
+        set allElements to entire contents of window 1
+        repeat with el in allElements
+            try
+                if description of el contains "Woodbury" then
+                    click el
+                    return "clicked"
+                end if
+            end try
+        end repeat
+        return "not found"
+    end tell
+end tell
+APPLESCRIPT`;
+        } else if (platform === 'win32') {
+          // Windows: use UI Automation to find and click the extension button
+          cmd = `powershell -NoProfile -Command "$wsh = New-Object -ComObject WScript.Shell; $wsh.AppActivate('Google Chrome'); Start-Sleep -Milliseconds 300; $wsh.SendKeys('%s')"`;
+        } else {
+          cmd = `xdotool key alt+s`;
+        }
+
+        debugLog.info('dashboard', `click-extension-icon: clicking on ${platform}`);
+        exec(cmd, { timeout: 10000 }, (err, stdout) => {
+          if (err) {
+            debugLog.warn('dashboard', `click-extension-icon failed: ${err.message}`);
+            sendJson(res, 500, { error: err.message });
+          } else {
+            const result = (stdout || '').trim();
+            debugLog.info('dashboard', `click-extension-icon: ${result}`);
+            sendJson(res, 200, { success: true, result });
+          }
+        });
+      } catch (err) {
+        sendJson(res, 500, { error: String(err) });
+      }
+      return;
+    }
+
+    // POST /api/bridge/screenshot — capture viewport screenshot via bridge
+    if (req.method === 'POST' && pathname === '/api/bridge/screenshot') {
+      try {
+        await ensureBridgeServer();
+        if (!bridgeServer.isConnected) {
+          sendJson(res, 503, { error: 'Chrome extension is not connected.' }); return;
+        }
+        const screenshotResult = await bridgeServer.send('capture_viewport', {}) as any;
+        const image = screenshotResult?.data?.image || screenshotResult?.image || null;
+        if (!image) {
+          sendJson(res, 500, { error: 'Failed to capture viewport screenshot' }); return;
+        }
+        const pageInfo = await bridgeServer.send('get_page_info', {}) as any;
+        const viewport = {
+          width: pageInfo?.viewport?.width || pageInfo?.innerWidth || 1920,
+          height: pageInfo?.viewport?.height || pageInfo?.innerHeight || 1080,
+        };
+        sendJson(res, 200, { screenshot: image, viewport });
+      } catch (err) {
+        sendJson(res, 500, { error: String(err) });
+      }
+      return;
+    }
+
+    // POST /api/workflows/:id/visual-find — find element visually using inference server
+    const visualFindMatch = pathname.match(/^\/api\/workflows\/([^/]+)\/visual-find$/);
+    if (req.method === 'POST' && visualFindMatch) {
+      const id = decodeURIComponent(visualFindMatch[1]);
+      try {
+        const body = await readBody(req);
+        const { searchBounds, referenceImagePath, expectedBounds, screenshotPath: savedScreenshotPath, savedElementsPath } = body;
+
+        // Load workflow (for model path)
+        const discovered = await discoverWorkflows(workDir);
+        const found = discovered.find(d => d.workflow.id === id);
+        if (!found) { sendJson(res, 404, { error: `Workflow "${id}" not found` }); return; }
+        const wf = found.workflow;
+
+        // Accept referenceImagePath directly from frontend
+        const refImagePath = referenceImagePath;
+        const eb = expectedBounds;
+        if (!refImagePath) {
+          sendJson(res, 400, { error: 'referenceImagePath is required' }); return;
+        }
+        if (!existsSync(refImagePath)) {
+          sendJson(res, 400, { error: 'Reference image file not found: ' + refImagePath }); return;
+        }
+
+        // Use saved screenshot + elements if available (captured at same time as reference),
+        // otherwise fall back to live capture from the browser
+        let screenshot: string | null = null;
+        let viewport = { width: 1920, height: 1080 };
+        let elements: any[] = [];
+        let usedSavedContext = false;
+
+        if (savedScreenshotPath && existsSync(savedScreenshotPath)) {
+          // Load saved screenshot from disk
+          const ssBuffer = await readFile(savedScreenshotPath);
+          screenshot = `data:image/png;base64,${ssBuffer.toString('base64')}`;
+
+          // Load saved elements if available
+          if (savedElementsPath && existsSync(savedElementsPath)) {
+            try {
+              const elData = JSON.parse(await readFile(savedElementsPath, 'utf8') as string);
+              viewport = elData.viewport || viewport;
+              elements = elData.elements || [];
+              usedSavedContext = true;
+              debugLog.info('visual-find', `Using saved screenshot + ${elements.length} elements from capture context`);
+            } catch {
+              debugLog.warn('visual-find', 'Failed to parse saved elements, falling back to live');
+            }
+          }
+
+          // If we have the screenshot but no saved elements, try to get live elements as fallback
+          if (!usedSavedContext) {
+            viewport = {
+              width: eb?.viewportW || 1920,
+              height: eb?.viewportH || 1080,
+            };
+            // Try to fetch live clickable elements (positions may not match saved screenshot perfectly,
+            // but better than 0 candidates)
+            try {
+              await ensureBridgeServer();
+              if (bridgeServer.isConnected) {
+                const liveElementsResult = await bridgeServer.send('get_clickable_elements', {}) as any;
+                elements = Array.isArray(liveElementsResult) ? liveElementsResult :
+                           Array.isArray(liveElementsResult?.elements) ? liveElementsResult.elements : [];
+                debugLog.info('visual-find', `Using saved screenshot + ${elements.length} live elements (no saved elements file)`);
+              }
+            } catch {
+              debugLog.warn('visual-find', 'Failed to get live elements for saved screenshot context');
+            }
+          }
+        }
+
+        // Fall back to live capture if no saved screenshot
+        if (!screenshot) {
+          await ensureBridgeServer();
+          if (!bridgeServer.isConnected) {
+            sendJson(res, 503, { error: 'Chrome extension is not connected.' }); return;
+          }
+
+          // Capture screenshot (hide debug overlays so crops match the clean reference image)
+          const screenshotResult = await bridgeServer.send('capture_viewport', { hideOverlay: true }) as any;
+          screenshot = screenshotResult?.data?.image || screenshotResult?.image || null;
+          if (!screenshot) { sendJson(res, 500, { error: 'Failed to capture screenshot' }); return; }
+
+          // Get viewport info
+          const pageInfo = await bridgeServer.send('get_page_info', {}) as any;
+          viewport = {
+            width: pageInfo?.viewport?.width || pageInfo?.innerWidth || 1920,
+            height: pageInfo?.viewport?.height || pageInfo?.innerHeight || 1080,
+          };
+
+          // Get clickable elements
+          const elementsResult = await bridgeServer.send('get_clickable_elements', {}) as any;
+          elements = Array.isArray(elementsResult) ? elementsResult :
+                     Array.isArray(elementsResult?.elements) ? elementsResult.elements : [];
+        }
+
+        // Filter by search bounds if provided
+        const bounds = searchBounds;
+        if (bounds && bounds.pctW > 0 && bounds.pctH > 0) {
+          const bLeft = (bounds.pctX / 100) * viewport.width;
+          const bTop = (bounds.pctY / 100) * viewport.height;
+          const bRight = bLeft + (bounds.pctW / 100) * viewport.width;
+          const bBottom = bTop + (bounds.pctH / 100) * viewport.height;
+          elements = elements.filter((el: any) => {
+            const b = el.position || el.bounds;
+            if (!b) return false;
+            const cx = b.left + (b.width || 0) / 2;
+            const cy = b.top + (b.height || 0) / 2;
+            return cx >= bLeft && cx <= bRight && cy >= bTop && cy <= bBottom;
+          });
+        }
+
+        // Build DOM candidate bounds (in CSS pixel space)
+        const domCandidates = elements.map((el: any) => {
+          const b = el.position || el.bounds;
+          return {
+            left: b?.left ?? 0,
+            top: b?.top ?? 0,
+            width: b?.width ?? 0,
+            height: b?.height ?? 0,
+          };
+        });
+
+        // Load reference image
+        const refBuffer = await readFile(refImagePath);
+        const referenceImage = `data:image/png;base64,${refBuffer.toString('base64')}`;
+
+        // Expected position
+        const expectedPct = (eb?.pctX != null && eb?.pctY != null) ? { x: eb.pctX, y: eb.pctY } : undefined;
+
+        // ── DPR-aware coordinate handling + sliding window ──
+        // The screenshot may be at device pixel ratio (e.g. 2x on retina).
+        // DOM candidates are in CSS pixels but crops happen in screenshot pixel space.
+        // We unify everything into screenshot pixel space for correct cropping.
+        const ssBase64 = screenshot!.startsWith('data:') ? screenshot!.split(',')[1]! : screenshot!;
+        const ssBuf = Buffer.from(ssBase64, 'base64');
+        const ssMeta = await sharp(ssBuf).metadata();
+        const ssPixelW = ssMeta.width || viewport.width;
+        const ssPixelH = ssMeta.height || viewport.height;
+        const dprScale = ssPixelW / viewport.width;
+
+        debugLog.info('visual-find', `Screenshot: ${ssPixelW}×${ssPixelH}px, viewport: ${viewport.width}×${viewport.height}, DPR scale: ${dprScale.toFixed(2)}`);
+
+        // Scale DOM candidates from CSS pixels → screenshot pixels
+        const candidateBounds: SlidingWindowBounds[] = domCandidates.map(c => ({
+          left: Math.round(c.left * dprScale),
+          top: Math.round(c.top * dprScale),
+          width: Math.round(c.width * dprScale),
+          height: Math.round(c.height * dprScale),
+        }));
+
+        // Generate sliding window candidates (always in screenshot pixel space)
+        // This works for desktop apps too — no DOM required.
+        // Uses search area bounds if set, otherwise a moderate default radius.
+        if (expectedPct) {
+          const refMeta = await sharp(refBuffer).metadata();
+          const refPixelW = refMeta.width || 50;
+          const refPixelH = refMeta.height || 50;
+
+          let slidingCenterX = (expectedPct.x / 100) * ssPixelW;
+          let slidingCenterY = (expectedPct.y / 100) * ssPixelH;
+          let slidingRadiusX = refPixelW * 5;    // default: ±5x ref width
+          let slidingRadiusY = refPixelH * 3;    // default: ±3x ref height
+
+          // If search area is set, use its extent as the sliding window region
+          if (bounds && bounds.pctW > 0 && bounds.pctH > 0) {
+            const sbLeft = (bounds.pctX / 100) * ssPixelW;
+            const sbTop = (bounds.pctY / 100) * ssPixelH;
+            const sbW = (bounds.pctW / 100) * ssPixelW;
+            const sbH = (bounds.pctH / 100) * ssPixelH;
+            slidingCenterX = sbLeft + sbW / 2;
+            slidingCenterY = sbTop + sbH / 2;
+            slidingRadiusX = Math.round(sbW / 2);
+            slidingRadiusY = Math.round(sbH / 2);
+          }
+
+          const slidingCandidates = generateSlidingWindowCandidates(
+            ssPixelW, ssPixelH,
+            slidingCenterX, slidingCenterY,
+            refPixelW, refPixelH,
+            {
+              searchRadiusX: slidingRadiusX,
+              searchRadiusY: slidingRadiusY,
+              strideFactor: 0.5,
+              maxCandidates: 300,
+            },
+          );
+
+          debugLog.info('visual-find', `Generated ${slidingCandidates.length} sliding-window candidates (ref: ${refPixelW}×${refPixelH}px, center: ${Math.round(slidingCenterX)},${Math.round(slidingCenterY)}, radius: ${Math.round(slidingRadiusX)}×${Math.round(slidingRadiusY)})`);
+          candidateBounds.push(...slidingCandidates);
+        }
+
+        if (candidateBounds.length === 0) {
+          sendJson(res, 200, {
+            success: true, screenshot, referenceImage, viewport,
+            results: [], bestIndex: -1, bestSimilarity: 0, bestComposite: 0,
+            candidateCount: 0, searchBounds: bounds || null,
+            expectedPosition: expectedPct || null,
+            thresholds: { verify: 0.75, search: 0.65 },
+          });
+          return;
+        }
+
+        // Call inference server — use screenshot pixel dimensions as viewport
+        // so position weighting computes percentages correctly
+        const useWeighted = !!expectedPct;
+        const endpoint = useWeighted ? '/search-region-weighted' : '/search-region';
+        const inferenceBody: Record<string, unknown> = {
+          screenshot, candidates: candidateBounds, reference: referenceImage,
+        };
+        if (useWeighted) {
+          inferenceBody.expected_pct = expectedPct;
+          inferenceBody.viewport = { width: ssPixelW, height: ssPixelH };
+          inferenceBody.position_decay = 50; // gentle weighting — allows sidePanel-shifted elements to score well
+        }
+        // Use workflow model if available
+        const modelPath = wf.metadata?.modelPath;
+        if (modelPath && existsSync(modelPath)) {
+          inferenceBody.model = modelPath;
+        }
+
+        const inferResp = await fetch(`http://127.0.0.1:${INFERENCE_PORT}${endpoint}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(inferenceBody),
+          signal: AbortSignal.timeout(30000),
+        });
+        const inferResult = await inferResp.json() as any;
+
+        // Enrich results with bounds converted back to CSS pixel space for frontend display
+        const results = (inferResult.results || []).map((r: any) => {
+          const ssb = candidateBounds[r.index];
+          return {
+            ...r,
+            bounds: ssb ? {
+              left: ssb.left / dprScale,
+              top: ssb.top / dprScale,
+              width: ssb.width / dprScale,
+              height: ssb.height / dprScale,
+            } : null,
+          };
+        });
+
+        sendJson(res, 200, {
+          success: true, screenshot, referenceImage, viewport, results,
+          bestIndex: inferResult.best_index ?? -1,
+          bestSimilarity: inferResult.best_similarity ?? 0,
+          bestComposite: inferResult.best_composite ?? inferResult.best_similarity ?? 0,
+          candidateCount: candidateBounds.length,
+          searchBounds: bounds || null,
+          expectedPosition: expectedPct || null,
+          thresholds: { verify: 0.75, search: 0.65 },
+        });
+      } catch (err) {
+        sendJson(res, 500, { error: String(err) });
+      }
+      return;
+    }
+
+    // POST /api/workflows/:id/search-bounds — save search bounds for a step (identified by referenceImagePath)
+    const searchBoundsMatch = pathname.match(/^\/api\/workflows\/([^/]+)\/search-bounds$/);
+    if (req.method === 'POST' && searchBoundsMatch) {
+      const id = decodeURIComponent(searchBoundsMatch[1]);
+      try {
+        const body = await readBody(req);
+        const { searchBounds: newBounds, referenceImagePath } = body;
+
+        const discovered = await discoverWorkflows(workDir);
+        const found = discovered.find(d => d.workflow.id === id);
+        if (!found) { sendJson(res, 404, { error: `Workflow "${id}" not found` }); return; }
+
+        // Find step by referenceImagePath in original (nested) structure
+        const wf = found.workflow;
+        function findStepByRefImage(steps: any[]): any {
+          for (const s of steps) {
+            if (s.target?.referenceImage === referenceImagePath) return s;
+            if (s.thenSteps) { const f = findStepByRefImage(s.thenSteps); if (f) return f; }
+            if (s.elseSteps) { const f = findStepByRefImage(s.elseSteps); if (f) return f; }
+            if (s.steps) { const f = findStepByRefImage(s.steps); if (f) return f; }
+            if (s.trySteps) { const f = findStepByRefImage(s.trySteps); if (f) return f; }
+            if (s.catchSteps) { const f = findStepByRefImage(s.catchSteps); if (f) return f; }
+          }
+          return null;
+        }
+        const step = findStepByRefImage(wf.steps);
+        if (!step || !step.target) {
+          sendJson(res, 400, { error: 'Step not found' }); return;
+        }
+
+        step.target.searchBounds = newBounds || undefined;
+
+        // Persist
+        await writeFile(found.path, JSON.stringify(wf, null, 2), 'utf-8');
+        sendJson(res, 200, { success: true, searchBounds: newBounds });
+      } catch (err) {
+        sendJson(res, 500, { error: String(err) });
+      }
+      return;
+    }
+
+    // POST /api/workflows/:id/visual-verify — standalone visual verification for a step
+    const visualVerifyMatch = pathname.match(/^\/api\/workflows\/([^/]+)\/visual-verify$/);
+    if (req.method === 'POST' && visualVerifyMatch) {
+      const id = decodeURIComponent(visualVerifyMatch[1]);
+      try {
+        const body = await readBody(req);
+        const { referenceImagePath, expectedBounds } = body;
+
+        if (!referenceImagePath || !expectedBounds) {
+          sendJson(res, 400, { error: 'referenceImagePath and expectedBounds are required' }); return;
+        }
+
+        const discovered = await discoverWorkflows(workDir);
+        const found = discovered.find(d => d.workflow.id === id);
+        if (!found) { sendJson(res, 404, { error: `Workflow "${id}" not found` }); return; }
+        const wf = found.workflow;
+
+        await ensureBridgeServer();
+        if (!bridgeServer.isConnected) {
+          sendJson(res, 503, { error: 'Chrome extension is not connected.' }); return;
+        }
+
+        const verifier = new VisualVerifier(
+          `http://127.0.0.1:${INFERENCE_PORT}`,
+          wf.metadata?.modelPath || undefined,
+        );
+        if (!await verifier.isAvailable()) {
+          sendJson(res, 503, { error: 'Inference server not available' }); return;
+        }
+
+        // Convert pct to pixel position
+        const pageInfo = await bridgeServer.send('get_page_info', {}) as any;
+        const eb = expectedBounds;
+        const vpW = pageInfo?.viewport?.width || eb.viewportW || 1920;
+        const vpH = pageInfo?.viewport?.height || eb.viewportH || 1080;
+        const position = {
+          left: Math.round(((eb.pctX ?? 0) / 100) * vpW - ((eb.pctW || 2) / 200) * vpW),
+          top: Math.round(((eb.pctY ?? 0) / 100) * vpH - ((eb.pctH || 2) / 200) * vpH),
+          width: Math.round(((eb.pctW || 2) / 100) * vpW),
+          height: Math.round(((eb.pctH || 2) / 100) * vpH),
+        };
+
+        const vResult = await verifier.verifyElement(bridgeServer as any, position, referenceImagePath);
+        const result: any = {
+          ran: true,
+          verified: vResult?.verified ?? null,
+          similarity: vResult?.similarity ?? null,
+        };
+
+        if (vResult && !vResult.verified) {
+          const expectedPct = (eb.pctX != null) ? { x: eb.pctX, y: eb.pctY! } : undefined;
+          const search = await verifier.searchNearby(
+            bridgeServer as any, position, referenceImagePath,
+            undefined, vResult.screenshotDataUrl, expectedPct,
+          );
+          if (search) {
+            result.searchResult = {
+              found: search.found,
+              similarity: search.similarity,
+              position: search.position,
+              candidatesChecked: search.candidatesChecked,
+            };
+          }
+        }
+
+        sendJson(res, 200, result);
+      } catch (err) {
+        sendJson(res, 500, { error: String(err) });
+      }
+      return;
+    }
+
     // GET /api/workflows/:id — get a single workflow document
     const getWfMatch = pathname.match(/^\/api\/workflows\/([^/]+)$/);
     if (req.method === 'GET' && getWfMatch) {
@@ -4287,7 +5367,7 @@ Rules:
           sendJson(res, 404, { error: `Workflow "${id}" not found` });
           return;
         }
-        sendJson(res, 200, { workflow: found.workflow, path: found.path, source: found.source });
+        sendJson(res, 200, { workflow: found.workflow, path: found.path, source: found.source, format: found.format || 'json' });
       } catch (err) {
         sendJson(res, 500, { error: String(err) });
       }
@@ -4535,6 +5615,39 @@ Rules:
         debugLog.info('dashboard', `Renamed variable "${oldName}" → "${newName}" in workflow "${id}"`, {
           path: found.path,
         });
+        sendJson(res, 200, { success: true, workflow: wf });
+      } catch (err) {
+        sendJson(res, 500, { error: String(err) });
+      }
+      return;
+    }
+
+    // POST /api/workflows/:id/rename — rename a workflow (display name only, id/file unchanged)
+    const renameWfMatch = pathname.match(/^\/api\/workflows\/([^/]+)\/rename$/);
+    if (req.method === 'POST' && renameWfMatch) {
+      const id = decodeURIComponent(renameWfMatch[1]);
+      try {
+        const body = await readBody(req);
+        const newName = body?.name?.trim();
+        if (!newName) {
+          sendJson(res, 400, { error: 'name is required' });
+          return;
+        }
+
+        const discovered = await discoverWorkflows(workDir);
+        const found = discovered.find(d => d.workflow.id === id);
+        if (!found) {
+          sendJson(res, 404, { error: `Workflow "${id}" not found` });
+          return;
+        }
+
+        const wf = found.workflow as any;
+        wf.name = newName;
+        wf.metadata = wf.metadata || {};
+        wf.metadata.updatedAt = new Date().toISOString();
+
+        await writeFile(found.path, JSON.stringify(wf, null, 2), 'utf-8');
+        debugLog.info('dashboard', `Renamed workflow "${id}" to "${newName}"`, { path: found.path });
         sendJson(res, 200, { success: true, workflow: wf });
       } catch (err) {
         sendJson(res, 500, { error: String(err) });
@@ -5066,6 +6179,39 @@ Rules:
         await writeFile(found.path, JSON.stringify(comp, null, 2), 'utf-8');
         debugLog.info('dashboard', `Updated composition "${id}"`, { path: found.path });
         sendJson(res, 200, { success: true, composition: comp, path: found.path });
+      } catch (err) {
+        sendJson(res, 500, { error: String(err) });
+      }
+      return;
+    }
+
+    // POST /api/compositions/:id/rename — rename a composition (display name only)
+    const renameCompMatch = pathname.match(/^\/api\/compositions\/([^/]+)\/rename$/);
+    if (req.method === 'POST' && renameCompMatch) {
+      const id = decodeURIComponent(renameCompMatch[1]);
+      try {
+        const body = await readBody(req);
+        const newName = body?.name?.trim();
+        if (!newName) {
+          sendJson(res, 400, { error: 'name is required' });
+          return;
+        }
+
+        const discovered = await discoverCompositions(workDir);
+        const found = discovered.find(d => d.composition.id === id);
+        if (!found) {
+          sendJson(res, 404, { error: `Composition "${id}" not found` });
+          return;
+        }
+
+        const comp = found.composition as any;
+        comp.name = newName;
+        comp.metadata = comp.metadata || {};
+        comp.metadata.updatedAt = new Date().toISOString();
+
+        await writeFile(found.path, JSON.stringify(comp, null, 2), 'utf-8');
+        debugLog.info('dashboard', `Renamed composition "${id}" to "${newName}"`, { path: found.path });
+        sendJson(res, 200, { success: true, composition: comp });
       } catch (err) {
         sendJson(res, 500, { error: String(err) });
       }
@@ -7935,11 +9081,11 @@ Fix the bug and return the corrected code. Do not change the @input/@output anno
       const cropsRoot = join(workflowDataDir, 'crops');
 
       const result: {
-        snapshots: { total: number; fromRecording: number; fromExecution: number; totalElements: number; uniqueSelectors: number; interactionFiles: number; interactedSelectors: number; };
+        snapshots: { total: number; fromRecording: number; fromExecution: number; fromDebug: number; totalElements: number; uniqueSelectors: number; interactionFiles: number; interactedSelectors: number; };
         crops: { total: number; uniqueGroups: number; interacted: number; nonInteracted: number; } | null;
         lastTraining: { version: string; backbone: string; epochs: number; embedDim: number; bestAuc: number; trainedAt: string; cropsPerElement: number; } | null;
       } = {
-        snapshots: { total: 0, fromRecording: 0, fromExecution: 0, totalElements: 0, uniqueSelectors: 0, interactionFiles: 0, interactedSelectors: 0 },
+        snapshots: { total: 0, fromRecording: 0, fromExecution: 0, fromDebug: 0, totalElements: 0, uniqueSelectors: 0, interactionFiles: 0, interactedSelectors: 0 },
         crops: null,
         lastTraining: null,
       };
@@ -7972,6 +9118,8 @@ Fix the bug and return the corrected code. Do not change the @input/@output anno
               result.snapshots.total++;
               if (file.includes('_run-')) {
                 result.snapshots.fromExecution++;
+              } else if (file.startsWith('snapshot_capture_')) {
+                result.snapshots.fromDebug++;
               } else {
                 result.snapshots.fromRecording++;
               }
@@ -8111,9 +9259,17 @@ Fix the bug and return the corrected code. Do not change the @input/@output anno
         return;
       }
 
-      // Find workflow file
-      const wfPath = existing?.workflowFilePath
-        || join(workDir, '.woodbury-work', 'workflows', `${wfId}.workflow.json`);
+      // Find workflow file — use stored path or discover it
+      let wfPath = existing?.workflowFilePath || '';
+      if (!wfPath) {
+        const discovered = await discoverWorkflows(workDir);
+        const found = discovered.find((d: any) => d.workflow.id === wfId || d.workflow.name === wfId);
+        if (found) wfPath = found.path;
+      }
+      if (!wfPath) {
+        sendJson(res, 404, { error: `Workflow not found: ${wfId}` });
+        return;
+      }
 
       try {
         const wfContent = await readFile(wfPath, 'utf8');
@@ -8124,11 +9280,15 @@ Fix the bug and return the corrected code. Do not change the @input/@output anno
         let trainingConfig: Partial<WorkflowTrainingConfig> | undefined;
         try {
           const body = await readBody(req);
-          if (body && (body.backbone || body.epochs || body.embedDim)) {
+          if (body && (body.backbone || body.epochs || body.embedDim || body.sources)) {
             trainingConfig = {};
             if (body.backbone) trainingConfig.backbone = body.backbone;
             if (body.epochs) trainingConfig.epochs = parseInt(body.epochs, 10);
             if (body.embedDim) trainingConfig.embedDim = parseInt(body.embedDim, 10);
+            if (Array.isArray(body.sources) && body.sources.length > 0) {
+              trainingConfig.sources = body.sources.filter((s: string) =>
+                ['recording', 'execution', 'debug'].includes(s));
+            }
           }
         } catch { /* no body or invalid JSON — use defaults */ }
 

@@ -177,6 +177,57 @@ async function deleteComposition(id) {
   return data;
 }
 
+async function renameComposition(id, newName) {
+  var res = await fetch('/api/compositions/' + encodeURIComponent(id) + '/rename', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: newName }),
+  });
+  var data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Rename failed');
+  return data;
+}
+
+function startPipelineRename() {
+  if (!compData) return;
+  var titleEl = document.querySelector('#comp-pipeline-title');
+  if (!titleEl || titleEl.querySelector('input')) return;
+
+  var currentName = compData.name;
+  titleEl.innerHTML = '<input type="text" id="comp-rename-input" value="' + compEscAttr(currentName) + '" ' +
+    'style="font-size:inherit;font-weight:inherit;background:#1e293b;color:#e2e8f0;border:1px solid #7c3aed;' +
+    'border-radius:4px;padding:2px 6px;width:200px;outline:none;" autofocus>';
+
+  var input = document.getElementById('comp-rename-input');
+  input.focus();
+  input.select();
+
+  async function commitRename() {
+    var newName = input.value.trim();
+    if (!newName || newName === currentName) {
+      titleEl.textContent = currentName;
+      return;
+    }
+    try {
+      var result = await renameComposition(compData.id, newName);
+      compData.name = newName;
+      toast('Renamed to "' + newName + '"', 'success');
+      await fetchCompositions();
+      renderCompSidebar();
+      titleEl.textContent = newName;
+    } catch (err) {
+      toast('Rename failed: ' + err.message, 'error');
+      titleEl.textContent = currentName;
+    }
+  }
+
+  input.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') { e.preventDefault(); commitRename(); }
+    if (e.key === 'Escape') { titleEl.textContent = currentName; }
+  });
+  input.addEventListener('blur', commitRename);
+}
+
 async function fetchWorkflowsForNodes() {
   try {
     var res = await fetch('/api/workflows');
@@ -486,7 +537,7 @@ function renderGraphEditor() {
   // Toolbar
   html += '<div class="comp-toolbar">';
   html += '<div class="comp-toolbar-left">';
-  html += '<h2 style="margin:0;font-size:1rem;">' + compEscHtml(compData.name) + helpIcon('pipelines-connecting') + '</h2>';
+  html += '<h2 id="comp-pipeline-title" title="Double-click to rename" style="margin:0;font-size:1rem;cursor:pointer;">' + compEscHtml(compData.name) + '</h2>' + helpIcon('pipelines-connecting');
   if (compData.description) {
     html += '<span style="color:#64748b;font-size:0.75rem;margin-left:0.5rem;">' + compEscHtml(compData.description) + '</span>';
   }
@@ -524,6 +575,7 @@ function renderGraphEditor() {
   html += '<button class="comp-tb-btn" id="comp-tools-btn" title="Configure script tools">&#x1f527; Tools</button>';
   html += '<button class="comp-tb-btn" id="comp-export" title="Download pipeline file">Export</button>';
   html += '<button class="comp-tb-btn" id="comp-import" title="Upload pipeline file">Import</button>';
+  html += '<button class="comp-tb-btn" id="comp-rename-composition" title="Rename pipeline">Rename</button>';
   html += '<button class="comp-tb-btn" id="comp-duplicate-composition" title="Make a copy">Copy</button>';
   html += '<button class="comp-tb-btn comp-tb-btn-danger" id="comp-delete-composition" title="Delete pipeline">&#x1f5d1;</button>';
   html += '</div>';
@@ -1348,6 +1400,16 @@ function wireUpToolbar() {
     fitBtn.addEventListener('click', function() {
       fitToView();
     });
+  }
+
+  // Rename (button + double-click on title)
+  var renameCompBtn = document.querySelector('#comp-rename-composition');
+  if (renameCompBtn) {
+    renameCompBtn.addEventListener('click', function() { startPipelineRename(); });
+  }
+  var pipelineTitleEl = document.querySelector('#comp-pipeline-title');
+  if (pipelineTitleEl) {
+    pipelineTitleEl.addEventListener('dblclick', function() { startPipelineRename(); });
   }
 
   var deleteCompBtn = document.querySelector('#comp-delete-composition');

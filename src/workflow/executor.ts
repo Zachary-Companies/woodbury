@@ -57,6 +57,7 @@ import type {
   DesktopClickStep,
   DesktopTypeStep,
   DesktopKeyboardStep,
+  InjectStyleStep,
   Precondition,
   Postcondition,
 } from './types.js';
@@ -529,6 +530,8 @@ export class WorkflowExecutor {
         return this.execDesktopType(step as DesktopTypeStep);
       case 'desktop_keyboard':
         return this.execDesktopKeyboard(step as DesktopKeyboardStep);
+      case 'inject_style':
+        return this.execInjectStyle(step as InjectStyleStep);
       default:
         throw new Error(`Unknown step type: ${(step as WorkflowStep).type}`);
     }
@@ -537,6 +540,35 @@ export class WorkflowExecutor {
   // ── Step executors ──────────────────────────────────────────
 
   private async execNavigate(step: NavigateStep): Promise<void> {
+    // If Chrome extension isn't connected, launch Chrome and wait for it
+    if (!this.bridge.isConnected) {
+      execLog('INFO', 'Chrome not connected — launching Chrome and waiting for extension...');
+      try {
+        const mod = await import('flow-frame-core/dist/controllers/browserController.js');
+        await mod.BrowserController.openChrome({ url: 'about:blank' });
+      } catch {
+        // Fallback: use the open package directly
+        try {
+          const { default: open } = await import('open');
+          await open('about:blank', { app: { name: 'google chrome' } });
+        } catch (e) {
+          execLog('WARN', `Failed to launch Chrome: ${e}`);
+        }
+      }
+      // Wait up to 15 seconds for the extension to connect
+      const deadline = Date.now() + 15000;
+      while (!this.bridge.isConnected && Date.now() < deadline) {
+        await this.delay(500);
+      }
+      if (!this.bridge.isConnected) {
+        throw new Error(
+          'Chrome was launched but the extension did not connect within 15 seconds.\n' +
+          'Make sure the Woodbury Bridge extension is installed in Chrome.'
+        );
+      }
+      execLog('INFO', 'Chrome extension connected after launch');
+    }
+
     // Bring Chrome to the foreground and maximise immediately (fire-and-forget)
     focusAndMaximizeChrome();
 
@@ -735,14 +767,14 @@ export class WorkflowExecutor {
           value: '',
         });
       } catch {
-        // Fallback: click and select all + delete
-        if (resolved.position) {
+        // Fallback: click and select all + delete (skip click if skipClick is set)
+        if (resolved.position && !step.skipClick) {
           const cx = resolved.position.left + resolved.position.width / 2;
           const cy = resolved.position.top + resolved.position.height / 2;
           await this.bridge.send('mouse', { action: 'click', x: Math.round(cx), y: Math.round(cy) });
-          await this.bridge.send('keyboard', { action: 'hotkey', key: 'a', ctrl: true });
-          await this.bridge.send('keyboard', { action: 'press', key: 'backspace' });
         }
+        await this.bridge.send('keyboard', { action: 'hotkey', key: 'a', ctrl: true });
+        await this.bridge.send('keyboard', { action: 'press', key: 'backspace' });
       }
     }
 
@@ -752,9 +784,16 @@ export class WorkflowExecutor {
         selector: setValueSelector,
         value: step.value,
       });
+      // After set_value, click the element to sync OS-level focus with DOM focus.
+      // set_value does el.focus() but OS keyboard (Tab etc.) follows OS focus, not DOM focus.
+      if (resolved.position && !step.skipClick) {
+        const cx = resolved.position.left + resolved.position.width / 2;
+        const cy = resolved.position.top + resolved.position.height / 2;
+        await this.bridge.send('mouse', { action: 'click', x: Math.round(cx), y: Math.round(cy) });
+      }
     } catch {
-      // Fallback: click and type
-      if (resolved.position) {
+      // Fallback: type via keyboard (click to focus first unless skipClick is set)
+      if (resolved.position && !step.skipClick) {
         const cx = resolved.position.left + resolved.position.width / 2;
         const cy = resolved.position.top + resolved.position.height / 2;
         await this.bridge.send('mouse', { action: 'click', x: Math.round(cx), y: Math.round(cy) });
@@ -1032,10 +1071,15 @@ export class WorkflowExecutor {
   }
 
   private async execConditional(step: ConditionalStep): Promise<void> {
-    const passed = await this.validator.checkAssertCondition(
-      step.condition,
-      this.variables
-    );
+    let passed: boolean;
+    if (typeof step.condition === 'function') {
+      passed = !!(await step.condition(this.variables));
+    } else {
+      passed = await this.validator.checkAssertCondition(
+        step.condition,
+        this.variables
+      );
+    }
 
     const stepsToRun = passed ? step.thenSteps : (step.elseSteps || []);
 
@@ -1269,6 +1313,20 @@ export class WorkflowExecutor {
 
     if (step.delayAfterMs) {
       await this.sleepMs(step.delayAfterMs);
+    }
+  }
+
+  private async execInjectStyle(step: InjectStyleStep): Promise<void> {
+    const action = step.action || 'apply';
+    execLog('INFO', `execInjectStyle: ${step.id}`, { selector: step.selector, action });
+
+    if (action === 'clear') {
+      await this.bridge.send('clear_injected_styles', { selector: step.selector || undefined });
+    } else {
+      if (!step.styles || Object.keys(step.styles).length === 0) {
+        throw new Error('inject_style step requires a non-empty styles object when action is "apply"');
+      }
+      await this.bridge.send('inject_style', { selector: step.selector, styles: step.styles });
     }
   }
 

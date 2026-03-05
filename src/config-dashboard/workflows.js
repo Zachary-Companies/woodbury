@@ -54,6 +54,7 @@ const STEP_ICONS = {
   set_variable: '&#x1f4dd;',
   file_dialog: '&#x1f4c1;',
   capture_download: '&#x1f4e5;',
+  inject_style: '&#x1f3a8;',
 };
 
 // ── Variable auto-detection ─────────────────────────────────
@@ -139,6 +140,61 @@ async function deleteWorkflow(id) {
   return data;
 }
 
+async function renameWorkflow(id, newName) {
+  const res = await fetch('/api/workflows/' + encodeURIComponent(id) + '/rename', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: newName }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Rename failed');
+  return data;
+}
+
+function startInlineRename(wf) {
+  var titleEl = document.getElementById('wf-title');
+  if (!titleEl || titleEl.querySelector('input')) return;
+
+  var currentName = wf.name;
+  titleEl.innerHTML = '<input type="text" id="wf-rename-input" value="' + escAttr(currentName) + '" ' +
+    'style="font-size:inherit;font-weight:inherit;background:#1e293b;color:#e2e8f0;border:1px solid #7c3aed;' +
+    'border-radius:4px;padding:2px 6px;width:100%;outline:none;" autofocus>';
+
+  var input = document.getElementById('wf-rename-input');
+  input.focus();
+  input.select();
+
+  async function commitRename() {
+    var newName = input.value.trim();
+    if (!newName || newName === currentName) {
+      // Revert
+      titleEl.textContent = currentName;
+      return;
+    }
+    try {
+      await renameWorkflow(wf.id, newName);
+      wf.name = newName;
+      toast('Renamed to "' + newName + '"', 'success');
+      // Refresh sidebar and detail
+      await fetchWorkflows();
+      renderWorkflowSidebar();
+      if (_wfCurrentDetail) {
+        _wfCurrentDetail.wf.name = newName;
+        renderWorkflowDetail(_wfCurrentDetail.wf, _wfCurrentDetail.filePath, _wfCurrentDetail.source);
+      }
+    } catch (err) {
+      toast('Rename failed: ' + err.message, 'error');
+      titleEl.textContent = currentName;
+    }
+  }
+
+  input.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') { e.preventDefault(); commitRename(); }
+    if (e.key === 'Escape') { titleEl.textContent = currentName; }
+  });
+  input.addEventListener('blur', commitRename);
+}
+
 // ── Init (called from app.js when switching to workflows tab) ─
 
 function initWorkflows() {
@@ -195,6 +251,7 @@ function renderWorkflowSidebar() {
         '<div class="ext-item-badges">' +
           '<span class="badge badge-ok">' + escHtml(wf.source) + '</span>' +
           typeBadge +
+          (wf.format === 'code' ? '<span class="badge" style="background:#4c1d95;color:#c4b5fd;">JS</span>' : '') +
           (wf.variableCount > 0 ? '<span class="badge badge-partial">' + wf.variableCount + ' vars</span>' : '') +
           (smartCount > 0 ? '<span class="badge badge-webui">' + smartCount + ' smart</span>' : '') +
           trainingBadge +
@@ -496,7 +553,7 @@ function renderNewVarsList() {
 
 // ── New Workflow: Step rows ──────────────────────────────────
 
-var STEP_TYPES = ['navigate', 'click', 'type', 'wait', 'keyboard', 'scroll', 'assert', 'set_variable', 'file_dialog'];
+var STEP_TYPES = ['navigate', 'click', 'type', 'wait', 'keyboard', 'scroll', 'assert', 'set_variable', 'file_dialog', 'inject_style'];
 
 function renderNewStepsList() {
   var container = document.querySelector('#wf-new-steps-list');
@@ -574,6 +631,14 @@ function renderStepFields(step, idx) {
       html += '<label style="display:flex;align-items:center;gap:0.25rem;font-size:0.7rem;color:#94a3b8;cursor:pointer;white-space:nowrap;">';
       html += '<input type="checkbox" class="wf-ns-clear"' + (step.clearFirst ? ' checked' : '') + '> Clear first';
       html += '</label>';
+      html += '<label style="display:flex;align-items:center;gap:0.25rem;font-size:0.7rem;color:#94a3b8;cursor:pointer;white-space:nowrap;">';
+      html += '<input type="checkbox" class="wf-ns-skip-click"' + (step.skipClick ? ' checked' : '') + '> Skip click';
+      html += '</label>';
+      html += '<label style="display:flex;align-items:center;gap:0.25rem;font-size:0.7rem;color:#94a3b8;white-space:nowrap;">';
+      html += 'Delay';
+      html += '<input class="wf-var-input wf-ns-delay-ms" type="number" value="' + escAttr(String(step.delayAfterMs != null ? step.delayAfterMs : 1000)) + '" placeholder="1000" style="width:65px;">';
+      html += '<span style="font-size:0.6rem;">ms</span>';
+      html += '</label>';
       break;
     case 'wait':
       html += '<input class="wf-var-input wf-ns-delay" type="number" placeholder="Delay (ms)" value="' + escAttr(String((step.condition && step.condition.ms) || '')) + '" style="width:100px;">';
@@ -600,6 +665,14 @@ function renderStepFields(step, idx) {
       html += '<input class="wf-var-input wf-ns-filepath" type="text" placeholder="Absolute file path or {{var}}" value="' + escAttr(step.filePath || '') + '" style="flex:1;min-width:200px;">';
       html += '<input class="wf-var-input wf-ns-selector" type="text" placeholder="Trigger selector (optional)" value="' + escAttr((step.trigger && step.trigger.selector) || '') + '" style="flex:1;min-width:120px;">';
       html += '<input class="wf-var-input wf-ns-outvar" type="text" placeholder="Output variable" value="' + escAttr(step.outputVariable || 'selectedFile') + '" style="width:130px;">';
+      break;
+    case 'inject_style':
+      html += '<select class="wf-var-input wf-ns-style-action" style="width:90px;">';
+      html += '<option value="apply"' + ((step.action || 'apply') === 'apply' ? ' selected' : '') + '>Apply</option>';
+      html += '<option value="clear"' + (step.action === 'clear' ? ' selected' : '') + '>Clear</option>';
+      html += '</select>';
+      html += '<input class="wf-var-input wf-ns-style-selector" type="text" placeholder="CSS selector" value="' + escAttr(step.selector || '') + '" style="flex:1;min-width:150px;">';
+      html += '<input class="wf-var-input wf-ns-style-json" type="text" placeholder=\'{"position":"absolute"}\' value="' + escAttr(JSON.stringify(step.styles || {})) + '" style="flex:1;min-width:150px;">';
       break;
     default:
       html += '<span style="color:#475569;font-size:0.75rem;">This step type can be configured after creation</span>';
@@ -638,12 +711,16 @@ function wireStepFieldHandlers(row, idx) {
       var selInput = row.querySelector('.wf-ns-selector');
       var valInput = row.querySelector('.wf-ns-value');
       var clearInput = row.querySelector('.wf-ns-clear');
+      var skipClickInput = row.querySelector('.wf-ns-skip-click');
       if (selInput) selInput.addEventListener('input', function() {
         newWorkflowSteps[idx].target = newWorkflowSteps[idx].target || {};
         newWorkflowSteps[idx].target.selector = selInput.value;
       });
+      var delayMsInput = row.querySelector('.wf-ns-delay-ms');
       if (valInput) valInput.addEventListener('input', function() { newWorkflowSteps[idx].value = valInput.value; });
       if (clearInput) clearInput.addEventListener('change', function() { newWorkflowSteps[idx].clearFirst = clearInput.checked; });
+      if (skipClickInput) skipClickInput.addEventListener('change', function() { newWorkflowSteps[idx].skipClick = skipClickInput.checked; });
+      if (delayMsInput) delayMsInput.addEventListener('input', function() { newWorkflowSteps[idx].delayAfterMs = parseInt(delayMsInput.value) || 0; });
       break;
     }
     case 'wait': {
@@ -687,6 +764,17 @@ function wireStepFieldHandlers(row, idx) {
       if (outVarInput) outVarInput.addEventListener('input', function() { newWorkflowSteps[idx].outputVariable = outVarInput.value; });
       break;
     }
+    case 'inject_style': {
+      var actionInput = row.querySelector('.wf-ns-style-action');
+      var selInput = row.querySelector('.wf-ns-style-selector');
+      var jsonInput = row.querySelector('.wf-ns-style-json');
+      if (actionInput) actionInput.addEventListener('change', function() { newWorkflowSteps[idx].action = actionInput.value; });
+      if (selInput) selInput.addEventListener('input', function() { newWorkflowSteps[idx].selector = selInput.value; });
+      if (jsonInput) jsonInput.addEventListener('input', function() {
+        try { newWorkflowSteps[idx].styles = JSON.parse(jsonInput.value); } catch(e) { /* ignore invalid JSON while typing */ }
+      });
+      break;
+    }
   }
 }
 
@@ -694,7 +782,7 @@ function buildDefaultStep(type) {
   switch (type) {
     case 'navigate': return { type: 'navigate', url: '', waitMs: 2000, label: '' };
     case 'click': return { type: 'click', target: { selector: '', textContent: '' }, label: '', delayAfterMs: 300 };
-    case 'type': return { type: 'type', target: { selector: '' }, value: '', clearFirst: false, label: '', delayAfterMs: 300 };
+    case 'type': return { type: 'type', target: { selector: '' }, value: '', clearFirst: false, skipClick: false, label: '', delayAfterMs: 1000 };
     case 'wait': return { type: 'wait', condition: { type: 'delay', ms: 2000 }, label: '' };
     case 'keyboard': return { type: 'keyboard', key: '', modifiers: [], label: '' };
     case 'scroll': return { type: 'scroll', x: 0, y: 0, amount: 3, label: '' };
@@ -703,8 +791,82 @@ function buildDefaultStep(type) {
     case 'file_dialog': return { type: 'file_dialog', filePath: '', trigger: { selector: '' }, outputVariable: 'selectedFile', delayBeforeMs: 2000, delayAfterMs: 1000, label: '' };
     case 'capture_download': return { type: 'capture_download', outputVariable: 'downloadedFiles', maxFiles: 1, label: '' };
     case 'move_file': return { type: 'move_file', source: '', destination: '', label: '' };
+    case 'conditional': return { type: 'conditional', condition: { type: 'expression', expression: '' }, thenSteps: [], elseSteps: [], label: 'Conditional' };
+    case 'loop': return { type: 'loop', overVariable: '', itemVariable: 'item', indexVariable: '', steps: [], label: 'Loop' };
+    case 'try_catch': return { type: 'try_catch', trySteps: [], catchSteps: [], errorVariable: 'error', label: 'Try / Catch' };
+    case 'inject_style': return { type: 'inject_style', selector: '', styles: {}, action: 'apply', label: '' };
     default: return { type: type, label: '' };
   }
+}
+
+/**
+ * Resolve a dot-path like "3", "3.thenSteps.1", "2.steps.0" into
+ * { array: <parent steps array>, index: <number>, step: <step object> }
+ * relative to the workflow's steps array.
+ */
+function resolveStepPath(wfSteps, path) {
+  var parts = String(path).split('.');
+  // Simple top-level index (e.g. "3")
+  if (parts.length === 1) {
+    var idx = parseInt(parts[0]);
+    return { array: wfSteps, index: idx, step: wfSteps[idx] };
+  }
+  // Nested path (e.g. "3.thenSteps.1")
+  var currentArray = wfSteps;
+  var currentStep = null;
+  for (var pi = 0; pi < parts.length; pi++) {
+    var part = parts[pi];
+    if (pi % 2 === 0) {
+      // Even parts are numeric indices
+      var numIdx = parseInt(part);
+      currentStep = currentArray[numIdx];
+      // Last part — this is the target
+      if (pi === parts.length - 1) {
+        return { array: currentArray, index: numIdx, step: currentStep };
+      }
+    } else {
+      // Odd parts are property names (thenSteps, elseSteps, steps, trySteps, catchSteps)
+      if (!currentStep || !currentStep[part]) return null;
+      currentArray = currentStep[part];
+    }
+  }
+  return null;
+}
+
+/**
+ * Given a nested step path like "4.thenSteps.0", find the parent wrapper step
+ * and its position in the grandparent array.
+ * Returns { parentArray, parentIndex, parentStep, subProp } or null if top-level.
+ *
+ * Example: path "4.thenSteps.0"
+ *  → parentArray = wf.steps, parentIndex = 4, parentStep = wf.steps[4], subProp = "thenSteps"
+ *
+ * Example: path "2.thenSteps.1.steps.0"
+ *  → parentArray = wf.steps[2].thenSteps, parentIndex = 1, parentStep = wf.steps[2].thenSteps[1], subProp = "steps"
+ */
+function getParentFromPath(wfSteps, path) {
+  var parts = String(path).split('.');
+  // Top-level steps have no parent group
+  if (parts.length <= 1) return null;
+
+  // Remove the last two parts (subProp + index) to get the parent path
+  // e.g. "4.thenSteps.0" → parentPath = "4", subProp = "thenSteps"
+  var childIdx = parseInt(parts[parts.length - 1]);
+  var subProp = parts[parts.length - 2];
+  var parentParts = parts.slice(0, parts.length - 2);
+
+  if (parentParts.length === 0) return null;
+
+  var parentPath = parentParts.join('.');
+  var parentResolved = resolveStepPath(wfSteps, parentPath);
+  if (!parentResolved) return null;
+
+  return {
+    parentArray: parentResolved.array,
+    parentIndex: parentResolved.index,
+    parentStep: parentResolved.step,
+    subProp: subProp,
+  };
 }
 
 // ── Step Editor (Visual View inline editing) ───────────────
@@ -752,6 +914,16 @@ function renderStepEditor(step, idx, totalSteps) {
       html += '<span class="wf-se-label">Delay ms</span>';
       html += '<input class="wf-se-input wf-se-delay-ms" type="number" value="' + escAttr(String(step.delayAfterMs || '')) + '" placeholder="300" style="max-width:100px;">';
       html += '</div>';
+      // Visual element finder
+      if (step.target && step.target.referenceImage) {
+        html += '<div class="wf-se-row" style="margin-top:0.5rem;">';
+        html += '<button class="wf-se-btn wf-se-find-element" style="background:#7c3aed;color:#fff;border-color:#6d28d9;">&#x1f50d; Find Element</button>';
+        if (step.target.expectedBounds) {
+          html += '<span style="font-size:0.62rem;color:#64748b;margin-left:0.4rem;">Expected: (' + (step.target.expectedBounds.pctX || 0).toFixed(1) + '%, ' + (step.target.expectedBounds.pctY || 0).toFixed(1) + '%)</span>';
+        }
+        html += '</div>';
+        html += '<div class="wf-se-finder-panel" style="display:none;"></div>';
+      }
       break;
 
     case 'type':
@@ -767,9 +939,22 @@ function renderStepEditor(step, idx, totalSteps) {
       html += '<label style="display:flex;align-items:center;gap:0.25rem;font-size:0.7rem;color:#94a3b8;cursor:pointer;">';
       html += '<input type="checkbox" class="wf-se-clear"' + (step.clearFirst ? ' checked' : '') + '> Clear first';
       html += '</label>';
+      html += '<label style="display:flex;align-items:center;gap:0.25rem;font-size:0.7rem;color:#94a3b8;cursor:pointer;margin-left:1rem;">';
+      html += '<input type="checkbox" class="wf-se-skip-click"' + (step.skipClick ? ' checked' : '') + '> Skip click';
+      html += '</label>';
       html += '<span class="wf-se-label" style="margin-left:1rem;">Delay ms</span>';
-      html += '<input class="wf-se-input wf-se-delay-ms" type="number" value="' + escAttr(String(step.delayAfterMs || '')) + '" placeholder="300" style="max-width:100px;">';
+      html += '<input class="wf-se-input wf-se-delay-ms" type="number" value="' + escAttr(String(step.delayAfterMs != null ? step.delayAfterMs : 1000)) + '" placeholder="1000" style="max-width:100px;">';
       html += '</div>';
+      // Visual element finder
+      if (step.target && step.target.referenceImage) {
+        html += '<div class="wf-se-row" style="margin-top:0.5rem;">';
+        html += '<button class="wf-se-btn wf-se-find-element" style="background:#7c3aed;color:#fff;border-color:#6d28d9;">&#x1f50d; Find Element</button>';
+        if (step.target.expectedBounds) {
+          html += '<span style="font-size:0.62rem;color:#64748b;margin-left:0.4rem;">Expected: (' + (step.target.expectedBounds.pctX || 0).toFixed(1) + '%, ' + (step.target.expectedBounds.pctY || 0).toFixed(1) + '%)</span>';
+        }
+        html += '</div>';
+        html += '<div class="wf-se-finder-panel" style="display:none;"></div>';
+      }
       break;
 
     case 'wait':
@@ -885,21 +1070,123 @@ function renderStepEditor(step, idx, totalSteps) {
       html += '</div>';
       break;
 
+    case 'conditional': {
+      var condType = (step.condition && typeof step.condition === 'object' && step.condition.type) || 'expression';
+      var isFunc = typeof step.condition === 'function';
+      html += '<div class="wf-se-row">';
+      html += '<span class="wf-se-label">Condition</span>';
+      if (isFunc) {
+        html += '<span style="color:#c4b5fd;font-size:0.75rem;">[custom function]</span>';
+      } else {
+        html += '<select class="wf-se-input wf-se-cond-type" style="max-width:180px;">';
+        var condTypes = ['expression', 'element_exists', 'element_visible', 'url_contains', 'url_matches', 'variable_equals'];
+        for (var ci = 0; ci < condTypes.length; ci++) {
+          html += '<option value="' + condTypes[ci] + '"' + (condType === condTypes[ci] ? ' selected' : '') + '>' + condTypes[ci] + '</option>';
+        }
+        html += '</select>';
+      }
+      html += '</div>';
+      if (!isFunc && condType === 'expression') {
+        html += '<div class="wf-se-row">';
+        html += '<span class="wf-se-label">Expression</span>';
+        html += '<input class="wf-se-input wf-se-expression" type="text" value="' + escAttr((step.condition && step.condition.expression) || '') + '" placeholder="{{count}} > 0 && {{status}} === \'ready\'">';
+        html += '</div>';
+      } else if (!isFunc && (condType === 'element_exists' || condType === 'element_visible')) {
+        html += '<div class="wf-se-row">';
+        html += '<span class="wf-se-label">Selector</span>';
+        html += '<input class="wf-se-input wf-se-cond-selector" type="text" value="' + escAttr((step.condition && step.condition.target && step.condition.target.selector) || '') + '" placeholder="CSS selector">';
+        html += '</div>';
+      } else if (!isFunc && (condType === 'url_contains')) {
+        html += '<div class="wf-se-row">';
+        html += '<span class="wf-se-label">Substring</span>';
+        html += '<input class="wf-se-input wf-se-cond-substring" type="text" value="' + escAttr((step.condition && step.condition.substring) || '') + '" placeholder="URL substring">';
+        html += '</div>';
+      } else if (!isFunc && condType === 'url_matches') {
+        html += '<div class="wf-se-row">';
+        html += '<span class="wf-se-label">Pattern</span>';
+        html += '<input class="wf-se-input wf-se-cond-pattern" type="text" value="' + escAttr((step.condition && step.condition.pattern) || '') + '" placeholder="URL regex pattern">';
+        html += '</div>';
+      } else if (!isFunc && condType === 'variable_equals') {
+        html += '<div class="wf-se-row">';
+        html += '<span class="wf-se-label">Variable</span>';
+        html += '<input class="wf-se-input wf-se-cond-variable" type="text" value="' + escAttr((step.condition && step.condition.variable) || '') + '" placeholder="Variable name" style="max-width:140px;">';
+        html += '<span class="wf-se-label">Value</span>';
+        html += '<input class="wf-se-input wf-se-cond-value" type="text" value="' + escAttr((step.condition && step.condition.value != null) ? String(step.condition.value) : '') + '" placeholder="Expected value">';
+        html += '</div>';
+      }
+      break;
+    }
+
+    case 'loop':
+      html += '<div class="wf-se-row">';
+      html += '<span class="wf-se-label">Over variable</span>';
+      html += '<input class="wf-se-input wf-se-over-var" type="text" value="' + escAttr(step.overVariable || '') + '" placeholder="Array variable name" style="max-width:160px;">';
+      html += '</div>';
+      html += '<div class="wf-se-row">';
+      html += '<span class="wf-se-label">Item variable</span>';
+      html += '<input class="wf-se-input wf-se-item-var" type="text" value="' + escAttr(step.itemVariable || '') + '" placeholder="Current item name" style="max-width:160px;">';
+      html += '</div>';
+      html += '<div class="wf-se-row">';
+      html += '<span class="wf-se-label">Index variable</span>';
+      html += '<input class="wf-se-input wf-se-index-var" type="text" value="' + escAttr(step.indexVariable || '') + '" placeholder="(optional)" style="max-width:160px;">';
+      html += '</div>';
+      break;
+
+    case 'try_catch':
+      html += '<div class="wf-se-row">';
+      html += '<span class="wf-se-label">Error variable</span>';
+      html += '<input class="wf-se-input wf-se-error-var" type="text" value="' + escAttr(step.errorVariable || '') + '" placeholder="Variable to store error (optional)" style="max-width:200px;">';
+      html += '</div>';
+      break;
+
+    case 'inject_style':
+      html += '<div class="wf-se-row">';
+      html += '<span class="wf-se-label">Action</span>';
+      html += '<select class="wf-se-input wf-se-style-action" style="max-width:140px;">';
+      html += '<option value="apply"' + ((step.action || 'apply') === 'apply' ? ' selected' : '') + '>Apply</option>';
+      html += '<option value="clear"' + (step.action === 'clear' ? ' selected' : '') + '>Clear</option>';
+      html += '</select>';
+      html += '</div>';
+      html += '<div class="wf-se-row">';
+      html += '<span class="wf-se-label">Selector</span>';
+      html += '<input class="wf-se-input wf-se-style-selector" type="text" value="' + escAttr(step.selector || '') + '" placeholder="CSS selector, e.g. .header, #main">';
+      html += '</div>';
+      html += '<div class="wf-se-row wf-se-style-styles-row"' + (step.action === 'clear' ? ' style="display:none;"' : '') + '>';
+      html += '<span class="wf-se-label">Styles (JSON)</span>';
+      html += '<textarea class="wf-se-input wf-se-style-json" placeholder=\'{ "position": "absolute", "top": "0" }\' style="min-height:80px;font-family:monospace;font-size:0.75rem;">' + escHtml(JSON.stringify(step.styles || {}, null, 2)) + '</textarea>';
+      html += '</div>';
+      break;
+
     default:
-      // Complex types: sub_workflow, conditional, loop, try_catch
       html += '<div class="wf-se-row">';
       html += '<span style="color:#64748b;font-size:0.75rem;font-style:italic;">Advanced step type — use the JSON tab for full editing control</span>';
       html += '</div>';
   }
 
-  // Action buttons
+  // Is this step nested inside a group?
+  var isNested = String(idx).indexOf('.') !== -1;
+
+  // Action buttons — row 1: save/cancel/move/insert/delete
   html += '<div class="wf-se-actions">';
   html += '<button class="wf-se-btn wf-se-btn-save wf-se-save">Save</button>';
   html += '<button class="wf-se-btn wf-se-cancel">Cancel</button>';
-  html += '<button class="wf-se-btn wf-se-up"' + (idx === 0 ? ' disabled' : '') + '>&uarr; Up</button>';
-  html += '<button class="wf-se-btn wf-se-down"' + (idx >= totalSteps - 1 ? ' disabled' : '') + '>&darr; Down</button>';
+  html += '<button class="wf-se-btn wf-se-up">&uarr; Up</button>';
+  html += '<button class="wf-se-btn wf-se-down">&darr; Down</button>';
+  if (isNested) {
+    html += '<button class="wf-se-btn wf-se-move-out" style="color:#f59e0b;" title="Move this step out of the group to the parent level">&#x2934; Move Out</button>';
+  }
   html += '<button class="wf-se-btn wf-se-insert-below" style="color:#38bdf8;">+ Insert</button>';
   html += '<button class="wf-se-btn wf-se-btn-delete wf-se-delete" style="margin-left:auto;">Delete</button>';
+  html += '</div>';
+
+  // Action buttons — row 2: wrap/unwrap
+  html += '<div class="wf-se-actions" style="border-top:none;padding-top:0;">';
+  if (step.type === 'conditional' || step.type === 'loop' || step.type === 'try_catch') {
+    html += '<button class="wf-se-btn wf-se-unwrap" style="color:#f59e0b;" title="Move sub-steps out and remove this wrapper">&#x2B73; Unwrap</button>';
+  }
+  html += '<button class="wf-se-btn wf-se-wrap" data-wrap-type="conditional" style="color:#a78bfa;" title="Wrap this step in a conditional">&#x2696; Wrap in If</button>';
+  html += '<button class="wf-se-btn wf-se-wrap" data-wrap-type="loop" style="color:#a78bfa;" title="Wrap this step in a loop">&#x1f501; Wrap in Loop</button>';
+  html += '<button class="wf-se-btn wf-se-wrap" data-wrap-type="try_catch" style="color:#a78bfa;" title="Wrap this step in try/catch">&#x1f6e1; Wrap in Try</button>';
   html += '</div>';
 
   return html;
@@ -940,11 +1227,13 @@ function collectStepEditorValues(editor, step) {
       var selInput = editor.querySelector('.wf-se-selector');
       var valInput = editor.querySelector('.wf-se-value');
       var clearInput = editor.querySelector('.wf-se-clear');
+      var skipClickInput = editor.querySelector('.wf-se-skip-click');
       var delayInput = editor.querySelector('.wf-se-delay-ms');
       if (!updated.target) updated.target = {};
       if (selInput) updated.target.selector = selInput.value;
       if (valInput) updated.value = valInput.value;
       if (clearInput) updated.clearFirst = clearInput.checked;
+      if (skipClickInput) updated.skipClick = skipClickInput.checked;
       if (delayInput) updated.delayAfterMs = parseInt(delayInput.value) || 0;
       break;
     }
@@ -1025,6 +1314,59 @@ function collectStepEditorValues(editor, step) {
       if (outVarInput) updated.outputVariable = outVarInput.value || undefined;
       if (delayBeforeInput) updated.delayBeforeMs = parseInt(delayBeforeInput.value) || undefined;
       if (delayAfterInput) updated.delayAfterMs = parseInt(delayAfterInput.value) || undefined;
+      break;
+    }
+    case 'conditional': {
+      var condTypeSelect = editor.querySelector('.wf-se-cond-type');
+      if (condTypeSelect) {
+        var ct = condTypeSelect.value;
+        if (ct === 'expression') {
+          var exprInput = editor.querySelector('.wf-se-expression');
+          updated.condition = { type: 'expression', expression: exprInput ? exprInput.value : '' };
+        } else if (ct === 'element_exists' || ct === 'element_visible') {
+          var selInput = editor.querySelector('.wf-se-cond-selector');
+          updated.condition = { type: ct, target: { selector: selInput ? selInput.value : '' } };
+        } else if (ct === 'url_contains') {
+          var subInput = editor.querySelector('.wf-se-cond-substring');
+          updated.condition = { type: 'url_contains', substring: subInput ? subInput.value : '' };
+        } else if (ct === 'url_matches') {
+          var patInput = editor.querySelector('.wf-se-cond-pattern');
+          updated.condition = { type: 'url_matches', pattern: patInput ? patInput.value : '' };
+        } else if (ct === 'variable_equals') {
+          var varInput = editor.querySelector('.wf-se-cond-variable');
+          var valInput = editor.querySelector('.wf-se-cond-value');
+          updated.condition = { type: 'variable_equals', variable: varInput ? varInput.value : '', value: valInput ? valInput.value : '' };
+        }
+      }
+      break;
+    }
+    case 'loop': {
+      var overInput = editor.querySelector('.wf-se-over-var');
+      var itemInput = editor.querySelector('.wf-se-item-var');
+      var indexInput = editor.querySelector('.wf-se-index-var');
+      if (overInput) updated.overVariable = overInput.value;
+      if (itemInput) updated.itemVariable = itemInput.value;
+      if (indexInput) updated.indexVariable = indexInput.value || undefined;
+      break;
+    }
+    case 'try_catch': {
+      var errVarInput = editor.querySelector('.wf-se-error-var');
+      if (errVarInput) updated.errorVariable = errVarInput.value || undefined;
+      break;
+    }
+    case 'inject_style': {
+      var actionSelect = editor.querySelector('.wf-se-style-action');
+      var selInput = editor.querySelector('.wf-se-style-selector');
+      var jsonInput = editor.querySelector('.wf-se-style-json');
+      if (actionSelect) updated.action = actionSelect.value;
+      if (selInput) updated.selector = selInput.value;
+      if (jsonInput) {
+        try {
+          updated.styles = JSON.parse(jsonInput.value || '{}');
+        } catch (e) {
+          updated.styles = {};
+        }
+      }
       break;
     }
   }
@@ -1390,6 +1732,10 @@ function buildStepLabel(step, idx) {
     case 'file_dialog': return 'Select file ' + truncate(step.filePath || '', 40);
     case 'capture_download': return 'Capture download';
     case 'move_file': return 'Move ' + truncate(step.source || 'file', 25);
+    case 'conditional': return 'Conditional';
+    case 'loop': return 'Loop over ' + (step.overVariable || 'items');
+    case 'try_catch': return 'Try / Catch';
+    case 'inject_style': return step.action === 'clear' ? 'Clear styles: ' + truncate(step.selector || 'all', 30) : 'Inject style: ' + truncate(step.selector || '', 30);
     default: return 'Step ' + (idx + 1);
   }
 }
@@ -1444,14 +1790,20 @@ function renderWorkflowDetail(wf, filePath, source) {
   // Header row: title + delete
   html += '<div class="wf-detail-header">';
   html += '<div style="min-width:0;">';
-  html += '<h2>' + escHtml(wf.name) + '</h2>';
+  var isCodeWorkflow = filePath && filePath.endsWith('.workflow.js');
+  html += '<h2 id="wf-title" title="Double-click to rename" style="cursor:pointer;">' + escHtml(wf.name);
+  if (isCodeWorkflow) {
+    html += ' <span style="font-size:0.6rem;padding:2px 6px;background:linear-gradient(135deg,#7c3aed,#6d28d9);color:#fff;border-radius:4px;vertical-align:middle;font-weight:500;">JS</span>';
+  }
+  html += '</h2>';
   html += '<div class="wf-detail-meta">';
   html += escHtml(wf.description || '') + '<br>';
   html += '<code style="color:#475569;font-size:0.7rem;">' + escHtml(filePath) + '</code>';
   html += '</div>';
   html += '</div>';
   html += '<div class="wf-detail-actions">';
-  html += '<button class="btn-primary" id="wf-btn-publish" style="background:linear-gradient(135deg,#7c3aed,#6d28d9);margin-right:0.5rem;">Publish</button>';
+  html += '<button class="btn-primary" id="wf-btn-publish">Publish</button>';
+  html += '<button class="btn-secondary" id="wf-btn-rename" style="font-size:0.75rem;">Rename</button>';
   html += '<button class="btn-danger" id="wf-btn-delete">Delete</button>';
   html += '</div>';
   html += '</div>';
@@ -1487,6 +1839,480 @@ function renderWorkflowDetail(wf, filePath, source) {
 }
 
 // ── Visual View ──────────────────────────────────────────────
+
+/**
+ * Describe a condition object as a short human-readable string.
+ */
+function describeCondition(cond) {
+  if (!cond) return '';
+  if (typeof cond === 'function') return '[custom function]';
+  switch (cond.type) {
+    case 'element_exists': return 'element exists: ' + ((cond.target && cond.target.selector) || '?');
+    case 'element_visible': return 'element visible: ' + ((cond.target && cond.target.selector) || '?');
+    case 'element_text_matches': return 'text matches: ' + (cond.pattern || '?');
+    case 'url_matches': return 'URL matches: ' + (cond.pattern || '?');
+    case 'url_contains': return 'URL contains: ' + (cond.substring || '?');
+    case 'page_title_contains': return 'title contains: ' + (cond.text || '?');
+    case 'variable_equals': return (cond.variable || '?') + ' == ' + JSON.stringify(cond.value);
+    case 'expression': return cond.expression || '?';
+    default: return cond.type || 'unknown';
+  }
+}
+
+/**
+ * Render a flat or nested list of steps with support for control flow nesting.
+ * pathPrefix is a dot-path for nested data binding (e.g. '' for root, 'thenSteps.' for nested).
+ */
+function renderStepList(steps, pathPrefix) {
+  var html = '';
+  for (var i = 0; i < steps.length; i++) {
+    var step = steps[i];
+    var dataPath = pathPrefix + i;
+    var icon = STEP_ICONS[step.type] || '&#x25cf;';
+    var isSmart = step.type === 'wait' && step.condition && step.condition.type !== 'delay';
+
+    html += '<div class="wf-step" data-step-idx="' + dataPath + '">';
+    html += '<span class="wf-step-num">' + (i + 1) + '</span>';
+    html += '<span class="wf-step-icon">' + icon + '</span>';
+    html += '<span class="wf-step-label">' + escHtml(step.label || step.id) + '</span>';
+    html += '<span class="wf-step-type">' + escHtml(step.type) + '</span>';
+    if (isSmart) {
+      html += '<span class="wf-step-smart">smart</span>';
+    }
+    html += '<span class="wf-step-expand">&#x25BC;</span>';
+    html += '</div>';
+
+    // Inline editor panel (collapsed by default)
+    html += '<div class="wf-step-editor" data-step-idx="' + dataPath + '" style="display:none;">';
+    html += renderStepEditor(step, dataPath, steps.length);
+    html += '</div>';
+
+    // Render nested sub-steps for control flow types
+    if (step.type === 'conditional') {
+      html += '<div class="wf-step-condition-desc">if ' + escHtml(describeCondition(step.condition)) + '</div>';
+      html += '<div class="wf-step-group-label">Then</div>';
+      html += '<div class="wf-step-group">';
+      if (step.thenSteps && step.thenSteps.length > 0) {
+        html += renderStepList(step.thenSteps, dataPath + '.thenSteps.');
+      }
+      html += '<button class="wf-se-btn wf-group-insert" data-group-path="' + dataPath + '.thenSteps" style="color:#38bdf8;margin:0.35rem 0;font-size:0.68rem;">+ Add step</button>';
+      html += '</div>';
+      html += '<div class="wf-step-group-label else">Else</div>';
+      html += '<div class="wf-step-group else">';
+      if (step.elseSteps && step.elseSteps.length > 0) {
+        html += renderStepList(step.elseSteps, dataPath + '.elseSteps.');
+      }
+      html += '<button class="wf-se-btn wf-group-insert" data-group-path="' + dataPath + '.elseSteps" style="color:#38bdf8;margin:0.35rem 0;font-size:0.68rem;">+ Add step</button>';
+      html += '</div>';
+    } else if (step.type === 'loop') {
+      html += '<div class="wf-step-condition-desc">for each ' + escHtml(step.itemVariable || 'item') + ' in ' + escHtml(step.overVariable || '?') + '</div>';
+      html += '<div class="wf-step-group">';
+      if (step.steps && step.steps.length > 0) {
+        html += renderStepList(step.steps, dataPath + '.steps.');
+      }
+      html += '<button class="wf-se-btn wf-group-insert" data-group-path="' + dataPath + '.steps" style="color:#38bdf8;margin:0.35rem 0;font-size:0.68rem;">+ Add step</button>';
+      html += '</div>';
+    } else if (step.type === 'try_catch') {
+      html += '<div class="wf-step-group-label">Try</div>';
+      html += '<div class="wf-step-group">';
+      if (step.trySteps && step.trySteps.length > 0) {
+        html += renderStepList(step.trySteps, dataPath + '.trySteps.');
+      }
+      html += '<button class="wf-se-btn wf-group-insert" data-group-path="' + dataPath + '.trySteps" style="color:#38bdf8;margin:0.35rem 0;font-size:0.68rem;">+ Add step</button>';
+      html += '</div>';
+      html += '<div class="wf-step-group-label catch">Catch' + (step.errorVariable ? ' (' + escHtml(step.errorVariable) + ')' : '') + '</div>';
+      html += '<div class="wf-step-group catch">';
+      if (step.catchSteps && step.catchSteps.length > 0) {
+        html += renderStepList(step.catchSteps, dataPath + '.catchSteps.');
+      }
+      html += '<button class="wf-se-btn wf-group-insert" data-group-path="' + dataPath + '.catchSteps" style="color:#38bdf8;margin:0.35rem 0;font-size:0.68rem;">+ Add step</button>';
+      html += '</div>';
+    }
+  }
+  return html;
+}
+
+/* ── Element Finder Panel ───────────────────────────────────── */
+
+function renderFinderPanel(panel, step, wfId, stepIdx) {
+  var state = panel._finderState || {
+    screenshot: null,
+    viewport: null,
+    results: null,
+    searchBounds: (step.target && step.target.searchBounds) || null,
+    isDrawing: false,
+    drawStart: null,
+    referenceImage: null,
+    loadedSavedScreenshot: false,
+  };
+  panel._finderState = state;
+
+  // Auto-load saved screenshot if no live screenshot yet
+  if (!state.screenshot && !state.loadedSavedScreenshot && step.target && step.target.screenshotPath) {
+    state.loadedSavedScreenshot = true;
+    // Load asynchronously and re-render when ready
+    (function() {
+      var img = new Image();
+      img.onload = function() {
+        // Convert to data URL
+        var canvas = document.createElement('canvas');
+        canvas.width = img.naturalWidth;
+        canvas.height = img.naturalHeight;
+        var ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0);
+        state.screenshot = canvas.toDataURL('image/png');
+        // Use expectedBounds viewport or fall back to image dimensions
+        var eb = step.target.expectedBounds;
+        state.viewport = (eb && eb.viewportW && eb.viewportH)
+          ? { width: eb.viewportW, height: eb.viewportH }
+          : { width: img.naturalWidth, height: img.naturalHeight };
+        renderFinderPanel(panel, step, wfId, stepIdx);
+      };
+      img.src = '/api/file?path=' + encodeURIComponent(step.target.screenshotPath);
+    })();
+  }
+
+  var refImgSrc = step.target && step.target.referenceImage
+    ? '/api/file?path=' + encodeURIComponent(step.target.referenceImage)
+    : '';
+
+  var html = '';
+  html += '<div class="wf-finder-header">';
+  html += '<h4>&#x1f50d; Element Finder</h4>';
+  html += '<button class="wf-finder-close" title="Close">&times;</button>';
+  html += '</div>';
+  html += '<div class="wf-finder-toolbar">';
+  html += '<button class="wf-finder-capture-btn">&#x1f4f7; Capture</button>';
+  html += '<button class="wf-finder-search-btn" disabled>&#x1f50d; Search</button>';
+  html += '<button class="wf-finder-area-btn">&#x2b1c; Search Area</button>';
+  if (state.searchBounds) {
+    html += '<button class="wf-finder-clear-area-btn" style="color:#f87171;">&#x2716; Clear Area</button>';
+  }
+  html += '</div>';
+  html += '<div class="wf-finder-content">';
+  html += '<div class="wf-finder-canvas-wrap">';
+  html += '<canvas class="wf-finder-canvas" width="800" height="450"></canvas>';
+  if (!state.screenshot) {
+    html += '<div class="wf-finder-empty">Click "Capture" to take a screenshot of the current page</div>';
+  }
+  html += '</div>';
+  html += '<div class="wf-finder-sidebar">';
+  if (refImgSrc) {
+    html += '<div class="wf-finder-ref-wrap">';
+    html += '<div class="wf-finder-ref-label">Reference</div>';
+    html += '<img class="wf-finder-ref-img" src="' + refImgSrc + '" alt="Reference">';
+    html += '</div>';
+  }
+  html += '<div class="wf-finder-results-section">';
+  if (state.results) {
+    var best = state.results[0];
+    var bestSim = best ? (best.similarity || 0) : 0;
+    var simPct = (bestSim * 100).toFixed(1);
+    var cls = bestSim >= 0.75 ? 'good' : bestSim >= 0.65 ? 'warn' : 'bad';
+    html += '<div class="wf-finder-score">Best match: <span class="wf-finder-score-value ' + cls + '">' + simPct + '%</span></div>';
+    html += '<div class="wf-finder-score" style="font-size:0.65rem;">' + (state.candidateCount || 0) + ' candidates checked</div>';
+    // Ranked list
+    html += '<div class="wf-finder-candidates-title">Top matches</div>';
+    html += '<div class="wf-finder-candidates">';
+    var top = state.results.slice(0, 8);
+    for (var ri = 0; ri < top.length; ri++) {
+      var r = top[ri];
+      var rSim = ((r.similarity || 0) * 100).toFixed(1);
+      var rCls = (r.similarity || 0) >= 0.75 ? 'good' : (r.similarity || 0) >= 0.65 ? 'warn' : 'bad';
+      html += '<div class="wf-finder-candidate">';
+      html += '<span>' + (ri + 1) + '. <span class="wf-finder-score-value ' + rCls + '">' + rSim + '%</span></span>';
+      if (r.bounds) {
+        html += '<span style="font-size:0.6rem;color:#475569;">(' + Math.round(r.bounds.left) + ',' + Math.round(r.bounds.top) + ')</span>';
+      }
+      html += '</div>';
+    }
+    html += '</div>';
+    // Update position button
+    if (best && best.bounds && step.target && step.target.expectedBounds && state.viewport) {
+      var newPctX = ((best.bounds.left + (best.bounds.width || 0) / 2) / state.viewport.width * 100).toFixed(2);
+      var newPctY = ((best.bounds.top + (best.bounds.height || 0) / 2) / state.viewport.height * 100).toFixed(2);
+      var curPctX = (step.target.expectedBounds.pctX || 0).toFixed(2);
+      var curPctY = (step.target.expectedBounds.pctY || 0).toFixed(2);
+      if (newPctX !== curPctX || newPctY !== curPctY) {
+        html += '<button class="wf-finder-update-btn" data-new-pct-x="' + newPctX + '" data-new-pct-y="' + newPctY + '">Update Position (' + newPctX + '%, ' + newPctY + '%)</button>';
+      }
+    }
+  } else {
+    html += '<div style="color:#475569;font-size:0.7rem;font-style:italic;">Run search to see results</div>';
+  }
+  html += '</div>'; // results-section
+  html += '</div>'; // sidebar
+  html += '</div>'; // content
+
+  panel.innerHTML = html;
+
+  // Draw canvas if screenshot available
+  if (state.screenshot) {
+    var canvas = panel.querySelector('.wf-finder-canvas');
+    var emptyMsg = panel.querySelector('.wf-finder-empty');
+    if (emptyMsg) emptyMsg.remove();
+    drawFinderCanvas(canvas, state, step);
+    panel.querySelector('.wf-finder-search-btn').disabled = false;
+  }
+
+  // ── Wire panel events ──
+
+  // Close
+  panel.querySelector('.wf-finder-close').addEventListener('click', function() {
+    panel.style.display = 'none';
+  });
+
+  // Capture screenshot
+  panel.querySelector('.wf-finder-capture-btn').addEventListener('click', async function() {
+    var btn = this;
+    btn.disabled = true;
+    btn.textContent = 'Capturing...';
+    try {
+      var resp = await fetch('/api/bridge/screenshot', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      var data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || 'Capture failed');
+      state.screenshot = data.screenshot;
+      state.viewport = data.viewport;
+      state.results = null;
+      renderFinderPanel(panel, step, wfId, stepIdx);
+    } catch (err) {
+      toast('Capture failed: ' + err.message, 'error');
+      btn.disabled = false;
+      btn.textContent = '\u{1f4f7} Capture';
+    }
+  });
+
+  // Run search
+  panel.querySelector('.wf-finder-search-btn').addEventListener('click', async function() {
+    var btn = this;
+    btn.disabled = true;
+    btn.textContent = 'Searching...';
+    try {
+      var body = {
+        referenceImagePath: step.target.referenceImage,
+        expectedBounds: step.target.expectedBounds || null,
+      };
+      if (state.searchBounds) body.searchBounds = state.searchBounds;
+      // Use saved screenshot + elements from capture context (ensures correct page state)
+      if (step.target.screenshotPath) body.screenshotPath = step.target.screenshotPath;
+      if (step.target.savedElementsPath) body.savedElementsPath = step.target.savedElementsPath;
+      var resp = await fetch('/api/workflows/' + encodeURIComponent(wfId) + '/visual-find', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      var data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || 'Search failed');
+      state.screenshot = data.screenshot;
+      state.viewport = data.viewport;
+      state.referenceImage = data.referenceImage;
+      state.results = data.results || [];
+      state.candidateCount = data.candidateCount || 0;
+      renderFinderPanel(panel, step, wfId, stepIdx);
+    } catch (err) {
+      toast('Search failed: ' + err.message, 'error');
+      btn.disabled = false;
+      btn.textContent = '\u{1f50d} Search';
+    }
+  });
+
+  // Toggle search area drawing mode
+  var areaBtn = panel.querySelector('.wf-finder-area-btn');
+  if (areaBtn) {
+    areaBtn.addEventListener('click', function() {
+      state.isDrawing = !state.isDrawing;
+      areaBtn.classList.toggle('active', state.isDrawing);
+      var canvas = panel.querySelector('.wf-finder-canvas');
+      if (canvas) canvas.classList.toggle('drawing', state.isDrawing);
+    });
+  }
+
+  // Clear search area
+  var clearAreaBtn = panel.querySelector('.wf-finder-clear-area-btn');
+  if (clearAreaBtn) {
+    clearAreaBtn.addEventListener('click', async function() {
+      state.searchBounds = null;
+      if (step.target) step.target.searchBounds = undefined;
+      try {
+        await fetch('/api/workflows/' + encodeURIComponent(wfId) + '/search-bounds', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ searchBounds: null, referenceImagePath: step.target.referenceImage }),
+        });
+      } catch (e) { /* ignore */ }
+      renderFinderPanel(panel, step, wfId, stepIdx);
+    });
+  }
+
+  // Update position button
+  var updateBtn = panel.querySelector('.wf-finder-update-btn');
+  if (updateBtn) {
+    updateBtn.addEventListener('click', async function() {
+      var newPctX = parseFloat(updateBtn.getAttribute('data-new-pct-x'));
+      var newPctY = parseFloat(updateBtn.getAttribute('data-new-pct-y'));
+      if (isNaN(newPctX) || isNaN(newPctY)) return;
+      if (step.target && step.target.expectedBounds) {
+        step.target.expectedBounds.pctX = newPctX;
+        step.target.expectedBounds.pctY = newPctY;
+      }
+      updateBtn.disabled = true;
+      updateBtn.textContent = 'Saving...';
+      try {
+        var currentWf = _wfCurrentDetail ? _wfCurrentDetail.wf : null;
+        if (!currentWf) throw new Error('No workflow loaded');
+        await saveWorkflow(wfId, currentWf);
+        toast('Position updated to (' + newPctX.toFixed(1) + '%, ' + newPctY.toFixed(1) + '%)', 'success');
+        renderFinderPanel(panel, step, wfId, stepIdx);
+      } catch (err) {
+        toast('Save failed: ' + err.message, 'error');
+        updateBtn.disabled = false;
+        updateBtn.textContent = 'Update Position';
+      }
+    });
+  }
+
+  // Canvas mouse events for search area drawing
+  var canvas = panel.querySelector('.wf-finder-canvas');
+  if (canvas) {
+    canvas.addEventListener('mousedown', function(e) {
+      if (!state.isDrawing || !state.viewport) return;
+      var rect = canvas.getBoundingClientRect();
+      var scaleX = state.viewport.width / canvas.width;
+      var scaleY = state.viewport.height / canvas.height;
+      var canvasX = (e.clientX - rect.left) * (canvas.width / rect.width);
+      var canvasY = (e.clientY - rect.top) * (canvas.height / rect.height);
+      state.drawStart = {
+        pctX: (canvasX * scaleX / state.viewport.width) * 100,
+        pctY: (canvasY * scaleY / state.viewport.height) * 100,
+      };
+    });
+    canvas.addEventListener('mousemove', function(e) {
+      if (!state.isDrawing || !state.drawStart || !state.viewport) return;
+      var rect = canvas.getBoundingClientRect();
+      var scaleX = state.viewport.width / canvas.width;
+      var scaleY = state.viewport.height / canvas.height;
+      var canvasX = (e.clientX - rect.left) * (canvas.width / rect.width);
+      var canvasY = (e.clientY - rect.top) * (canvas.height / rect.height);
+      var endPctX = (canvasX * scaleX / state.viewport.width) * 100;
+      var endPctY = (canvasY * scaleY / state.viewport.height) * 100;
+      state.searchBounds = {
+        pctX: Math.min(state.drawStart.pctX, endPctX),
+        pctY: Math.min(state.drawStart.pctY, endPctY),
+        pctW: Math.abs(endPctX - state.drawStart.pctX),
+        pctH: Math.abs(endPctY - state.drawStart.pctY),
+      };
+      drawFinderCanvas(canvas, state, step);
+    });
+    canvas.addEventListener('mouseup', async function(e) {
+      if (!state.isDrawing || !state.drawStart) return;
+      state.isDrawing = false;
+      state.drawStart = null;
+      var areaBtn2 = panel.querySelector('.wf-finder-area-btn');
+      if (areaBtn2) areaBtn2.classList.remove('active');
+      canvas.classList.remove('drawing');
+      if (state.searchBounds && state.searchBounds.pctW > 1 && state.searchBounds.pctH > 1) {
+        if (step.target) step.target.searchBounds = state.searchBounds;
+        try {
+          await fetch('/api/workflows/' + encodeURIComponent(wfId) + '/search-bounds', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ searchBounds: state.searchBounds, referenceImagePath: step.target.referenceImage }),
+          });
+          toast('Search area saved', 'success');
+        } catch (e) { /* ignore */ }
+        renderFinderPanel(panel, step, wfId, stepIdx);
+      } else {
+        state.searchBounds = null;
+      }
+    });
+  }
+}
+
+function drawFinderCanvas(canvas, state, step) {
+  if (!canvas || !state.screenshot) return;
+
+  var ctx = canvas.getContext('2d');
+  var img = new Image();
+  img.onload = function() {
+    // Scale canvas to image aspect ratio
+    var aspect = img.width / img.height;
+    canvas.width = Math.min(img.width, 800);
+    canvas.height = Math.round(canvas.width / aspect);
+
+    // Draw screenshot
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+    var scaleX = canvas.width / img.width;
+    var scaleY = canvas.height / img.height;
+
+    // Viewport-to-image scale (screenshots may be at device pixel ratio)
+    var vpToImgX = state.viewport ? img.width / state.viewport.width : 1;
+    var vpToImgY = state.viewport ? img.height / state.viewport.height : 1;
+
+    // Draw search bounds overlay
+    if (state.searchBounds && state.searchBounds.pctW > 0 && state.viewport) {
+      var sbLeft = (state.searchBounds.pctX / 100) * state.viewport.width * vpToImgX * scaleX;
+      var sbTop = (state.searchBounds.pctY / 100) * state.viewport.height * vpToImgY * scaleY;
+      var sbW = (state.searchBounds.pctW / 100) * state.viewport.width * vpToImgX * scaleX;
+      var sbH = (state.searchBounds.pctH / 100) * state.viewport.height * vpToImgY * scaleY;
+
+      // Dim everything outside the search area
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+      ctx.fillRect(0, 0, canvas.width, sbTop);
+      ctx.fillRect(0, sbTop, sbLeft, sbH);
+      ctx.fillRect(sbLeft + sbW, sbTop, canvas.width - sbLeft - sbW, sbH);
+      ctx.fillRect(0, sbTop + sbH, canvas.width, canvas.height - sbTop - sbH);
+
+      // Dashed border
+      ctx.strokeStyle = '#38bdf8';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([6, 4]);
+      ctx.strokeRect(sbLeft, sbTop, sbW, sbH);
+      ctx.setLineDash([]);
+    }
+
+    // Draw expected position crosshair
+    if (step.target && step.target.expectedBounds && state.viewport) {
+      var exX = (step.target.expectedBounds.pctX / 100) * state.viewport.width * vpToImgX * scaleX;
+      var exY = (step.target.expectedBounds.pctY / 100) * state.viewport.height * vpToImgY * scaleY;
+      ctx.strokeStyle = '#06b6d4';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(exX - 12, exY); ctx.lineTo(exX + 12, exY);
+      ctx.moveTo(exX, exY - 12); ctx.lineTo(exX, exY + 12);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(exX, exY, 8, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    // Draw result bounding boxes
+    if (state.results && state.viewport) {
+      for (var i = state.results.length - 1; i >= 0; i--) {
+        var r = state.results[i];
+        if (!r.bounds) continue;
+        var bx = r.bounds.left * vpToImgX * scaleX;
+        var by = r.bounds.top * vpToImgY * scaleY;
+        var bw = (r.bounds.width || 20) * vpToImgX * scaleX;
+        var bh = (r.bounds.height || 20) * vpToImgY * scaleY;
+
+        var color = i === 0 ? '#22c55e' : (r.similarity || 0) >= 0.65 ? '#eab308' : '#ef4444';
+        ctx.strokeStyle = color;
+        ctx.lineWidth = i === 0 ? 3 : 1.5;
+        ctx.strokeRect(bx, by, bw, bh);
+
+        // Score label
+        ctx.fillStyle = color;
+        ctx.font = (i === 0 ? 'bold ' : '') + '10px sans-serif';
+        var scoreText = ((r.similarity || 0) * 100).toFixed(0) + '%';
+        ctx.fillRect(bx, by - 14, ctx.measureText(scoreText).width + 6, 14);
+        ctx.fillStyle = '#fff';
+        ctx.fillText(scoreText, bx + 3, by - 3);
+      }
+    }
+  };
+  img.src = state.screenshot;
+}
 
 function renderVisualView(wf, source) {
   var html = '';
@@ -1550,26 +2376,7 @@ function renderVisualView(wf, source) {
   html += '<div class="wf-section">';
   html += '<div class="wf-section-header">Steps (' + wf.steps.length + ')' + helpIcon('workflows-steps') + '</div>';
   html += '<div class="wf-section-body">';
-  for (var i = 0; i < wf.steps.length; i++) {
-    var step = wf.steps[i];
-    var icon = STEP_ICONS[step.type] || '&#x25cf;';
-    var isSmart = step.type === 'wait' && step.condition && step.condition.type !== 'delay';
-
-    html += '<div class="wf-step" data-step-idx="' + i + '">';
-    html += '<span class="wf-step-num">' + (i + 1) + '</span>';
-    html += '<span class="wf-step-icon">' + icon + '</span>';
-    html += '<span class="wf-step-label">' + escHtml(step.label || step.id) + '</span>';
-    html += '<span class="wf-step-type">' + escHtml(step.type) + '</span>';
-    if (isSmart) {
-      html += '<span class="wf-step-smart">smart</span>';
-    }
-    html += '<span class="wf-step-expand">&#x25BC;</span>';
-    html += '</div>';
-    // Inline editor panel (collapsed by default)
-    html += '<div class="wf-step-editor" data-step-idx="' + i + '" style="display:none;">';
-    html += renderStepEditor(step, i, wf.steps.length);
-    html += '</div>';
-  }
+  html += renderStepList(wf.steps, '');
   html += '</div>';
   html += '</div>';
 
@@ -1732,6 +2539,21 @@ function renderModelView(wf) {
   html += '</select>';
   html += '</div>';
 
+  html += '<div class="wf-model-config-row" style="align-items:flex-start;">';
+  html += '<label class="wf-model-config-label" style="padding-top:0.15rem;">Data Sources</label>';
+  html += '<div id="wf-source-checkboxes" style="display:flex;flex-direction:column;gap:0.35rem;">';
+  html += '<label style="display:flex;align-items:center;gap:0.4rem;font-size:0.78rem;color:#e2e8f0;cursor:pointer;">';
+  html += '<input type="checkbox" id="wf-source-recording" checked> Recording <span id="wf-source-recording-count" style="color:#64748b;font-size:0.7rem;"></span>';
+  html += '</label>';
+  html += '<label style="display:flex;align-items:center;gap:0.4rem;font-size:0.78rem;color:#e2e8f0;cursor:pointer;">';
+  html += '<input type="checkbox" id="wf-source-execution" checked> Execution Runs <span id="wf-source-execution-count" style="color:#64748b;font-size:0.7rem;"></span>';
+  html += '</label>';
+  html += '<label style="display:flex;align-items:center;gap:0.4rem;font-size:0.78rem;color:#e2e8f0;cursor:pointer;">';
+  html += '<input type="checkbox" id="wf-source-debug" checked> Debug Captures <span id="wf-source-debug-count" style="color:#64748b;font-size:0.7rem;"></span>';
+  html += '</label>';
+  html += '</div>';
+  html += '</div>';
+
   html += '</div>'; // end config
 
   // Action buttons
@@ -1789,6 +2611,25 @@ function wireModelViewHandlers(wf) {
         if (backboneEl) configBody.backbone = backboneEl.value;
         if (epochsEl) configBody.epochs = parseInt(epochsEl.value, 10);
         if (embedDimEl) configBody.embedDim = parseInt(embedDimEl.value, 10);
+
+        // Read data source checkboxes
+        var sources = [];
+        var srcRec = document.getElementById('wf-source-recording');
+        var srcExec = document.getElementById('wf-source-execution');
+        var srcDebug = document.getElementById('wf-source-debug');
+        if (srcRec && srcRec.checked) sources.push('recording');
+        if (srcExec && srcExec.checked) sources.push('execution');
+        if (srcDebug && srcDebug.checked) sources.push('debug');
+        if (sources.length === 0) {
+          toast('Select at least one data source', 'error');
+          retrainBtn.disabled = false;
+          retrainBtn.textContent = retrainBtn.dataset.originalText || 'Train Model';
+          return;
+        }
+        // Only send sources filter if not all 3 are selected (all = no filter)
+        if (sources.length < 3) {
+          configBody.sources = sources;
+        }
 
         var res = await fetch('/api/workflows/' + encodeURIComponent(wf.id) + '/training/retry', {
           method: 'POST',
@@ -1986,8 +2827,9 @@ async function loadTrainingDataStats(workflowId) {
     } else {
       html += '<div class="wf-td-grid">';
       html += tdStat(snap.total, 'Snapshots', '#e2e8f0');
-      html += tdStat(snap.fromRecording, 'From Recording', '#c4b5fd');
-      html += tdStat(snap.fromExecution, 'From Runs', '#6ee7b7');
+      html += tdStat(snap.fromRecording, 'Recording', '#c4b5fd');
+      html += tdStat(snap.fromExecution, 'Runs', '#6ee7b7');
+      html += tdStat(snap.fromDebug || 0, 'Debug', '#f59e0b');
       html += tdStat(snap.totalElements, 'Elements', '#94a3b8');
       html += tdStat(snap.uniqueSelectors, 'Unique Selectors', '#94a3b8');
       html += tdStat(snap.interactedSelectors, 'Interacted', '#fbbf24');
@@ -2026,6 +2868,14 @@ async function loadTrainingDataStats(workflowId) {
     }
 
     container.innerHTML = html;
+
+    // Populate source counts next to checkboxes
+    var recCount = document.getElementById('wf-source-recording-count');
+    if (recCount && snap) recCount.textContent = '(' + snap.fromRecording + ')';
+    var execCount = document.getElementById('wf-source-execution-count');
+    if (execCount && snap) execCount.textContent = '(' + snap.fromExecution + ')';
+    var debugCount = document.getElementById('wf-source-debug-count');
+    if (debugCount && snap) debugCount.textContent = '(' + (snap.fromDebug || 0) + ')';
   } catch (err) {
     container.innerHTML = '<div style="color:#64748b;font-size:0.75rem;">Failed to load training data stats</div>';
   }
@@ -2242,6 +3092,16 @@ function wireUpHandlers(wf, filePath, source) {
         openPublishDialog(wf, filePath);
       }
     });
+  }
+
+  // Rename (button + double-click on title)
+  var renameBtn = document.querySelector('#wf-btn-rename');
+  if (renameBtn) {
+    renameBtn.addEventListener('click', function() { startInlineRename(wf); });
+  }
+  var titleEl = document.querySelector('#wf-title');
+  if (titleEl) {
+    titleEl.addEventListener('dblclick', function() { startInlineRename(wf); });
   }
 
   // Delete
@@ -2523,8 +3383,8 @@ function wireUpHandlers(wf, filePath, source) {
     row.addEventListener('click', function(e) {
       // Don't toggle if clicking inside an editor
       if (e.target.closest('.wf-step-editor')) return;
-      var idx = parseInt(row.getAttribute('data-step-idx'));
-      var editor = container.querySelector('.wf-step-editor[data-step-idx="' + idx + '"]');
+      var pathStr = row.getAttribute('data-step-idx');
+      var editor = container.querySelector('.wf-step-editor[data-step-idx="' + pathStr + '"]');
       if (!editor) return;
       var isOpen = editor.style.display !== 'none';
       // Collapse all editors
@@ -2539,7 +3399,9 @@ function wireUpHandlers(wf, filePath, source) {
 
   // Wire step editor action buttons
   container.querySelectorAll('.wf-step-editor[data-step-idx]').forEach(function(editor) {
-    var idx = parseInt(editor.getAttribute('data-step-idx'));
+    var pathStr = editor.getAttribute('data-step-idx');
+    var resolved = resolveStepPath(wf.steps, pathStr);
+    if (!resolved) return;
 
     // Prevent clicks inside editor from toggling the row
     editor.addEventListener('click', function(e) { e.stopPropagation(); });
@@ -2548,16 +3410,22 @@ function wireUpHandlers(wf, filePath, source) {
     var saveBtn = editor.querySelector('.wf-se-save');
     if (saveBtn) {
       saveBtn.addEventListener('click', async function() {
-        var step = wf.steps[idx];
-        if (!step) return;
-        var updated = collectStepEditorValues(editor, step);
-        wf.steps[idx] = updated;
+        var r = resolveStepPath(wf.steps, pathStr);
+        if (!r || !r.step) return;
+        var updated = collectStepEditorValues(editor, r.step);
+        // Preserve sub-step arrays for control flow types
+        if (r.step.thenSteps) updated.thenSteps = r.step.thenSteps;
+        if (r.step.elseSteps) updated.elseSteps = r.step.elseSteps;
+        if (r.step.steps) updated.steps = r.step.steps;
+        if (r.step.trySteps) updated.trySteps = r.step.trySteps;
+        if (r.step.catchSteps) updated.catchSteps = r.step.catchSteps;
+        r.array[r.index] = updated;
         var varsAdded = ensureStepVariablesDeclared(wf, updated);
         saveBtn.disabled = true;
         saveBtn.textContent = 'Saving...';
         try {
           await saveWorkflow(wf.id, wf);
-          var msg = 'Step ' + (idx + 1) + ' saved';
+          var msg = 'Step saved';
           if (varsAdded > 0) msg += ' — ' + varsAdded + ' variable' + (varsAdded > 1 ? 's' : '') + ' added';
           toast(msg, 'success');
           renderWorkflowDetail(wf, filePath, source);
@@ -2574,7 +3442,7 @@ function wireUpHandlers(wf, filePath, source) {
     if (cancelBtn) {
       cancelBtn.addEventListener('click', function() {
         editor.style.display = 'none';
-        var row = container.querySelector('.wf-step[data-step-idx="' + idx + '"]');
+        var row = container.querySelector('.wf-step[data-step-idx="' + pathStr + '"]');
         if (row) row.classList.remove('wf-step-expanded');
       });
     }
@@ -2583,9 +3451,11 @@ function wireUpHandlers(wf, filePath, source) {
     var deleteBtn = editor.querySelector('.wf-se-delete');
     if (deleteBtn) {
       deleteBtn.addEventListener('click', async function() {
-        var label = wf.steps[idx] ? (wf.steps[idx].label || wf.steps[idx].id || 'Step ' + (idx + 1)) : 'Step ' + (idx + 1);
+        var r = resolveStepPath(wf.steps, pathStr);
+        if (!r) return;
+        var label = r.step ? (r.step.label || r.step.id || 'this step') : 'this step';
         if (!confirm('Delete step "' + label + '"? This cannot be undone.')) return;
-        wf.steps.splice(idx, 1);
+        r.array.splice(r.index, 1);
         deleteBtn.disabled = true;
         try {
           await saveWorkflow(wf.id, wf);
@@ -2600,11 +3470,13 @@ function wireUpHandlers(wf, filePath, source) {
 
     // Move Up
     var upBtn = editor.querySelector('.wf-se-up');
-    if (upBtn && idx > 0) {
+    if (upBtn) {
       upBtn.addEventListener('click', async function() {
-        var tmp = wf.steps[idx];
-        wf.steps[idx] = wf.steps[idx - 1];
-        wf.steps[idx - 1] = tmp;
+        var r = resolveStepPath(wf.steps, pathStr);
+        if (!r || r.index <= 0) { toast('Already at top', 'info'); return; }
+        var tmp = r.array[r.index];
+        r.array[r.index] = r.array[r.index - 1];
+        r.array[r.index - 1] = tmp;
         upBtn.disabled = true;
         try {
           await saveWorkflow(wf.id, wf);
@@ -2619,11 +3491,13 @@ function wireUpHandlers(wf, filePath, source) {
 
     // Move Down
     var downBtn = editor.querySelector('.wf-se-down');
-    if (downBtn && idx < wf.steps.length - 1) {
+    if (downBtn) {
       downBtn.addEventListener('click', async function() {
-        var tmp = wf.steps[idx];
-        wf.steps[idx] = wf.steps[idx + 1];
-        wf.steps[idx + 1] = tmp;
+        var r = resolveStepPath(wf.steps, pathStr);
+        if (!r || r.index >= r.array.length - 1) { toast('Already at bottom', 'info'); return; }
+        var tmp = r.array[r.index];
+        r.array[r.index] = r.array[r.index + 1];
+        r.array[r.index + 1] = tmp;
         downBtn.disabled = true;
         try {
           await saveWorkflow(wf.id, wf);
@@ -2636,50 +3510,236 @@ function wireUpHandlers(wf, filePath, source) {
       });
     }
 
+    // Move Out — move a nested step to the parent level (after the wrapper)
+    var moveOutBtn = editor.querySelector('.wf-se-move-out');
+    if (moveOutBtn) {
+      moveOutBtn.addEventListener('click', async function() {
+        var r = resolveStepPath(wf.steps, pathStr);
+        if (!r || !r.step) return;
+
+        // Parse the path to find parent: e.g. "4.thenSteps.0" → parent at "4", prop "thenSteps"
+        var parentInfo = getParentFromPath(wf.steps, pathStr);
+        if (!parentInfo) { toast('Cannot move out — already at top level', 'info'); return; }
+
+        // Remove from current sub-array
+        var stepCopy = JSON.parse(JSON.stringify(r.step));
+        r.array.splice(r.index, 1);
+
+        // Insert into parent array right after the wrapper step
+        parentInfo.parentArray.splice(parentInfo.parentIndex + 1, 0, stepCopy);
+
+        moveOutBtn.disabled = true;
+        try {
+          await saveWorkflow(wf.id, wf);
+          toast('Step moved out', 'success');
+          renderWorkflowDetail(wf, filePath, source);
+        } catch (err) {
+          toast('Move out failed: ' + err.message, 'error');
+          moveOutBtn.disabled = false;
+        }
+      });
+    }
+
     // Insert Step Below
     var insertBtn = editor.querySelector('.wf-se-insert-below');
     if (insertBtn) {
       insertBtn.addEventListener('click', function() {
-        // Toggle inline type picker
-        var existing = editor.querySelector('.wf-se-insert-picker');
-        if (existing) { existing.remove(); return; }
-
-        var pickerHtml = '<div class="wf-se-insert-picker" style="margin-top:0.5rem;padding:0.5rem;background:#1e293b;border:1px solid #334155;border-radius:6px;">';
-        pickerHtml += '<div style="font-size:0.75rem;color:#94a3b8;margin-bottom:0.5rem;">Select step type to insert:</div>';
-        pickerHtml += '<div style="display:flex;flex-wrap:wrap;gap:0.35rem;">';
-        var allTypes = ['navigate', 'click', 'type', 'wait', 'keyboard', 'scroll', 'assert', 'set_variable', 'file_dialog', 'capture_download', 'move_file'];
-        for (var ti = 0; ti < allTypes.length; ti++) {
-          var t = allTypes[ti];
-          var tIcon = STEP_ICONS[t] || '&#x25cf;';
-          pickerHtml += '<button class="wf-se-btn wf-se-insert-type" data-insert-type="' + t + '" style="font-size:0.7rem;padding:0.25rem 0.5rem;">' + tIcon + ' ' + t + '</button>';
-        }
-        pickerHtml += '</div>';
-        pickerHtml += '</div>';
-
-        editor.insertAdjacentHTML('beforeend', pickerHtml);
-
-        editor.querySelectorAll('.wf-se-insert-type').forEach(function(typeBtn) {
-          typeBtn.addEventListener('click', async function() {
-            var newType = typeBtn.getAttribute('data-insert-type');
-            var newStep = buildDefaultStep(newType);
-            newStep.id = 'step-' + Date.now() + '-' + newType;
-            newStep.label = buildStepLabel(newStep, idx + 1);
-
-            wf.steps.splice(idx + 1, 0, newStep);
-            insertBtn.disabled = true;
-            try {
-              await saveWorkflow(wf.id, wf);
-              toast('Step inserted', 'success');
-              renderWorkflowDetail(wf, filePath, source);
-            } catch (err) {
-              toast('Insert failed: ' + err.message, 'error');
-              wf.steps.splice(idx + 1, 1);
-              insertBtn.disabled = false;
-            }
-          });
+        showInsertPicker(editor, wf, pathStr, filePath, source, function(targetArray, insertIdx) {
+          // Default: insert after current step in same array
+          var r = resolveStepPath(wf.steps, pathStr);
+          return { array: r.array, index: r.index + 1 };
         });
       });
     }
+
+    // Wrap in Conditional/Loop/Try-Catch
+    editor.querySelectorAll('.wf-se-wrap').forEach(function(wrapBtn) {
+      wrapBtn.addEventListener('click', async function() {
+        var wrapType = wrapBtn.getAttribute('data-wrap-type');
+        var r = resolveStepPath(wf.steps, pathStr);
+        if (!r || !r.step) return;
+
+        var wrapped = JSON.parse(JSON.stringify(r.step));
+        var wrapper;
+        if (wrapType === 'conditional') {
+          wrapper = {
+            id: 'step-' + Date.now() + '-conditional',
+            type: 'conditional',
+            label: 'Conditional',
+            condition: { type: 'expression', expression: '' },
+            thenSteps: [wrapped],
+            elseSteps: [],
+          };
+        } else if (wrapType === 'loop') {
+          wrapper = {
+            id: 'step-' + Date.now() + '-loop',
+            type: 'loop',
+            label: 'Loop',
+            overVariable: '',
+            itemVariable: 'item',
+            indexVariable: '',
+            steps: [wrapped],
+          };
+        } else if (wrapType === 'try_catch') {
+          wrapper = {
+            id: 'step-' + Date.now() + '-try_catch',
+            type: 'try_catch',
+            label: 'Try / Catch',
+            trySteps: [wrapped],
+            catchSteps: [],
+            errorVariable: 'error',
+          };
+        }
+        if (!wrapper) return;
+
+        r.array[r.index] = wrapper;
+        wrapBtn.disabled = true;
+        try {
+          await saveWorkflow(wf.id, wf);
+          toast('Step wrapped in ' + wrapType.replace('_', '/'), 'success');
+          renderWorkflowDetail(wf, filePath, source);
+        } catch (err) {
+          toast('Wrap failed: ' + err.message, 'error');
+          r.array[r.index] = wrapped; // revert
+          wrapBtn.disabled = false;
+        }
+      });
+    });
+
+    // Unwrap — move sub-steps out and remove wrapper
+    var unwrapBtn = editor.querySelector('.wf-se-unwrap');
+    if (unwrapBtn) {
+      unwrapBtn.addEventListener('click', async function() {
+        var r = resolveStepPath(wf.steps, pathStr);
+        if (!r || !r.step) return;
+
+        // Gather all sub-steps
+        var subSteps = [];
+        if (r.step.type === 'conditional') {
+          subSteps = (r.step.thenSteps || []).concat(r.step.elseSteps || []);
+        } else if (r.step.type === 'loop') {
+          subSteps = r.step.steps || [];
+        } else if (r.step.type === 'try_catch') {
+          subSteps = (r.step.trySteps || []).concat(r.step.catchSteps || []);
+        }
+
+        if (subSteps.length === 0) {
+          if (!confirm('This wrapper has no sub-steps. Delete it?')) return;
+        }
+
+        // Replace the wrapper with its sub-steps
+        r.array.splice(r.index, 1, ...subSteps);
+        unwrapBtn.disabled = true;
+        try {
+          await saveWorkflow(wf.id, wf);
+          toast('Unwrapped ' + subSteps.length + ' step' + (subSteps.length !== 1 ? 's' : ''), 'success');
+          renderWorkflowDetail(wf, filePath, source);
+        } catch (err) {
+          toast('Unwrap failed: ' + err.message, 'error');
+          unwrapBtn.disabled = false;
+        }
+      });
+    }
+  });
+
+  // Wire "Find Element" buttons
+  container.querySelectorAll('.wf-se-find-element').forEach(function(findBtn) {
+    findBtn.addEventListener('click', function(e) {
+      e.stopPropagation();
+      var editor = findBtn.closest('.wf-step-editor');
+      if (!editor) return;
+      var pathStr = editor.getAttribute('data-step-idx');
+      var resolved = resolveStepPath(wf.steps, pathStr);
+      if (!resolved || !resolved.step) return;
+      var panel = editor.querySelector('.wf-se-finder-panel');
+      if (!panel) return;
+      if (panel.style.display !== 'none') {
+        panel.style.display = 'none';
+        return;
+      }
+      panel.style.display = 'block';
+      renderFinderPanel(panel, resolved.step, wf.id, resolved.index);
+    });
+  });
+
+  // Wire "+ Add step" buttons inside sub-step groups
+  container.querySelectorAll('.wf-group-insert').forEach(function(groupInsertBtn) {
+    groupInsertBtn.addEventListener('click', function(e) {
+      e.stopPropagation();
+      var groupPath = groupInsertBtn.getAttribute('data-group-path');
+      showInsertPickerForGroup(groupInsertBtn, wf, groupPath, filePath, source);
+    });
+  });
+}
+
+/**
+ * Show the step type picker inline. Used by both "Insert Below" and group "+ Add step".
+ * getInsertPoint is a function returning { array, index } for where to insert.
+ */
+function showInsertPicker(anchorEl, wf, pathStr, filePath, source, getInsertPoint) {
+  // Toggle inline type picker
+  var existing = anchorEl.closest('.wf-step-editor, .wf-step-group')?.querySelector('.wf-se-insert-picker');
+  if (existing) { existing.remove(); return; }
+
+  var pickerHtml = '<div class="wf-se-insert-picker" style="margin-top:0.5rem;padding:0.5rem;background:#1e293b;border:1px solid #334155;border-radius:6px;">';
+  pickerHtml += '<div style="font-size:0.75rem;color:#94a3b8;margin-bottom:0.5rem;">Select step type to insert:</div>';
+  pickerHtml += '<div style="display:flex;flex-wrap:wrap;gap:0.35rem;">';
+  var allTypes = ['navigate', 'click', 'type', 'wait', 'keyboard', 'scroll', 'assert', 'set_variable', 'file_dialog', 'capture_download', 'move_file', 'conditional', 'loop', 'try_catch', 'inject_style'];
+  for (var ti = 0; ti < allTypes.length; ti++) {
+    var t = allTypes[ti];
+    var tIcon = STEP_ICONS[t] || '&#x25cf;';
+    pickerHtml += '<button class="wf-se-btn wf-se-insert-type" data-insert-type="' + t + '" style="font-size:0.7rem;padding:0.25rem 0.5rem;">' + tIcon + ' ' + t + '</button>';
+  }
+  pickerHtml += '</div>';
+  pickerHtml += '</div>';
+
+  anchorEl.closest('.wf-step-editor, .wf-step-group, .wf-se-actions')?.insertAdjacentHTML('beforeend', pickerHtml);
+  // Find the just-inserted picker
+  var parentEl = anchorEl.closest('.wf-step-editor, .wf-step-group, .wf-se-actions');
+  if (!parentEl) return;
+  parentEl.querySelectorAll('.wf-se-insert-type').forEach(function(typeBtn) {
+    typeBtn.addEventListener('click', async function() {
+      var newType = typeBtn.getAttribute('data-insert-type');
+      var newStep = buildDefaultStep(newType);
+      newStep.id = 'step-' + Date.now() + '-' + newType;
+      newStep.label = newStep.label || buildStepLabel(newStep, 0);
+
+      var ip = getInsertPoint();
+      if (!ip) return;
+      ip.array.splice(ip.index, 0, newStep);
+      typeBtn.disabled = true;
+      try {
+        await saveWorkflow(wf.id, wf);
+        toast('Step inserted', 'success');
+        renderWorkflowDetail(wf, filePath, source);
+      } catch (err) {
+        toast('Insert failed: ' + err.message, 'error');
+        ip.array.splice(ip.index, 1);
+        typeBtn.disabled = false;
+      }
+    });
+  });
+}
+
+/**
+ * Show the step type picker for "+ Add step" buttons inside sub-step groups.
+ */
+function showInsertPickerForGroup(btn, wf, groupPath, filePath, source) {
+  // groupPath is like "3.thenSteps" — we need to find the parent step's sub-array
+  var parts = groupPath.split('.');
+  var propName = parts.pop(); // e.g. "thenSteps"
+  var parentPath = parts.join('.');
+
+  var parentResolved = resolveStepPath(wf.steps, parentPath);
+  if (!parentResolved || !parentResolved.step) return;
+  var subArray = parentResolved.step[propName];
+  if (!subArray) {
+    parentResolved.step[propName] = [];
+    subArray = parentResolved.step[propName];
+  }
+
+  showInsertPicker(btn, wf, groupPath, filePath, source, function() {
+    return { array: subArray, index: subArray.length };
   });
 }
 

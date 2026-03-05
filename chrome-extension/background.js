@@ -20,6 +20,9 @@ let recordingEventBuffer = [];    // buffer events when WS is temporarily discon
 const MAX_EVENT_BUFFER = 50;      // max buffered events to prevent memory leaks
 let debugModeData = null;         // debug session state for side panel + marker persistence
 // Shape: { steps, workflowId, workflowName, apiBaseUrl, currentIndex, completedIndices, failedIndices, tabId }
+let sidePanelOpen = false;        // track sidepanel open state via port connection
+let pendingPick = null;           // stores element_picked data when sidepanel was closed during pick
+let pendingStepResult = null;     // stores debug step result from close→execute→reopen flow
 
 // Restore debug state from persistent storage (survives MV3 service worker restarts)
 chrome.storage.local.get('debugModeData', (result) => {
@@ -266,6 +269,7 @@ async function handleMessage(message) {
           coordinateInfo: params.coordinateInfo || null,
           status: params.stepResult?.status || null,
           error: params.stepResult?.error || null,
+          stepDetail: params.stepDetail || null,
         };
       }
     }
@@ -295,6 +299,7 @@ async function handleMessage(message) {
         coordinateInfo: params.coordinateInfo,
         stepIndex: params.stepIndex,
         stepResult: params.stepResult,
+        stepDetail: params.stepDetail || null,
       }
     }).catch(() => {});
 
@@ -454,13 +459,65 @@ async function handleMessage(message) {
     // Optional: pass params.crop = {left, top, width, height} to crop a region
     if (action === 'capture_viewport') {
       try {
+        // If hideOverlay requested, hide debug markers before capturing
+        if (params.hideOverlay && tab?.id) {
+          try {
+            await chrome.tabs.sendMessage(tab.id, { action: 'toggle_debug_overlay', params: { visible: false } });
+            await new Promise(r => setTimeout(r, 50)); // brief wait for DOM update
+          } catch {}
+        }
+
         const dataUrl = await chrome.tabs.captureVisibleTab(null, { format: 'png' });
+
+        // Re-show overlay after capture
+        if (params.hideOverlay && tab?.id) {
+          try {
+            chrome.tabs.sendMessage(tab.id, { action: 'toggle_debug_overlay', params: { visible: true } });
+          } catch {}
+        }
 
         if (params.crop && params.crop.width > 0 && params.crop.height > 0) {
           // Crop using OffscreenCanvas (available in MV3 service workers)
-          const { left, top, width, height } = params.crop;
+          let { left, top, width, height } = params.crop;
           const response = await fetch(dataUrl);
           const blob = await response.blob();
+
+          // Detect DPR: compare captured image size to expected viewport size
+          // captureVisibleTab returns image at device pixel ratio
+          const fullBitmap = await createImageBitmap(blob);
+          const imgW = fullBitmap.width;
+          const imgH = fullBitmap.height;
+          fullBitmap.close();
+
+          // If crop coords appear to be in CSS pixels (not DPR-scaled), scale them up
+          // Heuristic: if the image is significantly larger than crop bounds suggest,
+          // the caller is using CSS pixel coordinates
+          if (params.crop.dprScaled) {
+            // Already DPR-scaled by the caller (e.g., element picker) — use as-is
+          } else {
+            // Assume CSS pixel coordinates — scale by detected DPR
+            const dpr = tab ? (await chrome.tabs.getZoom(tab.id)) || 1 : 1;
+            // getZoom returns zoom level, not DPR. Use image/viewport ratio instead.
+            // We estimate DPR from actual capture size vs expected viewport
+            const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+            const tabWidth = activeTab?.width || imgW;
+            const estimatedDpr = Math.round(imgW / tabWidth) || 1;
+            if (estimatedDpr > 1) {
+              left = Math.round(left * estimatedDpr);
+              top = Math.round(top * estimatedDpr);
+              width = Math.round(width * estimatedDpr);
+              height = Math.round(height * estimatedDpr);
+            }
+          }
+
+          // Clamp to image bounds
+          left = Math.max(0, Math.min(left, imgW - 1));
+          top = Math.max(0, Math.min(top, imgH - 1));
+          width = Math.min(width, imgW - left);
+          height = Math.min(height, imgH - top);
+          if (width < 1) width = 1;
+          if (height < 1) height = 1;
+
           const bitmap = await createImageBitmap(blob, left, top, width, height);
           const canvas = new OffscreenCanvas(width, height);
           const ctx = canvas.getContext('2d');
@@ -473,7 +530,12 @@ async function handleMessage(message) {
             binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192));
           }
           const croppedDataUrl = 'data:image/png;base64,' + btoa(binary);
-          sendResponse({ id, success: true, data: { image: croppedDataUrl } });
+          // If caller wants the full (uncropped) image too, include it
+          if (params.returnFull) {
+            sendResponse({ id, success: true, data: { image: croppedDataUrl, fullImage: dataUrl } });
+          } else {
+            sendResponse({ id, success: true, data: { image: croppedDataUrl } });
+          }
         } else {
           sendResponse({ id, success: true, data: { image: dataUrl } });
         }
@@ -884,15 +946,72 @@ connect();
 // that chrome.sidePanel.open() needs.
 chrome.action.onClicked.addListener(async (tab) => {
   if (debugModeData) {
-    try {
-      await chrome.sidePanel.open({ windowId: tab.windowId });
-      console.log('[Woodbury DBG] Side panel opened via extension icon click');
-      // Send current state to the side panel after it loads
-      setTimeout(() => {
-        chrome.runtime.sendMessage({ type: 'debug_started', data: debugModeData }).catch(() => {});
-      }, 500);
-    } catch (e) {
-      console.log('[Woodbury DBG] Failed to open side panel:', e.message);
+    if (sidePanelOpen) {
+      // Toggle: close the panel
+      try {
+        await chrome.sidePanel.setOptions({ enabled: false });
+        await chrome.sidePanel.setOptions({ enabled: true });
+        console.log('[Woodbury DBG] Side panel closed via icon click');
+      } catch (e) {
+        console.log('[Woodbury DBG] Failed to close side panel:', e.message);
+      }
+    } else {
+      // Toggle: open the panel
+      try {
+        await chrome.sidePanel.open({ windowId: tab.windowId });
+        console.log('[Woodbury DBG] Side panel opened via extension icon click');
+        setTimeout(() => {
+          chrome.runtime.sendMessage({ type: 'debug_started', data: debugModeData }).catch(() => {});
+        }, 500);
+      } catch (e) {
+        console.log('[Woodbury DBG] Failed to open side panel:', e.message);
+      }
+    }
+  }
+});
+
+// Track sidepanel open/close state via port connection.
+// The sidepanel connects a port when it loads; when it closes (X button or toggle),
+// the port disconnects.
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name === 'woodbury-sidepanel') {
+    sidePanelOpen = true;
+    console.log('[Woodbury DBG] Side panel connected');
+    port.onDisconnect.addListener(() => {
+      sidePanelOpen = false;
+      console.log('[Woodbury DBG] Side panel disconnected');
+    });
+  }
+});
+
+// Keyboard shortcut: Alt+S toggles the debug side panel
+chrome.commands.onCommand.addListener(async (command) => {
+  if (command === 'toggle-sidepanel') {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab) return;
+
+    if (sidePanelOpen) {
+      // Close the panel by disabling and immediately re-enabling
+      try {
+        await chrome.sidePanel.setOptions({ enabled: false });
+        await chrome.sidePanel.setOptions({ enabled: true });
+        console.log('[Woodbury DBG] Side panel closed via shortcut');
+      } catch (e) {
+        console.log('[Woodbury DBG] Failed to close side panel:', e.message);
+      }
+    } else {
+      // Open the panel (commands provide the required user gesture)
+      try {
+        await chrome.sidePanel.open({ windowId: tab.windowId });
+        console.log('[Woodbury DBG] Side panel opened via shortcut');
+        if (debugModeData) {
+          setTimeout(() => {
+            chrome.runtime.sendMessage({ type: 'debug_started', data: debugModeData }).catch(() => {});
+          }, 500);
+        }
+      } catch (e) {
+        console.log('[Woodbury DBG] Failed to open side panel:', e.message);
+      }
     }
   }
 });
@@ -909,6 +1028,45 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponseCallback) => 
     hasLoggedWaiting = false;
     connect();
     sendResponseCallback({ ok: true });
+    return true;
+  }
+
+  // Side panel asks to close itself (for step execution)
+  if (message.type === 'close_sidepanel') {
+    (async () => {
+      try {
+        await chrome.sidePanel.setOptions({ enabled: false });
+        await chrome.sidePanel.setOptions({ enabled: true });
+        console.log('[Woodbury DBG] Side panel closed by request');
+        sendResponseCallback({ ok: true });
+      } catch (e) {
+        console.log('[Woodbury DBG] Failed to close side panel:', e.message);
+        sendResponseCallback({ ok: false, error: e.message });
+      }
+    })();
+    return true;
+  }
+
+  // Side panel asks to reopen itself (after step execution)
+  if (message.type === 'open_sidepanel') {
+    (async () => {
+      try {
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (tab) {
+          await chrome.sidePanel.open({ windowId: tab.windowId });
+          console.log('[Woodbury DBG] Side panel reopened by request');
+          if (debugModeData) {
+            setTimeout(() => {
+              chrome.runtime.sendMessage({ type: 'debug_started', data: debugModeData }).catch(() => {});
+            }, 500);
+          }
+        }
+        sendResponseCallback({ ok: true });
+      } catch (e) {
+        console.log('[Woodbury DBG] Failed to open side panel:', e.message);
+        sendResponseCallback({ ok: false, error: e.message });
+      }
+    })();
     return true;
   }
 
@@ -953,6 +1111,121 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponseCallback) => 
     }
     sendResponseCallback({ ok: true });
     return true;
+  }
+
+  // Side panel requests element pick mode on the page
+  if (message.type === 'start_element_pick') {
+    if (debugModeData && debugModeData.tabId) {
+      chrome.tabs.sendMessage(debugModeData.tabId, {
+        action: 'start_element_pick',
+        params: { stepIndex: message.stepIndex }
+      }).catch(() => {});
+    }
+    sendResponseCallback({ ok: true });
+    return true;
+  }
+
+  // Content script reports a picked element — forward to sidepanel
+  if (message.type === 'element_picked' || message.type === 'element_pick_cancelled') {
+    if (sidePanelOpen) {
+      // Sidepanel is open — forward directly
+      chrome.runtime.sendMessage(message).catch(() => {});
+      sendResponseCallback({ ok: true });
+    } else if (message.type === 'element_picked') {
+      // Sidepanel is closed — capture screenshot NOW (elements in correct positions)
+      // and store pick data + screenshot for when the sidepanel reopens
+      (async () => {
+        let screenshot = null;
+        try {
+          const tabId = debugModeData?.tabId;
+          if (tabId) {
+            const tab = await chrome.tabs.get(tabId);
+            screenshot = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
+            console.log('[Woodbury DBG] Captured screenshot at pick time (sidepanel closed)');
+          }
+        } catch (e) {
+          console.log('[Woodbury DBG] Failed to capture at pick time:', e.message);
+        }
+        pendingPick = { ...message, screenshot };
+        console.log('[Woodbury DBG] Stored pending pick for step', message.stepIndex, screenshot ? '(with screenshot)' : '(no screenshot)');
+        sendResponseCallback({ ok: true });
+      })();
+    } else {
+      sendResponseCallback({ ok: true });
+    }
+    return true; // keep message channel open for async response
+  }
+
+  // Sidepanel requests any pending pick data (stored while it was closed)
+  if (message.type === 'get_pending_pick') {
+    sendResponseCallback({ pendingPick: pendingPick });
+    pendingPick = null; // clear after delivering
+    return true;
+  }
+
+  // Sidepanel requests any pending step result (from close→execute→reopen flow)
+  if (message.type === 'get_pending_step_result') {
+    sendResponseCallback({ pendingStepResult: pendingStepResult });
+    pendingStepResult = null;
+    return true;
+  }
+
+  // Sidepanel requests: close panel → execute debug step → reopen panel
+  // This orchestrates the full flow from the background (survives panel close/reopen)
+  if (message.type === 'debug_step_with_toggle') {
+    const { apiBaseUrl, workflowId } = message;
+    (async () => {
+      sendResponseCallback({ ok: true }); // ack immediately
+
+      // 1. Close the side panel
+      try {
+        await chrome.sidePanel.setOptions({ enabled: false });
+        await chrome.sidePanel.setOptions({ enabled: true });
+        console.log('[Woodbury DBG] Panel closed for step execution');
+      } catch (e) {
+        console.log('[Woodbury DBG] Failed to close panel for step:', e.message);
+      }
+
+      // 2. Wait for viewport to settle
+      await new Promise(r => setTimeout(r, 400));
+
+      // 3. Execute the debug step via the dashboard API
+      let stepResult = null;
+      try {
+        const res = await fetch(apiBaseUrl + '/api/workflows/' + encodeURIComponent(workflowId) + '/debug/step', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({}),
+        });
+        stepResult = await res.json();
+        if (!res.ok) {
+          stepResult = { error: stepResult.error || 'Step failed' };
+        }
+      } catch (err) {
+        stepResult = { error: err.message || 'Step request failed' };
+      }
+
+      // 4. Store the result for the reopened panel to pick up
+      pendingStepResult = stepResult;
+
+      // 5. Wait for the action to visually complete
+      await new Promise(r => setTimeout(r, 600));
+
+      // 6. Reopen the side panel by clicking the extension icon
+      //    (chrome.sidePanel.open() requires a user gesture, so we click
+      //     the actual toolbar icon via OS accessibility APIs)
+      try {
+        await fetch(apiBaseUrl + '/api/click-extension-icon', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({}),
+        });
+        console.log('[Woodbury DBG] Clicked extension icon to reopen panel');
+      } catch (e) {
+        console.log('[Woodbury DBG] Failed to click extension icon:', e.message);
+      }
+    })();
+    return true; // keep message channel open for async
   }
 
   // Forward recording events from content script to Woodbury bridge server

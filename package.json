@@ -39,7 +39,7 @@
     "commander": "^11.1.0",
     "electron-updater": "^6.8.3",
     "firebase": "^12.9.0",
-    "flow-frame-core": "^0.1.7",
+    "flow-frame-core": "^0.1.11",
     "groq-sdk": "^0.37.0",
     "marked": "^15.0.12",
     "marked-terminal": "^7.3.0",

@@ -1,7 +1,7 @@
 /**
  * Workflow Loader
  *
- * Loads and validates .workflow.json files from disk.
+ * Loads and validates .workflow.json and .workflow.js files from disk.
  * Discovers workflows from three locations:
  *   1. Extension workflows: ~/.woodbury/extensions/<name>/workflows/
  *   2. Project-local: .woodbury-work/workflows/
@@ -26,16 +26,31 @@ export interface DiscoveredWorkflow {
   source: 'extension' | 'project' | 'global';
   /** Extension name (if source is 'extension') */
   extensionName?: string;
+  /** File format: json or code (.workflow.js) */
+  format: 'json' | 'code';
 }
 
 /**
  * Load a single workflow file from disk.
+ * Supports both .workflow.json and .workflow.js formats.
  * Validates required fields.
  */
 export async function loadWorkflow(filePath: string): Promise<WorkflowDocument> {
   const absolutePath = resolve(filePath);
-  const content = await fs.readFile(absolutePath, 'utf-8');
-  const doc: WorkflowDocument = JSON.parse(content);
+
+  let doc: WorkflowDocument;
+
+  if (absolutePath.endsWith('.workflow.js')) {
+    // Code workflow — require() the module
+    // Clear the require cache so changes are picked up on reload
+    delete require.cache[absolutePath];
+    const exported = require(absolutePath);
+    doc = exported.default || exported;
+  } else {
+    // JSON workflow
+    const content = await fs.readFile(absolutePath, 'utf-8');
+    doc = JSON.parse(content);
+  }
 
   // Validate required fields
   if (!doc.version) {
@@ -112,7 +127,7 @@ async function discoverExtensionWorkflows(): Promise<DiscoveredWorkflow[]> {
 }
 
 /**
- * Discover all .workflow.json files in a directory.
+ * Discover all .workflow.json and .workflow.js files in a directory.
  */
 async function discoverFromDirectory(
   dir: string,
@@ -126,13 +141,15 @@ async function discoverFromDirectory(
     const files = await fs.readdir(dir);
 
     for (const file of files) {
-      if (!file.endsWith('.workflow.json')) continue;
+      const isJson = file.endsWith('.workflow.json');
+      const isCode = file.endsWith('.workflow.js');
+      if (!isJson && !isCode) continue;
 
       const filePath = join(dir, file);
 
       try {
         const workflow = await loadWorkflow(filePath);
-        results.push({ path: filePath, workflow, source });
+        results.push({ path: filePath, workflow, source, format: isCode ? 'code' : 'json' });
       } catch {
         // Skip invalid workflow files
       }
@@ -169,7 +186,7 @@ export async function loadWorkflowsFromDir(dir: string): Promise<WorkflowDocumen
     const files = await fs.readdir(workflowDir);
 
     for (const file of files) {
-      if (!file.endsWith('.workflow.json')) continue;
+      if (!file.endsWith('.workflow.json') && !file.endsWith('.workflow.js')) continue;
 
       try {
         const workflow = await loadWorkflow(join(workflowDir, file));

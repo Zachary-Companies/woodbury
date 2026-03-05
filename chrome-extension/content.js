@@ -21,6 +21,10 @@ if (window.__woodburyContentScriptLoaded) {
 if (!window.__woodburyContentScriptLoaded) {
   window.__woodburyContentScriptLoaded = true;
 
+// ── Injected style tracking ──────────────────────────────────
+// Maps selector → array of { el, originalStyle } for clean revert
+const _woodburyInjectedStyles = new Map();
+
 // ── Message listener ─────────────────────────────────────────
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -126,6 +130,21 @@ async function handleAction(action, params) {
 
     case 'get_element_at_point':
       return getElementAtPoint(params);
+
+    case 'start_element_pick':
+      return startElementPick(params);
+
+    case 'stop_element_pick':
+      return stopElementPick();
+
+    case 'toggle_debug_overlay':
+      return toggleDebugOverlay(params);
+
+    case 'inject_style':
+      return injectStyle(params);
+
+    case 'clear_injected_styles':
+      return clearInjectedStyles(params);
 
     default:
       throw new Error(`Unknown action: ${action}`);
@@ -1077,21 +1096,39 @@ function scrollToElement({ selector, block = 'center' }) {
 /**
  * Get all clickable/interactive elements on the visible page.
  */
-function getClickableElements({ limit = 50 }) {
+function getClickableElements({ limit = 150 }) {
   const selectors = [
+    // Standard interactive HTML elements
     'a[href]',
     'button',
-    'input[type="submit"]',
-    'input[type="button"]',
-    'input[type="checkbox"]',
-    'input[type="radio"]',
+    'input',
+    'textarea',
+    'select',
+    'summary',
+    'details',
+    'label[for]',
+    // ARIA roles for custom components
     '[role="button"]',
     '[role="link"]',
     '[role="menuitem"]',
     '[role="tab"]',
+    '[role="option"]',
+    '[role="switch"]',
+    '[role="combobox"]',
+    '[role="textbox"]',
+    '[role="listbox"]',
+    '[role="slider"]',
+    '[role="spinbutton"]',
+    '[role="checkbox"]',
+    '[role="radio"]',
+    // Custom interactivity markers
     '[onclick]',
     '[data-action]',
-    'summary'
+    '[data-testid]',
+    '[contenteditable]:not([contenteditable="false"])',
+    '[tabindex]:not([tabindex="-1"])',
+    '[aria-haspopup]',
+    '[draggable="true"]',
   ];
 
   const seen = new Set();
@@ -1785,6 +1822,10 @@ const STEP_TYPE_COLORS = {
   scroll: '#f59e0b',
   wait: '#64748b',
   assert: '#06b6d4',
+  conditional: '#a855f7',
+  loop: '#ec4899',
+  try_catch: '#f97316',
+  file_dialog: '#0ea5e9',
 };
 const STEP_TYPE_ICONS = {
   navigate: '\u{1F310}',
@@ -1794,6 +1835,10 @@ const STEP_TYPE_ICONS = {
   wait: '\u{23F3}',
   scroll: '\u{2195}',
   assert: '\u{2714}',
+  conditional: '\u{2696}',
+  loop: '\u{1F501}',
+  try_catch: '\u{1F6E1}',
+  file_dialog: '\u{1F4C2}',
 };
 
 function showDebugOverlay(params) {
@@ -1998,15 +2043,247 @@ function getElementAtPoint({ x, y }) {
   return { found: true, tag, id, classes, role, text, fingerprint };
 }
 
+function toggleDebugOverlay(params) {
+  const host = document.getElementById('woodbury-debug-host');
+  if (host) {
+    host.style.display = params?.visible === false ? 'none' : '';
+  }
+  return { visible: params?.visible !== false };
+}
+
 function hideDebugOverlay() {
   _debugShadow = null;
   document.getElementById('woodbury-debug-host')?.remove();
   return { overlayRemoved: true };
 }
 
+// ── Element Picker for Debug Mode ──
+
+let _pickOverlay = null;
+
+function startElementPick(params) {
+  // Remove any existing pick overlay
+  stopElementPick();
+
+  const stepIndex = params?.stepIndex ?? null;
+
+  // Create pick overlay container
+  const overlay = document.createElement('div');
+  overlay.id = 'woodbury-pick-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:2147483647;cursor:crosshair;pointer-events:auto;background:transparent;';
+
+  // Highlight box that follows the hovered element
+  const highlight = document.createElement('div');
+  highlight.style.cssText = 'position:fixed;border:2px dashed #3b82f6;pointer-events:none;background:rgba(59,130,246,0.08);border-radius:3px;display:none;transition:left 0.05s,top 0.05s,width 0.05s,height 0.05s;';
+  overlay.appendChild(highlight);
+
+  // Element info tooltip near highlight
+  const infoTip = document.createElement('div');
+  infoTip.style.cssText = 'position:fixed;pointer-events:none;background:#0f172a;color:#e2e8f0;font-size:11px;font-family:system-ui,sans-serif;padding:3px 8px;border-radius:4px;border:1px solid #334155;white-space:nowrap;display:none;z-index:2147483647;';
+  overlay.appendChild(infoTip);
+
+  // Hint label at the bottom
+  const hint = document.createElement('div');
+  hint.style.cssText = 'position:fixed;bottom:20px;left:50%;transform:translateX(-50%);pointer-events:none;background:#0f172aee;color:#94a3b8;font-size:13px;font-family:system-ui,sans-serif;padding:6px 16px;border-radius:8px;border:1px solid #334155;white-space:nowrap;';
+  hint.textContent = 'Click element to select \u00b7 Esc to cancel';
+  overlay.appendChild(hint);
+
+  let lastEl = null;
+
+  overlay.addEventListener('mousemove', function(e) {
+    // Temporarily hide overlay to find the real element underneath
+    overlay.style.display = 'none';
+    const el = document.elementFromPoint(e.clientX, e.clientY);
+    overlay.style.display = '';
+
+    if (!el || el === document.documentElement || el === document.body) {
+      highlight.style.display = 'none';
+      infoTip.style.display = 'none';
+      lastEl = null;
+      return;
+    }
+
+    lastEl = el;
+    const rect = el.getBoundingClientRect();
+    highlight.style.display = '';
+    highlight.style.left = rect.left + 'px';
+    highlight.style.top = rect.top + 'px';
+    highlight.style.width = rect.width + 'px';
+    highlight.style.height = rect.height + 'px';
+
+    // Show element info tooltip
+    const tag = el.tagName.toLowerCase();
+    const text = (el.textContent || '').trim().slice(0, 40);
+    infoTip.textContent = tag + (text ? ' \u2014 "' + text + '"' : '');
+    infoTip.style.display = '';
+    // Position tooltip above the highlight box
+    const tipTop = rect.top - 28;
+    infoTip.style.left = Math.max(4, rect.left) + 'px';
+    infoTip.style.top = (tipTop > 4 ? tipTop : rect.bottom + 4) + 'px';
+  });
+
+  overlay.addEventListener('click', function(e) {
+    e.preventDefault();
+    e.stopPropagation();
+
+    // Find the real element under the click
+    overlay.style.display = 'none';
+    const el = document.elementFromPoint(e.clientX, e.clientY);
+    overlay.style.display = '';
+
+    let pctX = (e.clientX / window.innerWidth) * 100;
+    let pctY = (e.clientY / window.innerHeight) * 100;
+    let elementBounds = null;
+    let elementInfo = null;
+
+    if (el && el !== document.documentElement && el !== document.body) {
+      const rect = el.getBoundingClientRect();
+
+      // Center position on the element's bounding box, not the raw click point
+      const centerX = rect.left + rect.width / 2;
+      const centerY = rect.top + rect.height / 2;
+      pctX = (centerX / window.innerWidth) * 100;
+      pctY = (centerY / window.innerHeight) * 100;
+
+      // Scale bounds by devicePixelRatio so the crop aligns with the captured screenshot
+      const dpr = window.devicePixelRatio || 1;
+      elementBounds = {
+        left: Math.round(rect.left * dpr),
+        top: Math.round(rect.top * dpr),
+        width: Math.round(rect.width * dpr),
+        height: Math.round(rect.height * dpr),
+      };
+      elementInfo = {
+        tag: el.tagName.toLowerCase(),
+        text: (el.textContent || '').trim().slice(0, 100),
+      };
+    }
+
+    // Send picked element back
+    chrome.runtime.sendMessage({
+      type: 'element_picked',
+      stepIndex: stepIndex,
+      pctX: pctX,
+      pctY: pctY,
+      elementBounds: elementBounds,
+      elementInfo: elementInfo,
+      dpr: window.devicePixelRatio || 1,
+    });
+
+    // Clean up
+    stopElementPick();
+  });
+
+  // Escape key to cancel
+  function onKeyDown(e) {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      chrome.runtime.sendMessage({ type: 'element_pick_cancelled', stepIndex: stepIndex });
+      stopElementPick();
+      document.removeEventListener('keydown', onKeyDown, true);
+    }
+  }
+  document.addEventListener('keydown', onKeyDown, true);
+  overlay._keyHandler = onKeyDown;
+
+  document.body.appendChild(overlay);
+  _pickOverlay = overlay;
+
+  return { picking: true };
+}
+
+function stopElementPick() {
+  if (_pickOverlay) {
+    if (_pickOverlay._keyHandler) {
+      document.removeEventListener('keydown', _pickOverlay._keyHandler, true);
+    }
+    _pickOverlay.remove();
+    _pickOverlay = null;
+  }
+  // Also remove by ID in case of stale references
+  document.getElementById('woodbury-pick-overlay')?.remove();
+  return { picking: false };
+}
+
 function escText(str) {
   if (!str) return '';
   return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+// ── Inject / Clear Styles ────────────────────────────────────
+
+/**
+ * Apply CSS styles to all elements matching a selector.
+ * Stores original inline styles for later revert via clearInjectedStyles().
+ */
+function injectStyle({ selector, styles }) {
+  if (!selector) throw new Error('selector is required');
+  if (!styles || typeof styles !== 'object' || Object.keys(styles).length === 0) {
+    throw new Error('styles must be a non-empty object, e.g. { position: "absolute" }');
+  }
+
+  const elements = Array.from(document.querySelectorAll(selector));
+  if (elements.length === 0) {
+    throw new Error('No elements match selector: ' + selector);
+  }
+
+  // Track originals for revert
+  const tracked = [];
+  for (const el of elements) {
+    tracked.push({ el, originalStyle: el.style.cssText || '' });
+
+    // Apply each style property
+    for (const [prop, value] of Object.entries(styles)) {
+      el.style.setProperty(
+        // Convert camelCase to kebab-case: backgroundColor → background-color
+        prop.replace(/([A-Z])/g, '-$1').toLowerCase(),
+        value,
+        'important'
+      );
+    }
+
+    el.setAttribute('data-woodbury-styled', selector);
+  }
+
+  // Store (append to existing if same selector used multiple times)
+  const existing = _woodburyInjectedStyles.get(selector) || [];
+  _woodburyInjectedStyles.set(selector, existing.concat(tracked));
+
+  return { applied: true, elementsModified: elements.length, selector };
+}
+
+/**
+ * Revert previously injected styles.
+ * If selector is given, only revert elements for that selector.
+ * If no selector, revert ALL injected styles.
+ */
+function clearInjectedStyles({ selector } = {}) {
+  let reverted = 0;
+
+  if (selector) {
+    const tracked = _woodburyInjectedStyles.get(selector);
+    if (tracked) {
+      for (const { el, originalStyle } of tracked) {
+        el.style.cssText = originalStyle;
+        el.removeAttribute('data-woodbury-styled');
+        reverted++;
+      }
+      _woodburyInjectedStyles.delete(selector);
+    }
+  } else {
+    // Clear ALL
+    for (const [sel, tracked] of _woodburyInjectedStyles.entries()) {
+      for (const { el, originalStyle } of tracked) {
+        el.style.cssText = originalStyle;
+        el.removeAttribute('data-woodbury-styled');
+        reverted++;
+      }
+    }
+    _woodburyInjectedStyles.clear();
+  }
+
+  return { cleared: true, elementsReverted: reverted, selector: selector || 'all' };
 }
 
 // Log that content script is loaded

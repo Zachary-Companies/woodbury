@@ -140,6 +140,13 @@ export interface ElementTarget {
   context?: ElementContext;
   /** Path to reference image captured during recording (for visual verification) */
   referenceImage?: string;
+  /** Bounding region to constrain visual search (viewport percentages) */
+  searchBounds?: {
+    pctX: number;  // left edge as % of viewport width
+    pctY: number;  // top edge as % of viewport height
+    pctW: number;  // width as % of viewport width
+    pctH: number;  // height as % of viewport height
+  };
 }
 
 /** Contextual clues about where an element lives on the page */
@@ -241,7 +248,8 @@ export type AssertCondition =
   | { type: 'url_matches'; pattern: string }
   | { type: 'url_contains'; substring: string }
   | { type: 'page_title_contains'; text: string }
-  | { type: 'variable_equals'; variable: string; value: unknown };
+  | { type: 'variable_equals'; variable: string; value: unknown }
+  | { type: 'expression'; expression: string };
 
 // ────────────────────────────────────────────────────────────────
 //  Step types
@@ -318,6 +326,8 @@ export interface TypeStep extends StepBase {
   value: string;
   /** Whether to clear the field first */
   clearFirst?: boolean;
+  /** Skip clicking the element before typing (assumes field is already focused) */
+  skipClick?: boolean;
   /** Delay after typing in ms */
   delayAfterMs?: number;
 }
@@ -415,10 +425,13 @@ export interface SubWorkflowStep extends StepBase {
   variables?: Record<string, unknown>;
 }
 
+/** Function-based condition (only available in .workflow.js code workflows) */
+export type ConditionFunction = (variables: Record<string, unknown>) => boolean | Promise<boolean>;
+
 /** Conditional branching */
 export interface ConditionalStep extends StepBase {
   type: 'conditional';
-  condition: AssertCondition;
+  condition: AssertCondition | ConditionFunction;
   /** Steps to execute if condition is true */
   thenSteps: WorkflowStep[];
   /** Steps to execute if condition is false */
@@ -518,6 +531,17 @@ export interface DesktopKeyboardStep extends StepBase {
   delayAfterMs?: number;
 }
 
+/** Inject or clear CSS styles on elements matching a selector */
+export interface InjectStyleStep extends StepBase {
+  type: 'inject_style';
+  /** CSS selector to target */
+  selector: string;
+  /** CSS property/value pairs to apply, e.g. { position: 'absolute', display: 'none' } */
+  styles?: Record<string, string>;
+  /** 'apply' (default) to inject styles, 'clear' to revert previously injected styles */
+  action?: 'apply' | 'clear';
+}
+
 /** Union of all step types */
 export type WorkflowStep =
   | NavigateStep
@@ -539,7 +563,8 @@ export type WorkflowStep =
   | DesktopLaunchAppStep
   | DesktopClickStep
   | DesktopTypeStep
-  | DesktopKeyboardStep;
+  | DesktopKeyboardStep
+  | InjectStyleStep;
 
 // ────────────────────────────────────────────────────────────────
 //  Expectations (workflow-level outcome checks)

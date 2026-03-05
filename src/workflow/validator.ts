@@ -14,6 +14,7 @@ import type {
   ElementTarget,
 } from './types.js';
 import { ElementResolver } from './resolver.js';
+import { substituteString } from './variable-sub.js';
 
 export class ConditionValidator {
   private resolver: ElementResolver;
@@ -108,6 +109,18 @@ export class ConditionValidator {
       case 'variable_equals':
         if (!variables) return false;
         return variables[condition.variable] === condition.value;
+
+      case 'expression': {
+        try {
+          const substituted = substituteString(condition.expression, variables || {});
+          const expr = typeof substituted === 'string' ? substituted : String(substituted);
+          // Same pattern used by composition Branch nodes
+          const result = new Function('return (' + expr + ')')();
+          return !!result;
+        } catch {
+          return false;
+        }
+      }
 
       default:
         return true;

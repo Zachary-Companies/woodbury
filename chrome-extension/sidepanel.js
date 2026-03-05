@@ -14,6 +14,7 @@ let workflowId = null;    // current workflow being debugged
 let stepping = false;     // true while a step is executing
 let runningAll = false;   // true while Run All is in progress
 let lastViewedStepIndex = null; // track which step's coord info is displayed (for editing)
+let lastPickData = null;        // element bounds/dpr from last "Pick from Page" (per-step)
 
 const STEP_ICONS = {
   navigate: '\u{1F310}',
@@ -26,11 +27,22 @@ const STEP_ICONS = {
   download: '\u2B07',
   capture_download: '\u{1F4E5}',
   move_file: '\u{1F4C1}',
+  conditional: '\u2696',
+  loop: '\u{1F501}',
+  try_catch: '\u{1F6E1}',
+  file_dialog: '\u{1F4C2}',
+  inject_style: '\u{1F3A8}',
 };
+
+/* ── Lifecycle port — lets background.js track open/close state ── */
+
+chrome.runtime.connect({ name: 'woodbury-sidepanel' });
 
 /* ── Initialization ────────────────────────────────────── */
 
 document.addEventListener('DOMContentLoaded', async () => {
+  var initialized = false;
+
   // Path 1: Try message-based query (fastest when service worker is alive)
   try {
     var response = await chrome.runtime.sendMessage({ type: 'debug_get_state' });
@@ -39,28 +51,77 @@ document.addEventListener('DOMContentLoaded', async () => {
       apiBaseUrl = response.apiBaseUrl;
       workflowId = response.workflowId;
       renderDebugUI();
-      return;
+      initialized = true;
     }
   } catch (err) {
     console.log('[Woodbury Debug Panel] Message query failed:', err.message);
   }
 
   // Path 2: Fallback to persistent storage (survives service worker restarts)
-  try {
-    var stored = await chrome.storage.local.get('debugModeData');
-    if (stored.debugModeData && stored.debugModeData.steps) {
-      console.log('[Woodbury Debug Panel] Loaded from storage:', stored.debugModeData.workflowName);
-      debugState = { active: true, ...stored.debugModeData };
-      apiBaseUrl = stored.debugModeData.apiBaseUrl;
-      workflowId = stored.debugModeData.workflowId;
-      renderDebugUI();
-      return;
+  if (!initialized) {
+    try {
+      var stored = await chrome.storage.local.get('debugModeData');
+      if (stored.debugModeData && stored.debugModeData.steps) {
+        console.log('[Woodbury Debug Panel] Loaded from storage:', stored.debugModeData.workflowName);
+        debugState = { active: true, ...stored.debugModeData };
+        apiBaseUrl = stored.debugModeData.apiBaseUrl;
+        workflowId = stored.debugModeData.workflowId;
+        renderDebugUI();
+        initialized = true;
+      }
+    } catch (err) {
+      console.log('[Woodbury Debug Panel] Storage fallback failed:', err.message);
     }
-  } catch (err) {
-    console.log('[Woodbury Debug Panel] Storage fallback failed:', err.message);
   }
 
-  renderEmptyState();
+  if (!initialized) {
+    renderEmptyState();
+  }
+
+  // Check for any element pick that happened while the sidepanel was closed
+  try {
+    var pickResp = await chrome.runtime.sendMessage({ type: 'get_pending_pick' });
+    if (pickResp && pickResp.pendingPick) {
+      var pick = pickResp.pendingPick;
+      console.log('[Woodbury Debug Panel] Processing pending pick for step', pick.stepIndex);
+      // Process it exactly like a live element_picked message
+      var pickIdx = pick.stepIndex;
+      lastPickData = {
+        stepIndex: pickIdx,
+        elementBounds: pick.elementBounds,
+        dpr: pick.dpr,
+      };
+      var pctXInput = document.getElementById('dbg-edit-pctX');
+      var pctYInput = document.getElementById('dbg-edit-pctY');
+      if (pctXInput) pctXInput.value = pick.pctX.toFixed(1);
+      if (pctYInput) pctYInput.value = pick.pctY.toFixed(1);
+      previewMarkerPosition(pickIdx, pick.pctX, pick.pctY);
+      try {
+        await updateStepPosition(pickIdx, pick.pctX, pick.pctY);
+        await captureElement(pickIdx, pick.pctX, pick.pctY, pick.elementBounds, pick.dpr, pick.screenshot);
+      } catch (e) {
+        setStatus('Pending pick error: ' + e.message, 'error');
+      }
+    }
+  } catch (err) {
+    // No pending pick or background not ready — fine
+  }
+
+  // Check for any step result from a toggle-step execution (close→execute→reopen)
+  try {
+    var stepResp = await chrome.runtime.sendMessage({ type: 'get_pending_step_result' });
+    if (stepResp && stepResp.pendingStepResult) {
+      var sr = stepResp.pendingStepResult;
+      console.log('[Woodbury Debug Panel] Processing pending step result for step', sr.stepIndex);
+      if (sr.error) {
+        setStatus('Step error: ' + sr.error, 'error');
+      } else {
+        processStepResult(sr);
+      }
+    }
+  } catch (err) {
+    // No pending step result — fine
+  }
 });
 
 /* ── Live updates from chrome.storage (catches debug start even if messages fail) ── */
@@ -108,6 +169,48 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     stepping = false;
     runningAll = false;
     renderEmptyState();
+  }
+
+  // Element picked from page — update position + capture reference image
+  if (message.type === 'element_picked') {
+    var pickIdx = message.stepIndex;
+
+    // Store pick data so Save can reuse the exact element bounds
+    lastPickData = {
+      stepIndex: pickIdx,
+      elementBounds: message.elementBounds,
+      dpr: message.dpr,
+    };
+
+    // Update pctX/pctY inputs if they exist
+    var pctXInput = document.getElementById('dbg-edit-pctX');
+    var pctYInput = document.getElementById('dbg-edit-pctY');
+    if (pctXInput) pctXInput.value = message.pctX.toFixed(1);
+    if (pctYInput) pctYInput.value = message.pctY.toFixed(1);
+
+    // Update marker on page immediately
+    previewMarkerPosition(pickIdx, message.pctX, message.pctY);
+
+    // Save position + capture element (async, fire and handle)
+    (async function() {
+      try {
+        await updateStepPosition(pickIdx, message.pctX, message.pctY);
+        await captureElement(pickIdx, message.pctX, message.pctY, message.elementBounds, message.dpr);
+      } catch (e) {
+        setStatus('Pick error: ' + e.message, 'error');
+      }
+    })();
+
+    // Reset pick button
+    var pickBtn2 = document.getElementById('dbg-pick-btn');
+    if (pickBtn2) { pickBtn2.textContent = '\uD83C\uDFAF Pick from Page'; pickBtn2.disabled = false; }
+  }
+
+  // Element pick cancelled (Escape)
+  if (message.type === 'element_pick_cancelled') {
+    var pickBtnCancel = document.getElementById('dbg-pick-btn');
+    if (pickBtnCancel) { pickBtnCancel.textContent = '\uD83C\uDFAF Pick from Page'; pickBtnCancel.disabled = false; }
+    setStatus('Pick cancelled', null);
   }
 });
 
@@ -158,8 +261,23 @@ function renderDebugUI() {
   html += '<div class="dbg-step-list" id="dbg-step-list">';
   for (var i = 0; i < steps.length; i++) {
     var s = steps[i];
-    var icon = (s.type === 'click' && s.clickType === 'hover') ? '\u2197' : (STEP_ICONS[s.type] || '\u25cf');
+    var isControlFlow = s.isControlFlow || false;
+    var icon = isControlFlow ? (STEP_ICONS[s.type] || '\u2699') :
+               (s.type === 'click' && s.clickType === 'hover') ? '\u2197' : (STEP_ICONS[s.type] || '\u25cf');
     var cls = 'dbg-step';
+    // Detect nesting depth from label prefix (e.g. "Then → Else → ...")
+    var nestDepth = 0;
+    var displayLabel = s.label || '';
+    if (!isControlFlow && displayLabel.indexOf(' \u2192 ') !== -1) {
+      var arrowParts = displayLabel.split(' \u2192 ');
+      nestDepth = arrowParts.length - 1;
+    }
+    if (isControlFlow) {
+      cls += ' dbg-step-control-flow';
+    }
+    if (nestDepth > 0) {
+      cls += ' dbg-step-nested';
+    }
     if (completedIndices.includes(i)) {
       cls += ' dbg-step-completed';
     } else if (failedIndices.includes(i)) {
@@ -169,13 +287,16 @@ function renderDebugUI() {
     } else {
       cls += ' dbg-step-pending';
     }
-    html += '<div class="' + cls + '" data-idx="' + i + '">';
+    html += '<div class="' + cls + '" data-idx="' + i + '" style="' + (nestDepth > 0 ? 'padding-left:' + (8 + nestDepth * 16) + 'px;' : '') + '">';
     html += '<span class="dbg-step-num">' + (i + 1) + '</span>';
     html += '<span class="dbg-step-icon">' + icon + '</span>';
-    html += '<span class="dbg-step-label">' + escHtml(s.label) + '</span>';
+    html += '<span class="dbg-step-label">' + escHtml(displayLabel) + '</span>';
     html += '<span class="dbg-step-status">';
-    if (completedIndices.includes(i)) html += '\u2705';
-    else if (failedIndices.includes(i)) html += '\u274c';
+    if (completedIndices.includes(i)) {
+      html += isControlFlow ? '\u23ed' : '\u2705';
+    } else if (failedIndices.includes(i)) {
+      html += '\u274c';
+    }
     html += '</span>';
     html += '</div>';
   }
@@ -222,6 +343,8 @@ function renderDebugUI() {
           stepIndex: sr.stepIndex,
           coordinateInfo: sr.coordinateInfo,
           stepResult: { status: sr.status, error: sr.error },
+          visualVerification: sr.visualVerification || null,
+          stepDetail: sr.stepDetail || null,
         });
       } else {
         // Pending step — show editable position from recorded data
@@ -300,12 +423,90 @@ function updateCoordInfo(data) {
   var step = debugState && debugState.steps[idx] ? debugState.steps[idx] : null;
   var stepType = step ? step.type : null;
 
+  // Restore lastPickData from step's persisted pickedBounds (survives reload/step switch)
+  if (step && step.target && step.target.pickedBounds && step.target.pickedBounds.width > 0) {
+    lastPickData = { stepIndex: idx, elementBounds: step.target.pickedBounds, dpr: step.target.pickedDpr || 1 };
+  } else if (!lastPickData || lastPickData.stepIndex !== idx) {
+    lastPickData = null; // Clear if switching to a step with no saved pick
+  }
+
   var html = '';
   html += '<div class="dbg-coord-title">Step ' + (idx + 1) + ' — ' + escHtml(step ? step.label : 'Unknown') + '</div>';
 
   // Status row (if step has been executed)
   if (data.stepResult && data.stepResult.status) {
     html += '<div class="dbg-coord-row"><span class="dbg-coord-label">Status</span><span class="dbg-coord-value" style="color:' + (status === 'success' ? '#10b981' : '#ef4444') + ';">' + status + '</span></div>';
+  }
+
+  // Visual verification badge (if available)
+  if (data.visualVerification && data.visualVerification.ran) {
+    var vv = data.visualVerification;
+    if (vv.verified) {
+      var vvSim = ((vv.similarity || 0) * 100).toFixed(1);
+      html += '<div style="padding:0.3rem 0.5rem;margin:0.3rem 0;border-radius:4px;font-size:0.65rem;background:rgba(16,185,129,0.1);border:1px solid #065f46;color:#6ee7b7;">';
+      html += '\u2705 Visual match: ' + vvSim + '%';
+      html += '</div>';
+    } else {
+      var vvSim2 = ((vv.similarity || 0) * 100).toFixed(1);
+      html += '<div style="padding:0.3rem 0.5rem;margin:0.3rem 0;border-radius:4px;font-size:0.65rem;background:rgba(239,68,68,0.1);border:1px solid #7f1d1d;color:#fca5a5;">';
+      html += '\u274c Visual mismatch: ' + vvSim2 + '%';
+      if (vv.searchResult && vv.searchResult.found) {
+        html += '<br>\u{1f50d} Found nearby: ' + ((vv.searchResult.similarity || 0) * 100).toFixed(1) + '% (' + vv.searchResult.candidatesChecked + ' checked)';
+      }
+      html += '</div>';
+    }
+  }
+
+  // ── Control flow steps: show info only ──
+  if (stepType === 'conditional' || stepType === 'loop' || stepType === 'try_catch') {
+    html += '<div class="dbg-coord-row"><span class="dbg-coord-label">Type</span><span class="dbg-coord-value" style="color:#8b5cf6;">' + stepType.replace('_', '/') + '</span></div>';
+    if (step && step.isControlFlow) {
+      html += '<div style="color:#64748b;font-style:italic;font-size:0.7rem;margin-top:4px;">Control flow marker — auto-skipped during execution. Sub-steps run individually below.</div>';
+    }
+    if (data.stepResult && data.stepResult.status) {
+      var cfStatusColor = data.stepResult.status === 'skipped' ? '#8b5cf6' : (data.stepResult.status === 'success' ? '#10b981' : '#ef4444');
+      html += '<div class="dbg-coord-row"><span class="dbg-coord-label">Status</span><span class="dbg-coord-value" style="color:' + cfStatusColor + ';">' + data.stepResult.status + '</span></div>';
+    }
+    if (data.stepResult && data.stepResult.error) {
+      html += '<div class="dbg-coord-error">' + escHtml(data.stepResult.error) + '</div>';
+    }
+    coordEl.innerHTML = html;
+    return;
+  }
+
+  // ── Inject Style step: show selector, action, and result ──
+  if (stepType === 'inject_style') {
+    var isAction = step ? (step.action || 'apply') : 'apply';
+    html += '<div class="dbg-coord-row"><span class="dbg-coord-label">Action</span><span class="dbg-coord-value" style="color:#8b5cf6;">' + isAction + '</span></div>';
+    if (step && step.selector) {
+      html += '<div class="dbg-coord-row"><span class="dbg-coord-label">Selector</span><span class="dbg-coord-value" style="font-family:monospace;font-size:0.65rem;">' + escHtml(step.selector) + '</span></div>';
+    }
+    if (isAction === 'apply' && step && step.styles) {
+      var styleKeys = Object.keys(step.styles);
+      html += '<div class="dbg-coord-row"><span class="dbg-coord-label">Styles</span><span class="dbg-coord-value" style="font-size:0.65rem;">' + escHtml(styleKeys.join(', ')) + '</span></div>';
+    }
+
+    // Show result from stepDetail
+    var sd = data.stepDetail;
+    if (sd) {
+      if (sd.action === 'apply') {
+        var countColor = sd.elementsModified > 0 ? '#10b981' : '#ef4444';
+        html += '<div class="dbg-coord-row"><span class="dbg-coord-label">Elements found</span><span class="dbg-coord-value" style="color:' + countColor + ';">' + sd.elementsModified + '</span></div>';
+        if (sd.stylesApplied && sd.stylesApplied.length > 0) {
+          html += '<div class="dbg-coord-row"><span class="dbg-coord-label">Applied</span><span class="dbg-coord-value" style="font-size:0.65rem;">' + escHtml(sd.stylesApplied.join(', ')) + '</span></div>';
+        }
+      } else if (sd.action === 'clear') {
+        html += '<div class="dbg-coord-row"><span class="dbg-coord-label">Elements reverted</span><span class="dbg-coord-value" style="color:#10b981;">' + sd.elementsReverted + '</span></div>';
+      }
+    } else if (!data.stepResult) {
+      html += '<div style="color:#475569;font-style:italic;font-size:0.7rem;margin-top:4px;">Not yet executed</div>';
+    }
+
+    if (data.stepResult && data.stepResult.error) {
+      html += '<div class="dbg-coord-error">' + escHtml(data.stepResult.error) + '</div>';
+    }
+    coordEl.innerHTML = html;
+    return;
   }
 
   // ── Wait step: show editable duration ──
@@ -373,6 +574,7 @@ function updateCoordInfo(data) {
       html += '<input type="number" id="dbg-edit-pctY" value="' + pctYVal + '" step="0.1" min="0" max="100" class="dbg-coord-input" title="Y %">';
       html += '<button id="dbg-save-pos" class="dbg-save-btn" title="Save position">Save</button>';
       html += '</span></div>';
+      html += '<div class="dbg-coord-row"><button id="dbg-pick-btn" class="dbg-pick-btn" title="Click on element in page">\uD83C\uDFAF Pick from Page</button></div>';
     }
 
     // ── Verify + Retry toggle (click steps only) ──
@@ -395,6 +597,21 @@ function updateCoordInfo(data) {
       html += '</div>';
     }
 
+    // ── Capture Element section ──
+    var hasRefImage = (step && step.hasReferenceImage) || false;
+    html += '<div class="dbg-capture-section">';
+    html += '<div class="dbg-capture-row">';
+    html += '<button id="dbg-capture-btn" class="dbg-capture-btn' + (hasRefImage ? ' dbg-capture-has-ref' : '') + '">';
+    html += hasRefImage ? '\uD83D\uDCF7 Re-capture Element' : '\uD83D\uDCF7 Capture Element';
+    html += '</button>';
+    html += '<div class="dbg-capture-padding-ctl"><label for="dbg-capture-padding" class="dbg-capture-padding-label">Pad</label><input type="number" id="dbg-capture-padding" value="8" min="0" max="60" step="2" class="dbg-coord-input dbg-capture-padding-input" title="Padding around element (px)"><span class="dbg-capture-padding-unit">px</span></div>';
+    html += '</div>';
+    html += '<div id="dbg-capture-result"></div>';
+    if (hasRefImage) {
+      html += '<div id="dbg-capture-existing" class="dbg-capture-info">\u2705 Reference image saved</div>';
+    }
+    html += '</div>';
+
     if (ci) {
       html += '<div class="dbg-coord-row"><span class="dbg-coord-label">Viewport px</span><span class="dbg-coord-value">(' + (ci.viewportX ?? '?') + ', ' + (ci.viewportY ?? '?') + ')</span></div>';
       html += '<div class="dbg-coord-row"><span class="dbg-coord-label">Screen px</span><span class="dbg-coord-value">(' + (ci.screenX ?? '?') + ', ' + (ci.screenY ?? '?') + ')</span></div>';
@@ -410,7 +627,7 @@ function updateCoordInfo(data) {
     }
     coordEl.innerHTML = html;
 
-    // Wire save button
+    // Wire save button — save position + auto-capture element
     var saveBtn = document.getElementById('dbg-save-pos');
     if (saveBtn) {
       saveBtn.addEventListener('click', function() {
@@ -420,7 +637,21 @@ function updateCoordInfo(data) {
           setStatus('Invalid position values', 'error');
           return;
         }
-        updateStepPosition(idx, newPctX, newPctY);
+        // Reuse element bounds from the last pick (if same step) so we don't re-hit-test
+        var pickBounds = null;
+        var pickDpr = null;
+        if (lastPickData && lastPickData.stepIndex === idx) {
+          pickBounds = lastPickData.elementBounds;
+          pickDpr = lastPickData.dpr;
+        }
+        (async function() {
+          try {
+            await updateStepPosition(idx, newPctX, newPctY);
+            await captureElement(idx, newPctX, newPctY, pickBounds, pickDpr);
+          } catch (e) {
+            setStatus('Save error: ' + e.message, 'error');
+          }
+        })();
       });
     }
 
@@ -472,6 +703,38 @@ function updateCoordInfo(data) {
           verifySection.style.display = clickTypeSelect.value === 'hover' ? 'none' : '';
         }
         updateStepClickType(idx, clickTypeSelect.value);
+      });
+    }
+
+    // Wire capture element button — reuse pick bounds if available
+    var captureBtn = document.getElementById('dbg-capture-btn');
+    if (captureBtn) {
+      captureBtn.addEventListener('click', function() {
+        var currentPctX = parseFloat((document.getElementById('dbg-edit-pctX') || {}).value);
+        var currentPctY = parseFloat((document.getElementById('dbg-edit-pctY') || {}).value);
+        if (isNaN(currentPctX)) currentPctX = (step && step.pctX != null) ? step.pctX : 50;
+        if (isNaN(currentPctY)) currentPctY = (step && step.pctY != null) ? step.pctY : 50;
+        var pickBounds = null;
+        var pickDpr = null;
+        if (lastPickData && lastPickData.stepIndex === idx) {
+          pickBounds = lastPickData.elementBounds;
+          pickDpr = lastPickData.dpr;
+        }
+        captureElement(idx, currentPctX, currentPctY, pickBounds, pickDpr);
+      });
+    }
+
+    // Wire pick from page button
+    var pickBtn = document.getElementById('dbg-pick-btn');
+    if (pickBtn) {
+      pickBtn.addEventListener('click', function() {
+        pickBtn.textContent = '\uD83C\uDFAF Picking...';
+        pickBtn.disabled = true;
+        setStatus('Click on the target element in the page...', null);
+        chrome.runtime.sendMessage({
+          type: 'start_element_pick',
+          stepIndex: idx
+        });
       });
     }
     return;
@@ -738,6 +1001,95 @@ async function updateStepClickType(stepIndex, clickType) {
   }
 }
 
+async function captureElement(stepIndex, pctX, pctY, elementBounds, dpr, screenshotDataUrl) {
+  if (!apiBaseUrl || !workflowId) return;
+
+  var captureBtn = document.getElementById('dbg-capture-btn');
+  var resultDiv = document.getElementById('dbg-capture-result');
+  if (captureBtn) { captureBtn.disabled = true; captureBtn.textContent = '\u23f3 Capturing...'; }
+  if (resultDiv) resultDiv.innerHTML = '';
+  setStatus('Capturing element...', null);
+
+  try {
+    var reqBody = { stepIndex: stepIndex, pctX: pctX, pctY: pctY };
+    if (elementBounds) reqBody.elementBounds = elementBounds;
+    if (dpr) reqBody.dpr = dpr;
+    if (screenshotDataUrl) reqBody.screenshotDataUrl = screenshotDataUrl;
+    // Read padding from the UI control
+    var paddingInput = document.getElementById('dbg-capture-padding');
+    if (paddingInput) {
+      var padVal = parseInt(paddingInput.value, 10);
+      if (!isNaN(padVal) && padVal >= 0) reqBody.padding = padVal;
+    }
+    var res = await fetch(
+      apiBaseUrl + '/api/workflows/' + encodeURIComponent(workflowId) + '/debug/capture-element',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(reqBody),
+      }
+    );
+    var data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Capture failed');
+
+    // Update local step data
+    if (debugState && debugState.steps[stepIndex]) {
+      debugState.steps[stepIndex].hasReferenceImage = true;
+    }
+
+    // Cache picked bounds from response for future re-captures
+    if (data.pickedBounds) {
+      lastPickData = { stepIndex: stepIndex, elementBounds: data.pickedBounds, dpr: data.pickedDpr || 1 };
+    }
+
+    // Show preview
+    if (resultDiv) {
+      var previewHtml = '<div class="dbg-capture-preview">';
+      if (data.elementCrop) {
+        previewHtml += '<img src="' + data.elementCrop + '" alt="Captured element">';
+      }
+      if (data.elementInfo) {
+        previewHtml += '<div class="dbg-capture-info">';
+        previewHtml += escHtml(data.elementInfo.tag || '');
+        if (data.elementInfo.text) {
+          previewHtml += ' \u2014 "' + escHtml(data.elementInfo.text.slice(0, 60)) + '"';
+        }
+        previewHtml += '</div>';
+      }
+      previewHtml += '<div class="dbg-capture-success">\u2705 Reference saved</div>';
+      if (data.expectedBounds) {
+        previewHtml += '<div class="dbg-capture-info">';
+        previewHtml += Math.round(data.expectedBounds.width) + '\u00d7' + Math.round(data.expectedBounds.height) + 'px';
+        if (data.matchedByFallback) {
+          previewHtml += ' (nearest element)';
+        }
+        previewHtml += '</div>';
+      }
+      previewHtml += '</div>';
+      resultDiv.innerHTML = previewHtml;
+    }
+
+    // Update button state
+    if (captureBtn) {
+      captureBtn.textContent = '\uD83D\uDCF7 Re-capture Element';
+      captureBtn.className = 'dbg-capture-btn dbg-capture-has-ref';
+    }
+
+    // Hide the "existing" hint if present (it's now replaced by the live preview)
+    var existingHint = document.getElementById('dbg-capture-existing');
+    if (existingHint) existingHint.style.display = 'none';
+
+    setStatus('Element captured for step ' + (stepIndex + 1), 'success');
+  } catch (err) {
+    if (resultDiv) {
+      resultDiv.innerHTML = '<div class="dbg-capture-info" style="color:#ef4444;">\u274c ' + escHtml(err.message) + '</div>';
+    }
+    setStatus('Capture error: ' + err.message, 'error');
+  } finally {
+    if (captureBtn) { captureBtn.disabled = false; }
+  }
+}
+
 async function updateStepCaptureDownload(stepIndex, fields) {
   if (!apiBaseUrl || !workflowId) return;
   setStatus('Saving capture settings...', null);
@@ -792,13 +1144,43 @@ async function updateStepMoveFile(stepIndex, fields) {
   }
 }
 
-async function debugNextStep() {
+async function debugNextStep(skipToggle) {
   if (!debugState || !apiBaseUrl || !workflowId || stepping) return;
   stepping = true;
 
   var nextBtn = document.getElementById('dbg-btn-next');
   if (nextBtn) { nextBtn.disabled = true; nextBtn.textContent = '\u23f3 Running...'; }
-  setStatus('Executing step...', null);
+
+  // When called from Run All (skipToggle=true), execute inline without closing panel
+  if (skipToggle) {
+    setStatus('Executing step...', null);
+    return await debugNextStepInline();
+  }
+
+  setStatus('Closing panel & executing step...', null);
+
+  // Send the step execution to background.js which orchestrates:
+  // close panel → wait → execute step → wait → reopen panel
+  // The sidepanel JS context dies when panel closes, so background handles everything.
+  // When panel reopens, it picks up the result via get_pending_step_result.
+  try {
+    await chrome.runtime.sendMessage({
+      type: 'debug_step_with_toggle',
+      apiBaseUrl: apiBaseUrl,
+      workflowId: workflowId,
+    });
+  } catch (e) {
+    // If the message fails, fall back to executing without toggle
+    console.log('[Woodbury Debug Panel] Toggle step failed, executing inline:', e.message);
+    return await debugNextStepInline();
+  }
+  // Panel will close now — this JS context will be destroyed.
+  // When it reopens, DOMContentLoaded will check for pending step result.
+}
+
+// Fallback: execute step without closing/reopening the panel
+async function debugNextStepInline() {
+  var nextBtn = document.getElementById('dbg-btn-next');
 
   try {
     var res = await fetch(apiBaseUrl + '/api/workflows/' + encodeURIComponent(workflowId) + '/debug/step', {
@@ -809,50 +1191,7 @@ async function debugNextStep() {
     var data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Step failed');
 
-    var idx = data.stepIndex;
-
-    // Update local state
-    if (debugState) {
-      if (data.stepResult && data.stepResult.status === 'success') {
-        if (!debugState.completedIndices.includes(idx)) {
-          debugState.completedIndices.push(idx);
-        }
-      } else {
-        if (!debugState.failedIndices.includes(idx)) {
-          debugState.failedIndices.push(idx);
-        }
-      }
-      if (data.hasMore) {
-        debugState.currentIndex = data.nextIndex;
-      }
-      // Store step result for persistence (survives side panel close/reopen)
-      if (!debugState.stepResults) debugState.stepResults = [];
-      debugState.stepResults[idx] = {
-        stepIndex: idx,
-        coordinateInfo: data.coordinateInfo || null,
-        status: data.stepResult?.status || null,
-        error: data.stepResult?.error || null,
-      };
-    }
-
-    // Update UI
-    updateMarkersUI();
-    updateCoordInfo(data);
-
-    // Scroll current step into view
-    if (data.hasMore) {
-      var nextStepEl = document.querySelector('#dbg-step-list .dbg-step[data-idx="' + data.nextIndex + '"]');
-      if (nextStepEl) nextStepEl.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-    }
-
-    if (!data.hasMore) {
-      if (nextBtn) { nextBtn.disabled = true; nextBtn.textContent = '\u2705 Done'; }
-      setStatus('Debug complete \u2014 all steps executed', 'success');
-      return false; // signal no more steps
-    }
-
-    setStatus('Step ' + (idx + 1) + ' complete', 'success');
-    return true; // more steps remain
+    return processStepResult(data);
   } catch (err) {
     setStatus('Step error: ' + err.message, 'error');
     return false;
@@ -863,6 +1202,68 @@ async function debugNextStep() {
       nextBtn.textContent = '\u25b6 Next Step';
     }
   }
+}
+
+// Shared logic: process a step result (used by both inline and toggle flows)
+function processStepResult(data) {
+  var idx = data.stepIndex;
+  var isSkipped = data.stepResult && data.stepResult.status === 'skipped';
+
+  // Update local state
+  if (debugState) {
+    if (data.stepResult && (data.stepResult.status === 'success' || data.stepResult.status === 'skipped')) {
+      if (!debugState.completedIndices.includes(idx)) {
+        debugState.completedIndices.push(idx);
+      }
+    } else {
+      if (!debugState.failedIndices.includes(idx)) {
+        debugState.failedIndices.push(idx);
+      }
+    }
+    if (data.hasMore) {
+      debugState.currentIndex = data.nextIndex;
+    }
+    // Store step result for persistence (survives side panel close/reopen)
+    if (!debugState.stepResults) debugState.stepResults = [];
+    debugState.stepResults[idx] = {
+      stepIndex: idx,
+      coordinateInfo: data.coordinateInfo || null,
+      status: data.stepResult?.status || null,
+      error: data.stepResult?.error || null,
+      visualVerification: data.visualVerification || null,
+      stepDetail: data.stepDetail || null,
+    };
+  }
+
+  // Update UI
+  updateMarkersUI();
+
+  // For skipped control-flow markers, auto-advance to next step
+  if (isSkipped && data.hasMore) {
+    var nextStepEl = document.querySelector('#dbg-step-list .dbg-step[data-idx="' + data.nextIndex + '"]');
+    if (nextStepEl) nextStepEl.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    setStatus('Skipped control flow marker (step ' + (idx + 1) + ')', null);
+    return true;
+  }
+
+  updateCoordInfo(data);
+
+  var nextBtn = document.getElementById('dbg-btn-next');
+  if (data.hasMore) {
+    var nextStepEl = document.querySelector('#dbg-step-list .dbg-step[data-idx="' + data.nextIndex + '"]');
+    if (nextStepEl) nextStepEl.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }
+
+  if (!data.hasMore) {
+    if (nextBtn) { nextBtn.disabled = true; nextBtn.textContent = '\u2705 Done'; }
+    setStatus('Debug complete \u2014 all steps executed', 'success');
+    return false;
+  }
+
+  setStatus('Step ' + (idx + 1) + ' complete', 'success');
+  if (nextBtn) { nextBtn.disabled = false; nextBtn.textContent = '\u25b6 Next Step'; }
+  stepping = false;
+  return true;
 }
 
 async function debugRunAll() {
@@ -877,7 +1278,7 @@ async function debugRunAll() {
   var maxSteps = debugState.steps.length;
   for (var i = 0; i < maxSteps; i++) {
     if (!debugState || !runningAll) break;
-    var hasMore = await debugNextStep();
+    var hasMore = await debugNextStep(true);
     if (!hasMore) break;
     // Delay between steps
     await new Promise(function(resolve) { setTimeout(resolve, 500); });
