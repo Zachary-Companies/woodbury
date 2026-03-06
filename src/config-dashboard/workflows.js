@@ -55,6 +55,8 @@ const STEP_ICONS = {
   file_dialog: '&#x1f4c1;',
   capture_download: '&#x1f4e5;',
   inject_style: '&#x1f3a8;',
+  keyboard_nav: '&#x1f9ed;',
+  click_selector: '&#x1f3af;',
 };
 
 // ── Variable auto-detection ─────────────────────────────────
@@ -245,12 +247,16 @@ function renderWorkflowSidebar() {
       var typeBadge = isDesktop
         ? '<span class="badge" style="background:#1e3a5f;color:#7dd3fc;">desktop</span>'
         : '';
+      var a11yBadge = (wf.metadata && wf.metadata.recordingMode === 'accessibility')
+        ? '<span class="badge" style="background:#1e3a5f;color:#93c5fd;">a11y</span>'
+        : '';
       return '<div class="ext-item' + active + '" data-wf-id="' + escAttr(wf.id) + '">' +
         '<div class="ext-item-name">' + escHtml(wf.name) + '</div>' +
         '<div class="ext-item-meta">' + escHtml(isDesktop ? 'Desktop App' : (wf.site || '')) + ' &middot; ' + wf.stepCount + ' steps</div>' +
         '<div class="ext-item-badges">' +
           '<span class="badge badge-ok">' + escHtml(wf.source) + '</span>' +
           typeBadge +
+          a11yBadge +
           (wf.format === 'code' ? '<span class="badge" style="background:#4c1d95;color:#c4b5fd;">JS</span>' : '') +
           (wf.variableCount > 0 ? '<span class="badge badge-partial">' + wf.variableCount + ' vars</span>' : '') +
           (smartCount > 0 ? '<span class="badge badge-webui">' + smartCount + ' smart</span>' : '') +
@@ -373,6 +379,20 @@ function showNewWorkflowForm() {
   html += '<label class="wf-create-label" for="wf-desktop-app-name" style="font-size:0.78rem;color:#94a3b8;margin-bottom:4px;display:block;">Application Name</label>';
   html += '<input class="wf-var-input" type="text" id="wf-desktop-app-name" placeholder="e.g. Finder, Spotify, Notepad" style="font-size:0.82rem;">';
   html += '<div class="wf-create-hint" style="margin-top:4px;">The app will be launched and brought to focus when recording starts</div>';
+  html += '</div>';
+
+  // Element identification mode selector (Standard / Accessibility)
+  html += '<div id="wf-element-mode-group" style="margin-bottom:0.75rem;">';
+  html += '<div style="font-size:0.72rem;color:#64748b;margin-bottom:4px;">Element Identification</div>';
+  html += '<div style="display:flex;gap:8px;align-items:center;">';
+  html += '<label style="display:flex;align-items:center;gap:5px;padding:6px 12px;border-radius:6px;border:1px solid #334155;cursor:pointer;font-size:0.78rem;color:#e2e8f0;user-select:none;">';
+  html += '<input type="radio" name="wf-element-mode" value="standard" checked style="accent-color:#7c3aed;margin:0;"> Standard';
+  html += '</label>';
+  html += '<label style="display:flex;align-items:center;gap:5px;padding:6px 12px;border-radius:6px;border:1px solid #334155;cursor:pointer;font-size:0.78rem;color:#e2e8f0;user-select:none;">';
+  html += '<input type="radio" name="wf-element-mode" value="accessibility" style="accent-color:#7c3aed;margin:0;"> Accessibility';
+  html += '</label>';
+  html += '</div>';
+  html += '<div class="wf-create-hint" style="margin-top:4px;font-size:0.7rem;">Standard uses CSS selectors. Accessibility uses ARIA roles, labels, and SVG fingerprints for layout-independent element matching.</div>';
   html += '</div>';
 
   html += '<div class="wf-create-hint" id="wf-record-hint" style="margin-bottom:0.75rem;">Click <strong>Start Recording</strong>, then perform the actions in Chrome. Each click, keystroke, and navigation will be captured as a workflow step. Click <strong>Stop</strong> when done.</div>';
@@ -553,7 +573,7 @@ function renderNewVarsList() {
 
 // ── New Workflow: Step rows ──────────────────────────────────
 
-var STEP_TYPES = ['navigate', 'click', 'type', 'wait', 'keyboard', 'scroll', 'assert', 'set_variable', 'file_dialog', 'inject_style'];
+var STEP_TYPES = ['navigate', 'click', 'click_selector', 'type', 'wait', 'keyboard', 'keyboard_nav', 'scroll', 'assert', 'set_variable', 'file_dialog', 'inject_style'];
 
 function renderNewStepsList() {
   var container = document.querySelector('#wf-new-steps-list');
@@ -648,6 +668,16 @@ function renderStepFields(step, idx) {
       html += '<input class="wf-var-input wf-ns-key" type="text" placeholder="Key (e.g. Enter, Tab)" value="' + escAttr(step.key || '') + '" style="width:120px;">';
       html += '<input class="wf-var-input wf-ns-mods" type="text" placeholder="Modifiers (cmd,shift)" value="' + escAttr((step.modifiers || []).join(',')) + '" style="width:140px;">';
       break;
+    case 'keyboard_nav':
+      html += '<select class="wf-var-input wf-ns-nav-key" style="width:120px;">';
+      var qiNavKeys = ['tab', 'shift_tab', 'arrow_up', 'arrow_down', 'arrow_left', 'arrow_right', 'enter', 'space', 'escape'];
+      var qiCurKey = (step.actions && step.actions[0] && step.actions[0].key) || 'tab';
+      for (var qk = 0; qk < qiNavKeys.length; qk++) {
+        html += '<option value="' + qiNavKeys[qk] + '"' + (qiCurKey === qiNavKeys[qk] ? ' selected' : '') + '>' + qiNavKeys[qk] + '</option>';
+      }
+      html += '</select>';
+      html += '<input class="wf-var-input wf-ns-nav-count" type="number" placeholder="Count" value="' + escAttr(String((step.actions && step.actions[0] && step.actions[0].count) || 1)) + '" style="width:65px;" min="1">';
+      break;
     case 'scroll':
       html += '<input class="wf-var-input wf-ns-x" type="number" placeholder="X" value="' + escAttr(String(step.x || '')) + '" style="width:60px;">';
       html += '<input class="wf-var-input wf-ns-y" type="number" placeholder="Y" value="' + escAttr(String(step.y || '')) + '" style="width:60px;">';
@@ -673,6 +703,24 @@ function renderStepFields(step, idx) {
       html += '</select>';
       html += '<input class="wf-var-input wf-ns-style-selector" type="text" placeholder="CSS selector" value="' + escAttr(step.selector || '') + '" style="flex:1;min-width:150px;">';
       html += '<input class="wf-var-input wf-ns-style-json" type="text" placeholder=\'{"position":"absolute"}\' value="' + escAttr(JSON.stringify(step.styles || {})) + '" style="flex:1;min-width:150px;">';
+      break;
+    case 'click_selector':
+      html += '<input class="wf-var-input wf-ns-cs-selector" type="text" placeholder="CSS selector" value="' + escAttr(step.selector || '') + '" style="flex:1;min-width:200px;">';
+      html += '<input class="wf-var-input wf-ns-cs-shadow" type="text" placeholder="Shadow DOM host (optional)" value="' + escAttr(step.shadowDomSelector || '') + '" style="flex:1;min-width:140px;">';
+      html += '<input class="wf-var-input wf-ns-cs-text" type="text" placeholder="Text to match (optional)" value="' + escAttr(step.textContent || '') + '" style="flex:1;min-width:120px;">';
+      html += '<select class="wf-var-input wf-ns-cs-click-type" style="width:90px;">';
+      ['single', 'double', 'right'].forEach(function(ct) {
+        html += '<option value="' + ct + '"' + ((step.clickType || 'single') === ct ? ' selected' : '') + '>' + ct + '</option>';
+      });
+      html += '</select>';
+      html += '<label style="display:flex;align-items:center;gap:0.25rem;font-size:0.7rem;color:#94a3b8;white-space:nowrap;">';
+      html += 'Delay';
+      html += '<input class="wf-var-input wf-ns-cs-delay" type="number" value="' + escAttr(String(step.delayAfterMs != null ? step.delayAfterMs : 1000)) + '" placeholder="1000" style="width:65px;">';
+      html += '<span style="font-size:0.6rem;">ms</span>';
+      html += '</label>';
+      html += '<label style="display:flex;align-items:center;gap:0.25rem;font-size:0.7rem;color:#94a3b8;white-space:nowrap;">';
+      html += '<input class="wf-ns-cs-exact" type="checkbox"' + (step.exactMatch ? ' checked' : '') + '> Exact';
+      html += '</label>';
       break;
     default:
       html += '<span style="color:#475569;font-size:0.75rem;">This step type can be configured after creation</span>';
@@ -775,16 +823,32 @@ function wireStepFieldHandlers(row, idx) {
       });
       break;
     }
+    case 'click_selector': {
+      var csSel = row.querySelector('.wf-ns-cs-selector');
+      var csShadow = row.querySelector('.wf-ns-cs-shadow');
+      var csType = row.querySelector('.wf-ns-cs-click-type');
+      var csDelay = row.querySelector('.wf-ns-cs-delay');
+      var csText = row.querySelector('.wf-ns-cs-text');
+      var csExact = row.querySelector('.wf-ns-cs-exact');
+      if (csSel) csSel.addEventListener('input', function() { newWorkflowSteps[idx].selector = csSel.value; });
+      if (csShadow) csShadow.addEventListener('input', function() { newWorkflowSteps[idx].shadowDomSelector = csShadow.value; });
+      if (csText) csText.addEventListener('input', function() { newWorkflowSteps[idx].textContent = csText.value; });
+      if (csExact) csExact.addEventListener('change', function() { newWorkflowSteps[idx].exactMatch = csExact.checked; });
+      if (csType) csType.addEventListener('change', function() { newWorkflowSteps[idx].clickType = csType.value; });
+      if (csDelay) csDelay.addEventListener('input', function() { newWorkflowSteps[idx].delayAfterMs = parseInt(csDelay.value) || 0; });
+      break;
+    }
   }
 }
 
 function buildDefaultStep(type) {
   switch (type) {
     case 'navigate': return { type: 'navigate', url: '', waitMs: 2000, label: '' };
-    case 'click': return { type: 'click', target: { selector: '', textContent: '' }, label: '', delayAfterMs: 300 };
+    case 'click': return { type: 'click', target: { selector: '', textContent: '' }, label: '', delayAfterMs: 1000 };
     case 'type': return { type: 'type', target: { selector: '' }, value: '', clearFirst: false, skipClick: false, label: '', delayAfterMs: 1000 };
     case 'wait': return { type: 'wait', condition: { type: 'delay', ms: 2000 }, label: '' };
     case 'keyboard': return { type: 'keyboard', key: '', modifiers: [], label: '' };
+    case 'keyboard_nav': return { type: 'keyboard_nav', actions: [{ key: 'tab', count: 1 }], expectedFocus: {}, autoFix: true, maxSearchDistance: 20, delayAfterMs: 1000, label: '' };
     case 'scroll': return { type: 'scroll', x: 0, y: 0, amount: 3, label: '' };
     case 'assert': return { type: 'assert', target: { selector: '' }, expectedText: '', label: '' };
     case 'set_variable': return { type: 'set_variable', variable: '', value: '', label: '' };
@@ -795,6 +859,7 @@ function buildDefaultStep(type) {
     case 'loop': return { type: 'loop', overVariable: '', itemVariable: 'item', indexVariable: '', steps: [], label: 'Loop' };
     case 'try_catch': return { type: 'try_catch', trySteps: [], catchSteps: [], errorVariable: 'error', label: 'Try / Catch' };
     case 'inject_style': return { type: 'inject_style', selector: '', styles: {}, action: 'apply', label: '' };
+    case 'click_selector': return { type: 'click_selector', selector: '', shadowDomSelector: '', textContent: '', exactMatch: false, clickType: 'single', delayAfterMs: 1000, label: '' };
     default: return { type: type, label: '' };
   }
 }
@@ -1157,6 +1222,92 @@ function renderStepEditor(step, idx, totalSteps) {
       html += '</div>';
       break;
 
+    case 'keyboard_nav': {
+      var navActions = step.actions || [{ key: 'tab', count: 1 }];
+      var navKeyOptions = ['tab', 'shift_tab', 'arrow_up', 'arrow_down', 'arrow_left', 'arrow_right', 'enter', 'space', 'escape'];
+      html += '<div class="wf-se-row" style="flex-direction:column;align-items:stretch;">';
+      html += '<span class="wf-se-label" style="margin-bottom:0.35rem;">Actions</span>';
+      html += '<div class="wf-se-nav-actions-list">';
+      for (var ai = 0; ai < navActions.length; ai++) {
+        var act = navActions[ai];
+        html += '<div class="wf-se-nav-action-row" style="display:flex;align-items:center;gap:0.35rem;margin-bottom:0.3rem;">';
+        html += '<select class="wf-se-input wf-se-nav-key" style="max-width:130px;">';
+        for (var ki = 0; ki < navKeyOptions.length; ki++) {
+          html += '<option value="' + navKeyOptions[ki] + '"' + (act.key === navKeyOptions[ki] ? ' selected' : '') + '>' + navKeyOptions[ki] + '</option>';
+        }
+        html += '</select>';
+        html += '<label style="display:flex;align-items:center;gap:0.2rem;font-size:0.7rem;color:#94a3b8;white-space:nowrap;">Count';
+        html += '<input class="wf-se-input wf-se-nav-count" type="number" value="' + escAttr(String(act.count || 1)) + '" style="max-width:55px;" min="1">';
+        html += '</label>';
+        html += '<input class="wf-se-input wf-se-nav-match" type="text" value="' + escAttr(act.matchText || '') + '" placeholder="Search text {{var}}" style="flex:1;min-width:100px;">';
+        html += '<button class="wf-se-btn wf-se-nav-remove" style="padding:0.15rem 0.4rem;font-size:0.8rem;" title="Remove action">&times;</button>';
+        html += '</div>';
+      }
+      html += '</div>';
+      html += '<button class="wf-se-btn wf-se-nav-add" style="font-size:0.7rem;padding:0.2rem 0.5rem;margin-top:0.25rem;">+ Add Action</button>';
+      html += '</div>';
+      // Expected focus
+      var ef = step.expectedFocus || {};
+      html += '<div class="wf-se-row" style="flex-direction:column;align-items:stretch;">';
+      html += '<span class="wf-se-label" style="margin-bottom:0.35rem;">Expected Focus</span>';
+      html += '<div style="display:flex;flex-wrap:wrap;gap:0.35rem;">';
+      html += '<input class="wf-se-input wf-se-nav-ef-text" type="text" value="' + escAttr(ef.text || '') + '" placeholder="Text" style="max-width:140px;">';
+      html += '<input class="wf-se-input wf-se-nav-ef-aria" type="text" value="' + escAttr(ef.ariaLabel || '') + '" placeholder="Aria label" style="max-width:140px;">';
+      html += '<input class="wf-se-input wf-se-nav-ef-role" type="text" value="' + escAttr(ef.role || '') + '" placeholder="Role" style="max-width:100px;">';
+      html += '<input class="wf-se-input wf-se-nav-ef-tag" type="text" value="' + escAttr(ef.tag || '') + '" placeholder="Tag" style="max-width:80px;">';
+      html += '<input class="wf-se-input wf-se-nav-ef-selector" type="text" value="' + escAttr(ef.selector || '') + '" placeholder="Selector" style="max-width:160px;">';
+      html += '<input class="wf-se-input wf-se-nav-ef-placeholder" type="text" value="' + escAttr(ef.placeholder || '') + '" placeholder="Placeholder" style="max-width:140px;">';
+      html += '</div>';
+      html += '</div>';
+      // Auto-fix + max search distance
+      html += '<div class="wf-se-row">';
+      html += '<label style="display:flex;align-items:center;gap:0.3rem;font-size:0.75rem;color:#cbd5e1;cursor:pointer;">';
+      html += '<input type="checkbox" class="wf-se-nav-autofix"' + (step.autoFix !== false ? ' checked' : '') + '> Auto-fix';
+      html += '</label>';
+      html += '<label style="display:flex;align-items:center;gap:0.2rem;font-size:0.7rem;color:#94a3b8;margin-left:1rem;white-space:nowrap;">Max search distance';
+      html += '<input class="wf-se-input wf-se-nav-max-dist" type="number" value="' + escAttr(String(step.maxSearchDistance || 20)) + '" style="max-width:65px;" min="1">';
+      html += '</label>';
+      html += '</div>';
+      // Delay
+      html += '<div class="wf-se-row">';
+      html += '<span class="wf-se-label">Delay ms</span>';
+      html += '<input class="wf-se-input wf-se-nav-delay" type="number" value="' + escAttr(String(step.delayAfterMs != null ? step.delayAfterMs : 1000)) + '" placeholder="1000" style="max-width:100px;">';
+      html += '</div>';
+      break;
+    }
+
+    case 'click_selector':
+      html += '<div class="wf-se-row">';
+      html += '<span class="wf-se-label">CSS Selector</span>';
+      html += '<input class="wf-se-input wf-se-cs-selector" type="text" value="' + escAttr(step.selector || '') + '" placeholder="e.g. button.submit, #my-btn, [data-action=save]">';
+      html += '</div>';
+      html += '<div class="wf-se-row">';
+      html += '<span class="wf-se-label">Shadow DOM host</span>';
+      html += '<input class="wf-se-input wf-se-cs-shadow" type="text" value="' + escAttr(step.shadowDomSelector || '') + '" placeholder="e.g. my-component >>> inner-host (optional)">';
+      html += '</div>';
+      html += '<div class="wf-se-row">';
+      html += '<span class="wf-se-label">Text content</span>';
+      html += '<input class="wf-se-input wf-se-cs-text" type="text" value="' + escAttr(step.textContent || '') + '" placeholder="Text to match (optional)">';
+      html += '</div>';
+      html += '<div class="wf-se-row">';
+      html += '<span class="wf-se-label">Exact match</span>';
+      html += '<label style="display:flex;align-items:center;gap:0.35rem;"><input class="wf-se-cs-exact" type="checkbox"' + (step.exactMatch ? ' checked' : '') + '> Match text exactly</label>';
+      html += '</div>';
+      html += '<div class="wf-se-row">';
+      html += '<span class="wf-se-label">Click type</span>';
+      var csClickType = step.clickType || 'single';
+      html += '<select class="wf-se-input wf-se-cs-click-type" style="max-width:120px;">';
+      ['single', 'double', 'right'].forEach(function(t) {
+        html += '<option value="' + t + '"' + (csClickType === t ? ' selected' : '') + '>' + t + '</option>';
+      });
+      html += '</select>';
+      html += '</div>';
+      html += '<div class="wf-se-row">';
+      html += '<span class="wf-se-label">Delay ms</span>';
+      html += '<input class="wf-se-input wf-se-cs-delay" type="number" value="' + escAttr(String(step.delayAfterMs != null ? step.delayAfterMs : 1000)) + '" placeholder="1000" style="max-width:100px;">';
+      html += '</div>';
+      break;
+
     default:
       html += '<div class="wf-se-row">';
       html += '<span style="color:#64748b;font-size:0.75rem;font-style:italic;">Advanced step type — use the JSON tab for full editing control</span>';
@@ -1369,6 +1520,62 @@ function collectStepEditorValues(editor, step) {
       }
       break;
     }
+    case 'keyboard_nav': {
+      var navActions = [];
+      var actionRows = editor.querySelectorAll('.wf-se-nav-action-row');
+      for (var ri = 0; ri < actionRows.length; ri++) {
+        var row = actionRows[ri];
+        var keySelect = row.querySelector('.wf-se-nav-key');
+        var countInput = row.querySelector('.wf-se-nav-count');
+        var matchInput = row.querySelector('.wf-se-nav-match');
+        var actionObj = {
+          key: keySelect ? keySelect.value : 'tab',
+          count: countInput ? (parseInt(countInput.value) || 1) : 1
+        };
+        if (matchInput && matchInput.value) actionObj.matchText = matchInput.value;
+        navActions.push(actionObj);
+      }
+      updated.actions = navActions.length > 0 ? navActions : [{ key: 'tab', count: 1 }];
+      var efText = editor.querySelector('.wf-se-nav-ef-text');
+      var efAria = editor.querySelector('.wf-se-nav-ef-aria');
+      var efRole = editor.querySelector('.wf-se-nav-ef-role');
+      var efTag = editor.querySelector('.wf-se-nav-ef-tag');
+      var efSel = editor.querySelector('.wf-se-nav-ef-selector');
+      var efPlaceholder = editor.querySelector('.wf-se-nav-ef-placeholder');
+      var ef = {};
+      if (efText && efText.value) ef.text = efText.value;
+      if (efAria && efAria.value) ef.ariaLabel = efAria.value;
+      if (efRole && efRole.value) ef.role = efRole.value;
+      if (efTag && efTag.value) ef.tag = efTag.value;
+      if (efSel && efSel.value) ef.selector = efSel.value;
+      if (efPlaceholder && efPlaceholder.value) ef.placeholder = efPlaceholder.value;
+      updated.expectedFocus = ef;
+      var autoFixCb = editor.querySelector('.wf-se-nav-autofix');
+      var maxDistInput = editor.querySelector('.wf-se-nav-max-dist');
+      var delayInput = editor.querySelector('.wf-se-nav-delay');
+      updated.autoFix = autoFixCb ? autoFixCb.checked : true;
+      updated.maxSearchDistance = maxDistInput ? (parseInt(maxDistInput.value) || 20) : 20;
+      updated.delayAfterMs = delayInput ? (parseInt(delayInput.value) || 100) : 100;
+      break;
+    }
+    case 'click_selector': {
+      var csSelInput = editor.querySelector('.wf-se-cs-selector');
+      var csShadowInput = editor.querySelector('.wf-se-cs-shadow');
+      var csTextInput = editor.querySelector('.wf-se-cs-text');
+      var csExactInput = editor.querySelector('.wf-se-cs-exact');
+      var csTypeSelect = editor.querySelector('.wf-se-cs-click-type');
+      var csDelayInput = editor.querySelector('.wf-se-cs-delay');
+      if (csSelInput) updated.selector = csSelInput.value;
+      if (csShadowInput) updated.shadowDomSelector = csShadowInput.value;
+      if (csTextInput) updated.textContent = csTextInput.value;
+      if (csExactInput) updated.exactMatch = csExactInput.checked;
+      if (csTypeSelect) {
+        if (csTypeSelect.value === 'single') delete updated.clickType;
+        else updated.clickType = csTypeSelect.value;
+      }
+      if (csDelayInput) updated.delayAfterMs = parseInt(csDelayInput.value) || 0;
+      break;
+    }
   }
 
   return updated;
@@ -1548,10 +1755,14 @@ async function startRecording() {
     var captureCropsEl = document.querySelector('#wf-capture-crops');
     var captureElementCrops = captureCropsEl ? captureCropsEl.checked : true;
 
+    // Get element identification mode
+    var elementModeRadio = document.querySelector('input[name="wf-element-mode"]:checked');
+    var recordingMode = (elementModeRadio && elementModeRadio.value === 'accessibility') ? 'accessibility' : 'standard';
+
     var res = await fetch('/api/recording/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: name, site: site, captureElementCrops: captureElementCrops, appName: appName || undefined }),
+      body: JSON.stringify({ name: name, site: site, captureElementCrops: captureElementCrops, appName: appName || undefined, recordingMode: recordingMode }),
     });
     var data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Start failed');
@@ -1663,6 +1874,209 @@ function resetRecordingUI() {
   if (saveRow) saveRow.style.display = '';
 }
 
+// ── Re-record existing workflow ──────────────────────────────
+
+var _reRecordContext = null; // { wf, filePath, source }
+var reRecordPollTimer = null;
+var reRecordLastStepCount = 0;
+
+async function startReRecording(wf, filePath, source) {
+  _reRecordContext = { wf: wf, filePath: filePath, source: source };
+
+  var isDesktopWf = wf.site === 'desktop';
+
+  // Show recording controls
+  var controls = document.querySelector('#wf-rerecord-controls');
+  if (controls) {
+    controls.style.display = 'flex';
+    controls.style.gap = '0.5rem';
+    controls.style.alignItems = 'center';
+    controls.innerHTML =
+      '<button class="btn-secondary wf-record-active-btn" id="wf-btn-rerecord-pause" title="Pause">&#x23f8; Pause</button>' +
+      '<button class="btn-danger" id="wf-btn-rerecord-stop" style="font-size:0.8rem;padding:0.4rem 1rem;">&#x23f9; Stop &amp; Save</button>' +
+      '<button class="btn-secondary" id="wf-btn-rerecord-cancel" style="font-size:0.75rem;padding:0.35rem 0.75rem;">Cancel</button>';
+  }
+
+  // Show feed
+  var feed = document.querySelector('#wf-rerecord-feed');
+  if (feed) {
+    feed.style.display = 'block';
+    feed.innerHTML =
+      '<div id="wf-rerecord-status"><span class="wf-rec-indicator">&#x23fa;</span> Starting re-record...</div>' +
+      '<div id="wf-rerecord-steps" style="margin-top:0.5rem;font-size:0.72rem;color:#64748b;max-height:200px;overflow-y:auto;"></div>';
+  }
+
+  // Hide the re-record button
+  var rerecordBtn = document.querySelector('#wf-btn-rerecord');
+  if (rerecordBtn) rerecordBtn.style.display = 'none';
+
+  // Show recording mode selector and pre-select the workflow's current mode
+  var modeSelectorDiv = document.querySelector('#wf-rerecord-mode-selector');
+  if (modeSelectorDiv) {
+    modeSelectorDiv.style.display = 'block';
+    var currentMode = (wf.metadata && wf.metadata.recordingMode) || 'standard';
+    var radioToCheck = document.querySelector('input[name="wf-rerecord-mode"][value="' + currentMode + '"]');
+    if (radioToCheck) radioToCheck.checked = true;
+  }
+
+  // Wire buttons
+  document.querySelector('#wf-btn-rerecord-stop').addEventListener('click', stopReRecording);
+  document.querySelector('#wf-btn-rerecord-pause').addEventListener('click', togglePauseReRecording);
+  document.querySelector('#wf-btn-rerecord-cancel').addEventListener('click', cancelReRecording);
+
+  try {
+    // Get the selected recording mode for re-record
+    var reRecordModeRadio = document.querySelector('input[name="wf-rerecord-mode"]:checked');
+    var reRecordMode = (reRecordModeRadio && reRecordModeRadio.value === 'accessibility') ? 'accessibility' : 'standard';
+
+    var res = await fetch('/api/recording/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: wf.name,
+        site: wf.site,
+        captureElementCrops: true,
+        reRecord: { workflowId: wf.id, filePath: filePath },
+        recordingMode: reRecordMode,
+      }),
+    });
+    var data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Start failed');
+
+    var statusEl = document.querySelector('#wf-rerecord-status');
+    if (statusEl) {
+      statusEl.innerHTML =
+        '<span class="wf-rec-indicator wf-rec-active">&#x23fa;</span> Recording — ' +
+        (isDesktopWf ? 'click anywhere on screen' : 'interact with Chrome now');
+    }
+
+    startReRecordPoll();
+  } catch (err) {
+    toast('Re-record failed: ' + err.message, 'error');
+    resetReRecordUI();
+  }
+}
+
+async function stopReRecording() {
+  stopReRecordPoll();
+  var statusEl = document.querySelector('#wf-rerecord-status');
+  if (statusEl) statusEl.innerHTML = '<span class="wf-rec-indicator">&#x23f9;</span> Saving...';
+
+  try {
+    var res = await fetch('/api/recording/stop', { method: 'POST' });
+    var data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Stop failed');
+
+    toast('Steps re-recorded! ' + data.stepCount + ' steps captured.', 'success');
+    resetReRecordUI();
+
+    // Re-load and re-render the workflow
+    await fetchWorkflows();
+    if (_reRecordContext && _reRecordContext.wf) {
+      selectWorkflow(_reRecordContext.wf.id);
+    }
+    _reRecordContext = null;
+  } catch (err) {
+    toast('Stop failed: ' + err.message, 'error');
+    resetReRecordUI();
+  }
+}
+
+async function togglePauseReRecording() {
+  var statusRes = await fetch('/api/recording/status');
+  var status = await statusRes.json();
+  var isPaused = status.paused;
+
+  try {
+    var endpoint = isPaused ? '/api/recording/resume' : '/api/recording/pause';
+    var res = await fetch(endpoint, { method: 'POST' });
+    var data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+
+    var pauseBtn = document.querySelector('#wf-btn-rerecord-pause');
+    var statusEl = document.querySelector('#wf-rerecord-status');
+
+    if (isPaused) {
+      if (pauseBtn) pauseBtn.innerHTML = '&#x23f8; Pause';
+      if (statusEl) statusEl.innerHTML = '<span class="wf-rec-indicator wf-rec-active">&#x23fa;</span> Recording';
+      startReRecordPoll();
+    } else {
+      if (pauseBtn) pauseBtn.innerHTML = '&#x25b6; Resume';
+      if (statusEl) statusEl.innerHTML = '<span class="wf-rec-indicator wf-rec-paused">&#x23f8;</span> Paused';
+      stopReRecordPoll();
+    }
+  } catch (err) {
+    toast('Pause/resume failed: ' + err.message, 'error');
+  }
+}
+
+async function cancelReRecording() {
+  stopReRecordPoll();
+  try {
+    await fetch('/api/recording/cancel', { method: 'POST' });
+  } catch {}
+  toast('Re-record cancelled', 'info');
+  resetReRecordUI();
+  // Re-render the original workflow
+  if (_reRecordContext) {
+    renderWorkflowDetail(_reRecordContext.wf, _reRecordContext.filePath, _reRecordContext.source);
+    _reRecordContext = null;
+  }
+}
+
+function resetReRecordUI() {
+  stopReRecordPoll();
+
+  var controls = document.querySelector('#wf-rerecord-controls');
+  if (controls) { controls.style.display = 'none'; controls.innerHTML = ''; }
+
+  var feed = document.querySelector('#wf-rerecord-feed');
+  if (feed) { feed.style.display = 'none'; feed.innerHTML = ''; }
+
+  var modeSelector = document.querySelector('#wf-rerecord-mode-selector');
+  if (modeSelector) modeSelector.style.display = 'none';
+
+  var rerecordBtn = document.querySelector('#wf-btn-rerecord');
+  if (rerecordBtn) rerecordBtn.style.display = '';
+}
+
+function startReRecordPoll() {
+  reRecordLastStepCount = 0;
+  reRecordPollTimer = setInterval(pollReRecordStatus, 1000);
+}
+
+function stopReRecordPoll() {
+  if (reRecordPollTimer) {
+    clearInterval(reRecordPollTimer);
+    reRecordPollTimer = null;
+  }
+}
+
+async function pollReRecordStatus() {
+  try {
+    var res = await fetch('/api/recording/status');
+    var data = await res.json();
+    if (!data.active) {
+      stopReRecordPoll();
+      return;
+    }
+
+    // Update step count in feed
+    var stepsEl = document.querySelector('#wf-rerecord-steps');
+    if (stepsEl && data.steps && data.steps.length > reRecordLastStepCount) {
+      for (var i = reRecordLastStepCount; i < data.steps.length; i++) {
+        var s = data.steps[i];
+        var icon = STEP_ICONS[s.type] || '&#x25cf;';
+        stepsEl.innerHTML += '<div style="padding:0.15rem 0;border-bottom:1px solid #1e293b;">' +
+          '<span style="opacity:0.5;">' + (s.index + 1) + '.</span> ' +
+          icon + ' ' + escHtml(s.label) + '</div>';
+      }
+      reRecordLastStepCount = data.steps.length;
+      stepsEl.scrollTop = stepsEl.scrollHeight;
+    }
+  } catch {}
+}
+
 var lastStepCount = 0;
 
 function startRecordingPoll() {
@@ -1726,6 +2140,24 @@ function buildStepLabel(step, idx) {
     case 'type': return 'Type "' + truncate(step.value || '', 30) + '"';
     case 'wait': return step.condition && step.condition.type === 'delay' ? 'Wait ' + (step.condition.ms || 0) + 'ms' : 'Wait for element';
     case 'keyboard': return 'Press ' + (step.modifiers && step.modifiers.length ? step.modifiers.join('+') + '+' : '') + (step.key || 'key');
+    case 'keyboard_nav': {
+      var navLabelMap = { tab: 'Tab', shift_tab: 'Shift+Tab', arrow_up: '\u2191', arrow_down: '\u2193', arrow_left: '\u2190', arrow_right: '\u2192', enter: 'Enter', space: 'Space', escape: 'Esc' };
+      var acts = step.actions || [];
+      if (acts.length === 0) return 'Keyboard Nav';
+      var parts = [];
+      for (var li = 0; li < acts.length; li++) {
+        var a = acts[li];
+        var lbl = navLabelMap[a.key] || a.key;
+        if (a.count > 1) lbl += ' \u00d7' + a.count;
+        if (a.matchText) lbl += ' find \u201c' + truncate(a.matchText, 20) + '\u201d';
+        parts.push(lbl);
+      }
+      var ef = step.expectedFocus;
+      if (ef && (ef.text || ef.ariaLabel || ef.selector)) {
+        parts.push('\u201c' + truncate(ef.text || ef.ariaLabel || ef.selector, 20) + '\u201d');
+      }
+      return parts.join(' \u2192 ');
+    }
     case 'scroll': return 'Scroll';
     case 'assert': return 'Assert ' + ((step.target && step.target.selector) || 'element');
     case 'set_variable': return 'Set ' + (step.variable || 'variable');
@@ -1736,8 +2168,132 @@ function buildStepLabel(step, idx) {
     case 'loop': return 'Loop over ' + (step.overVariable || 'items');
     case 'try_catch': return 'Try / Catch';
     case 'inject_style': return step.action === 'clear' ? 'Clear styles: ' + truncate(step.selector || 'all', 30) : 'Inject style: ' + truncate(step.selector || '', 30);
+    case 'click_selector': return 'Click ' + (step.selector || 'element') + (step.shadowDomSelector ? ' [shadow: ' + truncate(step.shadowDomSelector, 20) + ']' : '') + (step.textContent ? ' "' + truncate(step.textContent, 20) + '"' : '');
     default: return 'Step ' + (idx + 1);
   }
+}
+
+// ── Collapse Keyboard Steps ──────────────────────────────────
+
+/**
+ * Collapse consecutive keyboard steps with navigation/action keys into
+ * optimized keyboard_nav steps.
+ *
+ * A keyboard step qualifies if its key is one of:
+ *   Tab, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Enter, Escape, Space
+ * and it has no Ctrl, Alt, or Cmd/Meta modifiers (Shift is allowed only for Tab).
+ *
+ * Returns a new array of steps with qualifying runs merged into keyboard_nav steps.
+ */
+function collapseKeyboardSteps(steps) {
+  var KEY_MAP = {
+    'Tab':        'tab',
+    'ArrowUp':    'arrow_up',
+    'ArrowDown':  'arrow_down',
+    'ArrowLeft':  'arrow_left',
+    'ArrowRight': 'arrow_right',
+    'Enter':      'enter',
+    'Escape':     'escape',
+    'Space':      'space',
+    ' ':          'space',
+  };
+
+  var NAV_LABEL_MAP = {
+    tab: 'Tab', shift_tab: 'Shift+Tab',
+    arrow_up: '\u2191', arrow_down: '\u2193',
+    arrow_left: '\u2190', arrow_right: '\u2192',
+    enter: 'Enter', space: 'Space', escape: 'Esc',
+  };
+
+  /**
+   * Check if a keyboard step qualifies for collapsing.
+   * Returns the mapped action key string, or null if it doesn't qualify.
+   */
+  function getNavAction(step) {
+    if (!step || step.type !== 'keyboard') return null;
+    var key = step.key;
+    if (!key || !KEY_MAP[key]) return null;
+
+    var mods = step.modifiers || [];
+    // Disallow Ctrl, Alt, Cmd/Meta
+    for (var m = 0; m < mods.length; m++) {
+      var mod = mods[m].toLowerCase();
+      if (mod === 'ctrl' || mod === 'control' || mod === 'alt' ||
+          mod === 'cmd' || mod === 'meta' || mod === 'command') {
+        return null;
+      }
+    }
+
+    // Shift is only allowed with Tab
+    var hasShift = false;
+    for (var s = 0; s < mods.length; s++) {
+      if (mods[s].toLowerCase() === 'shift') { hasShift = true; break; }
+    }
+    if (hasShift && key !== 'Tab') return null;
+
+    if (hasShift && key === 'Tab') return 'shift_tab';
+    return KEY_MAP[key];
+  }
+
+  /**
+   * Build a label from an actions array.
+   */
+  function buildNavLabel(actions) {
+    var parts = [];
+    for (var i = 0; i < actions.length; i++) {
+      var a = actions[i];
+      var lbl = NAV_LABEL_MAP[a.key] || a.key;
+      if (a.count > 1) lbl += ' \u00d7' + a.count;
+      parts.push(lbl);
+    }
+    return parts.join(' \u2192 ');
+  }
+
+  var result = [];
+  var stepCounter = 1;
+  var pendingActions = null; // array of { key, count }
+
+  function flushPending() {
+    if (!pendingActions || pendingActions.length === 0) return;
+    var label = buildNavLabel(pendingActions);
+    result.push({
+      type: 'keyboard_nav',
+      id: 'keyboard_nav_' + stepCounter++,
+      actions: pendingActions,
+      autoFix: true,
+      label: label,
+    });
+    pendingActions = null;
+  }
+
+  for (var i = 0; i < steps.length; i++) {
+    var step = steps[i];
+    var action = getNavAction(step);
+
+    if (action) {
+      if (pendingActions) {
+        // Check if same action as last entry — increment count
+        var last = pendingActions[pendingActions.length - 1];
+        if (last.key === action) {
+          last.count++;
+        } else {
+          pendingActions.push({ key: action, count: 1 });
+        }
+      } else {
+        // Start a new pending group
+        pendingActions = [{ key: action, count: 1 }];
+      }
+    } else {
+      // Non-matching step — flush any pending group, then emit this step
+      flushPending();
+      result.push(step);
+    }
+  }
+
+  // Flush any trailing pending group
+  flushPending();
+
+  return result;
 }
 
 // ── Detail View ──────────────────────────────────────────────
@@ -2325,6 +2881,9 @@ function renderVisualView(wf, source) {
   var smartCount = wf.steps.filter(function(s) { return s.type === 'wait' && s.condition && s.condition.type !== 'delay'; }).length;
   if (smartCount > 0) html += infoChip('Smart Waits', String(smartCount), '#10b981');
   html += infoChip('Source', source);
+  if (wf.metadata && wf.metadata.recordingMode === 'accessibility') {
+    html += infoChip('Mode', 'Accessibility', '#3b82f6');
+  }
   if (wf.metadata && wf.metadata.createdAt) {
     var d = new Date(wf.metadata.createdAt);
     html += infoChip('Created', d.toLocaleDateString());
@@ -2374,7 +2933,24 @@ function renderVisualView(wf, source) {
 
   // Steps section
   html += '<div class="wf-section">';
-  html += '<div class="wf-section-header">Steps (' + wf.steps.length + ')' + helpIcon('workflows-steps') + '</div>';
+  html += '<div class="wf-section-header" style="display:flex;align-items:center;gap:0.5rem;">Steps (' + wf.steps.length + ')' + helpIcon('workflows-steps');
+  html += '<button class="wf-collapse-nav-btn" id="wf-btn-collapse-nav" style="margin-left:auto;font-size:0.68rem;padding:0.2rem 0.55rem;background:#1e293b;color:#94a3b8;border:1px solid #334155;border-radius:4px;cursor:pointer;" title="Collapse consecutive keyboard steps into keyboard_nav steps">&#x1f9ed; Collapse Nav</button>';
+  html += '<button id="wf-btn-rerecord" style="font-size:0.68rem;padding:0.2rem 0.55rem;background:#1e293b;color:#f87171;border:1px solid #7f1d1d;border-radius:4px;cursor:pointer;" title="Re-record all steps for this workflow">&#x23fa; Re-record</button>';
+  html += '</div>';
+  html += '<div id="wf-rerecord-controls" style="display:none;margin-bottom:0.75rem;"></div>';
+  // Re-record element mode selector (shown during re-recording setup)
+  html += '<div id="wf-rerecord-mode-selector" style="display:none;margin-bottom:0.75rem;">';
+  html += '<div style="font-size:0.72rem;color:#64748b;margin-bottom:4px;">Element Identification Mode</div>';
+  html += '<div style="display:flex;gap:8px;align-items:center;">';
+  html += '<label style="display:flex;align-items:center;gap:5px;padding:4px 10px;border-radius:5px;border:1px solid #334155;cursor:pointer;font-size:0.72rem;color:#e2e8f0;user-select:none;">';
+  html += '<input type="radio" name="wf-rerecord-mode" value="standard" style="accent-color:#7c3aed;margin:0;"> Standard';
+  html += '</label>';
+  html += '<label style="display:flex;align-items:center;gap:5px;padding:4px 10px;border-radius:5px;border:1px solid #334155;cursor:pointer;font-size:0.72rem;color:#e2e8f0;user-select:none;">';
+  html += '<input type="radio" name="wf-rerecord-mode" value="accessibility" style="accent-color:#7c3aed;margin:0;"> Accessibility';
+  html += '</label>';
+  html += '</div>';
+  html += '</div>';
+  html += '<div id="wf-rerecord-feed" style="display:none;margin-bottom:0.75rem;padding:0.75rem;background:#0f172a;border:1px solid #1e293b;border-radius:6px;"></div>';
   html += '<div class="wf-section-body">';
   html += renderStepList(wf.steps, '');
   html += '</div>';
@@ -2388,6 +2964,7 @@ function renderVisualView(wf, source) {
     if (wf.metadata.createdAt) html += 'Created: ' + escHtml(wf.metadata.createdAt) + '<br>';
     if (wf.metadata.updatedAt) html += 'Updated: ' + escHtml(wf.metadata.updatedAt) + '<br>';
     if (wf.metadata.recordedBy) html += 'Recorded by: ' + escHtml(wf.metadata.recordedBy) + '<br>';
+    if (wf.metadata.recordingMode) html += 'Recording mode: ' + escHtml(wf.metadata.recordingMode) + '<br>';
     html += '</div>';
     html += '</div>';
   }
@@ -3201,6 +3778,42 @@ function wireUpHandlers(wf, filePath, source) {
     });
   }
 
+  // Collapse Nav button
+  var collapseNavBtn = document.querySelector('#wf-btn-collapse-nav');
+  if (collapseNavBtn) {
+    collapseNavBtn.addEventListener('click', async function() {
+      var originalCount = wf.steps.length;
+      var collapsed = collapseKeyboardSteps(wf.steps);
+      var newCount = collapsed.length;
+      if (newCount === originalCount) {
+        toast('No consecutive keyboard nav steps found to collapse', 'info');
+        return;
+      }
+      wf.steps = collapsed;
+      collapseNavBtn.disabled = true;
+      collapseNavBtn.textContent = 'Collapsing...';
+      try {
+        await saveWorkflow(wf.id, wf);
+        var diff = originalCount - newCount;
+        toast('Collapsed ' + originalCount + ' steps \u2192 ' + newCount + ' steps (' + diff + ' step' + (diff !== 1 ? 's' : '') + ' merged)', 'success');
+        renderWorkflowDetail(wf, filePath, source);
+      } catch (err) {
+        toast('Collapse failed: ' + err.message, 'error');
+        collapseNavBtn.disabled = false;
+        collapseNavBtn.textContent = '\u{1F9ED} Collapse Nav';
+      }
+    });
+  }
+
+  // Re-record button
+  var rerecordBtn = document.querySelector('#wf-btn-rerecord');
+  if (rerecordBtn) {
+    rerecordBtn.addEventListener('click', function() {
+      if (!confirm('Re-record all steps for "' + wf.name + '"? This will replace the existing steps with freshly recorded ones.')) return;
+      startReRecording(wf, filePath, source);
+    });
+  }
+
   // Variable rename — click variable name to edit inline
   document.querySelectorAll('.wf-var-rename').forEach(function(el) {
     el.addEventListener('click', function() {
@@ -3684,7 +4297,7 @@ function showInsertPicker(anchorEl, wf, pathStr, filePath, source, getInsertPoin
   var pickerHtml = '<div class="wf-se-insert-picker" style="margin-top:0.5rem;padding:0.5rem;background:#1e293b;border:1px solid #334155;border-radius:6px;">';
   pickerHtml += '<div style="font-size:0.75rem;color:#94a3b8;margin-bottom:0.5rem;">Select step type to insert:</div>';
   pickerHtml += '<div style="display:flex;flex-wrap:wrap;gap:0.35rem;">';
-  var allTypes = ['navigate', 'click', 'type', 'wait', 'keyboard', 'scroll', 'assert', 'set_variable', 'file_dialog', 'capture_download', 'move_file', 'conditional', 'loop', 'try_catch', 'inject_style'];
+  var allTypes = ['navigate', 'click', 'click_selector', 'type', 'wait', 'keyboard', 'keyboard_nav', 'scroll', 'assert', 'set_variable', 'file_dialog', 'capture_download', 'move_file', 'conditional', 'loop', 'try_catch', 'inject_style'];
   for (var ti = 0; ti < allTypes.length; ti++) {
     var t = allTypes[ti];
     var tIcon = STEP_ICONS[t] || '&#x25cf;';

@@ -56,6 +56,9 @@ async function handleAction(action, params) {
     case 'find_element_by_text':
       return findElementByText(params);
 
+    case 'find_elements_with_text':
+      return findElementsWithText(params);
+
     case 'find_interactive':
       return findInteractive(params);
 
@@ -100,13 +103,16 @@ async function handleAction(action, params) {
 
     case 'set_recording_mode':
       console.log('[Woodbury REC:content] set_recording_mode', params, 'current recordingActive:', recordingActive);
+      if (params?.mode) {
+        recordingModeType = params.mode; // 'standard' or 'accessibility'
+      }
       if (params?.enabled) {
         startRecording();
       } else {
         stopRecording();
       }
-      console.log('[Woodbury REC:content] recordingActive after:', recordingActive);
-      return { recording: recordingActive };
+      console.log('[Woodbury REC:content] recordingActive after:', recordingActive, 'mode:', recordingModeType);
+      return { recording: recordingActive, mode: recordingModeType };
 
     // ── Element Snapshot (ML training data) ──────────────────
     case 'snapshot_interactive_elements':
@@ -146,6 +152,52 @@ async function handleAction(action, params) {
     case 'clear_injected_styles':
       return clearInjectedStyles(params);
 
+    case 'get_focused_element':
+      return getFocusedElement();
+
+    case 'inject_calibration_marker':
+      return injectCalibrationMarker(params);
+
+    case 'remove_calibration_marker':
+      return removeCalibrationMarker();
+
+    case 'start_mouse_tracking': {
+      // Continuously track mouse viewport position
+      if (window.__woodburyMouseTracker) {
+        document.removeEventListener('mousemove', window.__woodburyMouseTracker);
+      }
+      window.__woodburyMousePos = null;
+      window.__woodburyMouseTracker = (e) => {
+        window.__woodburyMousePos = { clientX: e.clientX, clientY: e.clientY };
+      };
+      document.addEventListener('mousemove', window.__woodburyMouseTracker);
+      return { ok: true };
+    }
+
+    case 'stop_mouse_tracking': {
+      if (window.__woodburyMouseTracker) {
+        document.removeEventListener('mousemove', window.__woodburyMouseTracker);
+        window.__woodburyMouseTracker = null;
+      }
+      return { ok: true };
+    }
+
+    case 'get_mouse_viewport_pos':
+      return { pos: window.__woodburyMousePos };
+
+    case 'show_click_target':
+      return showClickTarget(params);
+
+    case 'hide_click_target':
+      return hideClickTarget();
+
+    // ── Accessibility-mode bridge actions ─────────────────────
+    case 'find_by_accessibility':
+      return findByAccessibility(params);
+
+    case 'find_by_svg_fingerprint':
+      return findBySvgFingerprint(params);
+
     default:
       throw new Error(`Unknown action: ${action}`);
   }
@@ -159,35 +211,17 @@ async function handleAction(action, params) {
  * Used to convert viewport-relative coordinates to screen-absolute coordinates.
  */
 function getChromeOffset() {
-  // outerHeight includes Chrome UI (title bar, tabs, address bar, bookmarks bar)
-  // innerHeight is just the viewport (page content area)
-  // The difference is the Chrome UI height
-  const chromeUIHeight = window.outerHeight - window.innerHeight;
-
-  // outerWidth vs innerWidth gives horizontal offset (usually minimal)
-  const chromeUIWidth = window.outerWidth - window.innerWidth;
-
-  // screenX/screenY give the window's position on the physical screen
-  // screenTop/screenLeft are aliases that work in more browsers
   const windowX = window.screenX || window.screenLeft || 0;
   const windowY = window.screenY || window.screenTop || 0;
-
-  // devicePixelRatio matters for Retina/HiDPI displays
+  const chromeUIHeight = window.outerHeight - window.innerHeight;
+  const chromeUIWidth = window.outerWidth - window.innerWidth;
   const dpr = window.devicePixelRatio || 1;
 
   return {
-    // The Chrome UI height in CSS pixels (tabs + address bar + bookmarks bar)
     chromeUIHeight,
-    // Total horizontal chrome difference (includes scrollbar, side panel, etc.)
     chromeUIWidth,
-    // Chrome window position on screen
     windowX,
     windowY,
-    // Total offset from screen origin to viewport content origin.
-    // This is what you add to viewport-relative coords to get screen-absolute coords.
-    // X: On modern Chrome there is no left viewport border — the viewport starts at
-    // the window's left edge. Side panel and scrollbar are on the RIGHT, so they
-    // don't affect the left offset. (The old chromeUIWidth/2 broke when side panel was open.)
     totalOffsetX: windowX,
     totalOffsetY: windowY + chromeUIHeight,
     // Display info
@@ -204,10 +238,8 @@ function getChromeOffset() {
 function getBoundingInfo(el) {
   const rect = el.getBoundingClientRect();
 
-  // Calculate screen-absolute position using Chrome offset
-  const chromeUIHeight = window.outerHeight - window.innerHeight;
-  const windowX = window.screenX || window.screenLeft || 0;
-  const windowY = window.screenY || window.screenTop || 0;
+  // Get accurate screen offset using getChromeOffset (uses SVG getScreenCTM)
+  const offset = getChromeOffset();
 
   return {
     // Viewport-relative center point
@@ -223,9 +255,9 @@ function getBoundingInfo(el) {
     // Absolute position (accounting for scroll)
     absX: Math.round(rect.left + window.scrollX + rect.width / 2),
     absY: Math.round(rect.top + window.scrollY + rect.height / 2),
-    // Screen-absolute position (viewport left edge = window left edge on modern Chrome)
-    screenX: Math.round(windowX + rect.left + rect.width / 2),
-    screenY: Math.round(windowY + chromeUIHeight + rect.top + rect.height / 2),
+    // Screen-absolute position using measured offset
+    screenX: Math.round(offset.totalOffsetX + rect.left + rect.width / 2),
+    screenY: Math.round(offset.totalOffsetY + rect.top + rect.height / 2),
     visible: rect.width > 0 && rect.height > 0 &&
              rect.top < window.innerHeight && rect.bottom > 0 &&
              rect.left < window.innerWidth && rect.right > 0
@@ -438,12 +470,35 @@ function buildUniqueSelector(el) {
 // ── Action implementations ───────────────────────────────────
 
 /**
- * Find elements matching a CSS selector.
+ * Resolve the query root — either document or a shadow root.
+ * If shadowRootSelector is provided, finds the host element and returns its .shadowRoot.
+ * Supports chained shadow DOMs with " >>> " separator, e.g. "outer-host >>> inner-host".
  */
-function findElements({ selector, limit = 20 }) {
+function resolveQueryRoot(shadowRootSelector) {
+  if (!shadowRootSelector) return document;
+
+  const parts = shadowRootSelector.split('>>>').map(s => s.trim()).filter(Boolean);
+  let root = document;
+
+  for (const part of parts) {
+    const host = root.querySelector(part);
+    if (!host) throw new Error('Shadow host not found: ' + part);
+    if (!host.shadowRoot) throw new Error('Element has no shadowRoot: ' + part);
+    root = host.shadowRoot;
+  }
+
+  return root;
+}
+
+/**
+ * Find elements matching a CSS selector.
+ * If shadowRootSelector is provided, queries inside that element's shadow DOM.
+ */
+function findElements({ selector, shadowRootSelector, limit = 20 }) {
   if (!selector) throw new Error('selector is required');
 
-  const elements = Array.from(document.querySelectorAll(selector)).slice(0, limit);
+  const root = resolveQueryRoot(shadowRootSelector);
+  const elements = Array.from(root.querySelectorAll(selector)).slice(0, limit);
   return elements.map(el => ({
     ...describeElement(el),
     bounds: getBoundingInfo(el),
@@ -488,6 +543,50 @@ function findElementByText({ text, tag, exact = false, limit = 10 }) {
         ...describeElement(el),
         bounds: getBoundingInfo(el),
         matchedText: (directText || el.textContent || '').trim().substring(0, 100),
+        context: getElementContext(el)
+      });
+    }
+  }
+
+  return results;
+}
+
+/**
+ * Find elements matching a CSS selector that also contain specific text.
+ * Checks textContent, placeholder, title, and alt attributes.
+ */
+function findElementsWithText({ selector, shadowRootSelector, text, exact = false, limit = 20 }) {
+  if (!selector) throw new Error('selector is required');
+  if (!text) throw new Error('text is required');
+
+  const root = resolveQueryRoot(shadowRootSelector);
+  const searchText = exact ? text : text.toLowerCase();
+  const candidates = Array.from(root.querySelectorAll(selector));
+  const results = [];
+
+  for (const el of candidates) {
+    if (results.length >= limit) break;
+
+    const style = window.getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden') continue;
+
+    // Check text content
+    const elText = (el.textContent || '').trim();
+    const textMatched = exact ? elText === searchText : elText.toLowerCase().includes(searchText);
+
+    // Check placeholder, title, alt attributes
+    const placeholder = el.getAttribute('placeholder') || '';
+    const title = el.getAttribute('title') || '';
+    const alt = el.getAttribute('alt') || '';
+    const attrMatched = exact
+      ? (placeholder === searchText || title === searchText || alt === searchText)
+      : (placeholder.toLowerCase().includes(searchText) || title.toLowerCase().includes(searchText) || alt.toLowerCase().includes(searchText));
+
+    if (textMatched || attrMatched) {
+      results.push({
+        ...describeElement(el),
+        bounds: getBoundingInfo(el),
+        matchedText: elText.substring(0, 100),
         context: getElementContext(el)
       });
     }
@@ -760,15 +859,77 @@ function getDirectText(el) {
     .trim();
 }
 
+/**
+ * Query document.activeElement and return metadata about the focused element.
+ * Used by keyboard_nav steps to verify focus landed on the expected element.
+ */
+function getFocusedElement() {
+  const el = document.activeElement;
+  if (!el || el === document.body || el === document.documentElement) {
+    return { focused: false, tag: 'body' };
+  }
+
+  const rect = el.getBoundingClientRect();
+  const selectors = buildSelectorSet(el);
+  const directText = getDirectText(el);
+  const innerText = (el.innerText || el.textContent || '').trim();
+  const text = (directText || innerText).substring(0, 200) || undefined;
+
+  return {
+    focused: true,
+    tag: el.tagName.toLowerCase(),
+    text,
+    ariaLabel: el.getAttribute('aria-label') || undefined,
+    role: el.getAttribute('role') || undefined,
+    selector: selectors[0] || '',
+    fallbackSelectors: selectors.slice(1),
+    placeholder: el.getAttribute('placeholder') || undefined,
+    id: el.id || undefined,
+    name: el.getAttribute('name') || undefined,
+    value: el.value !== undefined ? String(el.value).substring(0, 500) : undefined,
+    inputType: el.getAttribute('type') || undefined,
+    dataTestId: el.getAttribute('data-testid') || el.getAttribute('data-test-id') || undefined,
+    bounds: {
+      left: Math.round(rect.left),
+      top: Math.round(rect.top),
+      width: Math.round(rect.width),
+      height: Math.round(rect.height),
+    },
+  };
+}
+
 // ── Action implementations ───────────────────────────────────
 
 /**
- * Find elements matching a CSS selector.
+ * Resolve the query root — either document or a shadow root.
+ * If shadowRootSelector is provided, finds the host element and returns its .shadowRoot.
+ * Supports chained shadow DOMs with " >>> " separator, e.g. "outer-host >>> inner-host".
  */
-function findElements({ selector, limit = 20 }) {
+function resolveQueryRoot(shadowRootSelector) {
+  if (!shadowRootSelector) return document;
+
+  const parts = shadowRootSelector.split('>>>').map(s => s.trim()).filter(Boolean);
+  let root = document;
+
+  for (const part of parts) {
+    const host = root.querySelector(part);
+    if (!host) throw new Error('Shadow host not found: ' + part);
+    if (!host.shadowRoot) throw new Error('Element has no shadowRoot: ' + part);
+    root = host.shadowRoot;
+  }
+
+  return root;
+}
+
+/**
+ * Find elements matching a CSS selector.
+ * If shadowRootSelector is provided, queries inside that element's shadow DOM.
+ */
+function findElements({ selector, shadowRootSelector, limit = 20 }) {
   if (!selector) throw new Error('selector is required');
 
-  const elements = Array.from(document.querySelectorAll(selector)).slice(0, limit);
+  const root = resolveQueryRoot(shadowRootSelector);
+  const elements = Array.from(root.querySelectorAll(selector)).slice(0, limit);
   return elements.map(el => ({
     ...describeElement(el),
     bounds: getBoundingInfo(el),
@@ -1379,6 +1540,483 @@ function detectSpinners({ limit = 20 } = {}) {
   };
 }
 
+// ── Accessibility-First Recording Helpers ─────────────────────
+//
+// These functions support the accessibility recording mode, which identifies
+// elements by their semantic accessibility properties (roles, labels, text)
+// and SVG visual fingerprints, rather than CSS selectors.
+//
+
+/**
+ * Compute the accessible name of an element using a simplified WAI-ARIA algorithm.
+ * Priority: aria-labelledby → aria-label → <label> → alt/title/placeholder → text content
+ */
+function computeAccessibleName(el) {
+  // 1. aria-labelledby: concatenate text of referenced elements
+  const labelledBy = el.getAttribute('aria-labelledby');
+  if (labelledBy) {
+    const ids = labelledBy.split(/\s+/).filter(Boolean);
+    const texts = [];
+    for (const id of ids) {
+      const ref = document.getElementById(id);
+      if (ref) texts.push((ref.textContent || '').trim());
+    }
+    const result = texts.join(' ').trim();
+    if (result) return result;
+  }
+
+  // 2. aria-label
+  const ariaLabel = el.getAttribute('aria-label');
+  if (ariaLabel && ariaLabel.trim()) return ariaLabel.trim();
+
+  // 3. Associated <label> (for="id" or wrapping <label>)
+  if (el.id) {
+    const labelFor = document.querySelector('label[for="' + CSS.escape(el.id) + '"]');
+    if (labelFor) {
+      const text = (labelFor.textContent || '').trim();
+      if (text) return text;
+    }
+  }
+  // Check wrapping <label>
+  const wrappingLabel = el.closest('label');
+  if (wrappingLabel) {
+    // Get label text without the input's own value
+    const clone = wrappingLabel.cloneNode(true);
+    const inputs = clone.querySelectorAll('input, textarea, select');
+    for (const inp of inputs) inp.remove();
+    const text = (clone.textContent || '').trim();
+    if (text) return text;
+  }
+
+  // 4. alt, title, placeholder
+  const alt = el.getAttribute('alt');
+  if (alt && alt.trim()) return alt.trim();
+
+  const title = el.getAttribute('title');
+  if (title && title.trim()) return title.trim();
+
+  const placeholder = el.getAttribute('placeholder');
+  if (placeholder && placeholder.trim()) return placeholder.trim();
+
+  // 5. Direct text content (for buttons, links, etc.)
+  const tag = el.tagName.toLowerCase();
+  const textTags = new Set(['button', 'a', 'label', 'summary', 'option', 'th', 'td', 'li', 'span', 'div', 'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6']);
+  if (textTags.has(tag) || el.getAttribute('role')) {
+    const text = getDirectText(el).trim();
+    if (text) return text.substring(0, 200);
+  }
+
+  return '';
+}
+
+/**
+ * Get the implicit ARIA role for an HTML element based on its tag and attributes.
+ */
+function getImplicitRole(el) {
+  const tag = el.tagName.toLowerCase();
+  const type = (el.getAttribute('type') || '').toLowerCase();
+
+  // Explicit role always wins
+  const explicitRole = el.getAttribute('role');
+  if (explicitRole) return explicitRole;
+
+  // Tag → role mapping
+  const inputRoles = {
+    'text': 'textbox', 'email': 'textbox', 'tel': 'textbox', 'url': 'textbox', 'search': 'searchbox',
+    'number': 'spinbutton', 'range': 'slider',
+    'checkbox': 'checkbox', 'radio': 'radio',
+    'submit': 'button', 'reset': 'button', 'button': 'button', 'image': 'button',
+  };
+
+  const tagRoleMap = {
+    'button': 'button',
+    'textarea': 'textbox',
+    'option': 'option',
+    'img': 'img',
+    'nav': 'navigation',
+    'main': 'main',
+    'header': 'banner',
+    'footer': 'contentinfo',
+    'aside': 'complementary',
+    'form': 'form',
+    'article': 'article',
+    'ul': 'list', 'ol': 'list',
+    'li': 'listitem',
+    'table': 'table',
+    'tr': 'row',
+    'td': 'cell',
+    'th': 'columnheader',
+    'dialog': 'dialog',
+    'details': 'group',
+    'summary': 'button',
+    'progress': 'progressbar',
+    'meter': 'meter',
+    'output': 'status',
+    'menu': 'menu',
+    'h1': 'heading', 'h2': 'heading', 'h3': 'heading',
+    'h4': 'heading', 'h5': 'heading', 'h6': 'heading',
+  };
+
+  if (tag === 'a') return el.hasAttribute('href') ? 'link' : null;
+  if (tag === 'input') return inputRoles[type] || 'textbox';
+  if (tag === 'select') return el.hasAttribute('multiple') ? 'listbox' : 'combobox';
+  if (tag === 'section') return (el.hasAttribute('aria-label') || el.hasAttribute('aria-labelledby')) ? 'region' : null;
+
+  return tagRoleMap[tag] || null;
+}
+
+/**
+ * Pierce shadow DOM boundaries using event.composedPath() during recording.
+ * Returns the innermost target element and an array of shadow host descriptors.
+ */
+function pierceAndResolveShadowDOM(event) {
+  const path = event.composedPath ? event.composedPath() : [];
+  const shadowPath = [];
+  let innermostTarget = event.target;
+
+  for (let i = 0; i < path.length; i++) {
+    const node = path[i];
+    // Check if this is a ShadowRoot
+    if (node instanceof ShadowRoot) {
+      const host = node.host;
+      if (host) {
+        const hostSelectors = buildSelectorSet(host);
+        shadowPath.push({
+          tag: host.tagName.toLowerCase(),
+          id: host.id || undefined,
+          ariaLabel: host.getAttribute('aria-label') || undefined,
+          role: host.getAttribute('role') || getImplicitRole(host) || undefined,
+          selector: hostSelectors[0] || undefined,
+        });
+      }
+    }
+    // The first Element in the path is the innermost target
+    if (i === 0 && node instanceof Element) {
+      innermostTarget = node;
+    }
+  }
+
+  // Reverse so outermost host is first
+  shadowPath.reverse();
+
+  return { target: innermostTarget, shadowPath: shadowPath.length > 0 ? shadowPath : undefined };
+}
+
+/**
+ * Fingerprint an SVG element for visual matching across layouts.
+ * Uses a perceptual average hash: rasterize to 32×32, grayscale, compare to mean.
+ */
+function fingerprintSVG(svgElement) {
+  try {
+    const rect = svgElement.getBoundingClientRect();
+    if (rect.width < 4 || rect.height < 4) return Promise.resolve(null);
+
+    // Clone the SVG to avoid modifying the original
+    const clone = svgElement.cloneNode(true);
+    // Ensure the clone has explicit dimensions for rasterization
+    clone.setAttribute('width', '32');
+    clone.setAttribute('height', '32');
+    // Remove any transform that might affect rendering
+    clone.removeAttribute('transform');
+
+    const svgString = new XMLSerializer().serializeToString(clone);
+    const blob = new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+
+    return new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => {
+        try {
+          const canvas = document.createElement('canvas');
+          canvas.width = 32;
+          canvas.height = 32;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(img, 0, 0, 32, 32);
+
+          const imageData = ctx.getImageData(0, 0, 32, 32);
+          const pixels = imageData.data;
+
+          // Convert to grayscale and compute mean
+          const gray = new Float32Array(32 * 32);
+          let sum = 0;
+          for (let i = 0; i < 32 * 32; i++) {
+            const r = pixels[i * 4];
+            const g = pixels[i * 4 + 1];
+            const b = pixels[i * 4 + 2];
+            gray[i] = 0.299 * r + 0.587 * g + 0.114 * b;
+            sum += gray[i];
+          }
+          const mean = sum / (32 * 32);
+
+          // Build binary hash: 1 if pixel >= mean, else 0
+          // Pack into hex string (256 bits = 64 hex chars)
+          let hashBits = '';
+          for (let i = 0; i < 32 * 32; i++) {
+            hashBits += gray[i] >= mean ? '1' : '0';
+          }
+          // Convert binary string to hex
+          let hash = '';
+          for (let i = 0; i < hashBits.length; i += 4) {
+            hash += parseInt(hashBits.substring(i, i + 4), 2).toString(16);
+          }
+
+          URL.revokeObjectURL(url);
+
+          // Get label from SVG
+          const svgLabel = svgElement.getAttribute('aria-label')
+            || (svgElement.querySelector('title') ? svgElement.querySelector('title').textContent : null)
+            || undefined;
+
+          resolve({
+            hash,
+            dimensions: { width: Math.round(rect.width), height: Math.round(rect.height) },
+            label: svgLabel,
+            inline: true,
+          });
+        } catch (err) {
+          URL.revokeObjectURL(url);
+          resolve(null);
+        }
+      };
+      img.onerror = () => {
+        URL.revokeObjectURL(url);
+        resolve(null);
+      };
+      img.src = url;
+    });
+  } catch (err) {
+    return Promise.resolve(null);
+  }
+}
+
+/**
+ * Capture accessibility-enriched element metadata for a recording event.
+ * This is the accessibility-mode alternative to captureElementMeta().
+ */
+async function captureAccessibilityMeta(el, event) {
+  // 1. Pierce shadow DOM to get innermost target + shadow path
+  const { target: actualTarget, shadowPath } = pierceAndResolveShadowDOM(event);
+  const effectiveEl = actualTarget || el;
+
+  // 2. Find nearest interactive ancestor (reuse same logic as captureElementMeta)
+  const interactiveTags = new Set(['button', 'a', 'input', 'textarea', 'select', 'label', 'summary']);
+  const interactiveRoles = new Set(['button', 'link', 'tab', 'menuitem', 'checkbox', 'radio', 'switch', 'slider', 'combobox', 'option']);
+  let interactiveAncestor = null;
+  let current = effectiveEl;
+  while (current && current !== document.body) {
+    const tag = current.tagName.toLowerCase();
+    const role = current.getAttribute('role') || '';
+    if (interactiveTags.has(tag) || interactiveRoles.has(role)) {
+      interactiveAncestor = current;
+      break;
+    }
+    current = current.parentElement;
+  }
+  // Use interactive ancestor if found, otherwise the effective element
+  const resolvedEl = interactiveAncestor || effectiveEl;
+
+  // 3. Compute accessible name and role
+  const accessibleName = computeAccessibleName(resolvedEl);
+  const computedRole = getImplicitRole(resolvedEl);
+
+  // 4. Fingerprint SVG if element is/contains an SVG
+  let svgFingerprint = null;
+  const svgEl = resolvedEl.tagName.toLowerCase() === 'svg'
+    ? resolvedEl
+    : resolvedEl.querySelector('svg');
+  if (svgEl) {
+    svgFingerprint = await fingerprintSVG(svgEl);
+  }
+
+  // 5. Get standard metadata as fallback (CSS selectors, bounds, etc.)
+  const standardMeta = captureElementMeta(resolvedEl);
+
+  // 6. Merge accessibility data into the standard metadata
+  return {
+    ...standardMeta,
+    shadowPath: shadowPath || undefined,
+    svgFingerprint: svgFingerprint || undefined,
+    accessibleName: accessibleName || undefined,
+    computedRole: computedRole || undefined,
+  };
+}
+
+/**
+ * Compute Hamming distance between two hex hash strings.
+ * Returns the number of differing bits.
+ */
+function hammingDistanceHex(hash1, hash2) {
+  if (hash1.length !== hash2.length) return Infinity;
+  let dist = 0;
+  for (let i = 0; i < hash1.length; i++) {
+    const xor = parseInt(hash1[i], 16) ^ parseInt(hash2[i], 16);
+    // Count bits in xor
+    let bits = xor;
+    while (bits) {
+      dist += bits & 1;
+      bits >>= 1;
+    }
+  }
+  return dist;
+}
+
+/**
+ * Find elements by accessibility query: role + accessible name.
+ * Optionally pierce shadow DOMs using a stored shadow path.
+ * Bridge action: find_by_accessibility
+ */
+async function findByAccessibility({ role, name, shadowPath, limit = 10 }) {
+  let roots = [document];
+
+  // If shadowPath provided, pierce into each shadow DOM
+  if (shadowPath && shadowPath.length > 0) {
+    for (const hostDesc of shadowPath) {
+      const newRoots = [];
+      for (const root of roots) {
+        // Try to find the shadow host by ariaLabel → id → selector
+        let host = null;
+        if (hostDesc.ariaLabel) {
+          host = root.querySelector('[aria-label="' + CSS.escape(hostDesc.ariaLabel) + '"]');
+        }
+        if (!host && hostDesc.id) {
+          host = root.querySelector('#' + CSS.escape(hostDesc.id));
+        }
+        if (!host && hostDesc.selector) {
+          try { host = root.querySelector(hostDesc.selector); } catch {}
+        }
+        if (!host && hostDesc.tag) {
+          // Last resort: match by tag name
+          const candidates = root.querySelectorAll(hostDesc.tag);
+          if (candidates.length === 1) host = candidates[0];
+        }
+        if (host && host.shadowRoot) {
+          newRoots.push(host.shadowRoot);
+        }
+      }
+      if (newRoots.length > 0) {
+        roots = newRoots;
+      }
+      // If we couldn't pierce, keep searching in current roots
+    }
+  }
+
+  const results = [];
+  const searchName = (name || '').toLowerCase();
+
+  for (const root of roots) {
+    // Build a selector for the role if provided
+    let candidates;
+    if (role) {
+      // Search for both explicit role and tag-implied elements
+      const explicitSel = '[role="' + role + '"]';
+      const implicitTags = [];
+      // Map roles back to tags
+      const roleToTag = {
+        'button': ['button', 'input[type="submit"]', 'input[type="button"]', 'input[type="reset"]', 'summary'],
+        'link': ['a[href]'],
+        'textbox': ['input:not([type])', 'input[type="text"]', 'input[type="email"]', 'input[type="tel"]', 'input[type="url"]', 'textarea'],
+        'checkbox': ['input[type="checkbox"]'],
+        'radio': ['input[type="radio"]'],
+        'combobox': ['select:not([multiple])'],
+        'listbox': ['select[multiple]'],
+        'searchbox': ['input[type="search"]'],
+        'slider': ['input[type="range"]'],
+        'img': ['img'],
+        'heading': ['h1', 'h2', 'h3', 'h4', 'h5', 'h6'],
+        'navigation': ['nav'],
+      };
+      const tags = roleToTag[role] || [];
+      const combinedSel = [explicitSel, ...tags].join(', ');
+      try {
+        candidates = root.querySelectorAll(combinedSel);
+      } catch {
+        candidates = root.querySelectorAll(explicitSel);
+      }
+    } else {
+      candidates = root.querySelectorAll('*');
+    }
+
+    for (const el of candidates) {
+      if (results.length >= limit) break;
+
+      // Skip hidden elements
+      const style = window.getComputedStyle(el);
+      if (style.display === 'none' || style.visibility === 'hidden') continue;
+      if (el.getAttribute('aria-hidden') === 'true') continue;
+
+      // Check accessible name match (case-insensitive partial)
+      if (searchName) {
+        const elName = computeAccessibleName(el).toLowerCase();
+        if (!elName.includes(searchName)) continue;
+      }
+
+      const rect = el.getBoundingClientRect();
+      results.push({
+        ...describeElement(el),
+        bounds: getBoundingInfo(el),
+        accessibleName: computeAccessibleName(el),
+        computedRole: getImplicitRole(el),
+      });
+    }
+  }
+
+  return { elements: results };
+}
+
+/**
+ * Find elements by SVG fingerprint hash (Hamming distance comparison).
+ * Returns the interactive parent of matching SVGs.
+ * Bridge action: find_by_svg_fingerprint
+ */
+async function findBySvgFingerprint({ hash, dimensions, limit = 5 }) {
+  if (!hash) throw new Error('hash is required');
+
+  const svgs = document.querySelectorAll('svg');
+  const results = [];
+  const maxBits = hash.length * 4; // Each hex char = 4 bits
+  const threshold = Math.floor(maxBits * 0.2); // 80% similarity = max 20% different bits
+
+  for (const svg of svgs) {
+    if (results.length >= limit) break;
+
+    const style = window.getComputedStyle(svg);
+    if (style.display === 'none' || style.visibility === 'hidden') continue;
+
+    const fp = await fingerprintSVG(svg);
+    if (!fp || !fp.hash) continue;
+
+    const dist = hammingDistanceHex(hash, fp.hash);
+    if (dist <= threshold) {
+      // Find interactive parent of the SVG
+      let interactiveParent = svg;
+      let cur = svg.parentElement;
+      const interactiveTags = new Set(['button', 'a', 'input', 'label', 'summary']);
+      const interactiveRoles = new Set(['button', 'link', 'tab', 'menuitem', 'checkbox', 'radio', 'switch']);
+      while (cur && cur !== document.body) {
+        const tag = cur.tagName.toLowerCase();
+        const role = cur.getAttribute('role') || '';
+        if (interactiveTags.has(tag) || interactiveRoles.has(role)) {
+          interactiveParent = cur;
+          break;
+        }
+        cur = cur.parentElement;
+      }
+
+      results.push({
+        ...describeElement(interactiveParent),
+        bounds: getBoundingInfo(interactiveParent),
+        svgMatch: {
+          distance: dist,
+          similarity: Math.round((1 - dist / maxBits) * 100),
+          fingerprint: fp,
+        },
+      });
+    }
+  }
+
+  return { elements: results };
+}
+
 // ── Recording Mode ─────────────────────────────────────────────
 //
 // When recording mode is active, DOM events (click, input, keydown,
@@ -1387,6 +2025,7 @@ function detectSpinners({ limit = 20 } = {}) {
 //
 
 let recordingActive = false;
+let recordingModeType = 'standard'; // 'standard' or 'accessibility'
 
 /**
  * Build multiple selectors for an element (primary + fallbacks).
@@ -1636,20 +2275,48 @@ function snapshotInteractiveElements() {
  * Send a recording event to the background script for relay to Woodbury.
  */
 function sendRecordingEvent(eventType, element, extra = {}) {
-  console.log('[Woodbury REC:content] sendRecordingEvent', eventType, element?.tagName, (element?.textContent || '').slice(0, 30));
-  const event = {
-    type: 'recording_event',
-    event: eventType,
-    element: captureElementMeta(element),
-    page: {
-      url: location.href,
-      title: document.title,
-    },
-    timestamp: Date.now(),
-    ...extra,
-  };
+  console.log('[Woodbury REC:content] sendRecordingEvent', eventType, element?.tagName, (element?.textContent || '').slice(0, 30), 'mode:', recordingModeType);
 
-  chrome.runtime.sendMessage(event);
+  const page = { url: location.href, title: document.title };
+  const timestamp = Date.now();
+
+  // In accessibility mode, use async metadata capture (for SVG fingerprinting etc.)
+  if (recordingModeType === 'accessibility' && extra._originalEvent) {
+    const originalEvent = extra._originalEvent;
+    delete extra._originalEvent;
+    captureAccessibilityMeta(element, originalEvent).then(meta => {
+      const event = {
+        type: 'recording_event',
+        event: eventType,
+        element: meta,
+        page,
+        timestamp,
+        ...extra,
+      };
+      chrome.runtime.sendMessage(event);
+    }).catch(err => {
+      console.warn('[Woodbury REC:content] captureAccessibilityMeta failed, falling back to standard', err);
+      const event = {
+        type: 'recording_event',
+        event: eventType,
+        element: captureElementMeta(element),
+        page,
+        timestamp,
+        ...extra,
+      };
+      chrome.runtime.sendMessage(event);
+    });
+  } else {
+    const event = {
+      type: 'recording_event',
+      event: eventType,
+      element: captureElementMeta(element),
+      page,
+      timestamp,
+      ...extra,
+    };
+    chrome.runtime.sendMessage(event);
+  }
 }
 
 // Recording event handlers
@@ -1700,23 +2367,39 @@ function onRecordClick(e) {
     }
   }
 
-  sendRecordingEvent('click', el, { similarElements });
+  // Detect file input clicks — send as file_dialog event so the recorder
+  // creates a FileDialogStep instead of a plain ClickStep
+  const isFileInput = (el.tagName === 'INPUT' && el.type === 'file') ||
+    (el.closest && el.closest('input[type="file"]'));
+  if (isFileInput) {
+    const fileInput = el.tagName === 'INPUT' ? el : el.closest('input[type="file"]');
+    // Prevent the native file dialog from opening during recording
+    e.preventDefault();
+    sendRecordingEvent('file_dialog', fileInput || el, { similarElements, _originalEvent: e });
+    return;
+  }
+
+  sendRecordingEvent('click', el, { similarElements, _originalEvent: e });
 }
 
 function onRecordInput(e) {
   if (!recordingActive) return;
-  sendRecordingEvent('input', e.target);
+  sendRecordingEvent('input', e.target, { _originalEvent: e });
 }
 
 function onRecordKeydown(e) {
   if (!recordingActive) return;
   // Only capture special keys (Enter, Escape, Tab, etc.) not regular typing
-  const specialKeys = ['Enter', 'Escape', 'Tab', 'Backspace', 'Delete', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown'];
+  const specialKeys = ['Enter', 'Escape', 'Tab', 'Backspace', 'Delete', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown', ' '];
   if (!specialKeys.includes(e.key) && !e.ctrlKey && !e.metaKey && !e.altKey) return;
 
-  sendRecordingEvent('keydown', e.target, {
+  // Navigation keys that move focus — capture focused element AFTER focus moves
+  const navKeys = ['Tab', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'];
+  const isNavKey = navKeys.includes(e.key);
+
+  const keyboardData = {
     keyboard: {
-      key: e.key,
+      key: e.key === ' ' ? 'Space' : e.key,
       modifiers: [
         e.ctrlKey && 'ctrl',
         e.shiftKey && 'shift',
@@ -1724,7 +2407,23 @@ function onRecordKeydown(e) {
         e.metaKey && 'cmd',
       ].filter(Boolean),
     },
-  });
+  };
+
+  if (isNavKey) {
+    // Use requestAnimationFrame to capture focus AFTER the browser processes
+    // the Tab/Arrow key and moves focus to the next element.
+    const target = e.target;
+    requestAnimationFrame(() => {
+      const focused = getFocusedElement();
+      sendRecordingEvent('keydown', target, {
+        ...keyboardData,
+        focusedElement: focused.focused ? focused : undefined,
+        _originalEvent: e,
+      });
+    });
+  } else {
+    sendRecordingEvent('keydown', e.target, { ...keyboardData, _originalEvent: e });
+  }
 }
 
 function startRecording() {
@@ -2284,6 +2983,153 @@ function clearInjectedStyles({ selector } = {}) {
   }
 
   return { cleared: true, elementsReverted: reverted, selector: selector || 'all' };
+}
+
+// ── Click Target Overlay ────────────────────────────────────
+// Semi-transparent overlay that moves to where the mouse is about to click,
+// showing the CSS selector so you can visually verify targets.
+
+const CLICK_TARGET_ID = '__woodbury_click_target__';
+
+/**
+ * Show (or move) the click-target overlay to highlight an element's bounds.
+ *
+ * @param {object} params
+ * @param {number} params.left    - viewport left px
+ * @param {number} params.top     - viewport top px
+ * @param {number} params.width   - element width px
+ * @param {number} params.height  - element height px
+ * @param {string} params.label   - text to display (CSS selector, etc.)
+ * @param {number} [params.durationMs] - auto-hide after this many ms (0 = manual hide)
+ */
+function showClickTarget({ left, top, width, height, label = '', durationMs = 0 }) {
+  let overlay = document.getElementById(CLICK_TARGET_ID);
+
+  if (!overlay) {
+    overlay = document.createElement('div');
+    overlay.id = CLICK_TARGET_ID;
+    document.documentElement.appendChild(overlay);
+  }
+
+  overlay.style.cssText = [
+    'position: fixed',
+    'z-index: 2147483646',
+    'pointer-events: none',
+    'box-sizing: border-box',
+    'border: 2px solid rgba(0, 120, 255, 0.8)',
+    'background: rgba(0, 120, 255, 0.12)',
+    'border-radius: 4px',
+    'transition: left 0.25s ease, top 0.25s ease, width 0.25s ease, height 0.25s ease',
+    'display: flex',
+    'align-items: flex-start',
+    'justify-content: flex-start',
+    'overflow: visible',
+    'left: ' + left + 'px',
+    'top: ' + top + 'px',
+    'width: ' + width + 'px',
+    'height: ' + height + 'px',
+  ].join('; ');
+
+  // Label badge — positioned above the overlay box
+  overlay.innerHTML = label
+    ? '<div style="' + [
+        'position: absolute',
+        'bottom: 100%',
+        'left: 0',
+        'margin-bottom: 4px',
+        'background: rgba(0, 0, 0, 0.8)',
+        'color: #4fc3f7',
+        'font-family: monospace',
+        'font-size: 11px',
+        'padding: 3px 8px',
+        'border-radius: 3px',
+        'white-space: nowrap',
+        'max-width: 500px',
+        'overflow: hidden',
+        'text-overflow: ellipsis',
+        'pointer-events: none',
+        'line-height: 1.3',
+      ].join('; ') + '">' + label.replace(/</g, '&lt;') + '</div>'
+    : '';
+
+  if (durationMs > 0) {
+    if (overlay._hideTimer) clearTimeout(overlay._hideTimer);
+    overlay._hideTimer = setTimeout(() => hideClickTarget(), durationMs);
+  }
+
+  return { shown: true };
+}
+
+/**
+ * Remove the click-target overlay.
+ */
+function hideClickTarget() {
+  const overlay = document.getElementById(CLICK_TARGET_ID);
+  if (overlay) {
+    if (overlay._hideTimer) clearTimeout(overlay._hideTimer);
+    overlay.remove();
+    return { hidden: true };
+  }
+  return { hidden: false };
+}
+
+// ── Calibration Marker ──────────────────────────────────────
+// Injects a brightly colored marker at viewport (0,0) so that
+// the workflow runner can scan screen pixels with robotjs to
+// find the exact viewport-to-screen offset on any machine.
+
+const CALIBRATION_MARKER_ID = '__woodbury_calibration_marker__';
+
+/**
+ * Inject a calibration marker — a small colored block at viewport (0,0).
+ * Color defaults to #FF00FF (magenta) but can be overridden.
+ * The marker is a 6×6 block so it's easy to find via pixel scanning.
+ */
+function injectCalibrationMarker({ color = '#FF00FF', size = 6 } = {}) {
+  // Remove existing marker if present
+  const existing = document.getElementById(CALIBRATION_MARKER_ID);
+  if (existing) existing.remove();
+
+  const marker = document.createElement('div');
+  marker.id = CALIBRATION_MARKER_ID;
+  marker.style.cssText = [
+    'position: fixed !important',
+    'top: 0px !important',
+    'left: 0px !important',
+    `width: ${size}px !important`,
+    `height: ${size}px !important`,
+    `background-color: ${color} !important`,
+    'z-index: 2147483647 !important',
+    'pointer-events: none !important',
+    'opacity: 1 !important',
+    'border: none !important',
+    'margin: 0 !important',
+    'padding: 0 !important',
+    'box-shadow: none !important',
+    'border-radius: 0 !important',
+    'mix-blend-mode: normal !important',
+    'transform: none !important',
+  ].join('; ');
+  document.documentElement.appendChild(marker);
+
+  return {
+    injected: true,
+    color,
+    size,
+    viewport: { x: 0, y: 0 },
+  };
+}
+
+/**
+ * Remove the calibration marker from the page.
+ */
+function removeCalibrationMarker() {
+  const marker = document.getElementById(CALIBRATION_MARKER_ID);
+  if (marker) {
+    marker.remove();
+    return { removed: true };
+  }
+  return { removed: false, reason: 'marker not found' };
 }
 
 // Log that content script is loaded

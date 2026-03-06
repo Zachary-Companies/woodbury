@@ -32,6 +32,8 @@ const STEP_ICONS = {
   try_catch: '\u{1F6E1}',
   file_dialog: '\u{1F4C2}',
   inject_style: '\u{1F3A8}',
+  keyboard_nav: '\u{1F9ED}',
+  click_selector: '\u{1F3AF}',
 };
 
 /* ── Lifecycle port — lets background.js track open/close state ── */
@@ -500,6 +502,65 @@ function updateCoordInfo(data) {
       }
     } else if (!data.stepResult) {
       html += '<div style="color:#475569;font-style:italic;font-size:0.7rem;margin-top:4px;">Not yet executed</div>';
+    }
+
+    if (data.stepResult && data.stepResult.error) {
+      html += '<div class="dbg-coord-error">' + escHtml(data.stepResult.error) + '</div>';
+    }
+    coordEl.innerHTML = html;
+    return;
+  }
+
+  // ── Keyboard Nav step: show action sequence and focus info ──
+  if (stepType === 'keyboard_nav') {
+    // Action labels
+    var navLabels = { tab: 'Tab', shift_tab: 'Shift+Tab', arrow_up: '\u2191 Up', arrow_down: '\u2193 Down', arrow_left: '\u2190 Left', arrow_right: '\u2192 Right', enter: 'Enter', space: 'Space', escape: 'Esc' };
+
+    // Show action sequence
+    var actions = step.actions || [];
+    var seqParts = [];
+    for (var ai = 0; ai < actions.length; ai++) {
+      var act = actions[ai];
+      var actLabel = navLabels[act.key] || act.key;
+      if (act.matchText) {
+        seqParts.push(actLabel + ' find "' + escHtml(act.matchText.substring(0, 25)) + '"');
+      } else {
+        seqParts.push(actLabel + (act.count > 1 ? ' \u00d7' + act.count : ''));
+      }
+    }
+    html += '<div class="dbg-coord-row"><span class="dbg-coord-label">Sequence</span><span class="dbg-coord-value" style="color:#8b5cf6;font-size:0.65rem;">' + seqParts.join(' \u2192 ') + '</span></div>';
+
+    // Show expected focus
+    if (step.expectedFocus) {
+      var efParts = [];
+      if (step.expectedFocus.text) efParts.push('text: "' + escHtml(step.expectedFocus.text.substring(0, 30)) + '"');
+      if (step.expectedFocus.ariaLabel) efParts.push('aria: "' + escHtml(step.expectedFocus.ariaLabel) + '"');
+      if (step.expectedFocus.role) efParts.push('role: ' + escHtml(step.expectedFocus.role));
+      if (step.expectedFocus.tag) efParts.push('tag: ' + escHtml(step.expectedFocus.tag));
+      if (step.expectedFocus.placeholder) efParts.push('placeholder: "' + escHtml(step.expectedFocus.placeholder) + '"');
+      if (efParts.length > 0) {
+        html += '<div class="dbg-coord-row"><span class="dbg-coord-label">Expected</span><span class="dbg-coord-value" style="font-size:0.65rem;">' + efParts.join(', ') + '</span></div>';
+      }
+    }
+
+    html += '<div class="dbg-coord-row"><span class="dbg-coord-label">Auto-fix</span><span class="dbg-coord-value">' + (step.autoFix !== false ? 'On' : 'Off') + '</span></div>';
+    html += '<div class="dbg-coord-row"><span class="dbg-coord-label">Max search</span><span class="dbg-coord-value">' + (step.maxSearchDistance || 20) + '</span></div>';
+
+    // Show step detail from execution
+    var sd = data.stepDetail;
+    if (sd) {
+      if (sd.actualFocus) {
+        html += '<div class="dbg-coord-row"><span class="dbg-coord-label">Actual focus</span><span class="dbg-coord-value" style="font-size:0.65rem;">' + escHtml(sd.actualFocus.tag + (sd.actualFocus.text ? ': "' + sd.actualFocus.text.substring(0, 30) + '"' : '')) + '</span></div>';
+      }
+      if (sd.matched !== undefined) {
+        html += '<div class="dbg-coord-row"><span class="dbg-coord-label">Match</span><span class="dbg-coord-value" style="color:' + (sd.matched ? '#10b981' : '#ef4444') + ';">' + (sd.matched ? 'Yes' : 'No') + '</span></div>';
+      }
+      if (sd.correctedCount !== undefined) {
+        html += '<div class="dbg-coord-row"><span class="dbg-coord-label">Corrected</span><span class="dbg-coord-value" style="color:#f59e0b;">' + sd.originalCount + ' \u2192 ' + sd.correctedCount + '</span></div>';
+      }
+      if (sd.searchIterations !== undefined) {
+        html += '<div class="dbg-coord-row"><span class="dbg-coord-label">Searched</span><span class="dbg-coord-value">' + sd.searchIterations + ' presses</span></div>';
+      }
     }
 
     if (data.stepResult && data.stepResult.error) {

@@ -374,8 +374,8 @@ class BridgeServer extends EventEmitter {
    * When enabled, the content script captures click/input/keyboard events
    * and sends them back as 'recording_event' messages.
    */
-  async setRecordingMode(enabled: boolean): Promise<any> {
-    return this.send('set_recording_mode', { enabled });
+  async setRecordingMode(enabled: boolean, mode?: 'standard' | 'accessibility'): Promise<any> {
+    return this.send('set_recording_mode', { enabled, mode });
   }
 
   private handleMessage(message: any): void {

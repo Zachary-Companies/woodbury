@@ -39,6 +39,7 @@ import type {
   BridgeInterface,
   NavigateStep,
   ClickStep,
+  ClickSelectorStep,
   TypeStep,
   WaitStep,
   AssertStep,
@@ -48,6 +49,9 @@ import type {
   FileDialogStep,
   ScrollStep,
   KeyboardStep,
+  KeyboardNavStep,
+  KeyboardNavAction,
+  ExpectedFocusDescriptor,
   SubWorkflowStep,
   ConditionalStep,
   LoopStep,
@@ -62,7 +66,7 @@ import type {
   Postcondition,
 } from './types.js';
 import { substituteObject } from './variable-sub.js';
-import { ElementResolver } from './resolver.js';
+import { ElementResolver, AccessibilityResolver } from './resolver.js';
 import { ConditionValidator } from './validator.js';
 import { VisualVerifier } from './visual-verifier.js';
 
@@ -148,7 +152,7 @@ export { checkExpectations };
 // ── Workflow Executor ────────────────────────────────────────
 
 export class WorkflowExecutor {
-  private resolver: ElementResolver;
+  private resolver: ElementResolver | AccessibilityResolver;
   private validator: ConditionValidator;
   private visualVerifier: VisualVerifier | null;
   private _explicitVerifier: boolean;
@@ -182,6 +186,13 @@ export class WorkflowExecutor {
    */
   async execute(workflow: WorkflowDocument): Promise<ExecutionResult> {
     const startTime = Date.now();
+
+    // Select resolver based on workflow recording mode
+    if (workflow.metadata?.recordingMode === 'accessibility') {
+      this.resolver = new AccessibilityResolver(this.bridge);
+      execLog('INFO', 'Using AccessibilityResolver (accessibility recording mode)');
+    }
+    // else keep default ElementResolver
 
     // Initialize visual verifier with workflow's model if not explicitly provided
     if (!this._explicitVerifier) {
@@ -494,6 +505,8 @@ export class WorkflowExecutor {
         return this.execNavigate(step as NavigateStep);
       case 'click':
         return this.execClick(step as ClickStep);
+      case 'click_selector':
+        return this.execClickSelector(step as ClickSelectorStep);
       case 'type':
         return this.execType(step as TypeStep);
       case 'wait':
@@ -512,6 +525,8 @@ export class WorkflowExecutor {
         return this.execScroll(step as ScrollStep);
       case 'keyboard':
         return this.execKeyboard(step as KeyboardStep);
+      case 'keyboard_nav':
+        return this.execKeyboardNav(step as KeyboardNavStep);
       case 'sub_workflow':
         return this.execSubWorkflow(step as SubWorkflowStep);
       case 'conditional':
@@ -674,11 +689,33 @@ export class WorkflowExecutor {
         y: Math.round(centerY),
       });
 
-      await this.bridge.send('mouse', {
-        action,
-        x: Math.round(centerX),
-        y: Math.round(centerY),
-      });
+      // Use robotjs for visible mouse movement
+      const robot = (await import('robotjs')).default || (await import('robotjs'));
+      let offsetX = 1;
+      let offsetY = 125;
+      try {
+        const ping = await this.bridge.send('ping', {}) as any;
+        if (ping?.chromeOffset) {
+          offsetX = ping.chromeOffset.chromeUIWidth ?? 1;
+          offsetY = ping.chromeOffset.chromeUIHeight ?? 125;
+        }
+      } catch { /* use defaults */ }
+
+      const targetX = Math.round(centerX) + offsetX;
+      const targetY = Math.round(centerY) + offsetY;
+      robot.moveMouseSmooth(targetX, targetY);
+
+      if (action === 'move') {
+        // hover — just move, don't click
+      } else if (action === 'double_click') {
+        robot.mouseClick();
+        await this.delay(100);
+        robot.mouseClick();
+      } else if (action === 'right_click') {
+        robot.mouseClick('right');
+      } else {
+        robot.mouseClick();
+      }
     } else {
       execLog('WARN', `execClick no position, using click_element: ${step.id}`, {
         selector: step.target.selector,
@@ -688,6 +725,88 @@ export class WorkflowExecutor {
         selector: step.target.selector,
       });
     }
+
+    if (step.delayAfterMs) {
+      await this.delay(step.delayAfterMs);
+    }
+  }
+
+  private async execClickSelector(step: ClickSelectorStep): Promise<void> {
+    execLog('INFO', `execClickSelector: ${step.id} "${step.label}"`, {
+      selector: step.selector,
+      textContent: step.textContent,
+      exactMatch: step.exactMatch,
+      clickType: step.clickType,
+    });
+
+    if (!step.selector) {
+      throw new Error('click_selector step requires a selector');
+    }
+
+    // Find element by CSS selector, optionally filtered by text content
+    let elements: any[];
+    if (step.textContent) {
+      elements = await this.bridge.send('find_elements_with_text', {
+        selector: step.selector,
+        text: step.textContent,
+        exact: !!step.exactMatch,
+        limit: 1,
+      }) as any[];
+    } else {
+      elements = await this.bridge.send('find_elements', {
+        selector: step.selector,
+        limit: 1,
+      }) as any[];
+    }
+
+    if (!elements || elements.length === 0) {
+      const desc = step.textContent
+        ? `"${step.selector}" containing "${step.textContent}"`
+        : `"${step.selector}"`;
+      throw new Error(`click_selector: no element found matching ${desc}`);
+    }
+
+    const bounds = elements[0].bounds;
+
+    if (!bounds || !bounds.visible) {
+      throw new Error(`click_selector: element matching "${step.selector}" is not visible`);
+    }
+
+    // Import robotjs directly (same pattern as ff-mouse.ts)
+    const robot = (await import('robotjs')).default || (await import('robotjs'));
+
+    // Get Chrome offset from bridge
+    let offsetX = 1;
+    let offsetY = 125;
+    try {
+      const ping = await this.bridge.send('ping', {}) as any;
+      if (ping?.chromeOffset) {
+        offsetX = ping.chromeOffset.chromeUIWidth ?? 1;
+        offsetY = ping.chromeOffset.chromeUIHeight ?? 125;
+      }
+    } catch { /* use defaults */ }
+
+    // Calculate screen-absolute target: element center + chrome offset
+    const targetX = bounds.left + offsetX + (bounds.width / 2);
+    const targetY = bounds.top + offsetY + (bounds.height / 2);
+
+    execLog('INFO', `execClickSelector: moving to (${targetX}, ${targetY}), offset=(${offsetX}, ${offsetY})`, { bounds });
+
+    // Move mouse visibly via robotjs
+    robot.moveMouseSmooth(targetX, targetY);
+
+    // Click via robotjs
+    if (step.clickType === 'double') {
+      robot.mouseClick();
+      await this.delay(100);
+      robot.mouseClick();
+    } else if (step.clickType === 'right') {
+      robot.mouseClick('right');
+    } else {
+      robot.mouseClick();
+    }
+
+    execLog('INFO', `execClickSelector: clicked element matching "${step.selector}"`);
 
     if (step.delayAfterMs) {
       await this.delay(step.delayAfterMs);
@@ -1032,6 +1151,238 @@ export class WorkflowExecutor {
       });
     }
   }
+
+  // ── Keyboard Nav helpers ───────────────────────────────────
+
+  /** Map keyboard_nav action key to bridge keyboard params */
+  private keyboardNavKeyToParams(key: string): { keyName: string; modifiers: string[] } {
+    switch (key) {
+      case 'tab':         return { keyName: 'Tab', modifiers: [] };
+      case 'shift_tab':   return { keyName: 'Tab', modifiers: ['shift'] };
+      case 'arrow_up':    return { keyName: 'ArrowUp', modifiers: [] };
+      case 'arrow_down':  return { keyName: 'ArrowDown', modifiers: [] };
+      case 'arrow_left':  return { keyName: 'ArrowLeft', modifiers: [] };
+      case 'arrow_right': return { keyName: 'ArrowRight', modifiers: [] };
+      case 'enter':       return { keyName: 'Enter', modifiers: [] };
+      case 'space':       return { keyName: 'Space', modifiers: [] };
+      case 'escape':      return { keyName: 'Escape', modifiers: [] };
+      default:            return { keyName: 'Tab', modifiers: [] };
+    }
+  }
+
+  /** Get reverse direction key for self-healing */
+  private keyboardNavReverse(key: string): string {
+    const map: Record<string, string> = {
+      tab: 'shift_tab', shift_tab: 'tab',
+      arrow_up: 'arrow_down', arrow_down: 'arrow_up',
+      arrow_left: 'arrow_right', arrow_right: 'arrow_left',
+    };
+    return map[key] || key;
+  }
+
+  /** Send a single key press via bridge */
+  private async sendNavKeyPress(keyName: string, modifiers: string[]): Promise<void> {
+    if (modifiers.length > 0) {
+      await this.bridge.send('keyboard', {
+        action: 'hotkey',
+        key: keyName,
+        shift: modifiers.includes('shift'),
+        ctrl: modifiers.includes('ctrl'),
+        alt: modifiers.includes('alt'),
+      });
+    } else {
+      await this.bridge.send('keyboard', { action: 'press', key: keyName });
+    }
+  }
+
+  /** Check if focused element matches expected focus criteria (AND logic) */
+  private focusMatches(
+    focused: any,
+    expected: ExpectedFocusDescriptor
+  ): boolean {
+    if (!focused || !focused.focused) return false;
+
+    if (expected.tag && focused.tag !== expected.tag.toLowerCase()) return false;
+    if (expected.role && focused.role !== expected.role) return false;
+    if (expected.ariaLabel && focused.ariaLabel !== expected.ariaLabel) return false;
+    if (expected.placeholder && focused.placeholder !== expected.placeholder) return false;
+
+    // Text matching: use substring/includes for flexibility
+    if (expected.text) {
+      const focusedText = (focused.text || '').toLowerCase();
+      const expectedText = expected.text.toLowerCase();
+      if (!focusedText.includes(expectedText) && !expectedText.includes(focusedText)) {
+        return false;
+      }
+    }
+
+    // Selector: check against selector or fallbacks
+    if (expected.selector) {
+      const allSelectors = [focused.selector, ...(focused.fallbackSelectors || [])];
+      if (!allSelectors.some((s: string) => s && s.includes(expected.selector!))) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  /** Check if focused element's text matches a search string */
+  private textMatchesSearch(focused: any, matchText: string): boolean {
+    if (!focused || !focused.focused) return false;
+    const searchLower = matchText.toLowerCase();
+    const texts = [focused.text, focused.ariaLabel, focused.placeholder]
+      .filter(Boolean)
+      .map((t: string) => t.toLowerCase());
+    return texts.some(t => t.includes(searchLower) || searchLower.includes(t));
+  }
+
+  private async execKeyboardNav(step: KeyboardNavStep): Promise<void> {
+    const maxSearch = step.maxSearchDistance || 20;
+    const delayBetweenPresses = 75;
+
+    execLog('INFO', 'keyboard_nav start', {
+      actionsCount: step.actions.length,
+      actions: step.actions.map(a => `${a.key}${a.matchText ? `:search("${a.matchText}")` : `:${a.count || 1}`}`),
+    });
+
+    // Execute each action in the sequence
+    for (let ai = 0; ai < step.actions.length; ai++) {
+      const action = step.actions[ai];
+      const { keyName, modifiers } = this.keyboardNavKeyToParams(action.key);
+
+      if (action.matchText) {
+        // ── Search mode: keep pressing until text match ──
+        // Note: {{variables}} already substituted by substituteObject() before executeStep()
+        const searchText = action.matchText;
+
+        execLog('INFO', `keyboard_nav action[${ai}] search mode`, {
+          key: action.key, searchText, maxSearch,
+        });
+
+        let found = false;
+        for (let press = 1; press <= maxSearch; press++) {
+          await this.sendNavKeyPress(keyName, modifiers);
+          await this.delay(delayBetweenPresses);
+
+          const focused = await this.bridge.send('get_focused_element') as any;
+          if (this.textMatchesSearch(focused, searchText)) {
+            execLog('INFO', `keyboard_nav search found at press ${press}`, {
+              key: action.key, matchedText: focused?.text?.slice(0, 50),
+            });
+            found = true;
+            break;
+          }
+        }
+
+        if (!found) {
+          throw new Error(
+            `keyboard_nav: could not find "${searchText}" after ${maxSearch} ${action.key} presses`
+          );
+        }
+      } else {
+        // ── Count mode: press N times ──
+        const count = action.count || 1;
+        for (let i = 0; i < count; i++) {
+          await this.sendNavKeyPress(keyName, modifiers);
+          if (i < count - 1) {
+            await this.delay(delayBetweenPresses);
+          }
+        }
+      }
+
+      // Brief pause between actions in the sequence
+      if (ai < step.actions.length - 1) {
+        await this.delay(delayBetweenPresses);
+      }
+    }
+
+    // Wait for focus to settle
+    await this.delay(step.delayAfterMs || 1000);
+
+    // If no expectedFocus, we're done
+    if (!step.expectedFocus || Object.keys(step.expectedFocus).length === 0) return;
+
+    // Verify focus matches expected
+    let focused = await this.bridge.send('get_focused_element') as any;
+    if (this.focusMatches(focused, step.expectedFocus)) {
+      execLog('INFO', 'keyboard_nav focus verified', {
+        focusedText: focused?.text?.slice(0, 50),
+      });
+      return;
+    }
+
+    // Focus doesn't match — try self-healing if enabled
+    if (step.autoFix === false) {
+      throw new Error(
+        `keyboard_nav: focus mismatch. Expected: ${JSON.stringify(step.expectedFocus)}, ` +
+        `Got: tag=${focused?.tag}, text="${focused?.text?.slice(0, 50)}"`
+      );
+    }
+
+    // Find the last navigational action to use for self-healing
+    const navActions = step.actions.filter(a =>
+      ['tab', 'shift_tab', 'arrow_up', 'arrow_down', 'arrow_left', 'arrow_right'].includes(a.key)
+    );
+    if (navActions.length === 0) {
+      throw new Error(
+        `keyboard_nav: focus mismatch and no navigational actions to self-heal with. ` +
+        `Expected: ${JSON.stringify(step.expectedFocus)}`
+      );
+    }
+
+    const healAction = navActions[navActions.length - 1];
+    const { keyName: healKey, modifiers: healMods } = this.keyboardNavKeyToParams(healAction.key);
+
+    execLog('INFO', 'keyboard_nav self-healing: searching forward', {
+      key: healAction.key, maxSearch,
+    });
+
+    // Search forward
+    for (let extra = 1; extra <= maxSearch; extra++) {
+      await this.sendNavKeyPress(healKey, healMods);
+      await this.delay(delayBetweenPresses);
+      focused = await this.bridge.send('get_focused_element') as any;
+
+      if (this.focusMatches(focused, step.expectedFocus)) {
+        execLog('INFO', 'keyboard_nav self-healed forward', { extra });
+        return;
+      }
+    }
+
+    // Forward search failed — try reverse
+    const reverseKey = this.keyboardNavReverse(healAction.key);
+    const { keyName: revKeyName, modifiers: revMods } = this.keyboardNavKeyToParams(reverseKey);
+
+    execLog('INFO', 'keyboard_nav self-healing: searching reverse', { reverseKey });
+
+    // Undo forward overshoot
+    const undoCount = maxSearch + (healAction.count || 1);
+    for (let i = 0; i < undoCount; i++) {
+      await this.sendNavKeyPress(revKeyName, revMods);
+      await this.delay(delayBetweenPresses);
+    }
+
+    // Search in reverse
+    for (let extra = 1; extra <= maxSearch; extra++) {
+      await this.sendNavKeyPress(revKeyName, revMods);
+      await this.delay(delayBetweenPresses);
+      focused = await this.bridge.send('get_focused_element') as any;
+
+      if (this.focusMatches(focused, step.expectedFocus)) {
+        execLog('INFO', 'keyboard_nav self-healed reverse', { extra });
+        return;
+      }
+    }
+
+    throw new Error(
+      `keyboard_nav: could not find expected focus after self-healing ` +
+      `(searched ${maxSearch} forward + ${maxSearch} reverse). ` +
+      `Expected: ${JSON.stringify(step.expectedFocus)}`
+    );
+  }
+
+  // ── Sub-workflow ──────────────────────────────────────────
 
   private async execSubWorkflow(step: SubWorkflowStep): Promise<void> {
     // Resolve workflow path

@@ -16,6 +16,7 @@ let reconnectTimer = null;
 let reconnectDelay = RECONNECT_MIN;
 let hasLoggedWaiting = false;  // only log "waiting" once to reduce console spam
 let recordingModeActive = false;  // track recording state across navigations
+let recordingModeType = 'standard'; // 'standard' or 'accessibility' — persists across navigations
 let recordingEventBuffer = [];    // buffer events when WS is temporarily disconnected
 const MAX_EVENT_BUFFER = 50;      // max buffered events to prevent memory leaks
 let debugModeData = null;         // debug session state for side panel + marker persistence
@@ -142,7 +143,10 @@ async function handleMessage(message) {
   // Handle recording mode toggle — forwarded to content script
   if (action === 'set_recording_mode') {
     recordingModeActive = !!params?.enabled;
-    console.log('[Woodbury REC] set_recording_mode', { enabled: recordingModeActive, id });
+    if (params?.mode) {
+      recordingModeType = params.mode; // 'standard' or 'accessibility'
+    }
+    console.log('[Woodbury REC] set_recording_mode', { enabled: recordingModeActive, mode: recordingModeType, id });
     try {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       console.log('[Woodbury REC] Active tab:', tab?.id, tab?.url?.slice(0, 60));
@@ -584,6 +588,20 @@ async function handleMessage(message) {
       return;
     }
 
+    // Get/set zoom level
+    if (action === 'get_zoom') {
+      const zoom = await chrome.tabs.getZoom(tab.id);
+      sendResponse({ id, success: true, data: { zoom } });
+      return;
+    }
+
+    if (action === 'set_zoom') {
+      const level = params.zoom ?? 1.0;
+      await chrome.tabs.setZoom(tab.id, level);
+      sendResponse({ id, success: true, data: { zoom: level } });
+      return;
+    }
+
     // Navigate to a URL
     if (action === 'open') {
       const url = params.url;
@@ -603,7 +621,7 @@ async function handleMessage(message) {
         try {
           await chrome.tabs.sendMessage(tab.id, {
             action: 'set_recording_mode',
-            params: { enabled: true },
+            params: { enabled: true, mode: recordingModeType },
           });
         } catch {}
       }
@@ -1338,7 +1356,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     try {
       const resp = await chrome.tabs.sendMessage(tabId, {
         action: 'set_recording_mode',
-        params: { enabled: true },
+        params: { enabled: true, mode: recordingModeType },
       });
       console.log('[Woodbury REC] Recording mode re-applied after navigation:', JSON.stringify(resp));
       // Capture snapshot of the new page after a brief delay for rendering

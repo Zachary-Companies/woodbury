@@ -38,6 +38,8 @@ export interface WorkflowMetadata {
   createdAt: string;
   updatedAt: string;
   recordedBy: 'manual' | 'recorder';
+  /** Recording mode used: 'standard' (CSS selectors) or 'accessibility' (roles/labels/SVG fingerprints) */
+  recordingMode?: 'standard' | 'accessibility';
   environment?: {
     userAgent?: string;
     viewportWidth?: number;
@@ -104,6 +106,36 @@ export interface VariableDeclaration {
 }
 
 // ────────────────────────────────────────────────────────────────
+//  Accessibility-first recording types
+// ────────────────────────────────────────────────────────────────
+
+/** Descriptor for a shadow DOM host in the path from document root to target element */
+export interface ShadowHostDescriptor {
+  /** Tag name of the shadow host element */
+  tag: string;
+  /** ID attribute, if present */
+  id?: string;
+  /** aria-label attribute, if present */
+  ariaLabel?: string;
+  /** ARIA role, if present */
+  role?: string;
+  /** CSS selector fallback for this host */
+  selector?: string;
+}
+
+/** Visual fingerprint of an SVG element for matching across layouts */
+export interface SvgFingerprint {
+  /** Perceptual hash (32×32 average hash → hex string) */
+  hash: string;
+  /** Rendered dimensions of the SVG */
+  dimensions: { width: number; height: number };
+  /** SVG's aria-label or <title> text, if present */
+  label?: string;
+  /** Whether the SVG is inline (in the DOM) vs referenced via <img> or <use> */
+  inline: boolean;
+}
+
+// ────────────────────────────────────────────────────────────────
 //  Element targeting
 // ────────────────────────────────────────────────────────────────
 
@@ -138,6 +170,17 @@ export interface ElementTarget {
    * when multiple elements match (e.g., 2 "Create" buttons on the same page).
    */
   context?: ElementContext;
+  /** ARIA/implicit role of the element (e.g. 'button', 'link', 'textbox') — accessibility mode */
+  role?: string;
+  /** Shadow DOM path from document root to the target element — accessibility mode */
+  shadowPath?: ShadowHostDescriptor[];
+  /** Visual fingerprint of an SVG element for layout-independent matching — accessibility mode */
+  svgFingerprint?: SvgFingerprint;
+  /**
+   * Compact accessibility query string for element lookup — accessibility mode.
+   * Format: `role:button[name:Submit]`
+   */
+  accessibilityQuery?: string;
   /** Path to reference image captured during recording (for visual verification) */
   referenceImage?: string;
   /** Bounding region to constrain visual search (viewport percentages) */
@@ -202,7 +245,7 @@ export interface ElementBounds {
 /** Result from resolving an element target */
 export interface ResolvedElement {
   /** The selector that matched */
-  matchedBy: 'selector' | 'fallback' | 'ariaLabel' | 'textContent' | 'description' | 'placeholder' | 'percentage' | 'visual';
+  matchedBy: 'selector' | 'fallback' | 'ariaLabel' | 'textContent' | 'description' | 'placeholder' | 'percentage' | 'visual' | 'accessibilityQuery' | 'svgFingerprint' | 'labelAssociation' | 'contextual';
   /** The actual selector or description used */
   matchedValue: string;
   /** Element position from the bridge */
@@ -318,6 +361,23 @@ export interface ClickStep extends StepBase {
   verifyClick?: VerifyClickConfig;
 }
 
+/** Click the first element matching a CSS selector (bypasses element resolver / visual verification) */
+export interface ClickSelectorStep extends StepBase {
+  type: 'click_selector';
+  /** CSS selector to match */
+  selector: string;
+  /** Optional CSS selector for a shadow DOM host — queries selector inside its .shadowRoot */
+  shadowDomSelector?: string;
+  /** Optional text content to match (checks text nodes, placeholder, title, alt) */
+  textContent?: string;
+  /** If true, text must match exactly; otherwise partial match (default: false) */
+  exactMatch?: boolean;
+  /** Click variant */
+  clickType?: 'single' | 'double' | 'right';
+  /** Delay after click in ms */
+  delayAfterMs?: number;
+}
+
 /** Type text into an element */
 export interface TypeStep extends StepBase {
   type: 'type';
@@ -414,6 +474,49 @@ export interface KeyboardStep extends StepBase {
   key: string;
   /** Modifier keys */
   modifiers?: ('ctrl' | 'shift' | 'alt' | 'cmd')[];
+}
+
+/** Descriptor for verifying which element has focus after keyboard navigation */
+export interface ExpectedFocusDescriptor {
+  /** Inner text of the expected focused element */
+  text?: string;
+  /** aria-label attribute */
+  ariaLabel?: string;
+  /** ARIA role (e.g., 'button', 'menuitem', 'tab') */
+  role?: string;
+  /** HTML tag name (e.g., 'input', 'button') */
+  tag?: string;
+  /** CSS selector for verification */
+  selector?: string;
+  /** Input placeholder text */
+  placeholder?: string;
+}
+
+/** A single action within a keyboard_nav sequence */
+export interface KeyboardNavAction {
+  /** Key to press */
+  key: 'tab' | 'shift_tab' | 'arrow_up' | 'arrow_down'
+     | 'arrow_left' | 'arrow_right' | 'enter' | 'space' | 'escape';
+  /** Times to press (default 1). Ignored when matchText is set. */
+  count?: number;
+  /** Search mode: keep pressing until focused element's text matches.
+   *  Supports {{variables}}. */
+  matchText?: string;
+}
+
+/** Keyboard-based navigation with action sequencing, focus verification, and self-healing */
+export interface KeyboardNavStep extends StepBase {
+  type: 'keyboard_nav';
+  /** Ordered list of key actions to perform */
+  actions: KeyboardNavAction[];
+  /** Optional: verify focused element after entire sequence */
+  expectedFocus?: ExpectedFocusDescriptor;
+  /** Self-heal the last action's count if expectedFocus doesn't match (default true) */
+  autoFix?: boolean;
+  /** Max presses for any search-mode action or autoFix (default 20) */
+  maxSearchDistance?: number;
+  /** Delay after entire sequence in ms */
+  delayAfterMs?: number;
 }
 
 /** Call another workflow */
@@ -546,6 +649,7 @@ export interface InjectStyleStep extends StepBase {
 export type WorkflowStep =
   | NavigateStep
   | ClickStep
+  | ClickSelectorStep
   | TypeStep
   | WaitStep
   | AssertStep
@@ -555,6 +659,7 @@ export type WorkflowStep =
   | FileDialogStep
   | ScrollStep
   | KeyboardStep
+  | KeyboardNavStep
   | SubWorkflowStep
   | ConditionalStep
   | LoopStep
@@ -980,7 +1085,7 @@ export interface BridgeInterface {
 
 export interface RecordingEvent {
   type: 'recording_event';
-  event: 'click' | 'input' | 'change' | 'keydown' | 'navigate';
+  event: 'click' | 'input' | 'change' | 'keydown' | 'navigate' | 'file_dialog';
   element: {
     selector: string;
     fallbackSelectors: string[];
@@ -1016,6 +1121,14 @@ export interface RecordingEvent {
       nthWithSameText?: number;
       totalWithSameText?: number;
     };
+    /** Shadow DOM path from document root to element — accessibility mode */
+    shadowPath?: ShadowHostDescriptor[];
+    /** Visual fingerprint of SVG element — accessibility mode */
+    svgFingerprint?: SvgFingerprint;
+    /** Computed accessible name (WAI-ARIA algorithm) — accessibility mode */
+    accessibleName?: string;
+    /** Computed ARIA role (explicit or implicit from tag) — accessibility mode */
+    computedRole?: string;
   };
   page: {
     url: string;
@@ -1024,6 +1137,18 @@ export interface RecordingEvent {
   keyboard?: {
     key: string;
     modifiers: string[];
+  };
+  /** Metadata about the element that received focus after a keyboard event */
+  focusedElement?: {
+    focused: boolean;
+    tag: string;
+    text?: string;
+    ariaLabel?: string;
+    role?: string;
+    selector?: string;
+    placeholder?: string;
+    id?: string;
+    name?: string;
   };
   timestamp: number;
 }

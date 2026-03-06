@@ -20,7 +20,7 @@ import {
   type ServerResponse,
 } from 'node:http';
 import { readFile, writeFile, readdir, stat, unlink, mkdir } from 'node:fs/promises';
-import { join, extname } from 'node:path';
+import { join, extname, dirname, basename } from 'node:path';
 import { homedir } from 'node:os';
 import {
   discoverExtensions,
@@ -433,6 +433,43 @@ export async function startDashboard(
   let activeRecorder: WorkflowRecorder | null = null;
   let recordingSteps: Array<{ index: number; label: string; type: string }> = [];
   let recordingStatus: string = '';
+  let reRecordInfo: { workflowId: string; filePath: string } | null = null;
+
+  // ── Workflow file backup ──────────────────────────────────────
+  // Before overwriting a workflow file, copy the existing version to a .backups/ sibling directory.
+  // Keeps the last 10 backups per workflow, timestamped.
+  async function backupWorkflowFile(filePath: string): Promise<void> {
+    try {
+      // Only back up if the file currently exists
+      await stat(filePath);
+    } catch {
+      return; // nothing to back up
+    }
+    try {
+      const dir = dirname(filePath);
+      const name = basename(filePath);
+      const backupDir = join(dir, '.backups');
+      await mkdir(backupDir, { recursive: true });
+
+      const ts = new Date().toISOString().replace(/[:.]/g, '-');
+      const backupPath = join(backupDir, `${name}.${ts}`);
+      const content = await readFile(filePath, 'utf-8');
+      await writeFile(backupPath, content, 'utf-8');
+
+      // Prune old backups — keep only the last 10
+      const prefix = name + '.';
+      const entries = (await readdir(backupDir)).filter(f => f.startsWith(prefix)).sort();
+      if (entries.length > 10) {
+        const toDelete = entries.slice(0, entries.length - 10);
+        for (const old of toDelete) {
+          try { await unlink(join(backupDir, old)); } catch { /* best-effort */ }
+        }
+      }
+      debugLog.info('dashboard', `Backed up workflow: ${backupPath}`);
+    } catch (err) {
+      debugLog.info('dashboard', `Workflow backup failed (non-fatal): ${String(err)}`);
+    }
+  }
 
   // Workflow execution state — shared across requests
   let activeRun: {
@@ -2109,6 +2146,7 @@ export async function startDashboard(
           promoted,
           ...(training.worker ? { worker: training.worker.name } : {}),
         };
+        await backupWorkflowFile(workflowFilePath);
         await writeFile(workflowFilePath, JSON.stringify(wf, null, 2));
         debugLog.info('workflow-train', `Updated workflow JSON: ${workflowFilePath}`);
       } catch (err) {
@@ -3565,6 +3603,14 @@ export async function startDashboard(
         recordingSteps = [];
         recordingStatus = 'Starting...';
 
+        // Store re-record context if provided
+        if (body.reRecord && body.reRecord.workflowId && body.reRecord.filePath) {
+          reRecordInfo = { workflowId: body.reRecord.workflowId, filePath: body.reRecord.filePath };
+          dashRecLog('INFO', 'Re-record mode', { workflowId: reRecordInfo.workflowId, filePath: reRecordInfo.filePath });
+        } else {
+          reRecordInfo = null;
+        }
+
         activeRecorder = new WorkflowRecorder(
           // onStepCaptured — collect steps for the UI to poll
           (step, index) => {
@@ -3583,11 +3629,12 @@ export async function startDashboard(
         const captureElementCrops = body.captureElementCrops !== false; // default true
         const isDesktopMode = body.site === 'desktop';
         const appName = typeof body.appName === 'string' ? body.appName.trim() : '';
-        dashRecLog('INFO', `Calling activeRecorder.${isDesktopMode ? 'startDesktopRecording' : 'start'}()`, { captureElementCrops, isDesktopMode, appName });
+        const recordingMode = body.recordingMode === 'accessibility' ? 'accessibility' as const : 'standard' as const;
+        dashRecLog('INFO', `Calling activeRecorder.${isDesktopMode ? 'startDesktopRecording' : 'start'}()`, { captureElementCrops, isDesktopMode, appName, recordingMode });
         if (isDesktopMode) {
           await activeRecorder.startDesktopRecording(body.name, appName || undefined);
         } else {
-          await activeRecorder.start(body.name, body.site, { captureElementCrops });
+          await activeRecorder.start(body.name, body.site, { captureElementCrops, recordingMode });
         }
         dashRecLog('INFO', 'Recording start completed successfully');
         sendJson(res, 200, { success: true, status: 'recording' });
@@ -3600,7 +3647,7 @@ export async function startDashboard(
 
     // POST /api/recording/stop — stop recording and save the workflow
     if (req.method === 'POST' && pathname === '/api/recording/stop') {
-      dashRecLog('INFO', '/api/recording/stop called');
+      dashRecLog('INFO', '/api/recording/stop called', { isReRecord: !!reRecordInfo });
       try {
         if (!activeRecorder?.isActive) {
           sendJson(res, 400, { error: 'No recording in progress' });
@@ -3611,10 +3658,63 @@ export async function startDashboard(
         activeRecorder = null;
         recordingStatus = '';
 
+        let finalWorkflow = result.workflow;
+        let finalFilePath = result.filePath;
+
+        // Re-record mode: merge new steps into the existing workflow
+        if (reRecordInfo) {
+          try {
+            dashRecLog('INFO', 'Re-record merge: reading existing workflow', { filePath: reRecordInfo.filePath });
+            const existingContent = await readFile(reRecordInfo.filePath, 'utf-8');
+            const existingWorkflow = JSON.parse(existingContent);
+
+            // Replace steps with newly recorded ones
+            existingWorkflow.steps = result.workflow.steps;
+
+            // Merge any newly detected variables (add new ones, keep existing)
+            if (result.workflow.variables && result.workflow.variables.length > 0) {
+              const existingVarNames = new Set((existingWorkflow.variables || []).map((v: any) => v.name));
+              const newVars = result.workflow.variables.filter((v: any) => !existingVarNames.has(v.name));
+              if (newVars.length > 0) {
+                existingWorkflow.variables = [...(existingWorkflow.variables || []), ...newVars];
+                dashRecLog('INFO', `Re-record: added ${newVars.length} new variable(s)`, { names: newVars.map((v: any) => v.name) });
+              }
+            }
+
+            // Update metadata
+            if (!existingWorkflow.metadata) existingWorkflow.metadata = {};
+            existingWorkflow.metadata.updatedAt = new Date().toISOString();
+            existingWorkflow.metadata.reRecordedAt = new Date().toISOString();
+            // Update recording mode from the new recording (user may have switched modes)
+            if (result.workflow.metadata?.recordingMode) {
+              existingWorkflow.metadata.recordingMode = result.workflow.metadata.recordingMode;
+            }
+
+            // Save back to original file
+            await backupWorkflowFile(reRecordInfo.filePath);
+            await writeFile(reRecordInfo.filePath, JSON.stringify(existingWorkflow, null, 2));
+            dashRecLog('INFO', 'Re-record merge: saved to original file', { filePath: reRecordInfo.filePath });
+
+            // Clean up the temp file created by recorder (if different from original).
+            // Use case-insensitive comparison — macOS has a case-insensitive filesystem,
+            // so "Post To Instagram" and "Post to instagram" resolve to the same file.
+            if (result.filePath.toLowerCase() !== reRecordInfo.filePath.toLowerCase()) {
+              try { await unlink(result.filePath); } catch { /* ok if doesn't exist */ }
+            }
+
+            finalWorkflow = existingWorkflow;
+            finalFilePath = reRecordInfo.filePath;
+          } catch (mergeErr) {
+            dashRecLog('ERROR', 'Re-record merge failed, using freshly recorded workflow', { error: String(mergeErr) });
+            // Fall through — use the newly recorded file as-is
+          }
+          reRecordInfo = null;
+        }
+
         sendJson(res, 200, {
           success: true,
-          workflow: result.workflow,
-          filePath: result.filePath,
+          workflow: finalWorkflow,
+          filePath: finalFilePath,
           stepCount: recordingSteps.length,
           newDownloads: result.newDownloads || [],
           trainingStatus: 'pending',
@@ -3622,9 +3722,9 @@ export async function startDashboard(
         recordingSteps = [];
 
         // Kick off per-workflow model training in background (non-blocking)
-        const wfId = result.workflow.id;
-        const wfSite = result.workflow.site;
-        trainForWorkflow(wfId, wfSite, result.filePath).catch(err => {
+        const wfId = finalWorkflow.id;
+        const wfSite = finalWorkflow.site;
+        trainForWorkflow(wfId, wfSite, finalFilePath).catch(err => {
           debugLog.info('workflow-train', `Background training failed for ${wfId}: ${String(err)}`);
         });
       } catch (err) {
@@ -3672,6 +3772,7 @@ export async function startDashboard(
         activeRecorder = null;
         recordingSteps = [];
         recordingStatus = '';
+        reRecordInfo = null;
         sendJson(res, 200, { success: true });
       } catch (err) {
         sendJson(res, 500, { error: String(err) });
@@ -5403,6 +5504,7 @@ APPLESCRIPT`;
         wf.metadata = wf.metadata || {};
         wf.metadata.updatedAt = new Date().toISOString();
 
+        await backupWorkflowFile(found.path);
         await writeFile(found.path, JSON.stringify(wf, null, 2), 'utf-8');
         debugLog.info('dashboard', `Updated workflow "${id}"`, { path: found.path });
         sendJson(res, 200, { success: true, workflow: wf, path: found.path });
@@ -6536,6 +6638,9 @@ Rules:
 
         (async () => {
           try {
+            let pipelineHadFailure = false;
+            let pipelineFirstError = '';
+
             for (const nodeId of executionOrder) {
               if (abort.signal.aborted) break;
 
@@ -7372,18 +7477,18 @@ Fix the bug and return the corrected code. Do not change the @input/@output anno
                     ns.status = 'skipped';
                     continue;
                   } else {
+                    // 'stop' — skip downstream nodes of this failed node, but continue
+                    // executing independent sibling nodes that don't depend on it
                     const downstream = getDownstreamNodes(nodeId, comp.edges);
                     for (const downId of downstream) {
                       if (run.nodeStates[downId]) {
                         run.nodeStates[downId].status = 'skipped';
                       }
                     }
-                    run.done = true;
-                    run.success = false;
-                    run.error = ns.error;
-                    run.durationMs = Date.now() - run.startedAt;
-                    await finalizeCompRunRecord(compRunId, run, executionOrder);
-                    return;
+                    pipelineHadFailure = true;
+                    pipelineFirstError = pipelineFirstError || ns.error || 'Unknown error';
+                    debugLog.info('comp-run', `Node "${nodeId}" failed, skipping ${downstream.size} downstream nodes, continuing pipeline`);
+                    continue;
                   }
                 }
                 continue;
@@ -7555,34 +7660,41 @@ Fix the bug and return the corrected code. Do not change the @input/@output anno
                   debugLog.info('comp-run', `Node "${nodeId}" failed but policy is 'skip', continuing pipeline`);
                   continue; // Don't skip downstream — let them try without this node's outputs
                 } else {
-                  // 'stop' (default) — skip all downstream and halt
+                  // 'stop' — skip downstream nodes of this failed node, but continue
+                  // executing independent sibling nodes that don't depend on it
                   const downstream = getDownstreamNodes(nodeId, comp.edges);
                   for (const downId of downstream) {
                     if (run.nodeStates[downId]) {
                       run.nodeStates[downId].status = 'skipped';
                     }
                   }
-                  run.done = true;
-                  run.success = false;
-                  run.error = `"${wf.name}" failed: ${ns.error}`;
-                  run.durationMs = Date.now() - run.startedAt;
-                  debugLog.info('comp-run', `Pipeline stopped at node "${nodeId}"`, { error: ns.error });
-                  await finalizeCompRunRecord(compRunId, run, executionOrder);
-                  return;
+                  pipelineHadFailure = true;
+                  pipelineFirstError = pipelineFirstError || `"${wf.name}" failed: ${ns.error}`;
+                  debugLog.info('comp-run', `Node "${nodeId}" failed, skipping ${downstream.size} downstream nodes, continuing pipeline`, { error: ns.error });
+                  continue;
                 }
               }
             }
 
-            // All nodes completed successfully
+            // All reachable nodes have been processed
             if (!run.done) {
               run.done = true;
-              run.success = true;
+              run.success = !pipelineHadFailure;
               run.durationMs = Date.now() - run.startedAt;
               run.currentNodeId = null;
-              debugLog.info('comp-run', `Composition "${comp.name}" completed`, {
-                nodes: run.nodesCompleted,
-                durationMs: run.durationMs,
-              });
+              if (pipelineHadFailure) {
+                run.error = pipelineFirstError;
+                debugLog.info('comp-run', `Composition "${comp.name}" finished with failures`, {
+                  nodes: run.nodesCompleted,
+                  durationMs: run.durationMs,
+                  error: pipelineFirstError,
+                });
+              } else {
+                debugLog.info('comp-run', `Composition "${comp.name}" completed successfully`, {
+                  nodes: run.nodesCompleted,
+                  durationMs: run.durationMs,
+                });
+              }
               await finalizeCompRunRecord(compRunId, run, executionOrder);
             }
           } catch (err) {

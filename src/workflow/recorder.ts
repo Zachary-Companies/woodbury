@@ -29,11 +29,14 @@ import type {
   TypeStep,
   WaitStep,
   KeyboardStep,
+  KeyboardNavStep,
+  KeyboardNavAction,
   RecordingEvent,
   DesktopLaunchAppStep,
   DesktopClickStep,
   DesktopTypeStep,
   DesktopKeyboardStep,
+  FileDialogStep,
 } from './types.js';
 
 // ── Recording debug log ─────────────────────────────────────
@@ -66,6 +69,17 @@ interface PendingInput {
   target: ElementTarget;
   selector: string;       // For fast comparison
   lastValue: string;
+  firstTimestamp: number;
+}
+
+/** Tracks consecutive keyboard navigation events for collapsing into a single keyboard_nav step */
+interface PendingKeyboardNav {
+  /** Accumulated actions so far (different key = new action entry) */
+  actions: Array<{
+    key: string;
+    count: number;
+    lastFocusedElement?: RecordingEvent['focusedElement'];
+  }>;
   firstTimestamp: number;
 }
 
@@ -123,6 +137,7 @@ interface RecordingSession {
   lastEventTime: number;
   stepCounter: number;
   pendingInput: PendingInput | null;
+  pendingKeyboardNav: PendingKeyboardNav | null;
   eventListener: ((msg: any) => void) | null;
   /** Handler for page element snapshot events (ML training data) */
   snapshotListener: ((msg: any) => void) | null;
@@ -144,6 +159,10 @@ interface RecordingSession {
   desktopMode: boolean;
   /** Reference to uIOhook instance (only set during desktop recording) */
   desktopHook: any | null;
+  /** Timestamp of last Enter/Space keydown — used to suppress synthetic click events */
+  lastActionKeyTime: number;
+  /** Recording mode: 'standard' (CSS selectors) or 'accessibility' (roles/labels/SVG) */
+  recordingMode: 'standard' | 'accessibility';
 }
 
 export interface RecorderStatus {
@@ -205,7 +224,7 @@ export class WorkflowRecorder {
     return this.session !== null;
   }
 
-  async start(name: string, site: string, options?: { captureElementCrops?: boolean }): Promise<void> {
+  async start(name: string, site: string, options?: { captureElementCrops?: boolean; recordingMode?: 'standard' | 'accessibility' }): Promise<void> {
     // Truncate log file at start of each recording for clean diagnosis
     try {
       mkdirSync(RECORDING_LOG_DIR, { recursive: true });
@@ -313,6 +332,7 @@ export class WorkflowRecorder {
       lastEventTime: Date.now(),
       stepCounter: 0,
       pendingInput: null,
+      pendingKeyboardNav: null,
       eventListener: null,
       snapshotListener: null,
       reconnectHandler: null,
@@ -324,6 +344,8 @@ export class WorkflowRecorder {
       interactedSelectors: new Map(),
       desktopMode: false,
       desktopHook: null,
+      lastActionKeyTime: 0,
+      recordingMode: options?.recordingMode || 'standard',
     };
 
     // 7. Add initial navigate step
@@ -395,8 +417,9 @@ export class WorkflowRecorder {
       throw new Error('No recording in progress.');
     }
 
-    // Flush any pending input and cancel gap tracking
+    // Flush any pending input/nav and cancel gap tracking
     this.flushPendingInput();
+    this.flushPendingKeyboardNav();
     this.cancelGapTracking();
 
     // Desktop mode: kill the hook child process
@@ -446,6 +469,9 @@ export class WorkflowRecorder {
     // Post-process: collapse typo correction sequences
     this.status('Cleaning up recording...');
     this.session.steps = this.collapseTypoSequences(this.session.steps);
+
+    // Post-process: strip synthetic clicks that follow keyboard_nav Enter/Space
+    this.session.steps = this.stripSyntheticClicks(this.session.steps);
 
     // Post-process: upgrade remaining dumb delays to smart waits where possible
     this.session.steps = this.upgradeDumbDelays(this.session.steps);
@@ -585,6 +611,7 @@ export class WorkflowRecorder {
     // Detect URL change → insert navigate step
     if (event.page?.url && event.page.url !== this.session.lastUrl) {
       this.flushPendingInput();
+      this.flushPendingKeyboardNav();
       this.cancelGapTracking();
       const navStep = this.createNavigateStep(event.page.url);
       this.addStep(navStep);
@@ -618,6 +645,9 @@ export class WorkflowRecorder {
     switch (event.event) {
       case 'click':
         this.handleClick(event);
+        break;
+      case 'file_dialog':
+        this.handleFileDialog(event);
         break;
       case 'input':
       case 'change':
@@ -1061,12 +1091,26 @@ export class WorkflowRecorder {
   private handleClick(event: RecordingEvent): void {
     this.flushPendingInput();
 
+    // Suppress synthetic clicks triggered by Enter/Space keypress on focused elements.
+    // When the user presses Enter on a button, the browser fires both a keydown AND a
+    // click event. We already captured the keydown as a keyboard_nav action, so skip
+    // the redundant click if it arrives within 500ms of the Enter/Space keydown.
+    const timeSinceActionKey = Date.now() - (this.session?.lastActionKeyTime || 0);
+    if (timeSinceActionKey < 500) {
+      recLog('INFO', 'Suppressing synthetic click (arrived ' + timeSinceActionKey + 'ms after Enter/Space keydown)');
+      this.flushPendingKeyboardNav();
+      return;
+    }
+
+    this.flushPendingKeyboardNav();
+
+    const isA11yMode = this.session?.recordingMode === 'accessibility';
     const step: ClickStep = {
       id: this.nextStepId('click', event.element.tag),
       label: `Click ${this.describeElement(event)}`,
       type: 'click',
-      target: this.buildElementTarget(event),
-      delayAfterMs: 300,
+      target: isA11yMode ? this.buildAccessibilityTarget(event) : this.buildElementTarget(event),
+      delayAfterMs: 1000,
     };
 
     this.addStep(step);
@@ -1104,6 +1148,32 @@ export class WorkflowRecorder {
         }
       }
     }
+  }
+
+  /**
+   * Handle a click on a file input — creates a FileDialogStep instead of a ClickStep.
+   * The trigger stores the element target so the executor can click it to open
+   * the OS file dialog, then navigate to the specified filePath.
+   */
+  private handleFileDialog(event: RecordingEvent): void {
+    this.flushPendingInput();
+    this.flushPendingKeyboardNav();
+
+    const isA11yMode = this.session?.recordingMode === 'accessibility';
+    const trigger = isA11yMode ? this.buildAccessibilityTarget(event) : this.buildElementTarget(event);
+
+    const step: FileDialogStep = {
+      id: this.nextStepId('file-dialog', event.element.tag),
+      label: `File dialog: select file`,
+      type: 'file_dialog',
+      filePath: '{{filePath}}',
+      trigger,
+      delayBeforeMs: 2000,
+      delayAfterMs: 1000,
+    };
+
+    this.addStep(step);
+    recLog('INFO', 'Created file_dialog step for file input click', { selector: event.element.selector });
   }
 
   // ── Snapshot copy for per-workflow training ──────────────
@@ -1378,9 +1448,11 @@ export class WorkflowRecorder {
 
     // Different element → flush previous, start new buffer
     this.flushPendingInput();
+    this.flushPendingKeyboardNav();
 
+    const isA11yMode = this.session?.recordingMode === 'accessibility';
     this.session!.pendingInput = {
-      target: this.buildElementTarget(event),
+      target: isA11yMode ? this.buildAccessibilityTarget(event) : this.buildElementTarget(event),
       selector,
       lastValue: value,
       firstTimestamp: event.timestamp || Date.now(),
@@ -1392,14 +1464,75 @@ export class WorkflowRecorder {
 
     this.flushPendingInput();
 
-    const modifiers = (event.keyboard.modifiers || [])
-      .map(m => m.toLowerCase())
-      .filter(m => ['ctrl', 'shift', 'alt', 'cmd', 'meta'].includes(m))
-      .map(m => m === 'meta' ? 'cmd' : m) as ('ctrl' | 'shift' | 'alt' | 'cmd')[];
+    const key = event.keyboard.key;
+    const mods = (event.keyboard.modifiers || []).map(m => m.toLowerCase());
+    const hasShift = mods.includes('shift');
+    const hasCtrl = mods.includes('ctrl');
+    const hasAlt = mods.includes('alt');
+    const hasCmd = mods.includes('cmd') || mods.includes('meta');
+
+    // Map navigation/action keys to keyboard_nav action names
+    const navActionMap: Record<string, string> = {
+      'Tab': hasShift ? 'shift_tab' : 'tab',
+      'ArrowUp': 'arrow_up',
+      'ArrowDown': 'arrow_down',
+      'ArrowLeft': 'arrow_left',
+      'ArrowRight': 'arrow_right',
+      'Enter': 'enter',
+      'Space': 'space',
+      'Escape': 'escape',
+    };
+
+    const navAction = navActionMap[key];
+
+    // Only collapse into keyboard_nav if no Ctrl/Alt/Cmd modifiers
+    // (Shift is OK since Shift+Tab is a recognized nav action)
+    if (navAction && !hasCtrl && !hasAlt && !hasCmd) {
+      // Track Enter/Space timestamps so handleClick() can suppress synthetic clicks
+      if (key === 'Enter' || key === 'Space' || key === ' ') {
+        this.session!.lastActionKeyTime = Date.now();
+      }
+
+      // This is a navigation/action key — accumulate into pending keyboard_nav
+      const pending = this.session!.pendingKeyboardNav;
+
+      if (pending) {
+        const lastAction = pending.actions[pending.actions.length - 1];
+        if (lastAction && lastAction.key === navAction) {
+          // Same key as last action: increment count, update focus
+          lastAction.count++;
+          lastAction.lastFocusedElement = event.focusedElement;
+        } else {
+          // Different key: add a new action entry
+          pending.actions.push({
+            key: navAction,
+            count: 1,
+            lastFocusedElement: event.focusedElement,
+          });
+        }
+      } else {
+        // First nav key: start new pending
+        this.session!.pendingKeyboardNav = {
+          actions: [{
+            key: navAction,
+            count: 1,
+            lastFocusedElement: event.focusedElement,
+          }],
+          firstTimestamp: event.timestamp || Date.now(),
+        };
+      }
+      return;
+    }
+
+    // Non-navigation keyboard event — flush any pending nav, then emit keyboard step
+    this.flushPendingKeyboardNav();
+
+    const modifiers = mods
+      .filter(m => ['ctrl', 'shift', 'alt', 'cmd'].includes(m)) as ('ctrl' | 'shift' | 'alt' | 'cmd')[];
 
     const step: KeyboardStep = {
-      id: this.nextStepId('keyboard', event.keyboard.key.toLowerCase()),
-      label: `Press ${this.describeKeyCombo(event.keyboard.key, modifiers)}`,
+      id: this.nextStepId('keyboard', key.toLowerCase()),
+      label: `Press ${this.describeKeyCombo(key, modifiers)}`,
       type: 'keyboard',
       key: event.keyboard.key,
       modifiers: modifiers.length > 0 ? modifiers : undefined,
@@ -1409,6 +1542,65 @@ export class WorkflowRecorder {
   }
 
   // ── Input coalescing ─────────────────────────────────────
+
+  private flushPendingKeyboardNav(): void {
+    if (!this.session?.pendingKeyboardNav) return;
+
+    const pending = this.session.pendingKeyboardNav;
+
+    // Build action labels for the sequence
+    const actionLabels: Record<string, string> = {
+      tab: 'Tab', shift_tab: 'Shift+Tab',
+      arrow_up: '\u2191', arrow_down: '\u2193',
+      arrow_left: '\u2190', arrow_right: '\u2192',
+      enter: 'Enter', space: 'Space', escape: 'Esc',
+    };
+
+    const parts = pending.actions.map(a => {
+      const label = actionLabels[a.key] || a.key;
+      return a.count > 1 ? `${label} \u00d7${a.count}` : label;
+    });
+
+    // Build expectedFocus from the last action's focused element
+    const lastAction = pending.actions[pending.actions.length - 1];
+    let expectedFocus: KeyboardNavStep['expectedFocus'] = undefined;
+    if (lastAction?.lastFocusedElement && lastAction.lastFocusedElement.focused !== false) {
+      const fe = lastAction.lastFocusedElement;
+      const ef: Record<string, string> = {};
+      if (fe.text) ef.text = fe.text.substring(0, 100);
+      if (fe.ariaLabel) ef.ariaLabel = fe.ariaLabel;
+      if (fe.role) ef.role = fe.role;
+      if (fe.tag) ef.tag = fe.tag;
+      if (fe.selector) ef.selector = fe.selector;
+      if (fe.placeholder) ef.placeholder = fe.placeholder;
+      if (Object.keys(ef).length > 0) expectedFocus = ef;
+    }
+
+    // Append focus target to label
+    const focusText = expectedFocus?.text?.substring(0, 25)
+      || expectedFocus?.ariaLabel?.substring(0, 25)
+      || '';
+    const label = focusText
+      ? `${parts.join(' \u2192 ')} \u2192 "${focusText}"`
+      : parts.join(' \u2192 ');
+
+    const actions: KeyboardNavAction[] = pending.actions.map(a => ({
+      key: a.key as KeyboardNavAction['key'],
+      count: a.count,
+    }));
+
+    const step: KeyboardNavStep = {
+      id: this.nextStepId('keyboard_nav', pending.actions[0]?.key || 'nav'),
+      label,
+      type: 'keyboard_nav',
+      actions,
+      expectedFocus,
+      autoFix: true,
+    };
+
+    this.session.pendingKeyboardNav = null;
+    this.addStep(step);
+  }
 
   private flushPendingInput(): void {
     if (!this.session?.pendingInput) return;
@@ -1528,6 +1720,41 @@ export class WorkflowRecorder {
     return target;
   }
 
+  /**
+   * Build an accessibility-first element target from a recording event.
+   * Uses role + accessible name as primary identifiers, with CSS selector as fallback.
+   */
+  private buildAccessibilityTarget(event: RecordingEvent): ElementTarget {
+    const el = event.element as any;
+
+    // Build base target with CSS selector as fallback
+    const target = this.buildElementTarget(event);
+
+    // Add accessibility-specific fields
+    if (el.computedRole) {
+      target.role = el.computedRole;
+    }
+    if (el.shadowPath && el.shadowPath.length > 0) {
+      target.shadowPath = el.shadowPath;
+    }
+    if (el.svgFingerprint) {
+      target.svgFingerprint = el.svgFingerprint;
+    }
+
+    // Build compact accessibility query: role:button[name:Submit]
+    const role = el.computedRole || el.role || '';
+    const name = el.accessibleName || el.ariaLabel || '';
+    if (role && name) {
+      target.accessibilityQuery = `role:${role}[name:${name}]`;
+    } else if (role) {
+      target.accessibilityQuery = `role:${role}`;
+    } else if (name) {
+      target.accessibilityQuery = `[name:${name}]`;
+    }
+
+    return target;
+  }
+
   private nextStepId(type: string, suffix: string): string {
     if (!this.session) return 'step-0';
     this.session.stepCounter++;
@@ -1564,6 +1791,7 @@ export class WorkflowRecorder {
         createdAt: new Date(session.startTime).toISOString(),
         updatedAt: new Date().toISOString(),
         recordedBy: 'recorder',
+        recordingMode: session.recordingMode,
       },
     };
   }
@@ -1575,6 +1803,35 @@ export class WorkflowRecorder {
    * into a single type step with the final value. This cleans up
    * typo corrections that happen during recording.
    */
+
+  /**
+   * Remove click steps that are synthetic duplicates of Enter/Space in a preceding keyboard_nav.
+   * When Enter is pressed on a button, the browser fires both keydown AND click.
+   * The recorder captures both, so we strip the redundant click here.
+   */
+  private stripSyntheticClicks(steps: WorkflowStep[]): WorkflowStep[] {
+    const result: WorkflowStep[] = [];
+    for (let i = 0; i < steps.length; i++) {
+      const step = steps[i];
+      if (step.type === 'click' && i > 0) {
+        const prev = steps[i - 1];
+        if (prev.type === 'keyboard_nav') {
+          const navStep = prev as KeyboardNavStep;
+          const lastAction = navStep.actions[navStep.actions.length - 1];
+          if (lastAction && (lastAction.key === 'enter' || lastAction.key === 'space')) {
+            recLog('INFO', `stripSyntheticClicks: removing click step "${step.label}" after keyboard_nav ending with ${lastAction.key}`);
+            continue; // skip this click
+          }
+        }
+      }
+      result.push(step);
+    }
+    if (result.length < steps.length) {
+      recLog('INFO', `stripSyntheticClicks: removed ${steps.length - result.length} synthetic click(s)`);
+    }
+    return result;
+  }
+
   private collapseTypoSequences(steps: WorkflowStep[]): WorkflowStep[] {
     const result: WorkflowStep[] = [];
     let i = 0;
@@ -2033,8 +2290,9 @@ export class WorkflowRecorder {
         bridgeConnected: bridgeServer.isConnected,
       });
       try {
-        const result = await bridgeServer.setRecordingMode(true);
-        recLog('INFO', 'setRecordingMode(true) succeeded', { result });
+        const mode = this.session?.recordingMode || 'standard';
+        const result = await bridgeServer.setRecordingMode(true, mode);
+        recLog('INFO', 'setRecordingMode(true) succeeded', { result, mode });
         return; // Success
       } catch (err) {
         lastError = err as Error;
@@ -2337,6 +2595,7 @@ export class WorkflowRecorder {
       lastEventTime: Date.now(),
       stepCounter: 0,
       pendingInput: null,
+      pendingKeyboardNav: null,
       eventListener: null,
       snapshotListener: null,
       reconnectHandler: null,
@@ -2348,6 +2607,8 @@ export class WorkflowRecorder {
       interactedSelectors: new Map(),
       desktopMode: true,
       desktopHook: hookChild,
+      lastActionKeyTime: 0,
+      recordingMode: 'standard',
     };
 
     // Insert a launch app step as the first step so the workflow opens the app on replay
@@ -2426,7 +2687,7 @@ export class WorkflowRecorder {
       action,
       app: app || undefined,
       description: app || 'Desktop click',
-      delayAfterMs: 500,
+      delayAfterMs: 1000,
     };
 
     this.addStep(step);
@@ -2504,7 +2765,7 @@ export class WorkflowRecorder {
       type: 'desktop_keyboard',
       key,
       modifiers: modifiers.length > 0 ? modifiers : undefined,
-      delayAfterMs: 200,
+      delayAfterMs: 1000,
     };
 
     this.addStep(step);

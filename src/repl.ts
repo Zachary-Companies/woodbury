@@ -1,4 +1,5 @@
 import { marked } from 'marked';
+// @ts-ignore — no type declarations available
 import TerminalRenderer from 'marked-terminal';
 import { WoodburyConfig, SlashCommand, SlashCommandContext } from './types';
 import { logger } from './logger';

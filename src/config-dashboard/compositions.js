@@ -572,12 +572,7 @@ function renderGraphEditor() {
   html += '<button class="comp-tb-btn comp-tb-btn-cancel" id="comp-cancel-btn" title="Stop running" style="display:none;">&#x25a0; Stop</button>';
   html += '<button class="comp-tb-btn" id="comp-zoom-fit" title="Fit to view">Fit</button>';
   html += '<span class="comp-zoom-label" id="comp-zoom-label">' + Math.round(canvasState.zoom * 100) + '%</span>';
-  html += '<button class="comp-tb-btn" id="comp-tools-btn" title="Configure script tools">&#x1f527; Tools</button>';
-  html += '<button class="comp-tb-btn" id="comp-export" title="Download pipeline file">Export</button>';
-  html += '<button class="comp-tb-btn" id="comp-import" title="Upload pipeline file">Import</button>';
-  html += '<button class="comp-tb-btn" id="comp-rename-composition" title="Rename pipeline">Rename</button>';
-  html += '<button class="comp-tb-btn" id="comp-duplicate-composition" title="Make a copy">Copy</button>';
-  html += '<button class="comp-tb-btn comp-tb-btn-danger" id="comp-delete-composition" title="Delete pipeline">&#x1f5d1;</button>';
+  html += '<button class="comp-tb-btn" id="comp-more-btn" title="More actions">&#x22ef;</button>';
   html += '</div>';
   html += '</div>';
 
@@ -1402,34 +1397,10 @@ function wireUpToolbar() {
     });
   }
 
-  // Rename (button + double-click on title)
-  var renameCompBtn = document.querySelector('#comp-rename-composition');
-  if (renameCompBtn) {
-    renameCompBtn.addEventListener('click', function() { startPipelineRename(); });
-  }
+  // Rename via double-click on title
   var pipelineTitleEl = document.querySelector('#comp-pipeline-title');
   if (pipelineTitleEl) {
     pipelineTitleEl.addEventListener('dblclick', function() { startPipelineRename(); });
-  }
-
-  var deleteCompBtn = document.querySelector('#comp-delete-composition');
-  if (deleteCompBtn) {
-    deleteCompBtn.addEventListener('click', async function() {
-      if (!compData) return;
-      if (!confirm('Delete pipeline "' + compData.name + '"? This cannot be undone.')) return;
-      try {
-        await deleteComposition(compData.id);
-        toast('Pipeline deleted', 'success');
-        compData = null;
-        selectedComposition = null;
-        await fetchCompositions();
-        document.querySelector('#main').innerHTML =
-          '<div class="empty-state"><div class="empty-state-icon">&#x1f517;</div>' +
-          '<h2>Pipelines</h2><p>Select a pipeline or create a new one.</p></div>';
-      } catch (err) {
-        toast('Delete failed: ' + err.message, 'error');
-      }
-    });
   }
 
   // Undo/Redo buttons
@@ -1459,79 +1430,12 @@ function wireUpToolbar() {
   if (batchBtn) { batchBtn.addEventListener('click', function() { showBatchConfigModal(); }); }
   var scheduleBtn = document.querySelector('#comp-schedule-btn');
   if (scheduleBtn) { scheduleBtn.addEventListener('click', function() { showScheduleModal(); }); }
-  var toolsBtn = document.querySelector('#comp-tools-btn');
-  if (toolsBtn) { toolsBtn.addEventListener('click', function() { showToolDocsModal(); }); }
   var cancelBtn = document.querySelector('#comp-cancel-btn');
   if (cancelBtn) { cancelBtn.addEventListener('click', function() { cancelCompositionRun(); }); }
 
-  // Export button
-  var exportBtn = document.querySelector('#comp-export');
-  if (exportBtn) {
-    exportBtn.addEventListener('click', function() {
-      if (!compData) return;
-      var blob = new Blob([JSON.stringify(compData, null, 2)], { type: 'application/json' });
-      var url = URL.createObjectURL(blob);
-      var a = document.createElement('a');
-      a.href = url;
-      a.download = compData.id + '.composition.json';
-      a.click();
-      URL.revokeObjectURL(url);
-      toast('Downloaded ' + compData.name, 'success');
-    });
-  }
-
-  // Import button
-  var importBtn = document.querySelector('#comp-import');
-  if (importBtn) {
-    importBtn.addEventListener('click', function() {
-      var input = document.createElement('input');
-      input.type = 'file';
-      input.accept = '.json';
-      input.addEventListener('change', async function() {
-        var file = input.files[0];
-        if (!file) return;
-        try {
-          var text = await file.text();
-          var imported = JSON.parse(text);
-          if (!imported.version || !imported.nodes || !imported.edges) {
-            throw new Error('This doesn\'t look like a valid pipeline file');
-          }
-          // Create as new composition
-          var baseName = imported.name || 'Imported';
-          var result = await createComposition(baseName + ' (Imported)', imported.description || '');
-          // Update with full nodes/edges data
-          imported.id = result.composition.id;
-          imported.name = baseName + ' (Imported)';
-          imported.metadata = { createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
-          await saveComposition(imported);
-          toast('Uploaded ' + imported.name, 'success');
-          await fetchCompositions();
-          selectComposition(imported.id);
-        } catch (err) {
-          toast('Import failed: ' + err.message, 'error');
-        }
-      });
-      input.click();
-    });
-  }
-
-  // Duplicate composition button
-  var dupBtn = document.querySelector('#comp-duplicate-composition');
-  if (dupBtn) {
-    dupBtn.addEventListener('click', async function() {
-      if (!compData) return;
-      try {
-        var res = await fetch('/api/compositions/' + encodeURIComponent(compData.id) + '/duplicate', { method: 'POST' });
-        var data = await res.json();
-        if (!res.ok) throw new Error(data.error || 'Duplicate failed');
-        toast('Copy created!', 'success');
-        await fetchCompositions();
-        selectComposition(data.composition.id);
-      } catch (err) {
-        toast('Duplicate failed: ' + err.message, 'error');
-      }
-    });
-  }
+  // "More" dropdown button
+  var moreBtn = document.querySelector('#comp-more-btn');
+  if (moreBtn) { moreBtn.addEventListener('click', function() { showMoreDropdown(); }); }
 
   // Properties panel close
   var propsClose = document.querySelector('#comp-props-close');
@@ -1545,6 +1449,152 @@ function wireUpToolbar() {
       hidePropertiesPanel();
     });
   }
+}
+
+// ── "More" dropdown (Tools, Export, Import, Rename, Copy, Delete) ────────
+
+var moreDropdownEl = null;
+
+function hideMoreDropdown() {
+  if (moreDropdownEl) {
+    moreDropdownEl.remove();
+    moreDropdownEl = null;
+  }
+  document.removeEventListener('click', onMoreDropdownOutsideClick, true);
+}
+
+function onMoreDropdownOutsideClick(e) {
+  if (moreDropdownEl && !moreDropdownEl.contains(e.target) && e.target.id !== 'comp-more-btn') {
+    hideMoreDropdown();
+  }
+}
+
+function exportPipeline() {
+  if (!compData) return;
+  var blob = new Blob([JSON.stringify(compData, null, 2)], { type: 'application/json' });
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement('a');
+  a.href = url;
+  a.download = compData.id + '.composition.json';
+  a.click();
+  URL.revokeObjectURL(url);
+  toast('Downloaded ' + compData.name, 'success');
+}
+
+function importPipeline() {
+  var input = document.createElement('input');
+  input.type = 'file';
+  input.accept = '.json';
+  input.addEventListener('change', async function() {
+    var file = input.files[0];
+    if (!file) return;
+    try {
+      var text = await file.text();
+      var imported = JSON.parse(text);
+      if (!imported.version || !imported.nodes || !imported.edges) {
+        throw new Error('This doesn\'t look like a valid pipeline file');
+      }
+      var baseName = imported.name || 'Imported';
+      var result = await createComposition(baseName + ' (Imported)', imported.description || '');
+      imported.id = result.composition.id;
+      imported.name = baseName + ' (Imported)';
+      imported.metadata = { createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+      await saveComposition(imported);
+      toast('Uploaded ' + imported.name, 'success');
+      await fetchCompositions();
+      selectComposition(imported.id);
+    } catch (err) {
+      toast('Import failed: ' + err.message, 'error');
+    }
+  });
+  input.click();
+}
+
+async function duplicatePipeline() {
+  if (!compData) return;
+  try {
+    var res = await fetch('/api/compositions/' + encodeURIComponent(compData.id) + '/duplicate', { method: 'POST' });
+    var data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Duplicate failed');
+    toast('Copy created!', 'success');
+    await fetchCompositions();
+    selectComposition(data.composition.id);
+  } catch (err) {
+    toast('Duplicate failed: ' + err.message, 'error');
+  }
+}
+
+async function deletePipeline() {
+  if (!compData) return;
+  if (!confirm('Delete pipeline "' + compData.name + '"? This cannot be undone.')) return;
+  try {
+    await deleteComposition(compData.id);
+    toast('Pipeline deleted', 'success');
+    compData = null;
+    selectedComposition = null;
+    await fetchCompositions();
+    document.querySelector('#main').innerHTML =
+      '<div class="empty-state"><div class="empty-state-icon">&#x1f517;</div>' +
+      '<h2>Pipelines</h2><p>Select a pipeline or create a new one.</p></div>';
+  } catch (err) {
+    toast('Delete failed: ' + err.message, 'error');
+  }
+}
+
+function showMoreDropdown() {
+  if (moreDropdownEl) { hideMoreDropdown(); return; }
+
+  var btn = document.querySelector('#comp-more-btn');
+  if (!btn) return;
+  var rect = btn.getBoundingClientRect();
+
+  var items = [
+    { label: 'Tools', icon: '&#x1f527;', action: function() { showToolDocsModal(); } },
+    { separator: true },
+    { label: 'Export', icon: '&#x2913;', action: function() { exportPipeline(); } },
+    { label: 'Import', icon: '&#x2912;', action: function() { importPipeline(); } },
+    { separator: true },
+    { label: 'Rename', icon: '&#x270f;', action: function() { startPipelineRename(); } },
+    { label: 'Copy', icon: '&#x2398;', action: function() { duplicatePipeline(); } },
+    { label: 'Delete', icon: '&#x1f5d1;', danger: true, action: function() { deletePipeline(); } },
+  ];
+
+  var menu = document.createElement('div');
+  menu.className = 'comp-more-dropdown';
+  menu.style.position = 'fixed';
+  menu.style.right = (window.innerWidth - rect.right) + 'px';
+  menu.style.top = (rect.bottom + 4) + 'px';
+
+  var html = '';
+  items.forEach(function(item, i) {
+    if (item.separator) {
+      html += '<div class="comp-ctx-separator"></div>';
+    } else {
+      html += '<div class="comp-ctx-item' + (item.danger ? ' comp-ctx-item-danger' : '') + '" data-idx="' + i + '">';
+      html += '<span>' + item.icon + ' ' + compEscHtml(item.label) + '</span>';
+      html += '</div>';
+    }
+  });
+  menu.innerHTML = html;
+  document.body.appendChild(menu);
+  moreDropdownEl = menu;
+
+  // Wire click handlers
+  items.forEach(function(item, i) {
+    if (item.separator) return;
+    var el = menu.querySelector('[data-idx="' + i + '"]');
+    if (el) {
+      el.addEventListener('click', function() {
+        hideMoreDropdown();
+        item.action();
+      });
+    }
+  });
+
+  // Close on outside click (delayed so this click doesn't immediately close it)
+  setTimeout(function() {
+    document.addEventListener('click', onMoreDropdownOutsideClick, true);
+  }, 0);
 }
 
 async function showAddNodeDropdown() {
