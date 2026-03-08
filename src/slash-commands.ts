@@ -8,6 +8,8 @@ import { discoverWorkflows } from './workflow/loader.js';
 import { WorkflowRecorder } from './workflow/recorder.js';
 import type { WorkflowStep } from './workflow/types.js';
 import { getRoutes, addRoute, removeRoute, isHostsConfigured, GO_HOSTNAME } from './go-links.js';
+import { knownServers, getKnownServer } from './mcp-registry.js';
+import { loadAllMcpConfig, saveMcpConfig, type McpServerConfig } from './mcp-config.js';
 
 // Module-level state for the active recorder (persists across slash command calls)
 let activeRecorder: WorkflowRecorder | null = null;
@@ -819,6 +821,263 @@ export const slashCommands: SlashCommand[] = [
       } catch (err) {
         ctx.print(chalk.red(`  ❌ Pairing error: ${err}`));
       }
+    }
+  },
+
+  {
+    name: 'mcp',
+    description: 'Manage MCP intelligence servers: /mcp [enable|disable|setup|reconnect]',
+    async handler(args: string[], ctx: SlashCommandContext) {
+      const sub = args[0]?.toLowerCase();
+      const manager = ctx.mcpClientManager;
+
+      // /mcp or /mcp list — show status dashboard
+      if (!sub || sub === 'list') {
+        ctx.print('');
+        ctx.print(chalk.green.bold('  MCP Intelligence Servers'));
+        ctx.print('');
+
+        const configs = loadAllMcpConfig();
+        const configMap = new Map(configs.map(c => [c.name, c]));
+
+        let anyShown = false;
+        for (const known of knownServers) {
+          anyShown = true;
+          const config = configMap.get(known.name);
+          const isEnabled = config ? config.enabled !== false : false;
+
+          let statusText: string;
+          let statusIcon: string;
+
+          if (isEnabled && manager) {
+            const connStatus = manager.getConnectionStatus(known.name);
+            if (connStatus === 'connected') {
+              const summaries = manager.getConnectionSummaries();
+              const summary = summaries.find((s: any) => s.name === known.name);
+              const toolCount = summary ? summary.toolCount : 0;
+              statusIcon = chalk.green('◉');
+              statusText = chalk.green(`${toolCount} tools`) + chalk.gray('   Connected');
+            } else if (connStatus === 'failed') {
+              const reason = manager.getFailureReason(known.name);
+              statusIcon = chalk.red('◉');
+              statusText = chalk.red('Failed');
+              if (reason) {
+                statusText += chalk.gray(` — ${truncateStr(reason, 40)}`);
+              }
+            } else {
+              statusIcon = chalk.yellow('◎');
+              statusText = chalk.yellow('Enabled') + chalk.gray(' (not connected)');
+            }
+          } else if (isEnabled) {
+            statusIcon = chalk.yellow('◎');
+            statusText = chalk.yellow('Enabled') + chalk.gray(' (agent not started)');
+          } else {
+            statusIcon = chalk.gray('○');
+            statusText = chalk.gray('Disabled');
+          }
+
+          ctx.print(`  ${statusIcon} ${chalk.blue.bold(known.displayName)}` + chalk.gray(` (${known.name})`));
+          ctx.print(chalk.gray(`    ${known.description}`));
+          ctx.print(`    ${statusText}`);
+          ctx.print('');
+        }
+
+        if (!anyShown) {
+          ctx.print(chalk.gray('  No known MCP servers.'));
+        }
+
+        ctx.print(chalk.gray('  Commands:'));
+        ctx.print(chalk.gray('    /mcp enable <name>     Enable and connect a server'));
+        ctx.print(chalk.gray('    /mcp disable <name>    Disconnect and disable a server'));
+        ctx.print(chalk.gray('    /mcp setup <name>      Show installation guide'));
+        ctx.print(chalk.gray('    /mcp reconnect <name>  Reconnect a server'));
+        ctx.print('');
+        return;
+      }
+
+      // /mcp enable <name>
+      if (sub === 'enable') {
+        const name = args[1];
+        if (!name) {
+          ctx.print(chalk.yellow('Usage: /mcp enable <name>'));
+          ctx.print(chalk.gray('  Available: ' + knownServers.map(s => s.name).join(', ')));
+          return;
+        }
+
+        const known = getKnownServer(name);
+        if (!known) {
+          ctx.print(chalk.red(`Unknown server: ${name}`));
+          ctx.print(chalk.gray('  Known servers: ' + knownServers.map(s => s.name).join(', ')));
+          return;
+        }
+
+        // Check availability
+        const check = await known.checkAvailable();
+        if (!check.available) {
+          ctx.print(chalk.yellow(`${known.displayName} is not ready to use:`));
+          for (const missing of check.missing) {
+            ctx.print(chalk.red(`  ✗ ${missing}`));
+          }
+          ctx.print('');
+          ctx.print(chalk.gray(`  Run /mcp setup ${name} for installation instructions.`));
+          return;
+        }
+
+        // Add/update in config
+        const configs = loadAllMcpConfig();
+        const existing = configs.find(c => c.name === name);
+        if (existing) {
+          existing.enabled = true;
+          existing.command = known.command;
+          existing.args = known.args;
+        } else {
+          configs.push({
+            name: known.name,
+            command: known.command,
+            args: known.args,
+            enabled: true,
+          });
+        }
+        saveMcpConfig(configs);
+
+        // Connect if manager exists
+        if (manager) {
+          ctx.print(chalk.gray(`  Connecting to ${known.displayName}...`));
+          try {
+            await manager.connectOne({
+              name: known.name,
+              command: known.command,
+              args: known.args,
+            });
+            const summaries = manager.getConnectionSummaries();
+            const summary = summaries.find((s: any) => s.name === name);
+            ctx.print(chalk.green(`  ✅ ${known.displayName} enabled and connected (${summary?.toolCount || 0} tools)`));
+          } catch (err: any) {
+            ctx.print(chalk.red(`  ✗ Enabled but failed to connect: ${err.message}`));
+            ctx.print(chalk.gray(`    Try /mcp reconnect ${name} or /mcp setup ${name}`));
+          }
+        } else {
+          ctx.print(chalk.green(`  ✅ ${known.displayName} enabled.`));
+          ctx.print(chalk.gray('    It will connect when the agent starts.'));
+        }
+        return;
+      }
+
+      // /mcp disable <name>
+      if (sub === 'disable') {
+        const name = args[1];
+        if (!name) {
+          ctx.print(chalk.yellow('Usage: /mcp disable <name>'));
+          return;
+        }
+
+        // Disconnect if connected
+        if (manager) {
+          await manager.disconnectOne(name);
+        }
+
+        // Update config
+        const configs = loadAllMcpConfig();
+        const existing = configs.find(c => c.name === name);
+        if (existing) {
+          existing.enabled = false;
+          saveMcpConfig(configs);
+        }
+
+        const known = getKnownServer(name);
+        const displayName = known?.displayName || name;
+        ctx.print(chalk.green(`  ✅ ${displayName} disabled.`));
+        return;
+      }
+
+      // /mcp setup <name>
+      if (sub === 'setup') {
+        const name = args[1];
+        if (!name) {
+          ctx.print(chalk.yellow('Usage: /mcp setup <name>'));
+          ctx.print(chalk.gray('  Available: ' + knownServers.map(s => s.name).join(', ')));
+          return;
+        }
+
+        const known = getKnownServer(name);
+        if (!known) {
+          ctx.print(chalk.red(`Unknown server: ${name}`));
+          return;
+        }
+
+        ctx.print('');
+        for (const line of known.setupGuide) {
+          if (line === '') {
+            ctx.print('');
+          } else if (line === known.setupGuide[0]) {
+            ctx.print(chalk.green.bold(`  ${line}`));
+          } else if (line.match(/^\d+\./)) {
+            ctx.print(chalk.blue(`  ${line}`));
+          } else if (line.startsWith('   ')) {
+            ctx.print(chalk.gray(`  ${line}`));
+          } else {
+            ctx.print(chalk.gray(`  ${line}`));
+          }
+        }
+        ctx.print('');
+
+        // Show current availability
+        const check = await known.checkAvailable();
+        if (check.available) {
+          ctx.print(chalk.green('  ✅ All requirements met — ready to enable!'));
+          ctx.print(chalk.gray(`     Run: /mcp enable ${name}`));
+        } else {
+          ctx.print(chalk.yellow('  Current status:'));
+          for (const missing of check.missing) {
+            ctx.print(chalk.red(`    ✗ ${missing}`));
+          }
+        }
+        ctx.print('');
+        return;
+      }
+
+      // /mcp reconnect <name>
+      if (sub === 'reconnect') {
+        const name = args[1];
+        if (!name) {
+          ctx.print(chalk.yellow('Usage: /mcp reconnect <name>'));
+          return;
+        }
+
+        if (!manager) {
+          ctx.print(chalk.yellow('Agent not started yet. Start a conversation first.'));
+          return;
+        }
+
+        const configs = loadAllMcpConfig();
+        const config = configs.find(c => c.name === name && c.enabled !== false);
+        if (!config) {
+          const known = getKnownServer(name);
+          if (known) {
+            config;
+            ctx.print(chalk.yellow(`${known.displayName} is not enabled.`));
+            ctx.print(chalk.gray(`  Run /mcp enable ${name} first.`));
+          } else {
+            ctx.print(chalk.red(`Server "${name}" not found in config.`));
+          }
+          return;
+        }
+
+        ctx.print(chalk.gray(`  Reconnecting to ${name}...`));
+        try {
+          await manager.connectOne(config);
+          const summaries = manager.getConnectionSummaries();
+          const summary = summaries.find((s: any) => s.name === name);
+          ctx.print(chalk.green(`  ✅ Reconnected (${summary?.toolCount || 0} tools)`));
+        } catch (err: any) {
+          ctx.print(chalk.red(`  ✗ Failed to reconnect: ${err.message}`));
+        }
+        return;
+      }
+
+      // Unknown subcommand
+      ctx.print(chalk.yellow(`Unknown subcommand: ${sub}`));
+      ctx.print(chalk.gray('  Usage: /mcp [enable|disable|setup|reconnect|list]'));
     }
   }
 ];

@@ -10,19 +10,16 @@ export const pdfReadDefinition: ToolDefinition = {
     properties: {
       path: {
         type: 'string',
-        description: 'Path to the PDF file (relative to working directory or absolute)',
-        required: true
+        description: 'Path to the PDF file (relative to working directory or absolute)'
       },
       pages: {
         type: 'string',
         description: 'Page range to extract (e.g., "1-5", "1,3,5", "all"). Default: "all"',
-        required: false,
         default: 'all'
       },
       maxLength: {
         type: 'number',
         description: 'Maximum characters to return (default: 100000). Use to limit output for large PDFs.',
-        required: false,
         default: 100000
       }
     },

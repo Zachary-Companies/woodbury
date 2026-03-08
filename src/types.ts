@@ -158,6 +158,7 @@ export interface SlashCommandContext {
   agent?: any;
   extensionManager?: any;
   dashboardHandle?: any;
+  mcpClientManager?: any;
 }
 
 // Renderer types

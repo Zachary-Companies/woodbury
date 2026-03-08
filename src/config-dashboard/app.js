@@ -142,6 +142,7 @@ document.addEventListener('DOMContentLoaded', () => {
     '4': 'training',
     '5': 'marketplace',
     '6': 'social',
+    '7': 'mcp',
   };
 
   document.addEventListener('keydown', (e) => {
@@ -424,7 +425,7 @@ function closeHelp() {
 
 // ── Nav Tabs ─────────────────────────────────────────────────
 
-let currentTab = 'marketplace';
+let currentTab = 'home';
 
 function switchTab(tab, opts) {
   opts = opts || {};
@@ -448,7 +449,12 @@ function switchTab(tab, opts) {
   // Show appropriate empty state or content
   const main = $('#main');
 
-  if (tab === 'workflows') {
+  if (tab === 'home') {
+    selectedExtension = null;
+    if (typeof initHome === 'function') {
+      initHome();
+    }
+  } else if (tab === 'workflows') {
     selectedExtension = null;
     // Workflows module handles its own rendering
     if (typeof initWorkflows === 'function') {
@@ -480,6 +486,21 @@ function switchTab(tab, opts) {
     if (typeof initSocial === 'function') {
       initSocial();
     }
+  } else if (tab === 'chat') {
+    selectedExtension = null;
+    if (typeof initChat === 'function') {
+      initChat();
+    }
+  } else if (tab === 'assets') {
+    selectedExtension = null;
+    if (typeof initAssets === 'function') {
+      initAssets();
+    }
+  } else if (tab === 'mcp') {
+    selectedExtension = null;
+    if (typeof initMcp === 'function') {
+      initMcp();
+    }
   }
 }
 
@@ -501,10 +522,10 @@ function updateHash(tab, workflowId, view) {
 
 function parseHash() {
   var hash = window.location.hash.replace(/^#/, '');
-  if (!hash) return { tab: 'marketplace' };
+  if (!hash) return { tab: 'home' };
   var parts = hash.split('/');
   return {
-    tab: parts[0] || 'marketplace',
+    tab: parts[0] || 'home',
     workflowId: parts[1] || null,
     view: parts[2] || null,
   };
@@ -512,8 +533,8 @@ function parseHash() {
 
 function handleHash() {
   var state = parseHash();
-  var validTabs = ['workflows', 'compositions', 'runs', 'training', 'marketplace', 'social'];
-  var tab = validTabs.indexOf(state.tab) !== -1 ? state.tab : 'marketplace';
+  var validTabs = ['home', 'chat', 'workflows', 'compositions', 'runs', 'training', 'marketplace', 'social', 'assets', 'mcp'];
+  var tab = validTabs.indexOf(state.tab) !== -1 ? state.tab : 'home';
 
   // Only switch tab if it changed
   if (tab !== currentTab) {
@@ -595,8 +616,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Restore state from hash on initial load
   var state = parseHash();
-  var validTabs = ['workflows', 'compositions', 'runs', 'training', 'marketplace', 'social'];
-  var initialTab = validTabs.indexOf(state.tab) !== -1 ? state.tab : 'marketplace';
+  var validTabs = ['home', 'chat', 'workflows', 'compositions', 'runs', 'training', 'marketplace', 'social', 'assets', 'mcp'];
+  var initialTab = validTabs.indexOf(state.tab) !== -1 ? state.tab : 'home';
 
   // Set detailView early so workflow render picks it up
   if (state.view && typeof detailView !== 'undefined') {

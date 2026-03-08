@@ -376,24 +376,6 @@ export class Agent {
         // Add assistant response to messages
         messages.push({ role: 'assistant', content: assistantContent });
 
-        // Check for final answer
-        if (ToolParser.hasFinalAnswer(assistantContent)) {
-          const finalAnswer = ToolParser.extractFinalAnswer(assistantContent);
-          const executionTime = Date.now() - startTime;
-
-          this.progressLogger.stop();
-          return {
-            success: true,
-            content: finalAnswer || assistantContent,
-            toolCalls: allToolCalls,
-            metadata: {
-              executionTime,
-              iterations,
-              totalTokens
-            }
-          };
-        }
-
         // Check for incomplete/truncated tool calls first
         if (this.hasIncompleteToolCall(assistantContent)) {
           this.config.logger?.debug?.('Truncated response, continuing...');
@@ -402,7 +384,10 @@ export class Agent {
           continue;
         }
 
-        // Check for tool calls
+        // Check for tool calls BEFORE final answer — the model sometimes emits
+        // both tool calls and a premature final answer in one response. Execute
+        // the tools first; the model will produce a proper final answer after
+        // seeing the tool results.
         if (ToolParser.hasToolCalls(assistantContent)) {
           const toolCalls = ToolParser.parseToolCalls(assistantContent);
 
@@ -455,13 +440,16 @@ export class Agent {
           messages.push({ role: 'user', content: toolResultsMessage });
 
         } else {
-          // No tool calls and no final_answer tag - treat the response as the final answer
+          // No tool calls — check for final answer or treat as implicit final answer
+          const finalAnswer = ToolParser.hasFinalAnswer(assistantContent)
+            ? ToolParser.extractFinalAnswer(assistantContent)
+            : null;
           const executionTime = Date.now() - startTime;
 
           this.progressLogger.stop();
           return {
             success: true,
-            content: assistantContent,
+            content: finalAnswer || assistantContent,
             toolCalls: allToolCalls,
             metadata: {
               executionTime,

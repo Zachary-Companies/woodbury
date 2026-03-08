@@ -27,7 +27,10 @@ export const nanobananaSchema = z.object({
     'Text prompt describing the image to generate or the edit to make. Be descriptive - use paragraph-style descriptions rather than keyword lists.'
   ),
   image: z.string().optional().describe(
-    'For action="edit": Path to the image file to edit, or base64 data URL. Required for editing.'
+    'Path to an image file, a URL, or base64 data URL. For action="edit" this is the image to edit (required). For action="generate" this enables image-to-image generation.'
+  ),
+  referenceImages: z.array(z.string()).optional().describe(
+    'Additional reference images (file paths, URLs, or base64 data URLs). Used for character consistency, style reference, or multi-image context.'
   ),
   model: z.enum(['flash', 'pro']).optional().default('flash').describe(
     'Model to use: "flash" (gemini-2.0-flash-exp, fast/cheap ~$0.04/image) or "pro" (gemini-2.5-flash, higher quality ~$0.13-0.24/image). Default: flash'
@@ -113,16 +116,29 @@ async function loadImageAsBase64(imagePath: string): Promise<{ data: string; mim
     throw new Error('Invalid data URL format');
   }
 
+  // Check if it's a URL — fetch and convert to base64
+  if (imagePath.startsWith('http://') || imagePath.startsWith('https://')) {
+    const response = await fetch(imagePath);
+    if (!response.ok) {
+      throw new Error(`Failed to fetch image from URL (${response.status}): ${imagePath}`);
+    }
+    const buffer = Buffer.from(await response.arrayBuffer());
+    const contentType = response.headers.get('content-type') || 'image/png';
+    // Strip charset or extra params from content-type
+    const mimeType = contentType.split(';')[0].trim();
+    return { data: buffer.toString('base64'), mimeType };
+  }
+
   // Read file from disk
   const absolutePath = path.isAbsolute(imagePath) ? imagePath : path.resolve(process.cwd(), imagePath);
-  
+
   if (!fs.existsSync(absolutePath)) {
     throw new Error(`Image file not found: ${absolutePath}`);
   }
 
   const buffer = fs.readFileSync(absolutePath);
   const base64 = buffer.toString('base64');
-  
+
   // Determine MIME type from extension
   const ext = path.extname(absolutePath).toLowerCase();
   const mimeTypes: Record<string, string> = {
@@ -168,6 +184,7 @@ export async function nanobanana(
   }
 
   const { action, prompt, image, model = 'flash', aspectRatio = '1:1', imageSize, outputPath } = params;
+  const referenceImages = params.referenceImages || [];
 
   // Validate edit action has image
   if (action === 'edit' && !image) {
@@ -181,13 +198,12 @@ export async function nanobanana(
   const modelId = MODELS[model];
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent`;
 
-  // Build parts array
+  // Build parts array — images come BEFORE text so the model sees
+  // the visual reference first, then applies the text instruction.
   const parts: Array<{ text: string } | { inline_data: { mime_type: string; data: string } }> = [];
-  
-  parts.push({ text: prompt });
 
-  // Add image for edit action
-  if (action === 'edit' && image) {
+  // Add primary image first (for any action — enables image-to-image and editing)
+  if (image) {
     try {
       const imageContent = await loadImageAsBase64(image);
       parts.push({
@@ -203,6 +219,28 @@ export async function nanobanana(
       });
     }
   }
+
+  // Add reference images (for character consistency, style reference, etc.)
+  for (const refImg of referenceImages) {
+    try {
+      const imageContent = await loadImageAsBase64(refImg);
+      parts.push({
+        inline_data: {
+          mime_type: imageContent.mimeType,
+          data: imageContent.data,
+        },
+      });
+    } catch (err) {
+      return JSON.stringify({
+        success: false,
+        error: `Failed to load reference image: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
+  }
+
+  // Text prompt comes after images so the model interprets it as
+  // an instruction about the preceding image(s)
+  parts.push({ text: prompt });
 
   // Build generation config
   const generationConfig: Record<string, unknown> = {
@@ -316,15 +354,19 @@ export async function nanobanana(
 
 export const nanobananaTool: ToolDefinition = {
   name: 'nanobanana',
-  description: `Generate or edit images using Google's Gemini image models (Nano Banana). Supports text-to-image generation and image editing with natural language.
+  description: `Generate or edit images using Google's Gemini image models (Nano Banana). Supports text-to-image, image-to-image, and image editing with natural language.
 
 **Models:**
 - "flash" (default): Fast and cheap (~$0.04/image), good for most tasks
 - "pro": Higher quality, 4K support, complex prompts (~$0.13-0.24/image)
 
 **Actions:**
-- "generate": Create an image from a text description
-- "edit": Modify an existing image with a text prompt
+- "generate": Create an image from a text description. Optionally pass an image for image-to-image generation.
+- "edit": Modify an existing image with a text prompt (requires image parameter).
+
+**Image inputs:**
+- "image": Primary image — file path, URL, or base64 data URL
+- "referenceImages": Array of additional images for character consistency, style reference, or multi-image context
 
 **Prompting tips:**
 - Write paragraph-style descriptions, not keyword lists

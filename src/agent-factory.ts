@@ -2,10 +2,19 @@ import { Agent, createDefaultToolRegistry, AgentConfig } from './loop/index.js';
 import type { AgentResult } from './types';
 import { WoodburyLogger } from './logger';
 import type { WoodburyConfig } from './types';
-import { buildSystemPrompt } from './system-prompt.js';
+import { buildSystemPrompt, type McpServerInfo } from './system-prompt.js';
 import { ensureBridgeServer, bridgeServer } from './bridge-server.js';
 import type { ExtensionManager } from './extension-manager.js';
+import type { McpClientManager } from './mcp-client-manager.js';
 import { debugLog } from './debug-log.js';
+
+// V3 Closure Engine imports
+import { ClosureEngine } from './loop/v3/closure-engine.js';
+import { createAgentHandleBridge } from './loop/v3/agent-handle-bridge.js';
+import { buildV3SystemPrompt } from './loop/v3/system-prompt-v3.js';
+import { ToolRegistryV2 } from './loop/v2/tools/registry-v2.js';
+import { convertAllTools } from './loop/v2/tools/native-converter.js';
+import type { ClosureEngineConfig } from './loop/v3/types.js';
 
 export interface AgentHandle {
   run(input: string, signal?: AbortSignal): Promise<AgentResult>;
@@ -20,7 +29,8 @@ export { type AgentResult } from './types';
 
 export async function createAgent(
   config: WoodburyConfig,
-  extensionManager?: ExtensionManager
+  extensionManager?: ExtensionManager,
+  mcpClientManager?: McpClientManager,
 ): Promise<AgentHandle> {
   const logger = new WoodburyLogger(config.verbose || false);
 
@@ -48,21 +58,39 @@ export async function createAgent(
       }
     }
 
+    // Register MCP tools
+    if (mcpClientManager) {
+      const mcpTools = mcpClientManager.getAllTools();
+      debugLog.info('agent', `Registering ${mcpTools.length} MCP tool(s)`);
+      for (const { definition, handler } of mcpTools) {
+        try {
+          toolRegistry.register(definition, handler);
+          debugLog.debug('agent', `Registered MCP tool: ${definition.name}`);
+        } catch (err) {
+          debugLog.error('agent', `MCP tool "${definition.name}" registration failed`, { error: String(err) });
+        }
+      }
+    }
+
     // Start the bridge server for Chrome extension communication (non-blocking)
     debugLog.debug('agent', 'Starting bridge server (non-blocking)');
     ensureBridgeServer().catch((err) => {
       debugLog.warn('agent', 'Bridge server failed to start', { error: String(err) });
     });
 
-    // Build the comprehensive system prompt with project context + extension prompts
+    // Build the comprehensive system prompt with project context + extension prompts + MCP info
     const workingDirectory = config.workingDirectory || process.cwd();
     const extensionPrompts = extensionManager?.getAllPromptSections();
+    const mcpServers: McpServerInfo[] | undefined = mcpClientManager
+      ? mcpClientManager.getConnectionSummaries().map((s) => ({ name: s.name, toolNames: s.toolNames }))
+      : undefined;
     const donePrompt = debugLog.time('agent', 'Building system prompt');
-    const systemPrompt = await buildSystemPrompt(workingDirectory, config.contextDir, extensionPrompts);
+    const systemPrompt = await buildSystemPrompt(workingDirectory, config.contextDir, extensionPrompts, mcpServers);
     donePrompt();
     debugLog.info('agent', 'System prompt built', {
       length: systemPrompt.length,
       extensionPromptCount: extensionPrompts?.length || 0,
+      mcpServerCount: mcpServers?.length || 0,
     });
 
     // Configure agent
@@ -160,6 +188,135 @@ export async function createAgent(
     };
   } catch (error) {
     logger.error('Failed to create agent:', error);
+    throw error;
+  }
+}
+
+/**
+ * Create a V3 Closure Engine agent with native tool calling.
+ * Uses the same AgentHandle interface for backward compatibility.
+ */
+export async function createClosureAgent(
+  config: WoodburyConfig,
+  extensionManager?: ExtensionManager,
+  mcpClientManager?: McpClientManager,
+): Promise<AgentHandle> {
+  const logger = new WoodburyLogger(config.verbose || false);
+
+  try {
+    // Create V1 tool registry and get all tools
+    const doneRegistry = debugLog.time('agent-v3', 'Creating tool registry');
+    const v1Registry = createDefaultToolRegistry();
+    doneRegistry();
+
+    // Register extension tools on V1 registry
+    if (extensionManager) {
+      const extTools = extensionManager.getAllTools();
+      debugLog.info('agent-v3', `Registering ${extTools.length} extension tool(s)`);
+      for (const { definition, handler } of extTools) {
+        try {
+          v1Registry.register(definition, handler);
+        } catch (err) {
+          debugLog.error('agent-v3', `Extension tool "${definition.name}" registration failed`, { error: String(err) });
+        }
+      }
+    }
+
+    // Register MCP tools on V1 registry
+    if (mcpClientManager) {
+      const mcpTools = mcpClientManager.getAllTools();
+      debugLog.info('agent-v3', `Registering ${mcpTools.length} MCP tool(s)`);
+      for (const { definition, handler } of mcpTools) {
+        try {
+          v1Registry.register(definition, handler);
+        } catch (err) {
+          debugLog.error('agent-v3', `MCP tool "${definition.name}" registration failed`, { error: String(err) });
+        }
+      }
+    }
+
+    // Convert all V1 tools to native V2 format
+    const doneConvert = debugLog.time('agent-v3', 'Converting tools to native format');
+    const v1Tools = v1Registry.getAll?.() || [];
+    const nativeTools = convertAllTools(v1Tools);
+    doneConvert();
+
+    // Create V2 tool registry with converted tools
+    const v2Registry = new ToolRegistryV2({
+      debug: () => {},
+      info: () => {},
+      warn: (msg: string) => logger.warn(msg),
+      error: (msg: string) => logger.error(msg),
+    });
+    v2Registry.registerAll(nativeTools);
+    debugLog.info('agent-v3', 'Tools registered in V2 registry', { count: nativeTools.length });
+
+    // Start the bridge server (non-blocking)
+    ensureBridgeServer().catch((err) => {
+      debugLog.warn('agent-v3', 'Bridge server failed to start', { error: String(err) });
+    });
+
+    // Build V3 system prompt (strips XML instructions, adds native tool docs)
+    const workingDirectory = config.workingDirectory || process.cwd();
+    const extensionPrompts = extensionManager?.getAllPromptSections();
+    const mcpServers: McpServerInfo[] | undefined = mcpClientManager
+      ? mcpClientManager.getConnectionSummaries().map((s) => ({ name: s.name, toolNames: s.toolNames }))
+      : undefined;
+    const donePrompt = debugLog.time('agent-v3', 'Building V3 system prompt');
+    const systemPrompt = await buildV3SystemPrompt(
+      workingDirectory,
+      config.contextDir,
+      extensionPrompts,
+      v2Registry.getAllDefinitions(),
+      mcpServers,
+    );
+    donePrompt();
+    debugLog.info('agent-v3', 'V3 system prompt built', { length: systemPrompt.length, mcpServerCount: mcpServers?.length || 0 });
+
+    // Configure closure engine
+    const provider = getProvider(config);
+    if (provider === 'claude-code') {
+      throw new Error('Closure Engine does not support claude-code provider. Use anthropic, openai, or groq.');
+    }
+
+    const engineConfig: ClosureEngineConfig = {
+      provider,
+      model: config.model || getDefaultModel(provider),
+      maxIterations: config.maxIterations || 1000,
+      maxTaskRetries: 3,
+      timeout: config.timeout || 300000,
+      toolTimeout: 30000,
+      temperature: 0.1,
+      workingDirectory,
+      allowDangerousTools: !config.safe,
+      streaming: config.stream !== false,
+      reflectionInterval: 5,
+      callbacks: {},
+    };
+
+    debugLog.info('agent-v3', 'Closure Engine config', {
+      provider: engineConfig.provider,
+      model: engineConfig.model,
+      maxIterations: engineConfig.maxIterations,
+      streaming: engineConfig.streaming,
+    });
+
+    // Create engine and bridge to AgentHandle
+    const engine = new ClosureEngine(engineConfig, v2Registry, systemPrompt);
+    const handle = createAgentHandleBridge(engine);
+    debugLog.info('agent-v3', 'Closure Engine created successfully');
+
+    // Wrap stop() to also stop bridge server
+    const originalStop = handle.stop;
+    handle.stop = async () => {
+      await originalStop();
+      await bridgeServer.stop().catch(() => {});
+      logger.info('Closure Engine stopped');
+    };
+
+    return handle;
+  } catch (error) {
+    logger.error('Failed to create Closure Engine:', error);
     throw error;
   }
 }

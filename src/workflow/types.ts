@@ -792,6 +792,7 @@ export interface CompositionDocument {
   id: string;
   name: string;
   description?: string;
+  folder?: string;
   nodes: CompositionNode[];
   edges: CompositionEdge[];
   metadata?: {
@@ -840,6 +841,16 @@ export interface CompositionNode {
   switchNode?: SwitchNodeConfig;
   /** Port name aliases for external display (e.g., in sub-pipeline usage) */
   portAliases?: Record<string, string>;
+  /** Asset node configuration (only when workflowId is '__asset__') */
+  asset?: AssetNodeConfig;
+  /** Text node configuration (only when workflowId is '__text__') */
+  textNode?: TextNodeConfig;
+  /** File operation node configuration (only when workflowId is '__file_op__') */
+  fileOp?: FileOpNodeConfig;
+  /** JSON keys/extract node configuration (only when workflowId is '__json_keys__') */
+  jsonKeysNode?: JsonKeysNodeConfig;
+  /** Tool node configuration (only when workflowId is '__tool__') */
+  toolNode?: ToolNodeConfig;
   /** Sub-pipeline reference (only when workflowId starts with 'comp:') */
   compositionRef?: { compositionId: string };
 }
@@ -929,6 +940,58 @@ export interface SwitchNodeConfig {
   cases: Array<{ value: string; port: string }>;
   /** Output port name for when no case matches */
   defaultPort: string;
+}
+
+/** Configuration for an asset node in a composition */
+export interface AssetNodeConfig {
+  /** Operation mode */
+  mode: 'pick' | 'save' | 'list' | 'remove' | 'generate_path';
+  /** Collection slug to operate on */
+  collectionSlug?: string;
+  /** Selected asset ID (pick mode) */
+  assetId?: string;
+  /** Category filter (pick/list modes) */
+  category?: string;
+  /** Comma-separated tags (save mode) */
+  tags?: string;
+  /** Default name for saved assets (save mode) */
+  defaultName?: string;
+  /** If true, save mode references files in place rather than copying them */
+  referenceOnly?: boolean;
+  /** Base output directory (generate_path mode) */
+  outputDirectory?: string;
+  /** Name pattern with tokens like {name}, {datetime}, {uuid} (generate_path mode) */
+  namePattern?: string;
+  /** File extension including dot, e.g. ".json" (generate_path mode) */
+  fileExtension?: string;
+}
+
+/** Configuration for a text input node in a composition */
+export interface TextNodeConfig {
+  /** The text content to output */
+  value: string;
+}
+
+/** Configuration for a file operation node in a composition */
+export interface FileOpNodeConfig {
+  /** File operation to perform */
+  operation: 'copy' | 'move' | 'delete' | 'mkdir' | 'list';
+}
+
+/** Configuration for a JSON keys/extract node in a composition */
+export interface JsonKeysNodeConfig {
+  /** Optional JSONPath or dot-notation path to focus extraction (e.g., "categories.0.topics") */
+  defaultPath?: string;
+}
+
+/** Configuration for a tool node in a composition — calls extension tools directly */
+export interface ToolNodeConfig {
+  /** Selected tool name (e.g., 'nanobanana', 'web_fetch', 'shell_execute') */
+  selectedTool: string;
+  /** Default values for tool parameters (used when input port is not connected) */
+  paramDefaults?: Record<string, any>;
+  /** Cached parameter schema so ports render without live tools cache */
+  paramSchema?: { properties?: Record<string, any>; required?: string[] };
 }
 
 /** Runtime state of a pending approval gate */

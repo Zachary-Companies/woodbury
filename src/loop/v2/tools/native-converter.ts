@@ -38,15 +38,49 @@ function convertParameterType(type: ToolParameter['type']): JSONSchemaProperty['
 }
 
 /**
+ * Sanitize a JSON Schema object to comply with draft 2020-12.
+ * - Converts Zod schemas to JSON Schema via zod-to-json-schema
+ * - Strips `required` from individual property definitions
+ */
+function sanitizeSchema(schema: any): any {
+  if (!schema || typeof schema !== 'object') return schema;
+
+  // Detect Zod schema objects (they have _def and ~standard properties)
+  if (schema._def || schema['~standard']) {
+    try {
+      const { zodToJsonSchema } = require('zod-to-json-schema');
+      const converted = zodToJsonSchema(schema, { target: 'openApi3' });
+      // zodToJsonSchema may wrap in { $schema, ... } — strip $schema
+      const { $schema, ...rest } = converted as any;
+      return rest;
+    } catch {
+      // Fallback: return a minimal valid schema
+      return { type: 'object', properties: {} };
+    }
+  }
+
+  if (schema.type !== 'object' || !schema.properties) return schema;
+
+  const cleaned = { ...schema, properties: { ...schema.properties } };
+  for (const [key, prop] of Object.entries(cleaned.properties)) {
+    if (prop && typeof prop === 'object' && 'required' in (prop as any)) {
+      const { required, ...rest } = prop as any;
+      cleaned.properties[key] = rest;
+    }
+  }
+  return cleaned;
+}
+
+/**
  * Convert V1 tool definition to native format
  */
 export function convertToolDefinition(tool: ToolDefinition): NativeToolDefinition {
-  // Handle JSON Schema parameters (already in correct format)
+  // Handle JSON Schema parameters (already in object format)
   if (!Array.isArray(tool.parameters)) {
     return {
       name: tool.name,
       description: tool.description,
-      input_schema: tool.parameters
+      input_schema: sanitizeSchema(tool.parameters),
     };
   }
 

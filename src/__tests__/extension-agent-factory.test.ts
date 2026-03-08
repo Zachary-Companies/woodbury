@@ -178,7 +178,8 @@ describe('createAgent with extensions', () => {
     expect(mockBuildSystemPrompt).toHaveBeenCalledWith(
       '/tmp/test',      // workingDirectory
       undefined,        // contextDir
-      sections          // extensionPromptSections
+      sections,         // extensionPromptSections
+      undefined         // mcpServers
     );
   });
 
@@ -189,6 +190,7 @@ describe('createAgent with extensions', () => {
       '/tmp/test',
       undefined,
       undefined,        // no extension prompts
+      undefined         // mcpServers
     );
   });
 

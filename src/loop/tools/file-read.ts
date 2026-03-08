@@ -10,13 +10,11 @@ export const fileReadDefinition: ToolDefinition = {
     properties: {
       path: {
         type: 'string',
-        description: 'Path to the file (relative to working directory or absolute)',
-        required: true
+        description: 'Path to the file (relative to working directory or absolute)'
       },
       encoding: {
         type: 'string',
         description: 'File encoding (default: utf-8)',
-        required: false,
         default: 'utf-8'
       }
     },

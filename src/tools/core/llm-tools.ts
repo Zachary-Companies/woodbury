@@ -45,8 +45,7 @@ export const google_search: WoodburyToolDefinition = {
       },
       siteSearch: {
         type: 'string',
-        description: 'Restrict results to a specific site (e.g. "developer.mozilla.org")',
-        required: false
+        description: 'Restrict results to a specific site (e.g. "developer.mozilla.org")'
       }
     },
     required: ['query']
@@ -132,8 +131,7 @@ export const api_search: WoodburyToolDefinition = {
       },
       searchQuery: {
         type: 'string',
-        description: 'Optional specific search query. If not provided, will search for authentication documentation.',
-        required: false
+        description: 'Optional specific search query. If not provided, will search for authentication documentation.'
       },
       includeAuth: {
         type: 'boolean',

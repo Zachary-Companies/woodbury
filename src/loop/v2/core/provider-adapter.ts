@@ -2,6 +2,7 @@ import OpenAI from 'openai';
 import Anthropic from '@anthropic-ai/sdk';
 import Groq from 'groq-sdk';
 import { createLogger, Logger } from '../../logger.js';
+import { debugLog } from '../../../debug-log.js';
 
 const logger = createLogger();
 
@@ -206,15 +207,20 @@ export class ProviderAdapter {
 
     // Separate system message from conversation messages
     let systemMessage = '';
-    const conversationMessages: Array<{ role: 'user' | 'assistant'; content: string }> = [];
+    const conversationMessages: Array<{ role: 'user' | 'assistant'; content: any }> = [];
 
     for (const message of messages) {
       if (message.role === 'system') {
         systemMessage += (systemMessage ? '\n\n' : '') + contentToString(message.content);
       } else {
+        // Pass content arrays through directly (needed for tool_use/tool_result blocks)
+        // Only convert to string if content is a plain string
+        const content = Array.isArray(message.content)
+          ? message.content
+          : contentToString(message.content);
         conversationMessages.push({
           role: message.role as 'user' | 'assistant',
-          content: contentToString(message.content)
+          content
         });
       }
     }
@@ -227,13 +233,32 @@ export class ProviderAdapter {
       system: systemMessage || undefined
     };
 
-    // Note: Current version of Anthropic SDK may not support tools in the same way
-    // This is a simplified implementation that focuses on text generation
+    // Pass tools to Anthropic API — NativeToolDefinition matches the SDK format
     if (options.tools && options.tools.length > 0) {
-      this.logger.warn('Tool calling not fully implemented for current Anthropic SDK version');
+      (requestParams as any).tools = options.tools.map(tool => ({
+        name: tool.name,
+        description: tool.description,
+        input_schema: tool.input_schema
+      }));
+      debugLog.info('provider-adapter', 'Anthropic request prepared', {
+        model,
+        toolCount: options.tools.length,
+        systemPromptLength: systemMessage.length,
+        messageCount: conversationMessages.length,
+      });
     }
 
     const response = await client.messages.create(requestParams);
+
+    debugLog.info('provider-adapter', 'Anthropic response received', {
+      stopReason: response.stop_reason,
+      contentBlockCount: Array.isArray(response.content) ? response.content.length : 1,
+      contentTypes: Array.isArray(response.content)
+        ? response.content.map((b: any) => b.type).join(', ')
+        : 'string',
+      inputTokens: response.usage?.input_tokens,
+      outputTokens: response.usage?.output_tokens,
+    });
 
     let content = '';
     const toolCalls: ToolCall[] = [];
@@ -243,15 +268,13 @@ export class ProviderAdapter {
       for (const block of response.content) {
         if (block.type === 'text') {
           content += block.text;
+        } else if (block.type === 'tool_use') {
+          toolCalls.push({
+            id: block.id,
+            name: block.name,
+            input: block.input as Record<string, unknown>
+          });
         }
-        // Note: Tool use blocks would be handled here in newer SDK versions
-        // if (block.type === 'tool_use') {
-        //   toolCalls.push({
-        //     id: block.id,
-        //     name: block.name,
-        //     input: block.input
-        //   });
-        // }
       }
     } else if (typeof response.content === 'string') {
       content = response.content;

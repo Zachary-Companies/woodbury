@@ -19,8 +19,8 @@ import {
   type IncomingMessage,
   type ServerResponse,
 } from 'node:http';
-import { readFile, writeFile, readdir, stat, unlink, mkdir } from 'node:fs/promises';
-import { join, extname, dirname, basename } from 'node:path';
+import { readFile, writeFile, readdir, stat, unlink, mkdir, copyFile } from 'node:fs/promises';
+import { join, extname, dirname, basename, isAbsolute } from 'node:path';
 import { homedir } from 'node:os';
 import {
   discoverExtensions,
@@ -333,6 +333,31 @@ export async function startDashboard(
   workingDirectory?: string,
   preferredPort: number = 9001
 ): Promise<DashboardHandle> {
+  // Load API keys from ~/.woodbury/.env into process.env (same as llm-service.ts)
+  try {
+    const envPath = join(homedir(), '.woodbury', '.env');
+    const { readFileSync, existsSync: existsSyncFs } = await import('node:fs');
+    if (existsSyncFs(envPath)) {
+      const content = readFileSync(envPath, 'utf-8');
+      for (const line of content.split('\n')) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith('#')) continue;
+        const eqIndex = trimmed.indexOf('=');
+        if (eqIndex > 0) {
+          const key = trimmed.substring(0, eqIndex).trim();
+          let value = trimmed.substring(eqIndex + 1).trim();
+          if ((value.startsWith('"') && value.endsWith('"')) ||
+              (value.startsWith("'") && value.endsWith("'"))) {
+            value = value.slice(1, -1);
+          }
+          if (!process.env[key] && value) {
+            process.env[key] = value;
+          }
+        }
+      }
+    }
+  } catch { /* ignore */ }
+
   // Static files are copied to dist/config-dashboard/ by the postbuild script
   const staticDir = join(__dirname, 'config-dashboard');
   const workDir = workingDirectory || process.cwd();
@@ -643,6 +668,92 @@ export async function startDashboard(
     embedDim?: number;
     lossType?: string;
   } | null = null;
+
+  // Chat agent state — singleton agent for the chat tab
+  let chatAgent: import('./agent-factory.js').AgentHandle | null = null;
+  let chatAgentBusy = false;
+  let chatMcpManager: InstanceType<typeof import('./mcp-client-manager.js').McpClientManager> | null = null;
+
+  async function ensureChatAgent(): Promise<import('./agent-factory.js').AgentHandle> {
+    if (chatAgent) return chatAgent;
+    const { createClosureAgent } = await import('./agent-factory.js');
+    const { McpClientManager } = await import('./mcp-client-manager.js');
+    const { loadMcpConfig } = await import('./mcp-config.js');
+
+    // Load saved provider/model preference
+    let savedProvider: string | undefined;
+    let savedModel: string | undefined;
+    try {
+      const chatConfigPath = join(homedir(), '.woodbury', 'chat-config.json');
+      const raw = await readFile(chatConfigPath, 'utf-8');
+      const chatConfig = JSON.parse(raw);
+      if (chatConfig.provider) savedProvider = chatConfig.provider;
+      if (chatConfig.model) savedModel = chatConfig.model;
+    } catch { /* no saved config, auto-detect */ }
+
+    // Build config from available API keys + saved preference
+    const config: import('./types.js').WoodburyConfig = {
+      workingDirectory: workDir,
+      apiKeys: {
+        anthropic: process.env.ANTHROPIC_API_KEY,
+        openai: process.env.OPENAI_API_KEY || process.env.OPEN_AI_KEY,
+        groq: process.env.GROQ_API_KEY || process.env.GROK_API_KEY,
+      },
+      provider: savedProvider as any,
+      model: savedModel,
+      stream: true,
+      verbose,
+    };
+
+    // Connect to MCP servers (if configured)
+    chatMcpManager = null;
+    const mcpConfigs = loadMcpConfig();
+    if (mcpConfigs.length > 0) {
+      chatMcpManager = new McpClientManager();
+      await chatMcpManager.connectAll(mcpConfigs);
+    }
+
+    chatAgent = await createClosureAgent(config, extensionManager, chatMcpManager || undefined);
+    debugLog.info('dashboard', 'Chat agent created', { provider: savedProvider || 'auto' });
+
+    return chatAgent;
+  }
+
+  // Build a chat-oriented system prompt (simplified for non-technical users)
+  function buildChatPrompt(activeCompositionId?: string): string {
+    const extensionPrompts = extensionManager?.getAllPromptSections() || [];
+    const extSection = extensionPrompts.length > 0
+      ? '\n\n## Extension Instructions\n\n' + extensionPrompts.join('\n\n')
+      : '';
+
+    const activeCtx = activeCompositionId
+      ? `\n\nThe user is currently viewing pipeline "${activeCompositionId}" in the graph panel. When they reference "this pipeline" or ask to modify it, they mean this one.`
+      : '';
+
+    return `You are Woodbury, a friendly AI assistant that helps content creators automate their work.
+
+## What You Can Do
+- Create and manage content (images, videos, voiceovers, hashtags)
+- Save and organize assets (characters, logos, brand elements, any files)
+- Build automated pipelines that run on a schedule
+- Queue content for review before posting
+
+## How To Behave
+- Talk in plain, simple language — no technical jargon
+- When the user references something ambiguous ("my character", "that video"), look it up first. If multiple matches exist, ask which one they mean.
+- When building pipelines, explain each step in simple terms as you go
+- After creating content, offer to save it as a reusable asset
+- Show what you're doing — narrate your actions briefly
+
+## Clarification
+- If the user's request is ambiguous, ASK before assuming
+- If multiple assets match a reference, list them and ask which one
+- If a pipeline step could go multiple ways, explain the options simply
+- Never silently pick a default when the user might have a preference
+
+## Conversation History
+When the user's message contains a <conversation_history> block, treat it as prior conversation context. Continue the conversation naturally.${activeCtx}${extSection}`;
+  }
 
   const TRAINING_DATA_DIR = join(homedir(), '.woodbury', 'data', 'training-crops');
   const MODELS_DIR = join(homedir(), '.woodbury', 'data', 'models');
@@ -2662,7 +2773,7 @@ export async function startDashboard(
   function parseScriptPorts(code: string): { inputs: Array<{ name: string; type: string; description: string }>; outputs: Array<{ name: string; type: string; description: string }> } {
     const inputs: Array<{ name: string; type: string; description: string }> = [];
     const outputs: Array<{ name: string; type: string; description: string }> = [];
-    const regex = /@(input|output)\s+(\w+)\s+(string|number|boolean|string\[\])\s*(?:"([^"]*)")?/g;
+    const regex = /@(input|output)\s+(\w+)\s+(string|number|boolean|object|string\[\]|number\[\]|object\[\])\s*(?:"([^"]*)")?/g;
     let match;
     while ((match = regex.exec(code)) !== null) {
       const decl = { name: match[2], type: match[3], description: match[4] || '' };
@@ -3451,6 +3562,272 @@ export async function startDashboard(
         });
       } catch (err) {
         sendJson(res, 500, { error: `Generation failed: ${err instanceof Error ? err.message : err}` });
+      }
+      return;
+    }
+
+    // ── MCP Server Management API ──────────────────────────────
+
+    // GET /api/mcp/servers — list all known servers with status
+    if (req.method === 'GET' && pathname === '/api/mcp/servers') {
+      try {
+        const { knownServers } = await import('./mcp-registry.js');
+        const { loadAllMcpConfig } = await import('./mcp-config.js');
+
+        const configs = loadAllMcpConfig();
+        const configMap = new Map(configs.map(c => [c.name, c]));
+
+        const servers = await Promise.all(knownServers.map(async (known: any) => {
+          const config = configMap.get(known.name);
+          const isEnabled = config ? config.enabled !== false : false;
+
+          let status = 'disconnected';
+          let toolCount = 0;
+          let toolNames: string[] = [];
+          let failureReason: string | undefined;
+
+          if (isEnabled && chatMcpManager) {
+            const connStatus = chatMcpManager.getConnectionStatus(known.name);
+            status = connStatus;
+            if (connStatus === 'connected') {
+              const summaries = chatMcpManager.getConnectionSummaries();
+              const summary = summaries.find((s: any) => s.name === known.name);
+              if (summary) {
+                toolCount = summary.toolCount;
+                toolNames = summary.toolNames;
+              }
+            } else if (connStatus === 'failed') {
+              failureReason = chatMcpManager.getFailureReason(known.name);
+            }
+          }
+
+          // Check availability
+          let availability;
+          try {
+            availability = await known.checkAvailable();
+          } catch { /* ignore */ }
+
+          return {
+            name: known.name,
+            displayName: known.displayName,
+            description: known.description,
+            category: known.category,
+            enabled: isEnabled,
+            status,
+            toolCount,
+            toolNames,
+            failureReason,
+            availability,
+            setupGuide: known.setupGuide,
+          };
+        }));
+
+        sendJson(res, 200, { servers });
+      } catch (err) {
+        sendJson(res, 500, { error: String(err) });
+      }
+      return;
+    }
+
+    // POST /api/mcp/servers/:name/enable
+    const mcpEnableMatch = pathname.match(/^\/api\/mcp\/servers\/([^/]+)\/enable$/);
+    if (req.method === 'POST' && mcpEnableMatch) {
+      const name = decodeURIComponent(mcpEnableMatch[1]);
+      try {
+        const { getKnownServer } = await import('./mcp-registry.js');
+        const { loadAllMcpConfig, saveMcpConfig } = await import('./mcp-config.js');
+
+        const known = getKnownServer(name);
+        if (!known) {
+          sendJson(res, 404, { error: `Unknown server: ${name}` });
+          return;
+        }
+
+        // Check availability
+        const check = await known.checkAvailable();
+        if (!check.available) {
+          sendJson(res, 400, {
+            error: `Not ready: ${check.missing.join(', ')}`,
+            missing: check.missing,
+          });
+          return;
+        }
+
+        // Update config
+        const configs = loadAllMcpConfig();
+        const existing = configs.find((c: any) => c.name === name);
+        if (existing) {
+          existing.enabled = true;
+          existing.command = known.command;
+          existing.args = known.args;
+        } else {
+          configs.push({
+            name: known.name,
+            command: known.command,
+            args: known.args,
+            enabled: true,
+          });
+        }
+        saveMcpConfig(configs);
+
+        // Connect if manager is available
+        if (chatMcpManager) {
+          try {
+            await chatMcpManager.connectOne({
+              name: known.name,
+              command: known.command,
+              args: known.args,
+            });
+            const summaries = chatMcpManager.getConnectionSummaries();
+            const summary = summaries.find((s: any) => s.name === name);
+            sendJson(res, 200, {
+              success: true,
+              message: `${known.displayName} enabled and connected (${summary?.toolCount || 0} tools)`,
+            });
+          } catch (connErr: any) {
+            sendJson(res, 200, {
+              success: true,
+              message: `${known.displayName} enabled but connection failed: ${connErr.message}`,
+              warning: connErr.message,
+            });
+          }
+        } else {
+          sendJson(res, 200, {
+            success: true,
+            message: `${known.displayName} enabled. It will connect when the agent starts.`,
+          });
+        }
+      } catch (err) {
+        sendJson(res, 500, { error: String(err) });
+      }
+      return;
+    }
+
+    // POST /api/mcp/servers/:name/disable
+    const mcpDisableMatch = pathname.match(/^\/api\/mcp\/servers\/([^/]+)\/disable$/);
+    if (req.method === 'POST' && mcpDisableMatch) {
+      const name = decodeURIComponent(mcpDisableMatch[1]);
+      try {
+        const { loadAllMcpConfig, saveMcpConfig } = await import('./mcp-config.js');
+        const { getKnownServer } = await import('./mcp-registry.js');
+
+        // Disconnect if connected
+        if (chatMcpManager) {
+          await chatMcpManager.disconnectOne(name);
+        }
+
+        // Update config
+        const configs = loadAllMcpConfig();
+        const existing = configs.find((c: any) => c.name === name);
+        if (existing) {
+          existing.enabled = false;
+          saveMcpConfig(configs);
+        }
+
+        const known = getKnownServer(name);
+        const displayName = known?.displayName || name;
+        sendJson(res, 200, { success: true, message: `${displayName} disabled.` });
+      } catch (err) {
+        sendJson(res, 500, { error: String(err) });
+      }
+      return;
+    }
+
+    // POST /api/mcp/servers/:name/reconnect
+    const mcpReconnectMatch = pathname.match(/^\/api\/mcp\/servers\/([^/]+)\/reconnect$/);
+    if (req.method === 'POST' && mcpReconnectMatch) {
+      const name = decodeURIComponent(mcpReconnectMatch[1]);
+      try {
+        const { loadAllMcpConfig } = await import('./mcp-config.js');
+        const { getKnownServer } = await import('./mcp-registry.js');
+
+        if (!chatMcpManager) {
+          sendJson(res, 400, { error: 'Agent not started yet.' });
+          return;
+        }
+
+        const configs = loadAllMcpConfig();
+        const config = configs.find((c: any) => c.name === name && c.enabled !== false);
+        if (!config) {
+          const known = getKnownServer(name);
+          sendJson(res, 400, {
+            error: `${known?.displayName || name} is not enabled. Enable it first.`,
+          });
+          return;
+        }
+
+        await chatMcpManager.connectOne(config);
+        const summaries = chatMcpManager.getConnectionSummaries();
+        const summary = summaries.find((s: any) => s.name === name);
+        sendJson(res, 200, {
+          success: true,
+          message: `Reconnected (${summary?.toolCount || 0} tools)`,
+        });
+      } catch (err: any) {
+        sendJson(res, 500, { error: `Failed to reconnect: ${err.message}` });
+      }
+      return;
+    }
+
+    // ── Chat Provider Config API ───────────────────────────────
+
+    // GET /api/mcp/chat-provider — get current provider/model selection
+    if (req.method === 'GET' && pathname === '/api/mcp/chat-provider') {
+      try {
+        const chatConfigPath = join(homedir(), '.woodbury', 'chat-config.json');
+        let provider = 'auto';
+        let model = '';
+        try {
+          const raw = await readFile(chatConfigPath, 'utf-8');
+          const chatConfig = JSON.parse(raw);
+          if (chatConfig.provider) provider = chatConfig.provider;
+          if (chatConfig.model) model = chatConfig.model;
+        } catch { /* no saved config */ }
+
+        // Detect available providers from env
+        const available: Array<{ id: string; name: string; hasKey: boolean; defaultModel: string }> = [
+          { id: 'anthropic', name: 'Anthropic (Claude)', hasKey: !!process.env.ANTHROPIC_API_KEY, defaultModel: 'claude-sonnet-4-5-20250514' },
+          { id: 'openai', name: 'OpenAI (GPT)', hasKey: !!(process.env.OPENAI_API_KEY || process.env.OPEN_AI_KEY), defaultModel: 'gpt-4o' },
+          { id: 'groq', name: 'Groq (Llama)', hasKey: !!(process.env.GROQ_API_KEY || process.env.GROK_API_KEY), defaultModel: 'llama-3.1-70b-versatile' },
+        ];
+
+        sendJson(res, 200, { provider, model, available });
+      } catch (err) {
+        sendJson(res, 500, { error: String(err) });
+      }
+      return;
+    }
+
+    // PUT /api/mcp/chat-provider — set provider/model selection
+    if (req.method === 'PUT' && pathname === '/api/mcp/chat-provider') {
+      try {
+        const body = await readBody(req);
+        const chatConfigPath = join(homedir(), '.woodbury', 'chat-config.json');
+        const dir = join(homedir(), '.woodbury');
+
+        // Ensure dir exists
+        try { await mkdir(dir, { recursive: true }); } catch { /* ok */ }
+
+        const newConfig: any = {};
+        if (body.provider && body.provider !== 'auto') {
+          newConfig.provider = body.provider;
+        }
+        if (body.model) {
+          newConfig.model = body.model;
+        }
+
+        await writeFile(chatConfigPath, JSON.stringify(newConfig, null, 2) + '\n', 'utf-8');
+
+        // Force agent recreation on next chat message
+        if (chatAgent) {
+          try { await chatAgent.stop(); } catch { /* ignore */ }
+          chatAgent = null;
+        }
+
+        debugLog.info('dashboard', 'Chat provider updated', newConfig);
+        sendJson(res, 200, { success: true, message: 'Provider updated. Next message will use the new setting.' });
+      } catch (err) {
+        sendJson(res, 500, { error: String(err) });
       }
       return;
     }
@@ -5988,11 +6365,25 @@ Rules:
       return;
     }
 
+    // GET /api/tools — list available extension tools with their schemas
+    if (req.method === 'GET' && pathname === '/api/tools') {
+      await extensionManager?.whenReady();
+      const tools = extensionManager?.getAllTools() ?? [];
+      const result = tools.map(t => ({
+        name: t.definition.name,
+        description: t.definition.description,
+        parameters: t.definition.parameters,
+        dangerous: t.definition.dangerous || false,
+      }));
+      sendJson(res, 200, { tools: result });
+      return;
+    }
+
     // POST /api/compositions/generate-script — AI-powered code generation for script nodes
     if (req.method === 'POST' && pathname === '/api/compositions/generate-script') {
       try {
         const body = await readBody(req);
-        const { description, chatHistory, currentCode } = body || {};
+        const { description, chatHistory, currentCode, dataContext } = body || {};
 
         if (!description && (!chatHistory || chatHistory.length === 0)) {
           sendJson(res, 400, { error: 'description or chatHistory is required' });
@@ -6012,7 +6403,7 @@ IMPORTANT: You MUST generate code that follows this EXACT format:
 Port annotation format (one per line in the JSDoc):
   @input <name> <type> "<description>"
   @output <name> <type> "<description>"
-Types: string, number, boolean, string[]
+Types: string, number, boolean, object, string[], number[], object[]
 
 Available context methods:
 - context.llm.generate(prompt) — Call an LLM, returns a string
@@ -6074,6 +6465,9 @@ Rules:
 
         // Add the current request
         let userMessage = description || '';
+        if (dataContext) {
+          userMessage += `\n\nThe input data for this script looks like this (sample from a previous pipeline run):\n\`\`\`json\n${dataContext}\n\`\`\`\nUse this to understand the exact data structure and write code that handles it correctly. Make sure the first @input annotation matches the type of this data (it will be auto-connected to the source port). IMPORTANT: If the user's description references any other dynamic values (like keys, indices, filters, thresholds, etc.), create ADDITIONAL @input ports for each one. Every variable parameter should be its own input port so it can be wired from other nodes in the pipeline.`;
+        }
         if (currentCode) {
           userMessage += `\n\nCurrent code:\n\`\`\`javascript\n${currentCode}\n\`\`\``;
         }
@@ -6115,6 +6509,248 @@ Rules:
       return;
     }
 
+    // POST /api/compositions/generate-pipeline — AI-powered pipeline decomposition
+    if (req.method === 'POST' && pathname === '/api/compositions/generate-pipeline') {
+      try {
+        const body = await readBody(req);
+        const { description } = body || {};
+
+        if (!description || typeof description !== 'string' || !description.trim()) {
+          sendJson(res, 400, { error: 'description is required' });
+          return;
+        }
+
+        const toolDocs = await generateScriptToolDocs();
+        const pipelineSystemPrompt = `You are a pipeline architect for a visual automation platform. The user describes a task, and you decompose it into multiple small, focused steps — each becoming a node in a pipeline graph.
+
+IMPORTANT RULES:
+1. Each script node should do ONE thing and be under 20 lines of code
+2. Use the simplest node type for each step:
+   - "text" for constant values (prompts, paths, configuration strings)
+   - "file_op" for file operations (copy, move, delete, mkdir, list)
+   - "script" for custom logic, LLM calls, data transformation, or tool usage
+3. Connect nodes via matching port names in the connections array
+4. Port names must use snake_case (e.g., "generated_text", "file_path")
+5. Keep the pipeline linear or fan-out — avoid unnecessary complexity
+
+NODE TYPES:
+
+"text" — outputs a constant string value
+  Output port: "text" (always)
+  Config: { "type": "text", "label": "...", "textNode": { "value": "the text content" } }
+
+"file_op" — file system operations
+  Operations and their ports:
+  - "copy": inputs [sourcePath, destinationPath], outputs [outputPath, success]
+  - "move": inputs [sourcePath, destinationPath], outputs [outputPath, success]
+  - "delete": inputs [filePath], outputs [success]
+  - "mkdir": inputs [folderPath], outputs [outputPath, success]
+  - "list": inputs [folderPath], outputs [files, count]
+  Config: { "type": "file_op", "label": "...", "fileOp": { "operation": "copy" } }
+
+"script" — custom code with @input/@output ports
+  Must include a JSDoc block with @input and @output annotations.
+  Format: @input <name> <type> "<description>"  |  @output <name> <type> "<description>"
+  Types: string, number, boolean, object, string[], number[], object[]
+  Function signature: async function execute(inputs, context)
+  Available in context:
+  - context.llm.generate(prompt) — Call an LLM, returns string
+  - context.llm.generate(prompt, { temperature, maxTokens }) — With options
+  - context.llm.generateJSON(prompt) — Call LLM, parse JSON response
+  - context.log(message) — Log a message
+  - require('fs'), require('path'), require('os') — Node.js modules
+${toolDocs}
+
+RESPONSE FORMAT — respond with ONLY a JSON object (no explanation, no markdown fences):
+
+{
+  "name": "Human-readable pipeline name",
+  "nodes": [
+    {
+      "type": "text|script|file_op",
+      "label": "Short Node Label",
+      "description": "What this node does (script only)",
+      "code": "// JavaScript code (script only)",
+      "textNode": { "value": "..." },
+      "fileOp": { "operation": "copy|move|delete|mkdir|list" }
+    }
+  ],
+  "connections": [
+    { "from": 0, "fromPort": "output_name", "to": 1, "toPort": "input_name" }
+  ]
+}
+
+- "from" and "to" are zero-based indices into the nodes array
+- Only include fields relevant to each node type
+- Script nodes MUST have "code" with proper @input/@output JSDoc annotations
+- Make sure every connection references port names that actually exist on the source and target nodes
+
+EXAMPLE — "Generate a poem about a theme and save it to a file":
+
+{
+  "name": "Poem Generator & Saver",
+  "nodes": [
+    {
+      "type": "text",
+      "label": "Theme",
+      "textNode": { "value": "autumn leaves" }
+    },
+    {
+      "type": "script",
+      "label": "Generate Poem",
+      "description": "Generate a poem from a theme using AI",
+      "code": "/**\\n * @input theme string \\"The theme to write about\\"\\n * @output poem string \\"The generated poem\\"\\n * @output title string \\"A title for the poem\\"\\n */\\nasync function execute(inputs, context) {\\n  const { theme } = inputs;\\n  const result = await context.llm.generateJSON(\\n    \`Write a poem about \\"\${theme}\\". Return JSON: { \\"title\\": \\"...\\\", \\"poem\\": \\"...\\" }\`\\n  );\\n  return { poem: result.poem, title: result.title };\\n}"
+    },
+    {
+      "type": "script",
+      "label": "Save to File",
+      "description": "Write text content to a file",
+      "code": "/**\\n * @input content string \\"Text to save\\"\\n * @input filename string \\"File name\\"\\n * @output file_path string \\"Path where saved\\"\\n */\\nasync function execute(inputs, context) {\\n  const fs = require('fs');\\n  const path = require('path');\\n  const { content, filename } = inputs;\\n  const dir = path.join(require('os').homedir(), 'Documents', 'outputs');\\n  fs.mkdirSync(dir, { recursive: true });\\n  const fp = path.join(dir, filename + '.txt');\\n  fs.writeFileSync(fp, content, 'utf-8');\\n  return { file_path: fp };\\n}"
+    }
+  ],
+  "connections": [
+    { "from": 0, "fromPort": "text", "to": 1, "toPort": "theme" },
+    { "from": 1, "fromPort": "poem", "to": 2, "toPort": "content" },
+    { "from": 1, "fromPort": "title", "to": 2, "toPort": "filename" }
+  ]
+}
+
+Remember: respond with ONLY the JSON object.`;
+
+        const { runPrompt } = await import('./loop/llm-service.js');
+
+        const pipelineModel = process.env.ANTHROPIC_API_KEY
+          ? 'claude-sonnet-4-20250514'
+          : process.env.OPENAI_API_KEY
+            ? 'gpt-4o-mini'
+            : process.env.GROQ_API_KEY
+              ? 'llama-3.1-70b-versatile'
+              : 'claude-sonnet-4-20250514';
+
+        const pipelineMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
+          { role: 'system', content: pipelineSystemPrompt },
+          { role: 'user', content: description.trim() },
+        ];
+
+        const llmResp = await runPrompt(pipelineMessages, pipelineModel, { maxTokens: 8192, temperature: 0.7 });
+        const rawResponse = llmResp.content.trim();
+
+        // Extract JSON — may be wrapped in ```json ... ```
+        let jsonStr = rawResponse;
+        const jsonFenceMatch = rawResponse.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
+        if (jsonFenceMatch) {
+          jsonStr = jsonFenceMatch[1].trim();
+        }
+
+        let pipeline: any;
+        try {
+          pipeline = JSON.parse(jsonStr);
+        } catch {
+          sendJson(res, 422, { error: 'LLM returned invalid JSON', raw: rawResponse });
+          return;
+        }
+
+        if (!Array.isArray(pipeline.nodes) || pipeline.nodes.length === 0) {
+          sendJson(res, 422, { error: 'Pipeline must have at least one node', raw: rawResponse });
+          return;
+        }
+
+        // Map type strings to workflowId and ID prefixes
+        const typeToWorkflowId: Record<string, string> = {
+          script: '__script__', text: '__text__', file_op: '__file_op__',
+          image_viewer: '__image_viewer__', asset: '__asset__',
+        };
+        const typeToPrefix: Record<string, string> = {
+          script: 'script', text: 'text', file_op: 'fileop',
+          image_viewer: 'node', asset: 'asset',
+        };
+
+        const realNodes: any[] = [];
+        const idByIndex: string[] = [];
+
+        for (let i = 0; i < pipeline.nodes.length; i++) {
+          const pNode = pipeline.nodes[i];
+          const nodeType = pNode.type || 'script';
+          const workflowId = typeToWorkflowId[nodeType] || '__script__';
+          const prefix = typeToPrefix[nodeType] || 'script';
+          const id = prefix + '-' + Math.random().toString(36).slice(2, 9);
+          idByIndex.push(id);
+
+          const node: any = {
+            id,
+            workflowId,
+            position: { x: 0, y: 0 },
+            label: pNode.label || `Step ${i + 1}`,
+          };
+
+          if (workflowId === '__script__') {
+            const code = pNode.code || '';
+            const ports = parseScriptPorts(code);
+            node.script = {
+              description: pNode.description || pNode.label || '',
+              code,
+              inputs: ports.inputs.length > 0 ? ports.inputs : (pNode.inputs || []),
+              outputs: ports.outputs.length > 0 ? ports.outputs : (pNode.outputs || []),
+              chatHistory: [],
+            };
+          } else if (workflowId === '__text__') {
+            node.textNode = { value: pNode.textNode?.value || pNode.value || '' };
+          } else if (workflowId === '__file_op__') {
+            node.fileOp = { operation: pNode.fileOp?.operation || 'copy' };
+          } else if (workflowId === '__image_viewer__') {
+            node.imageViewer = pNode.imageViewer || { filePath: '', width: 300, height: 300 };
+          } else if (workflowId === '__asset__') {
+            node.asset = pNode.asset || { mode: 'pick' };
+          }
+
+          realNodes.push(node);
+        }
+
+        // Build edges from connections
+        const realEdges: any[] = [];
+        if (Array.isArray(pipeline.connections)) {
+          for (const conn of pipeline.connections) {
+            const srcId = idByIndex[conn.from];
+            const tgtId = idByIndex[conn.to];
+            if (!srcId || !tgtId) continue;
+
+            // Auto-correct text node output port
+            const srcNode = realNodes.find((n: any) => n.id === srcId);
+            let sourcePort = conn.fromPort;
+            if (srcNode?.workflowId === '__text__' && sourcePort !== 'text') {
+              sourcePort = 'text';
+            }
+
+            realEdges.push({
+              id: 'edge-' + Math.random().toString(36).slice(2, 9),
+              sourceNodeId: srcId,
+              sourcePort,
+              targetNodeId: tgtId,
+              targetPort: conn.toPort,
+            });
+          }
+        }
+
+        debugLog.info('dashboard', 'Pipeline generated', {
+          model: pipelineModel,
+          nodeCount: realNodes.length,
+          edgeCount: realEdges.length,
+          description: description.slice(0, 100),
+        });
+
+        sendJson(res, 200, {
+          success: true,
+          name: pipeline.name || 'Generated Pipeline',
+          nodes: realNodes,
+          edges: realEdges,
+        });
+      } catch (err) {
+        debugLog.error('dashboard', 'Pipeline generation failed', { error: String(err) });
+        sendJson(res, 500, { error: `Pipeline generation failed: ${(err as Error).message}` });
+      }
+      return;
+    }
+
     // ── Composition API Routes ──────────────────────────────
 
     // GET /api/compositions — list all compositions
@@ -6125,6 +6761,7 @@ Rules:
           id: d.composition.id,
           name: d.composition.name,
           description: d.composition.description,
+          folder: d.composition.folder || '',
           source: d.source,
           path: d.path,
           nodeCount: d.composition.nodes.length,
@@ -6147,7 +6784,7 @@ Rules:
           return;
         }
 
-        const { name, description } = body;
+        const { name, description, folder } = body;
         if (!name || typeof name !== 'string' || !name.trim()) {
           sendJson(res, 400, { error: 'Please give your pipeline a name' });
           return;
@@ -6175,6 +6812,7 @@ Rules:
           id,
           name: name.trim(),
           description: (description || '').trim() || undefined,
+          folder: (folder && typeof folder === 'string') ? folder.trim() : undefined,
           nodes: [] as any[],
           edges: [] as any[],
           metadata: {
@@ -6214,7 +6852,7 @@ Rules:
         const wfDiscovered = await discoverWorkflows(workDir);
         const wfMap: Record<string, any> = {};
         for (const node of comp.nodes) {
-          if (node.workflowId === '__approval_gate__' || node.workflowId === '__script__' || node.workflowId === '__output__' || node.workflowId === '__image_viewer__' || node.workflowId === '__branch__' || node.workflowId === '__delay__' || node.workflowId === '__gate__' || node.workflowId === '__for_each__' || node.workflowId === '__switch__') continue;
+          if (node.workflowId === '__approval_gate__' || node.workflowId === '__script__' || node.workflowId === '__output__' || node.workflowId === '__image_viewer__' || node.workflowId === '__branch__' || node.workflowId === '__delay__' || node.workflowId === '__gate__' || node.workflowId === '__for_each__' || node.workflowId === '__switch__' || node.workflowId === '__asset__' || node.workflowId === '__text__' || node.workflowId === '__file_op__' || node.workflowId === '__json_keys__') continue;
           if (node.workflowId.startsWith('comp:')) continue;
           const wfFound = wfDiscovered.find((d: any) => d.workflow.id === node.workflowId);
           if (wfFound) {
@@ -6320,6 +6958,35 @@ Rules:
       return;
     }
 
+    // POST /api/compositions/:id/move — move composition to a folder
+    const moveCompMatch = pathname.match(/^\/api\/compositions\/([^/]+)\/move$/);
+    if (req.method === 'POST' && moveCompMatch) {
+      const id = decodeURIComponent(moveCompMatch[1]);
+      try {
+        const body = await readBody(req);
+        const folder = (body?.folder != null && typeof body.folder === 'string') ? body.folder.trim() : '';
+
+        const discovered = await discoverCompositions(workDir);
+        const found = discovered.find(d => d.composition.id === id);
+        if (!found) {
+          sendJson(res, 404, { error: `Composition "${id}" not found` });
+          return;
+        }
+
+        const comp = found.composition as any;
+        comp.folder = folder || undefined;
+        comp.metadata = comp.metadata || {};
+        comp.metadata.updatedAt = new Date().toISOString();
+
+        await writeFile(found.path, JSON.stringify(comp, null, 2), 'utf-8');
+        debugLog.info('dashboard', `Moved composition "${id}" to folder "${folder || '(root)'}"`, { path: found.path });
+        sendJson(res, 200, { success: true, composition: comp });
+      } catch (err) {
+        sendJson(res, 500, { error: String(err) });
+      }
+      return;
+    }
+
     // DELETE /api/compositions/:id — delete a composition
     const delCompMatch = pathname.match(/^\/api\/compositions\/([^/]+)$/);
     if (req.method === 'DELETE' && delCompMatch) {
@@ -6408,6 +7075,9 @@ Rules:
           return;
         }
 
+        // Ensure all extensions (and their tools) are fully loaded before running
+        await extensionManager?.whenReady();
+
         // Topological sort
         let executionOrder: string[];
         try {
@@ -6421,7 +7091,7 @@ Rules:
         const wfDiscovered = await discoverWorkflows(workDir);
         const wfMap: Record<string, any> = {};
         for (const node of comp.nodes) {
-          if (node.workflowId === '__approval_gate__' || node.workflowId === '__script__' || node.workflowId === '__output__' || node.workflowId === '__image_viewer__' || node.workflowId === '__branch__' || node.workflowId === '__delay__' || node.workflowId === '__gate__' || node.workflowId === '__for_each__' || node.workflowId === '__switch__' || node.workflowId.startsWith('comp:')) continue; // Special nodes don't need workflows
+          if (node.workflowId === '__approval_gate__' || node.workflowId === '__script__' || node.workflowId === '__output__' || node.workflowId === '__image_viewer__' || node.workflowId === '__branch__' || node.workflowId === '__delay__' || node.workflowId === '__gate__' || node.workflowId === '__for_each__' || node.workflowId === '__switch__' || node.workflowId === '__asset__' || node.workflowId === '__text__' || node.workflowId === '__file_op__' || node.workflowId === '__json_keys__' || node.workflowId === '__tool__' || node.workflowId.startsWith('comp:')) continue; // Special nodes don't need workflows
           const found = wfDiscovered.find(d => d.workflow.id === node.workflowId);
           if (!found) {
             sendJson(res, 400, { error: `The workflow "${node.workflowId}" was deleted or renamed. Remove it from the pipeline and re-add it.` });
@@ -6538,6 +7208,51 @@ Rules:
               stepsCompleted: 0,
               currentStep: '',
             };
+          } else if (node.workflowId === '__asset__') {
+            nodeStates[node.id] = {
+              status: 'pending',
+              workflowId: '__asset__',
+              workflowName: node.label || 'Asset',
+              stepsTotal: 1,
+              stepsCompleted: 0,
+              currentStep: '',
+            };
+          } else if (node.workflowId === '__text__') {
+            nodeStates[node.id] = {
+              status: 'pending',
+              workflowId: '__text__',
+              workflowName: node.label || 'Text',
+              stepsTotal: 1,
+              stepsCompleted: 0,
+              currentStep: '',
+            };
+          } else if (node.workflowId === '__file_op__') {
+            nodeStates[node.id] = {
+              status: 'pending',
+              workflowId: '__file_op__',
+              workflowName: node.label || 'File Op',
+              stepsTotal: 1,
+              stepsCompleted: 0,
+              currentStep: '',
+            };
+          } else if (node.workflowId === '__json_keys__') {
+            nodeStates[node.id] = {
+              status: 'pending',
+              workflowId: '__json_keys__',
+              workflowName: node.label || 'JSON Extract',
+              stepsTotal: 1,
+              stepsCompleted: 0,
+              currentStep: '',
+            };
+          } else if (node.workflowId === '__tool__') {
+            nodeStates[node.id] = {
+              status: 'pending',
+              workflowId: '__tool__',
+              workflowName: node.label || (node.toolNode?.selectedTool || 'Tool'),
+              stepsTotal: 1,
+              stepsCompleted: 0,
+              currentStep: '',
+            };
           } else if (node.workflowId.startsWith('comp:')) {
             nodeStates[node.id] = {
               status: 'pending',
@@ -6640,9 +7355,13 @@ Rules:
           try {
             let pipelineHadFailure = false;
             let pipelineFirstError = '';
+            const forEachBodyNodes = new Set<string>(); // Nodes already executed by ForEach loops
 
             for (const nodeId of executionOrder) {
               if (abort.signal.aborted) break;
+
+              // Skip nodes already executed as part of a ForEach loop body
+              if (forEachBodyNodes.has(nodeId)) continue;
 
               const wf = wfMap[nodeId];
               const node = comp.nodes.find((n: any) => n.id === nodeId);
@@ -6751,8 +7470,8 @@ Rules:
                     return result;
                   };
                 }
-                // Fallback: if extensionManager unavailable, try nanobanana directly
-                if (Object.keys(scriptTools).length === 0) {
+                // Always include built-in tools (nanobanana, etc.) in script context
+                if (!scriptTools.nanobanana) {
                   try {
                     const { nanobanana: nb } = await import('./loop/tools/nanobanana.js');
                     scriptTools.nanobanana = async (p: any) => JSON.parse(await nb(p as any, workDir));
@@ -7170,7 +7889,7 @@ Fix the bug and return the corrected code. Do not change the @input/@output anno
                 continue;
               }
 
-              // ── ForEach Loop Node ─────────────────────────────────
+              // ── ForEach Loop Node (Unreal-style with loop body execution) ──
               if (node?.workflowId === '__for_each__' && node.forEachNode) {
                 ns.status = 'running';
                 ns.currentStep = 'Processing items...';
@@ -7189,16 +7908,658 @@ Fix the bug and return the corrected code. Do not change the @input/@output anno
                 const maxIter = node.forEachNode.maxIterations || 100;
                 const limited = itemsArray.slice(0, maxIter);
 
-                ns.currentStep = `Processing ${limited.length} items...`;
+                // Step 1: Identify loop body nodes — exclusively downstream of loop-body ports
+                const loopBodyFromItem = getNodesExclusivelyDownstreamOfPort(nodeId, 'current_item', comp.edges);
+                const loopBodyFromIndex = getNodesExclusivelyDownstreamOfPort(nodeId, 'index', comp.edges);
+                const loopBodyFromCount = getNodesExclusivelyDownstreamOfPort(nodeId, 'count', comp.edges);
+                const loopBodyNodeIds = new Set<string>();
+                for (const id of loopBodyFromItem) loopBodyNodeIds.add(id);
+                for (const id of loopBodyFromIndex) loopBodyNodeIds.add(id);
+                for (const id of loopBodyFromCount) loopBodyNodeIds.add(id);
 
+                // Mark them so the main loop skips them
+                for (const bodyId of loopBodyNodeIds) {
+                  forEachBodyNodes.add(bodyId);
+                }
+
+                // Step 2: Compute topological order of loop body nodes
+                const loopBodyNodeObjs = comp.nodes.filter((n: any) => loopBodyNodeIds.has(n.id));
+                const loopBodyEdges = comp.edges.filter((e: any) =>
+                  (loopBodyNodeIds.has(e.sourceNodeId) || e.sourceNodeId === nodeId) &&
+                  loopBodyNodeIds.has(e.targetNodeId)
+                );
+                let loopBodyOrder: string[];
+                try {
+                  loopBodyOrder = topoSort(loopBodyNodeObjs, loopBodyEdges);
+                } catch {
+                  loopBodyOrder = [...loopBodyNodeIds];
+                }
+
+                // Step 3: Find terminal loop body nodes (no outgoing edges to other body nodes)
+                const hasBodySuccessor = new Set<string>();
+                for (const e of comp.edges) {
+                  if (loopBodyNodeIds.has(e.sourceNodeId) && loopBodyNodeIds.has(e.targetNodeId)) {
+                    hasBodySuccessor.add(e.sourceNodeId);
+                  }
+                }
+                const terminalBodyNodes = [...loopBodyNodeIds].filter(id => !hasBodySuccessor.has(id));
+
+                debugLog.info('comp-run', `ForEach "${nodeId}": ${limited.length} items, ${loopBodyNodeIds.size} body nodes, ${terminalBodyNodes.length} terminal nodes`);
+
+                // Step 4: Iterate
+                const collectedResults: unknown[] = [];
+                ns.stepsTotal = limited.length;
+
+                for (let i = 0; i < limited.length; i++) {
+                  if (abort.signal.aborted) break;
+
+                  ns.currentStep = `Iteration ${i + 1}/${limited.length}`;
+                  ns.stepsCompleted = i;
+
+                  // Set ForEach outputs for this iteration
+                  nodeOutputs[nodeId] = {
+                    current_item: limited[i],
+                    index: i,
+                    count: limited.length,
+                  };
+
+                  // Execute each loop body node in topological order
+                  for (const bodyNodeId of loopBodyOrder) {
+                    if (abort.signal.aborted) break;
+
+                    const bodyNode = comp.nodes.find((n: any) => n.id === bodyNodeId);
+                    if (!bodyNode) continue;
+                    const bodyNs = run.nodeStates[bodyNodeId];
+
+                    // Reset body node state for this iteration
+                    bodyNs.status = 'running';
+                    bodyNs.currentStep = `Iteration ${i + 1}`;
+                    bodyNs.error = undefined;
+                    bodyNs.stepsCompleted = 0;
+
+                    const bodyEdgeInputs = gatherInputVariables(bodyNodeId, comp.edges, nodeOutputs);
+                    const bodyMergedInputs: Record<string, unknown> = { ...initialVariables, ...bodyEdgeInputs };
+                    bodyNs.inputVariables = { ...bodyMergedInputs };
+
+                    try {
+                      // Dispatch based on node type
+                      if (bodyNode.workflowId === '__script__' && bodyNode.script) {
+                        // Script node execution (matches main script execution pattern)
+                        const scriptCode = bodyNode.script.code || '';
+                        const bodyScriptLogs: string[] = [];
+                        const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
+
+                        // Build context with llm, tools, log — same as main script execution
+                        const { runPrompt: bodyScriptRunPrompt } = await import('./loop/llm-service.js');
+                        const bodyScriptModel = process.env.ANTHROPIC_API_KEY
+                          ? 'claude-sonnet-4-20250514'
+                          : process.env.OPENAI_API_KEY
+                            ? 'gpt-4o-mini'
+                            : process.env.GROQ_API_KEY
+                              ? 'llama-3.1-70b-versatile'
+                              : 'claude-sonnet-4-20250514';
+
+                        const bodyScriptTools: Record<string, (params: any) => Promise<any>> = {};
+                        const bodyAllExtTools = extensionManager?.getAllTools() ?? [];
+                        for (const extTool of bodyAllExtTools) {
+                          const toolHandler = extTool.handler;
+                          bodyScriptTools[extTool.definition.name] = async (params: any) => {
+                            const result = await toolHandler(params, { workingDirectory: workDir } as any);
+                            if (typeof result === 'string') {
+                              try { return JSON.parse(result); } catch { return result; }
+                            }
+                            return result;
+                          };
+                        }
+                        if (!bodyScriptTools.nanobanana) {
+                          try {
+                            const { nanobanana: nb } = await import('./loop/tools/nanobanana.js');
+                            bodyScriptTools.nanobanana = async (p: any) => JSON.parse(await nb(p as any, workDir));
+                          } catch { /* nanobanana not available */ }
+                        }
+
+                        const bodyContext = {
+                          llm: {
+                            generate: async (prompt: string, opts?: { temperature?: number; maxTokens?: number; model?: string }) => {
+                              const resp = await bodyScriptRunPrompt(
+                                [{ role: 'user', content: prompt }],
+                                opts?.model || bodyScriptModel,
+                                { maxTokens: opts?.maxTokens || 4096, temperature: opts?.temperature ?? 0.9 }
+                              );
+                              return resp.content.trim();
+                            },
+                            generateJSON: async (prompt: string, _schema?: any, opts?: { temperature?: number; maxTokens?: number; model?: string }) => {
+                              const resp = await bodyScriptRunPrompt(
+                                [{ role: 'user', content: prompt + '\n\nRespond with valid JSON only.' }],
+                                opts?.model || bodyScriptModel,
+                                { maxTokens: opts?.maxTokens || 4096, temperature: opts?.temperature ?? 0.7 }
+                              );
+                              const text = resp.content.trim();
+                              const jsonMatch = text.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
+                              return JSON.parse(jsonMatch ? jsonMatch[1].trim() : text);
+                            },
+                          },
+                          tools: bodyScriptTools,
+                          log: (msg: string) => { bodyScriptLogs.push(String(msg)); },
+                        };
+
+                        // Extract function body from async function execute(inputs, context) { ... }
+                        let bodyFnBody = scriptCode;
+                        const bodyFnMatch = bodyFnBody.match(/async\s+function\s+execute\s*\([^)]*\)\s*\{([\s\S]*)\}/);
+                        if (bodyFnMatch) {
+                          bodyFnBody = bodyFnMatch[1];
+                        }
+                        const bodyFn = new AsyncFunction('inputs', 'context', 'require', bodyFnBody);
+                        const scriptResult = await bodyFn(bodyMergedInputs, bodyContext, require);
+
+                        const scriptOutputs: Record<string, unknown> = scriptResult || {};
+                        bodyNs.status = 'completed';
+                        bodyNs.stepsCompleted = 1;
+                        bodyNs.logs = bodyScriptLogs;
+                        bodyNs.outputVariables = scriptOutputs;
+                        nodeOutputs[bodyNodeId] = scriptOutputs;
+
+                      } else if (bodyNode.workflowId === '__text__') {
+                        const textValue = bodyNode.textNode?.value ?? '';
+                        bodyNs.status = 'completed';
+                        bodyNs.stepsCompleted = 1;
+                        bodyNs.outputVariables = { text: textValue };
+                        nodeOutputs[bodyNodeId] = { text: textValue };
+
+                      } else if (bodyNode.workflowId === '__json_keys__') {
+                        let bjk: unknown = bodyEdgeInputs['json'];
+                        const bjkPath = String(bodyEdgeInputs['path'] || (bodyNode as any).jsonKeysNode?.defaultPath || '');
+                        if (typeof bjk === 'string') { try { bjk = JSON.parse(bjk); } catch {} }
+                        let bjkTarget: any = bjk;
+                        if (bjkPath && bjkTarget != null && typeof bjkTarget === 'object') {
+                          for (const seg of bjkPath.split('.')) {
+                            if (bjkTarget == null) break;
+                            bjkTarget = Array.isArray(bjkTarget) ? bjkTarget[parseInt(seg, 10)] : bjkTarget[seg];
+                          }
+                        }
+                        const bjkKeys = (bjkTarget != null && typeof bjkTarget === 'object') ? Object.keys(bjkTarget) : [];
+                        const bjkValues = (bjkTarget != null && typeof bjkTarget === 'object') ? Object.values(bjkTarget) : [];
+                        const bjkType = bjkTarget === null ? 'null' : Array.isArray(bjkTarget) ? 'array' : typeof bjkTarget;
+                        bodyNs.status = 'completed';
+                        bodyNs.stepsCompleted = 1;
+                        bodyNs.outputVariables = {
+                          keys: JSON.stringify(bjkKeys),
+                          values: JSON.stringify(bjkValues),
+                          value: typeof bjkTarget === 'object' ? JSON.stringify(bjkTarget) : bjkTarget,
+                          type: bjkType,
+                          structure: '',
+                        };
+                        nodeOutputs[bodyNodeId] = { ...bodyNs.outputVariables };
+
+                      } else if (bodyNode.workflowId === '__branch__' && bodyNode.branchNode) {
+                        // Branch in loop body
+                        let condVal: unknown = bodyEdgeInputs['condition'];
+                        if (condVal === undefined) {
+                          let condStr = bodyNode.branchNode.condition || 'false';
+                          condStr = condStr.replace(/\{\{(\w+)\}\}/g, (_: string, varName: string) => {
+                            const val = bodyMergedInputs[varName];
+                            if (val === undefined || val === null) return 'null';
+                            if (typeof val === 'string') return JSON.stringify(val);
+                            return String(val);
+                          });
+                          try { condVal = new Function(`return (${condStr});`)(); } catch { condVal = false; }
+                        }
+                        const branchTruthy = !!condVal;
+                        const inactivePort = branchTruthy ? 'on_false' : 'on_true';
+                        const toSkip = getNodesExclusivelyDownstreamOfPort(bodyNodeId, inactivePort, comp.edges);
+                        for (const skipId of toSkip) {
+                          if (run.nodeStates[skipId]) run.nodeStates[skipId].status = 'skipped';
+                        }
+                        bodyNs.status = 'completed';
+                        bodyNs.stepsCompleted = 1;
+                        bodyNs.outputVariables = { on_true: bodyMergedInputs, on_false: bodyMergedInputs, ...bodyMergedInputs };
+                        nodeOutputs[bodyNodeId] = { ...bodyMergedInputs };
+
+                      } else if (bodyNode.workflowId === '__delay__' && bodyNode.delayNode) {
+                        const delayMs = typeof bodyEdgeInputs['delay_ms'] === 'number'
+                          ? bodyEdgeInputs['delay_ms'] as number
+                          : (bodyNode.delayNode.delayMs || 1000);
+                        await new Promise<void>((resolve) => {
+                          const timer = setTimeout(resolve, delayMs);
+                          const onAbort = () => { clearTimeout(timer); resolve(); };
+                          abort.signal.addEventListener('abort', onAbort, { once: true });
+                        });
+                        bodyNs.status = 'completed';
+                        bodyNs.stepsCompleted = 1;
+                        bodyNs.outputVariables = { ...bodyMergedInputs };
+                        nodeOutputs[bodyNodeId] = { ...bodyMergedInputs };
+
+                      } else if (bodyNode.workflowId === '__for_each__' && bodyNode.forEachNode) {
+                        // Nested ForEach — recursive execution
+                        let innerItems = bodyEdgeInputs['items'];
+                        if (typeof innerItems === 'string') {
+                          try { innerItems = JSON.parse(innerItems); } catch {}
+                        }
+                        const innerArray = Array.isArray(innerItems) ? innerItems : [];
+                        const innerMax = bodyNode.forEachNode.maxIterations || 100;
+                        const innerLimited = innerArray.slice(0, innerMax);
+
+                        // Find inner loop body nodes
+                        const innerBodyIds = getNodesExclusivelyDownstreamOfPort(bodyNodeId, 'current_item', comp.edges);
+                        const innerFromIdx = getNodesExclusivelyDownstreamOfPort(bodyNodeId, 'index', comp.edges);
+                        for (const iid of innerFromIdx) innerBodyIds.add(iid);
+                        for (const ibid of innerBodyIds) forEachBodyNodes.add(ibid);
+
+                        const innerBodyObjs = comp.nodes.filter((n: any) => innerBodyIds.has(n.id));
+                        const innerBodyEdges = comp.edges.filter((e: any) =>
+                          (innerBodyIds.has(e.sourceNodeId) || e.sourceNodeId === bodyNodeId) &&
+                          innerBodyIds.has(e.targetNodeId)
+                        );
+                        let innerOrder: string[];
+                        try { innerOrder = topoSort(innerBodyObjs, innerBodyEdges); } catch { innerOrder = [...innerBodyIds]; }
+
+                        // Find inner terminal nodes
+                        const innerHasSucc = new Set<string>();
+                        for (const e of comp.edges) {
+                          if (innerBodyIds.has(e.sourceNodeId) && innerBodyIds.has(e.targetNodeId)) innerHasSucc.add(e.sourceNodeId);
+                        }
+                        const innerTerminals = [...innerBodyIds].filter(id => !innerHasSucc.has(id));
+
+                        const innerResults: unknown[] = [];
+                        bodyNs.stepsTotal = innerLimited.length;
+
+                        for (let ii = 0; ii < innerLimited.length; ii++) {
+                          if (abort.signal.aborted) break;
+                          bodyNs.currentStep = `Inner ${ii + 1}/${innerLimited.length}`;
+                          bodyNs.stepsCompleted = ii;
+
+                          nodeOutputs[bodyNodeId] = { current_item: innerLimited[ii], index: ii, count: innerLimited.length };
+
+                          // Execute inner body nodes
+                          for (const innerNodeId of innerOrder) {
+                            if (abort.signal.aborted) break;
+                            const innerNode = comp.nodes.find((n: any) => n.id === innerNodeId);
+                            if (!innerNode) continue;
+                            const innerNs = run.nodeStates[innerNodeId];
+                            innerNs.status = 'running';
+                            innerNs.error = undefined;
+
+                            const innerEdgeIn = gatherInputVariables(innerNodeId, comp.edges, nodeOutputs);
+                            const innerMerged: Record<string, unknown> = { ...initialVariables, ...innerEdgeIn };
+                            innerNs.inputVariables = { ...innerMerged };
+
+                            // For inner body: handle workflow nodes (the most common case)
+                            const innerWf = wfMap[innerNodeId];
+                            if (innerWf) {
+                              const innerVars: Record<string, unknown> = { ...innerMerged };
+                              for (const v of (innerWf.variables || [])) {
+                                if (innerVars[v.name] === undefined && v.default !== undefined) innerVars[v.name] = v.default;
+                              }
+                              try {
+                                const result = await executeWorkflow(bridgeServer, innerWf, innerVars, {
+                                  log: (msg: string) => debugLog.info('comp-run', `[inner-foreach] ${innerNodeId}: ${msg}`),
+                                  signal: abort.signal,
+                                  onProgress: () => {},
+                                });
+                                if (result.success) {
+                                  innerNs.status = 'completed';
+                                  innerNs.stepsCompleted = 1;
+                                  innerNs.outputVariables = result.variables;
+                                  nodeOutputs[innerNodeId] = result.variables;
+                                } else {
+                                  innerNs.status = 'failed';
+                                  innerNs.error = result.error || 'Workflow failed';
+                                }
+                              } catch (err: any) {
+                                innerNs.status = 'failed';
+                                innerNs.error = err?.message || String(err);
+                              }
+                            } else if (innerNode.workflowId === '__script__' && innerNode.script) {
+                              // Inner ForEach script execution (matches main pattern)
+                              const innerScriptCode = innerNode.script.code || '';
+                              const innerScriptLogs: string[] = [];
+                              const AFn = Object.getPrototypeOf(async function(){}).constructor;
+
+                              const { runPrompt: innerScriptRunPrompt } = await import('./loop/llm-service.js');
+                              const innerScriptModel = process.env.ANTHROPIC_API_KEY
+                                ? 'claude-sonnet-4-20250514'
+                                : process.env.OPENAI_API_KEY
+                                  ? 'gpt-4o-mini'
+                                  : process.env.GROQ_API_KEY
+                                    ? 'llama-3.1-70b-versatile'
+                                    : 'claude-sonnet-4-20250514';
+
+                              const innerScriptTools: Record<string, (params: any) => Promise<any>> = {};
+                              const innerAllExtTools = extensionManager?.getAllTools() ?? [];
+                              for (const extTool of innerAllExtTools) {
+                                const toolHandler = extTool.handler;
+                                innerScriptTools[extTool.definition.name] = async (params: any) => {
+                                  const result = await toolHandler(params, { workingDirectory: workDir } as any);
+                                  if (typeof result === 'string') {
+                                    try { return JSON.parse(result); } catch { return result; }
+                                  }
+                                  return result;
+                                };
+                              }
+                              if (!innerScriptTools.nanobanana) {
+                                try {
+                                  const { nanobanana: nb } = await import('./loop/tools/nanobanana.js');
+                                  innerScriptTools.nanobanana = async (p: any) => JSON.parse(await nb(p as any, workDir));
+                                } catch { /* nanobanana not available */ }
+                              }
+
+                              const innerContext = {
+                                llm: {
+                                  generate: async (prompt: string, opts?: { temperature?: number; maxTokens?: number; model?: string }) => {
+                                    const resp = await innerScriptRunPrompt(
+                                      [{ role: 'user', content: prompt }],
+                                      opts?.model || innerScriptModel,
+                                      { maxTokens: opts?.maxTokens || 4096, temperature: opts?.temperature ?? 0.9 }
+                                    );
+                                    return resp.content.trim();
+                                  },
+                                  generateJSON: async (prompt: string, _schema?: any, opts?: { temperature?: number; maxTokens?: number; model?: string }) => {
+                                    const resp = await innerScriptRunPrompt(
+                                      [{ role: 'user', content: prompt + '\n\nRespond with valid JSON only.' }],
+                                      opts?.model || innerScriptModel,
+                                      { maxTokens: opts?.maxTokens || 4096, temperature: opts?.temperature ?? 0.7 }
+                                    );
+                                    const text = resp.content.trim();
+                                    const jsonMatch = text.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
+                                    return JSON.parse(jsonMatch ? jsonMatch[1].trim() : text);
+                                  },
+                                },
+                                tools: innerScriptTools,
+                                log: (msg: string) => { innerScriptLogs.push(String(msg)); },
+                              };
+
+                              let innerFnBody = innerScriptCode;
+                              const innerFnMatch = innerFnBody.match(/async\s+function\s+execute\s*\([^)]*\)\s*\{([\s\S]*)\}/);
+                              if (innerFnMatch) {
+                                innerFnBody = innerFnMatch[1];
+                              }
+                              const innerFn = new AFn('inputs', 'context', 'require', innerFnBody);
+                              const sRes = await innerFn(innerMerged, innerContext, require);
+
+                              const sOut: Record<string, unknown> = sRes || {};
+                              innerNs.status = 'completed';
+                              innerNs.stepsCompleted = 1;
+                              innerNs.logs = innerScriptLogs;
+                              innerNs.outputVariables = sOut;
+                              nodeOutputs[innerNodeId] = sOut;
+                            } else if (innerNode.workflowId === '__text__') {
+                              nodeOutputs[innerNodeId] = { text: innerNode.textNode?.value ?? '' };
+                              innerNs.status = 'completed';
+                              innerNs.outputVariables = nodeOutputs[innerNodeId];
+                            } else if (innerNode.workflowId === '__tool__' && innerNode.toolNode) {
+                              // Tool node inside nested ForEach
+                              const innerToolName = innerNode.toolNode.selectedTool;
+                              innerNs.currentStep = `Running tool: ${innerToolName}...`;
+                              if (!innerToolName) throw new Error('No tool selected on tool node.');
+                              const allInnerTools = extensionManager?.getAllTools() ?? [];
+                              const innerTool = allInnerTools.find((t: any) => t.definition.name === innerToolName);
+                              if (!innerTool) throw new Error(`Tool "${innerToolName}" not found.`);
+                              const innerToolParams: Record<string, unknown> = { ...(innerNode.toolNode.paramDefaults || {}), ...innerMerged };
+                              delete innerToolParams.__trigger__;
+                              const innerToolRaw = await innerTool.handler(innerToolParams, { workingDirectory: workDir } as any);
+                              let innerToolResult: any;
+                              if (typeof innerToolRaw === 'string') {
+                                try { innerToolResult = JSON.parse(innerToolRaw); } catch { innerToolResult = innerToolRaw; }
+                              } else {
+                                innerToolResult = innerToolRaw;
+                              }
+                              innerNs.status = 'completed';
+                              innerNs.stepsCompleted = 1;
+                              innerNs.outputVariables = { result: innerToolResult, success: true, __done__: true };
+                              nodeOutputs[innerNodeId] = { result: innerToolResult, success: true, __done__: true };
+                            } else {
+                              // Passthrough for unhandled inner node types
+                              innerNs.status = 'completed';
+                              innerNs.outputVariables = { ...innerMerged };
+                              nodeOutputs[innerNodeId] = { ...innerMerged };
+                            }
+                          }
+
+                          // Collect inner terminal outputs
+                          if (innerTerminals.length > 0) {
+                            const iterOut: Record<string, unknown> = {};
+                            for (const tn of innerTerminals) {
+                              if (nodeOutputs[tn]) Object.assign(iterOut, nodeOutputs[tn]);
+                            }
+                            innerResults.push(Object.keys(iterOut).length === 1 ? Object.values(iterOut)[0] : iterOut);
+                          } else {
+                            innerResults.push(innerLimited[ii]);
+                          }
+                        }
+
+                        bodyNs.status = 'completed';
+                        bodyNs.stepsCompleted = innerLimited.length;
+                        bodyNs.currentStep = `Done — ${innerLimited.length} iterations`;
+                        nodeOutputs[bodyNodeId] = {
+                          results: innerResults,
+                          total_count: innerResults.length,
+                          current_item: innerLimited[innerLimited.length - 1],
+                          index: innerLimited.length - 1,
+                          count: innerLimited.length,
+                        };
+                        bodyNs.outputVariables = { ...nodeOutputs[bodyNodeId] };
+
+                      } else if (bodyNode.workflowId === '__tool__' && bodyNode.toolNode) {
+                        // Tool node in loop body
+                        const bodyToolName = bodyNode.toolNode.selectedTool;
+                        bodyNs.currentStep = `Running tool: ${bodyToolName} (iter ${i + 1})...`;
+                        if (!bodyToolName) throw new Error('No tool selected on tool node.');
+                        const allBodyTools = extensionManager?.getAllTools() ?? [];
+                        const bodyTool = allBodyTools.find(t => t.definition.name === bodyToolName);
+                        if (!bodyTool) throw new Error(`Tool "${bodyToolName}" not found.`);
+                        const bodyToolParams: Record<string, unknown> = { ...(bodyNode.toolNode.paramDefaults || {}), ...bodyEdgeInputs };
+                        delete bodyToolParams.__trigger__;
+                        console.log(`[tool-node] ForEach body: invoking "${bodyToolName}" with params:`, JSON.stringify(bodyToolParams, null, 2));
+                        const bodyToolRaw = await bodyTool.handler(bodyToolParams, { workingDirectory: workDir } as any);
+                        let bodyToolResult: any;
+                        if (typeof bodyToolRaw === 'string') {
+                          try { bodyToolResult = JSON.parse(bodyToolRaw); } catch { bodyToolResult = bodyToolRaw; }
+                        } else {
+                          bodyToolResult = bodyToolRaw;
+                        }
+                        bodyNs.status = 'completed';
+                        bodyNs.stepsCompleted = 1;
+                        bodyNs.outputVariables = { result: bodyToolResult, success: true, __done__: true };
+                        nodeOutputs[bodyNodeId] = { result: bodyToolResult, success: true, __done__: true };
+                        console.log(`[tool-node] ForEach body: "${bodyToolName}" completed`);
+
+                      } else if (bodyNode.workflowId === '__asset__' && bodyNode.asset) {
+                        // Asset node in loop body
+                        const bodyAssetMode = bodyNode.asset.mode || 'pick';
+                        bodyNs.currentStep = `Asset ${bodyAssetMode} (iter ${i + 1})...`;
+
+                        // Find asset tools from extension manager
+                        const bodyAssetTools: Record<string, (params: any) => Promise<any>> = {};
+                        const bodyAssetAllTools = extensionManager?.getAllTools() ?? [];
+                        for (const t of bodyAssetAllTools) {
+                          if (t.definition.name.startsWith('asset_')) {
+                            bodyAssetTools[t.definition.name] = async (params: any) => {
+                              const result = await t.handler(params, { workingDirectory: workDir } as any);
+                              if (typeof result === 'string') {
+                                try { return JSON.parse(result); } catch { return result; }
+                              }
+                              return result;
+                            };
+                          }
+                        }
+
+                        if (bodyAssetMode === 'pick') {
+                          const assetId = bodyNode.asset.assetId;
+                          if (!assetId) throw new Error('No asset selected.');
+                          const result = await bodyAssetTools.asset_get({ id: assetId });
+                          if (!result?.success) throw new Error(result?.error || 'Failed to get asset');
+                          const asset = result.asset;
+                          bodyNs.status = 'completed';
+                          bodyNs.stepsCompleted = 1;
+                          bodyNs.outputVariables = {
+                            filePath: asset.file_path_absolute || asset.file_path || asset.filePath || '',
+                            fileName: asset.file_name || asset.fileName || asset.name || '',
+                            assetId: asset.id || assetId,
+                            metadata: JSON.stringify(asset.metadata || {}),
+                            __done__: true,
+                          };
+                          nodeOutputs[bodyNodeId] = { ...bodyNs.outputVariables };
+                        } else if (bodyAssetMode === 'save') {
+                          const filePath = String(bodyEdgeInputs['filePath'] || bodyMergedInputs['filePath'] || '');
+                          const name = String(bodyEdgeInputs['name'] || bodyMergedInputs['name'] || bodyNode.asset.defaultName || `asset-${Date.now()}`);
+                          if (!filePath) throw new Error('No filePath input connected.');
+                          const saveParams: any = { file_path: filePath, name: name };
+                          if (bodyNode.asset.collectionSlug) saveParams.collection = bodyNode.asset.collectionSlug;
+                          if (bodyNode.asset.tags) saveParams.tags = bodyNode.asset.tags;
+                          if (bodyNode.asset.referenceOnly) saveParams.reference_only = true;
+                          const result = await bodyAssetTools.asset_save(saveParams);
+                          if (!result?.success) throw new Error(result?.error || 'Failed to save asset');
+                          bodyNs.status = 'completed';
+                          bodyNs.stepsCompleted = 1;
+                          bodyNs.outputVariables = { assetId: result.id || result.asset?.id || '', success: true, __done__: true };
+                          nodeOutputs[bodyNodeId] = { ...bodyNs.outputVariables };
+                        } else if (bodyAssetMode === 'list') {
+                          const listParams: any = {};
+                          if (bodyNode.asset.collectionSlug) listParams.collection = bodyNode.asset.collectionSlug;
+                          if (bodyNode.asset.category) listParams.category = bodyNode.asset.category;
+                          const result = await bodyAssetTools.asset_list(listParams);
+                          const assets = result?.assets || [];
+                          bodyNs.status = 'completed';
+                          bodyNs.stepsCompleted = 1;
+                          bodyNs.outputVariables = { assets: JSON.stringify(assets), count: assets.length, __done__: true };
+                          nodeOutputs[bodyNodeId] = { ...bodyNs.outputVariables };
+                        } else if (bodyAssetMode === 'remove') {
+                          const removeId = String(bodyEdgeInputs['assetId'] || bodyMergedInputs['assetId'] || '');
+                          if (!removeId) throw new Error('No assetId input connected.');
+                          const result = await bodyAssetTools.asset_delete({ id: removeId });
+                          bodyNs.status = 'completed';
+                          bodyNs.stepsCompleted = 1;
+                          bodyNs.outputVariables = { success: result?.success ?? false, __done__: true };
+                          nodeOutputs[bodyNodeId] = { ...bodyNs.outputVariables };
+                        } else if (bodyAssetMode === 'generate_path') {
+                          const now = new Date();
+                          const pad2 = (n: number) => String(n).padStart(2, '0');
+                          const dateStr = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`;
+                          const timeStr = `${pad2(now.getHours())}-${pad2(now.getMinutes())}-${pad2(now.getSeconds())}`;
+                          const datetimeStr = `${dateStr}_${timeStr}`;
+                          const timestampStr = String(Math.floor(now.getTime() / 1000));
+                          const uuidStr = `${Math.random().toString(36).slice(2, 10)}${Math.random().toString(36).slice(2, 6)}`;
+                          const nameInput = String(bodyEdgeInputs['name'] || bodyMergedInputs['name'] || 'output');
+                          const pattern = bodyNode.asset.namePattern || 'output_{datetime}';
+                          const ext = bodyNode.asset.fileExtension || '.json';
+                          const collectionSlug = bodyNode.asset.collectionSlug || '';
+
+                          let outputDir = bodyNode.asset.outputDirectory || '~/.woodbury/data/output';
+                          if (collectionSlug && collectionSlug !== '__all__') {
+                            try {
+                              const { readFile: rf } = await import('fs/promises');
+                              const { join: pj } = await import('path');
+                              const { homedir: hd } = await import('os');
+                              let assetsDataDir: string;
+                              try {
+                                const settingsRaw = await rf(pj(hd(), '.woodbury', 'data', 'assets-settings.json'), 'utf-8');
+                                const settings = JSON.parse(settingsRaw);
+                                assetsDataDir = settings.dataDir || pj(hd(), '.woodbury', 'creator-assets');
+                              } catch {
+                                assetsDataDir = pj(hd(), '.woodbury', 'creator-assets');
+                              }
+                              const colRaw = await rf(pj(assetsDataDir, 'collections.json'), 'utf-8');
+                              const collections = JSON.parse(colRaw);
+                              if (Array.isArray(collections)) {
+                                const col = collections.find((c: any) => c.slug === collectionSlug);
+                                if (col?.rootPath) outputDir = col.rootPath;
+                              }
+                            } catch (_e) { /* Fall back to configured outputDirectory */ }
+                          }
+                          if (outputDir.startsWith('~')) {
+                            outputDir = (process.env.HOME || '/tmp') + outputDir.slice(1);
+                          }
+                          const resolvedName = pattern
+                            .replace(/\{name\}/g, nameInput)
+                            .replace(/\{datetime\}/g, datetimeStr)
+                            .replace(/\{date\}/g, dateStr)
+                            .replace(/\{time\}/g, timeStr)
+                            .replace(/\{timestamp\}/g, timestampStr)
+                            .replace(/\{uuid\}/g, uuidStr);
+                          const fileName = resolvedName + ext;
+                          const { join: pathJoin } = await import('path');
+                          const filePath = pathJoin(outputDir, fileName);
+
+                          bodyNs.status = 'completed';
+                          bodyNs.stepsCompleted = 1;
+                          bodyNs.outputVariables = { filePath, fileName, directory: outputDir, collection: collectionSlug, __done__: true };
+                          nodeOutputs[bodyNodeId] = { ...bodyNs.outputVariables };
+                        }
+
+                      } else {
+                        // Regular workflow node in loop body
+                        const bodyWf = wfMap[bodyNodeId];
+                        if (bodyWf) {
+                          const bodyWfVars: Record<string, unknown> = { ...bodyMergedInputs };
+                          for (const v of (bodyWf.variables || [])) {
+                            if (bodyWfVars[v.name] === undefined && v.default !== undefined) {
+                              bodyWfVars[v.name] = v.default;
+                            }
+                          }
+                          bodyNs.currentStep = `Running (iter ${i + 1})...`;
+                          const result = await executeWorkflow(bridgeServer, bodyWf, bodyWfVars, {
+                            log: (msg: string) => debugLog.info('comp-run', `[foreach-body] ${bodyNodeId}: ${msg}`),
+                            signal: abort.signal,
+                            onProgress: (event: any) => {
+                              if (event.type === 'step_start') bodyNs.currentStep = event.step?.label || `Step ${event.index + 1}`;
+                              else if (event.type === 'step_complete') bodyNs.stepsCompleted = event.index + 1;
+                            },
+                          });
+                          if (result.success) {
+                            bodyNs.status = 'completed';
+                            bodyNs.stepsCompleted = 1;
+                            bodyNs.outputVariables = result.variables;
+                            nodeOutputs[bodyNodeId] = result.variables;
+                          } else {
+                            bodyNs.status = 'failed';
+                            bodyNs.error = result.error || 'Workflow failed';
+                            nodeOutputs[bodyNodeId] = {};
+                          }
+                        } else {
+                          // Unknown node type — passthrough
+                          bodyNs.status = 'completed';
+                          bodyNs.stepsCompleted = 1;
+                          bodyNs.outputVariables = { ...bodyMergedInputs };
+                          nodeOutputs[bodyNodeId] = { ...bodyMergedInputs };
+                        }
+                      }
+                    } catch (err: any) {
+                      bodyNs.status = 'failed';
+                      bodyNs.error = err?.message || String(err);
+                      nodeOutputs[bodyNodeId] = {};
+                      debugLog.error('comp-run', `ForEach body node "${bodyNodeId}" failed at iteration ${i}`, { error: err?.message });
+                    }
+                  }
+
+                  // Collect terminal node outputs for this iteration
+                  if (terminalBodyNodes.length > 0) {
+                    const iterResult: Record<string, unknown> = {};
+                    for (const tn of terminalBodyNodes) {
+                      if (nodeOutputs[tn]) Object.assign(iterResult, nodeOutputs[tn]);
+                    }
+                    collectedResults.push(
+                      Object.keys(iterResult).length === 1 ? Object.values(iterResult)[0] : iterResult
+                    );
+                  } else {
+                    collectedResults.push(limited[i]);
+                  }
+                }
+
+                // Step 5: Set completed outputs
+                nodeOutputs[nodeId] = {
+                  results: collectedResults,
+                  total_count: collectedResults.length,
+                  current_item: limited.length > 0 ? limited[limited.length - 1] : undefined,
+                  index: limited.length > 0 ? limited.length - 1 : 0,
+                  count: limited.length,
+                };
                 ns.status = 'completed';
-                ns.stepsCompleted = 1;
-                ns.currentStep = `Done — ${limited.length} items`;
-                ns.outputVariables = { results: limited, count: limited.length, current_item: limited[limited.length - 1] };
-                nodeOutputs[nodeId] = { results: limited, count: limited.length, current_item: limited[limited.length - 1] };
+                ns.stepsCompleted = limited.length;
+                ns.currentStep = `Done — ${limited.length} iterations`;
+                ns.outputVariables = { ...nodeOutputs[nodeId] };
                 run.nodesCompleted++;
 
-                debugLog.info('comp-run', `ForEach "${nodeId}" processed ${limited.length} items`);
+                debugLog.info('comp-run', `ForEach "${nodeId}" completed ${limited.length} iterations, collected ${collectedResults.length} results`);
                 continue;
               }
 
@@ -7256,6 +8617,441 @@ Fix the bug and return the corrected code. Do not change the @input/@output anno
                   value: switchValue,
                   skipped: [...allSkipped],
                 });
+                continue;
+              }
+
+              // ── Text Node ─────────────────────────────────────────
+              if (node?.workflowId === '__text__') {
+                ns.status = 'running';
+                ns.currentStep = 'Outputting text...';
+                run.currentNodeId = nodeId;
+
+                const textValue = node.textNode?.value ?? '';
+                ns.status = 'completed';
+                ns.stepsCompleted = 1;
+                ns.outputVariables = { text: textValue };
+                nodeOutputs[nodeId] = { text: textValue };
+                run.nodesCompleted++;
+                debugLog.info('comp-run', `Text "${nodeId}" outputting ${textValue.length} chars`);
+                continue;
+              }
+
+              // ── File Op Node ──────────────────────────────────────
+              if (node?.workflowId === '__file_op__' && node.fileOp) {
+                ns.status = 'running';
+                const fopOperation = node.fileOp.operation || 'copy';
+                ns.currentStep = `File ${fopOperation}...`;
+                run.currentNodeId = nodeId;
+
+                try {
+                  const edgeInputs = gatherInputVariables(nodeId, comp.edges, nodeOutputs);
+                  const fsP = await import('node:fs/promises');
+                  const fsSync = await import('node:fs');
+                  const pathMod = await import('node:path');
+
+                  let fopResult: Record<string, unknown> = {};
+
+                  if (fopOperation === 'copy') {
+                    const src = String(edgeInputs.sourcePath || '');
+                    const dest = String(edgeInputs.destinationPath || '');
+                    if (!src) throw new Error('sourcePath is required');
+                    if (!dest) throw new Error('destinationPath is required');
+                    // Ensure destination directory exists
+                    const destDir = pathMod.dirname(dest);
+                    if (!fsSync.existsSync(destDir)) {
+                      fsSync.mkdirSync(destDir, { recursive: true });
+                    }
+                    await fsP.copyFile(src, dest);
+                    fopResult = { outputPath: dest, success: true };
+                  } else if (fopOperation === 'move') {
+                    const src = String(edgeInputs.sourcePath || '');
+                    const dest = String(edgeInputs.destinationPath || '');
+                    if (!src) throw new Error('sourcePath is required');
+                    if (!dest) throw new Error('destinationPath is required');
+                    const destDir = pathMod.dirname(dest);
+                    if (!fsSync.existsSync(destDir)) {
+                      fsSync.mkdirSync(destDir, { recursive: true });
+                    }
+                    try {
+                      await fsP.rename(src, dest);
+                    } catch (renameErr: any) {
+                      // Cross-device move: copy then delete
+                      if (renameErr.code === 'EXDEV') {
+                        await fsP.copyFile(src, dest);
+                        await fsP.unlink(src);
+                      } else {
+                        throw renameErr;
+                      }
+                    }
+                    fopResult = { outputPath: dest, success: true };
+                  } else if (fopOperation === 'delete') {
+                    const fp = String(edgeInputs.filePath || '');
+                    if (!fp) throw new Error('filePath is required');
+                    await fsP.unlink(fp);
+                    fopResult = { success: true };
+                  } else if (fopOperation === 'mkdir') {
+                    const fp = String(edgeInputs.folderPath || '');
+                    if (!fp) throw new Error('folderPath is required');
+                    await fsP.mkdir(fp, { recursive: true });
+                    fopResult = { outputPath: fp, success: true };
+                  } else if (fopOperation === 'list') {
+                    const fp = String(edgeInputs.folderPath || '');
+                    if (!fp) throw new Error('folderPath is required');
+                    const entries = await fsP.readdir(fp);
+                    fopResult = { files: JSON.stringify(entries), count: entries.length };
+                  }
+
+                  ns.status = 'completed';
+                  ns.stepsCompleted = 1;
+                  ns.outputVariables = fopResult;
+                  nodeOutputs[nodeId] = fopResult;
+                  run.nodesCompleted++;
+                  debugLog.info('comp-run', `FileOp "${nodeId}" ${fopOperation} completed`, fopResult);
+                } catch (fopErr: any) {
+                  ns.status = 'failed';
+                  ns.error = fopErr.message || String(fopErr);
+                  run.done = true;
+                  run.success = false;
+                  run.error = `File operation "${node.label || nodeId}" failed: ${ns.error}`;
+                  debugLog.error('comp-run', `FileOp "${nodeId}" failed`, { error: fopErr.message });
+                }
+                continue;
+              }
+
+              // ── JSON Keys/Extract Node ────────────────────────────
+              if (node?.workflowId === '__json_keys__') {
+                ns.status = 'running';
+                ns.currentStep = 'Extracting JSON structure...';
+                run.currentNodeId = nodeId;
+
+                const edgeInputs = gatherInputVariables(nodeId, comp.edges, nodeOutputs);
+                ns.inputVariables = { ...edgeInputs };
+
+                let jsonInput: unknown = edgeInputs['json'];
+                const pathInput = String(edgeInputs['path'] || (node as any).jsonKeysNode?.defaultPath || '');
+
+                // Parse JSON if string
+                if (typeof jsonInput === 'string') {
+                  try { jsonInput = JSON.parse(jsonInput); } catch { /* leave as string */ }
+                }
+
+                // Navigate to path
+                let target: any = jsonInput;
+                if (pathInput && target != null && typeof target === 'object') {
+                  const segments = pathInput.split('.');
+                  for (const seg of segments) {
+                    if (target == null) break;
+                    if (Array.isArray(target)) {
+                      const idx = parseInt(seg, 10);
+                      target = isNaN(idx) ? undefined : target[idx];
+                    } else if (typeof target === 'object') {
+                      target = target[seg];
+                    } else {
+                      target = undefined;
+                    }
+                  }
+                }
+
+                // Build outputs
+                const jkKeys = (target != null && typeof target === 'object') ? Object.keys(target) : [];
+                const jkValues = (target != null && typeof target === 'object') ? Object.values(target) : [];
+                const jkType = target === null ? 'null'
+                  : Array.isArray(target) ? 'array'
+                  : typeof target;
+
+                // Build a structure summary (recursive, depth-limited)
+                function describeStructure(obj: any, depth = 0): string {
+                  if (depth > 3) return '...';
+                  if (obj === null) return 'null';
+                  if (Array.isArray(obj)) {
+                    if (obj.length === 0) return '[]';
+                    return `[${obj.length} items: ${describeStructure(obj[0], depth + 1)}]`;
+                  }
+                  if (typeof obj === 'object') {
+                    const entries = Object.entries(obj).slice(0, 10);
+                    return '{ ' + entries.map(([k, v]) =>
+                      `${k}: ${describeStructure(v, depth + 1)}`
+                    ).join(', ') + (Object.keys(obj).length > 10 ? ', ...' : '') + ' }';
+                  }
+                  return typeof obj;
+                }
+                const jkStructure = describeStructure(target);
+
+                ns.status = 'completed';
+                ns.stepsCompleted = 1;
+                ns.currentStep = `${jkKeys.length} keys, type: ${jkType}`;
+                ns.outputVariables = {
+                  keys: JSON.stringify(jkKeys),
+                  values: JSON.stringify(jkValues),
+                  value: typeof target === 'object' ? JSON.stringify(target) : target,
+                  type: jkType,
+                  structure: jkStructure,
+                };
+                nodeOutputs[nodeId] = { ...ns.outputVariables };
+                run.nodesCompleted++;
+                debugLog.info('comp-run', `JsonKeys "${nodeId}" extracted ${jkKeys.length} keys, type: ${jkType}`);
+                continue;
+              }
+
+              // ── Asset Node ────────────────────────────────────────
+              if (node?.workflowId === '__asset__' && node.asset) {
+                ns.status = 'running';
+                const assetMode = node.asset.mode || 'pick';
+                ns.currentStep = `Asset ${assetMode}...`;
+                run.currentNodeId = nodeId;
+
+                const edgeInputs = gatherInputVariables(nodeId, comp.edges, nodeOutputs);
+                const mergedInputs: Record<string, unknown> = { ...initialVariables, ...edgeInputs };
+                ns.inputVariables = { ...mergedInputs };
+
+                try {
+                  // Find asset tools from extension manager
+                  const assetTools: Record<string, (params: any) => Promise<any>> = {};
+                  const allTools = extensionManager?.getAllTools() ?? [];
+                  for (const t of allTools) {
+                    if (t.definition.name.startsWith('asset_')) {
+                      assetTools[t.definition.name] = async (params: any) => {
+                        const result = await t.handler(params, { workingDirectory: workDir } as any);
+                        if (typeof result === 'string') {
+                          try { return JSON.parse(result); } catch { return result; }
+                        }
+                        return result;
+                      };
+                    }
+                  }
+
+                  if (assetMode === 'pick') {
+                    // Pick mode — get a specific asset
+                    const assetId = node.asset.assetId;
+                    if (!assetId) {
+                      throw new Error('No asset selected. Configure the asset in the properties panel.');
+                    }
+                    const result = await assetTools.asset_get({ id: assetId });
+                    if (!result?.success) {
+                      throw new Error(result?.error || 'Failed to get asset');
+                    }
+                    const asset = result.asset;
+                    ns.status = 'completed';
+                    ns.stepsCompleted = 1;
+                    ns.outputVariables = {
+                      filePath: asset.file_path_absolute || asset.file_path || asset.filePath || '',
+                      fileName: asset.file_name || asset.fileName || asset.name || '',
+                      assetId: asset.id || assetId,
+                      metadata: JSON.stringify(asset.metadata || {}),
+                      __done__: true,
+                    };
+                    nodeOutputs[nodeId] = { ...ns.outputVariables };
+                  } else if (assetMode === 'save') {
+                    // Save mode — save a file as an asset
+                    const filePath = String(edgeInputs['filePath'] || mergedInputs['filePath'] || '');
+                    const name = String(edgeInputs['name'] || mergedInputs['name'] || node.asset.defaultName || `asset-${Date.now()}`);
+                    if (!filePath) {
+                      throw new Error('No filePath input connected. Connect a file path to save.');
+                    }
+                    const saveParams: any = {
+                      file_path: filePath,
+                      name: name,
+                    };
+                    if (node.asset.collectionSlug) {
+                      saveParams.collection = node.asset.collectionSlug;
+                    }
+                    if (node.asset.tags) {
+                      saveParams.tags = node.asset.tags;
+                    }
+                    if (node.asset.referenceOnly) {
+                      saveParams.reference_only = true;
+                    }
+                    const result = await assetTools.asset_save(saveParams);
+                    if (!result?.success) {
+                      throw new Error(result?.error || 'Failed to save asset');
+                    }
+                    ns.status = 'completed';
+                    ns.stepsCompleted = 1;
+                    ns.outputVariables = {
+                      assetId: result.id || result.asset?.id || '',
+                      success: true,
+                      __done__: true,
+                    };
+                    nodeOutputs[nodeId] = { ...ns.outputVariables };
+                  } else if (assetMode === 'list') {
+                    // List mode — list assets in a collection
+                    const listParams: any = {};
+                    if (node.asset.collectionSlug) {
+                      listParams.collection = node.asset.collectionSlug;
+                    }
+                    if (node.asset.category) {
+                      listParams.category = node.asset.category;
+                    }
+                    const result = await assetTools.asset_list(listParams);
+                    const assets = result?.assets || [];
+                    ns.status = 'completed';
+                    ns.stepsCompleted = 1;
+                    ns.outputVariables = {
+                      assets: JSON.stringify(assets),
+                      count: assets.length,
+                      __done__: true,
+                    };
+                    nodeOutputs[nodeId] = { ...ns.outputVariables };
+                  } else if (assetMode === 'remove') {
+                    // Remove mode — delete an asset
+                    const removeId = String(edgeInputs['assetId'] || mergedInputs['assetId'] || '');
+                    if (!removeId) {
+                      throw new Error('No assetId input connected. Connect an asset ID to remove.');
+                    }
+                    const result = await assetTools.asset_delete({ id: removeId });
+                    ns.status = 'completed';
+                    ns.stepsCompleted = 1;
+                    ns.outputVariables = {
+                      success: result?.success ?? false,
+                      __done__: true,
+                    };
+                    nodeOutputs[nodeId] = { ...ns.outputVariables };
+                  } else if (assetMode === 'generate_path') {
+                    // Generate Path mode — create a file path from pattern
+                    const now = new Date();
+                    const pad2 = (n: number) => String(n).padStart(2, '0');
+                    const dateStr = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`;
+                    const timeStr = `${pad2(now.getHours())}-${pad2(now.getMinutes())}-${pad2(now.getSeconds())}`;
+                    const datetimeStr = `${dateStr}_${timeStr}`;
+                    const timestampStr = String(Math.floor(now.getTime() / 1000));
+                    const uuidStr = `${Math.random().toString(36).slice(2, 10)}${Math.random().toString(36).slice(2, 6)}`;
+                    const nameInput = String(edgeInputs['name'] || mergedInputs['name'] || 'output');
+
+                    const pattern = node.asset.namePattern || 'output_{datetime}';
+                    const ext = node.asset.fileExtension || '.json';
+                    const collectionSlug = node.asset.collectionSlug || '';
+
+                    // Determine output directory: use collection rootPath if available
+                    let outputDir = node.asset.outputDirectory || '~/.woodbury/data/output';
+                    if (collectionSlug && collectionSlug !== '__all__') {
+                      try {
+                        const { readFile: rf } = await import('fs/promises');
+                        const { join: pj } = await import('path');
+                        const { homedir: hd } = await import('os');
+                        // Read assets settings to find data dir
+                        let assetsDataDir: string;
+                        try {
+                          const settingsRaw = await rf(pj(hd(), '.woodbury', 'data', 'assets-settings.json'), 'utf-8');
+                          const settings = JSON.parse(settingsRaw);
+                          assetsDataDir = settings.dataDir || pj(hd(), '.woodbury', 'creator-assets');
+                        } catch {
+                          assetsDataDir = pj(hd(), '.woodbury', 'creator-assets');
+                        }
+                        // Read collections.json
+                        const colRaw = await rf(pj(assetsDataDir, 'collections.json'), 'utf-8');
+                        const collections = JSON.parse(colRaw);
+                        if (Array.isArray(collections)) {
+                          const col = collections.find((c: any) => c.slug === collectionSlug);
+                          if (col?.rootPath) {
+                            outputDir = col.rootPath;
+                          }
+                        }
+                      } catch (_e) {
+                        // Fall back to configured outputDirectory
+                      }
+                    }
+
+                    // Resolve ~ to home directory
+                    if (outputDir.startsWith('~')) {
+                      outputDir = (process.env.HOME || '/tmp') + outputDir.slice(1);
+                    }
+
+                    const resolvedName = pattern
+                      .replace(/\{name\}/g, nameInput)
+                      .replace(/\{datetime\}/g, datetimeStr)
+                      .replace(/\{date\}/g, dateStr)
+                      .replace(/\{time\}/g, timeStr)
+                      .replace(/\{timestamp\}/g, timestampStr)
+                      .replace(/\{uuid\}/g, uuidStr);
+
+                    const fileName = resolvedName + ext;
+                    const { join: pathJoin } = await import('path');
+                    const filePath = pathJoin(outputDir, fileName);
+
+                    ns.status = 'completed';
+                    ns.stepsCompleted = 1;
+                    ns.outputVariables = {
+                      filePath,
+                      fileName,
+                      directory: outputDir,
+                      collection: collectionSlug,
+                      __done__: true,
+                    };
+                    nodeOutputs[nodeId] = { ...ns.outputVariables };
+                  }
+
+                  run.nodesCompleted++;
+                  debugLog.info('comp-run', `Asset "${nodeId}" mode=${assetMode} completed`, {
+                    outputs: ns.outputVariables,
+                  });
+                } catch (assetErr: any) {
+                  ns.status = 'failed';
+                  ns.error = assetErr?.message || String(assetErr);
+                  run.done = true;
+                  run.success = false;
+                  run.error = `Asset node "${node.label || nodeId}" failed: ${ns.error}`;
+                  debugLog.error('comp-run', `Asset node "${nodeId}" failed`, { error: ns.error });
+                }
+                continue;
+              }
+
+              // ── Tool Node (direct tool invocation) ──────────────────
+              console.log(`[tool-node-check] nodeId="${nodeId}" wfId="${node?.workflowId}" hasTool=${!!node?.toolNode} toolName="${node?.toolNode?.selectedTool || 'none'}"`);
+              if (node?.workflowId === '__tool__' && node.toolNode) {
+                console.log(`[tool-node] ENTERING tool execution for node "${nodeId}", tool="${node.toolNode.selectedTool}"`);
+                ns.status = 'running';
+                const toolName = node.toolNode.selectedTool;
+                ns.currentStep = `Running tool: ${toolName}...`;
+                run.currentNodeId = nodeId;
+
+                const edgeInputs = gatherInputVariables(nodeId, comp.edges, nodeOutputs);
+                const mergedInputs: Record<string, unknown> = { ...initialVariables, ...edgeInputs };
+                ns.inputVariables = { ...mergedInputs };
+
+                try {
+                  if (!toolName) {
+                    throw new Error('No tool selected. Open the node properties and choose a tool.');
+                  }
+                  const allTools = extensionManager?.getAllTools() ?? [];
+                  const tool = allTools.find(t => t.definition.name === toolName);
+                  if (!tool) {
+                    throw new Error(`Tool "${toolName}" not found. The extension may not be loaded.`);
+                  }
+
+                  // Build params: defaults overridden by edge inputs
+                  const params: Record<string, unknown> = { ...(node.toolNode.paramDefaults || {}), ...edgeInputs };
+                  // Remove internal ports from params
+                  delete params.__trigger__;
+
+                  console.log(`[tool-node] Invoking "${toolName}" with params:`, JSON.stringify(params, null, 2));
+
+                  const rawResult = await tool.handler(params, { workingDirectory: workDir } as any);
+                  console.log(`[tool-node] "${toolName}" raw result type:`, typeof rawResult);
+                  let result: any;
+                  if (typeof rawResult === 'string') {
+                    try { result = JSON.parse(rawResult); } catch { result = rawResult; }
+                  } else {
+                    result = rawResult;
+                  }
+
+                  ns.status = 'completed';
+                  ns.stepsCompleted = 1;
+                  ns.outputVariables = { result, success: true, __done__: true };
+                  nodeOutputs[nodeId] = { ...ns.outputVariables };
+
+                  run.nodesCompleted++;
+                  debugLog.info('comp-run', `Tool "${nodeId}" tool=${toolName} completed`, {
+                    outputs: ns.outputVariables,
+                  });
+                } catch (toolErr: any) {
+                  ns.status = 'failed';
+                  ns.error = toolErr?.message || String(toolErr);
+                  run.done = true;
+                  run.success = false;
+                  run.error = `Tool node "${node.label || nodeId}" failed: ${ns.error}`;
+                  console.error(`[tool-node] "${toolName}" FAILED:`, toolErr?.message, toolErr?.stack);
+                  debugLog.error('comp-run', `Tool node "${nodeId}" failed`, { error: ns.error, stack: toolErr?.stack });
+                }
                 continue;
               }
 
@@ -7324,7 +9120,7 @@ Fix the bug and return the corrected code. Do not change the @input/@output anno
                   // Resolve sub-composition's workflows
                   const subWfMap: Record<string, any> = {};
                   for (const subNode of subComp.nodes) {
-                    if (subNode.workflowId === '__approval_gate__' || subNode.workflowId === '__script__' || subNode.workflowId === '__output__' || subNode.workflowId === '__image_viewer__' || subNode.workflowId === '__branch__' || subNode.workflowId === '__delay__' || subNode.workflowId === '__gate__' || subNode.workflowId === '__for_each__' || subNode.workflowId === '__switch__' || subNode.workflowId.startsWith('comp:')) continue;
+                    if (subNode.workflowId === '__approval_gate__' || subNode.workflowId === '__script__' || subNode.workflowId === '__output__' || subNode.workflowId === '__image_viewer__' || subNode.workflowId === '__branch__' || subNode.workflowId === '__delay__' || subNode.workflowId === '__gate__' || subNode.workflowId === '__for_each__' || subNode.workflowId === '__switch__' || subNode.workflowId === '__asset__' || subNode.workflowId === '__text__' || subNode.workflowId === '__file_op__' || subNode.workflowId.startsWith('comp:')) continue;
                     const subWfFound = wfDiscovered.find((d: any) => d.workflow.id === subNode.workflowId);
                     if (!subWfFound) {
                       throw new Error(`Sub-pipeline workflow "${subNode.workflowId}" not found`);
@@ -7388,7 +9184,7 @@ Fix the bug and return the corrected code. Do not change the @input/@output anno
                           return result;
                         };
                       }
-                      if (Object.keys(subScriptTools).length === 0) {
+                      if (!subScriptTools.nanobanana) {
                         try {
                           const { nanobanana: nb } = await import('./loop/tools/nanobanana.js');
                           subScriptTools.nanobanana = async (p: any) => JSON.parse(await nb(p as any, workDir));
@@ -9416,6 +11212,1012 @@ Fix the bug and return the corrected code. Do not change the @input/@output anno
       return;
     }
 
+    // ── Chat Sessions ───────────────────────────────────────────
+    // Persistent chat sessions so conversations survive tab switches and reloads.
+    // Stored as JSON files in ~/.woodbury/data/chat-sessions/
+
+    const CHAT_SESSIONS_DIR = join(homedir(), '.woodbury', 'data', 'chat-sessions');
+
+    // GET /api/chat/sessions — list all saved sessions
+    if (req.method === 'GET' && pathname === '/api/chat/sessions') {
+      try {
+        await mkdir(CHAT_SESSIONS_DIR, { recursive: true });
+        const files = await readdir(CHAT_SESSIONS_DIR);
+        const sessions: any[] = [];
+        for (const f of files.filter(f => f.endsWith('.json')).sort().reverse()) {
+          try {
+            const raw = await readFile(join(CHAT_SESSIONS_DIR, f), 'utf-8');
+            const session = JSON.parse(raw);
+            sessions.push({
+              id: session.id,
+              title: session.title || 'Untitled',
+              messageCount: (session.history || []).length,
+              createdAt: session.createdAt,
+              updatedAt: session.updatedAt,
+            });
+          } catch { /* skip corrupted */ }
+        }
+        sendJson(res, 200, { sessions });
+      } catch (err) {
+        sendJson(res, 500, { error: String(err) });
+      }
+      return;
+    }
+
+    // GET /api/chat/sessions/:id — load a specific session
+    if (req.method === 'GET' && pathname.startsWith('/api/chat/sessions/')) {
+      const sessionId = pathname.replace('/api/chat/sessions/', '');
+      try {
+        const raw = await readFile(join(CHAT_SESSIONS_DIR, `${sessionId}.json`), 'utf-8');
+        sendJson(res, 200, JSON.parse(raw));
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+          sendJson(res, 404, { error: 'Session not found' });
+        } else {
+          sendJson(res, 500, { error: String(err) });
+        }
+      }
+      return;
+    }
+
+    // PUT /api/chat/sessions/:id — save/update a session
+    if (req.method === 'PUT' && pathname.startsWith('/api/chat/sessions/')) {
+      const sessionId = pathname.replace('/api/chat/sessions/', '');
+      try {
+        await mkdir(CHAT_SESSIONS_DIR, { recursive: true });
+        const body = await readBody(req);
+        const session = {
+          id: sessionId,
+          title: body.title || 'Untitled',
+          history: body.history || [],
+          activeCompositionId: body.activeCompositionId || null,
+          createdAt: body.createdAt || new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        };
+        await writeFile(join(CHAT_SESSIONS_DIR, `${sessionId}.json`), JSON.stringify(session, null, 2) + '\n', 'utf-8');
+        sendJson(res, 200, { success: true });
+      } catch (err) {
+        sendJson(res, 500, { error: String(err) });
+      }
+      return;
+    }
+
+    // DELETE /api/chat/sessions/:id — delete a session
+    if (req.method === 'DELETE' && pathname.startsWith('/api/chat/sessions/')) {
+      const sessionId = pathname.replace('/api/chat/sessions/', '');
+      try {
+        await unlink(join(CHAT_SESSIONS_DIR, `${sessionId}.json`));
+        sendJson(res, 200, { success: true });
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+          sendJson(res, 200, { success: true }); // already gone
+        } else {
+          sendJson(res, 500, { error: String(err) });
+        }
+      }
+      return;
+    }
+
+    // ── Chat Logging ───────────────────────────────────────────
+    // Structured chat logs written to ~/.woodbury/data/chat-logs/ as JSONL files
+    // Always active (not gated by --debug) so chat interactions can be reviewed later.
+
+    interface ChatToolLog {
+      name: string;
+      params: any;
+      result: string;       // first 500 chars
+      success: boolean;
+      durationMs: number;
+      startedAt: string;
+    }
+
+    interface ChatLogEntry {
+      id: string;
+      timestamp: string;
+      message: string;       // user message (first 2000 chars)
+      historyLength: number;
+      activeCompositionId?: string;
+      toolCalls: ChatToolLog[];
+      response: string;      // first 2000 chars
+      durationMs: number;
+      iterations?: number;
+      error?: string;
+      aborted?: boolean;
+    }
+
+    const CHAT_LOGS_DIR = join(homedir(), '.woodbury', 'data', 'chat-logs');
+    const MAX_CHAT_LOG_DAYS = 30; // keep 30 days of logs
+
+    async function appendChatLog(entry: ChatLogEntry): Promise<void> {
+      try {
+        await mkdir(CHAT_LOGS_DIR, { recursive: true });
+        const dateStr = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+        const logFile = join(CHAT_LOGS_DIR, `${dateStr}.jsonl`);
+        const { appendFile } = await import('node:fs/promises');
+        await appendFile(logFile, JSON.stringify(entry) + '\n');
+
+        // Also emit to debugLog for correlation
+        debugLog.info('chat', `Chat request completed`, {
+          id: entry.id,
+          message: entry.message.slice(0, 100),
+          toolCount: entry.toolCalls.length,
+          durationMs: entry.durationMs,
+          error: entry.error,
+        });
+
+        // Rotate old log files (async, non-blocking)
+        rotateChatLogs().catch(() => {});
+      } catch {
+        // Never let logging break the app
+      }
+    }
+
+    async function rotateChatLogs(): Promise<void> {
+      try {
+        const files = await readdir(CHAT_LOGS_DIR);
+        const logFiles = files
+          .filter(f => f.endsWith('.jsonl'))
+          .sort()
+          .reverse(); // newest first
+        if (logFiles.length > MAX_CHAT_LOG_DAYS) {
+          for (const f of logFiles.slice(MAX_CHAT_LOG_DAYS)) {
+            await unlink(join(CHAT_LOGS_DIR, f)).catch(() => {});
+          }
+        }
+      } catch { /* ignore */ }
+    }
+
+    function truncate(s: string, max: number): string {
+      return s.length > max ? s.slice(0, max) + '…' : s;
+    }
+
+    // ── Chat Log API Routes ─────────────────────────────────────
+
+    // GET /api/chat/logs — list available log days with entry counts
+    if (req.method === 'GET' && pathname === '/api/chat/logs') {
+      try {
+        await mkdir(CHAT_LOGS_DIR, { recursive: true });
+        const files = await readdir(CHAT_LOGS_DIR);
+        const days = [];
+        for (const f of files.filter(f => f.endsWith('.jsonl')).sort().reverse()) {
+          const content = await readFile(join(CHAT_LOGS_DIR, f), 'utf-8');
+          const lines = content.trim().split('\n').filter(Boolean);
+          days.push({
+            date: f.replace('.jsonl', ''),
+            entries: lines.length,
+          });
+        }
+        sendJson(res, 200, { days });
+      } catch (err) {
+        sendJson(res, 500, { error: String(err) });
+      }
+      return;
+    }
+
+    // GET /api/chat/logs/:date — get all entries for a specific day
+    if (req.method === 'GET' && pathname.startsWith('/api/chat/logs/')) {
+      const date = pathname.replace('/api/chat/logs/', '');
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+        sendJson(res, 400, { error: 'Invalid date format. Use YYYY-MM-DD' });
+        return;
+      }
+      try {
+        const logFile = join(CHAT_LOGS_DIR, `${date}.jsonl`);
+        const content = await readFile(logFile, 'utf-8');
+        const entries = content.trim().split('\n').filter(Boolean).map(line => {
+          try { return JSON.parse(line); } catch { return null; }
+        }).filter(Boolean);
+        sendJson(res, 200, { date, entries });
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+          sendJson(res, 200, { date, entries: [] });
+        } else {
+          sendJson(res, 500, { error: String(err) });
+        }
+      }
+      return;
+    }
+
+    // ── Chat Agent SSE Endpoint ──────────────────────────────
+    if (req.method === 'POST' && pathname === '/api/chat') {
+      if (chatAgentBusy) {
+        sendJson(res, 409, { error: 'A chat request is already in progress' });
+        return;
+      }
+
+      try {
+        const body = await readBody(req);
+        const { message, history, activeCompositionId: initialCompositionId } = body || {};
+        let activeCompositionId = initialCompositionId;
+
+        if (!message) {
+          sendJson(res, 400, { error: 'message is required' });
+          return;
+        }
+
+        chatAgentBusy = true;
+        const requestStartTime = Date.now();
+        const requestId = `chat_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+        const toolLogs: ChatToolLog[] = [];
+        let responseContent = '';
+
+        debugLog.info('chat', `Request started`, {
+          id: requestId,
+          messagePreview: message.slice(0, 100),
+          historyLength: Array.isArray(history) ? history.length : 0,
+          activeCompositionId,
+        });
+
+        // Ensure the chat agent is ready
+        const agent = await ensureChatAgent();
+
+        // Build conversation context with history (matching REPL pattern)
+        let prompt = '';
+        if (Array.isArray(history) && history.length > 0) {
+          prompt += '<conversation_history>\n';
+          for (const turn of history) {
+            prompt += `<turn role="${turn.role}">\n${turn.content}\n</turn>\n`;
+          }
+          prompt += '</conversation_history>\n\n';
+          // Override any patterns from history — always follow current system prompt rules
+          prompt += '<important>Ignore any tool usage patterns from the conversation history above. Always follow your current system prompt rules for which tools to use. For pipeline/workflow creation, you MUST use the mcp__intelligence__ tools.</important>\n\n';
+        }
+        prompt += message;
+
+        // Set up SSE response
+        res.writeHead(200, {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          'Connection': 'keep-alive',
+          'Access-Control-Allow-Origin': '*',
+        });
+
+        const writeEvent = (type: string, data: any) => {
+          try {
+            res.write(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`);
+          } catch { /* connection may be closed */ }
+        };
+
+        // Track in-flight tool calls for timing
+        const toolStartTimes = new Map<string, { startTime: number; startedAt: string; params: any }>();
+
+        // Wire up streaming callbacks
+        agent.setOnToken((token) => {
+          writeEvent('token', { token });
+          responseContent += token;
+        });
+        agent.setOnToolStart((name, params) => {
+          writeEvent('tool_start', { name, params });
+          toolStartTimes.set(name, {
+            startTime: Date.now(),
+            startedAt: new Date().toISOString(),
+            params,
+          });
+          debugLog.info('chat', `Tool started: ${name}`, {
+            requestId,
+            params: typeof params === 'string' ? params.slice(0, 500) : params,
+          });
+          // Emit composition_updated for pipeline tools
+          if (name === 'pipeline_create' || name === 'pipeline_update') {
+            // Will emit composition_updated on tool_end when we have the result
+          }
+        });
+        agent.setOnToolEnd((name, success, result, duration) => {
+          const startInfo = toolStartTimes.get(name);
+          const resultStr = typeof result === 'string' ? result : JSON.stringify(result ?? '');
+          writeEvent('tool_end', {
+            name,
+            success,
+            duration,
+            params: startInfo?.params,
+            result: resultStr.length > 2000 ? resultStr.slice(0, 2000) + '…' : resultStr,
+          });
+
+          // Capture tool log entry
+          toolLogs.push({
+            name,
+            params: startInfo?.params,
+            result: truncate(resultStr, 500),
+            success,
+            durationMs: duration || (startInfo ? Date.now() - startInfo.startTime : 0),
+            startedAt: startInfo?.startedAt || new Date().toISOString(),
+          });
+          toolStartTimes.delete(name);
+
+          debugLog.info('chat', `Tool ended: ${name}`, {
+            requestId,
+            success,
+            durationMs: duration,
+            resultPreview: resultStr.slice(0, 200),
+          });
+
+          // If a pipeline/composition was created, notify the graph panel
+          const isCompositionTool = name === 'pipeline_create' || name === 'pipeline_update' ||
+            name === 'mcp__intelligence__generate_pipeline' ||
+            name === 'mcp__intelligence__generate_workflow' ||
+            name === 'mcp__intelligence__compose_tools';
+          if (success && isCompositionTool) {
+            try {
+              const parsed = typeof result === 'string' ? JSON.parse(result) : result;
+              const compId = parsed?.id || parsed?.composition?.id || activeCompositionId;
+              if (compId) {
+                activeCompositionId = compId;
+                writeEvent('composition_updated', { compositionId: compId });
+              }
+            } catch { /* ignore parse errors */ }
+          }
+        });
+
+        // Set up abort on client disconnect
+        const abort = new AbortController();
+        req.on('close', () => abort.abort());
+
+        let wasAborted = false;
+        let runError: string | undefined;
+        let iterations: number | undefined;
+
+        try {
+          const result = await agent.run(prompt, abort.signal);
+          responseContent = result.content || responseContent;
+          iterations = result.metadata?.iterations;
+          writeEvent('done', {
+            content: result.content,
+            toolCalls: result.toolCalls?.map(tc => ({ name: tc.name, parameters: tc.parameters })),
+            metadata: result.metadata,
+          });
+        } catch (err) {
+          if ((err as Error).name === 'AbortError') {
+            wasAborted = true;
+          } else {
+            runError = (err as Error).message;
+            writeEvent('error', { error: (err as Error).message });
+          }
+        } finally {
+          // Clear callbacks
+          agent.setOnToken(undefined);
+          agent.setOnToolStart(undefined);
+          agent.setOnToolEnd(undefined);
+          chatAgentBusy = false;
+          try { res.end(); } catch { /* already closed */ }
+
+          // Write structured chat log
+          const totalDuration = Date.now() - requestStartTime;
+          appendChatLog({
+            id: requestId,
+            timestamp: new Date().toISOString(),
+            message: truncate(message, 2000),
+            historyLength: Array.isArray(history) ? history.length : 0,
+            activeCompositionId,
+            toolCalls: toolLogs,
+            response: truncate(responseContent, 2000),
+            durationMs: totalDuration,
+            iterations,
+            error: runError,
+            aborted: wasAborted || undefined,
+          });
+
+          debugLog.info('chat', `Request completed`, {
+            id: requestId,
+            durationMs: totalDuration,
+            toolCount: toolLogs.length,
+            responseLength: responseContent.length,
+            iterations,
+            aborted: wasAborted,
+            error: runError,
+          });
+        }
+      } catch (err) {
+        chatAgentBusy = false;
+        debugLog.error('chat', 'Chat endpoint error', { error: String(err) });
+        // If headers haven't been sent yet, send JSON error
+        if (!res.headersSent) {
+          sendJson(res, 500, { error: `Chat failed: ${(err as Error).message}` });
+        } else {
+          try { res.end(); } catch { /* already closed */ }
+        }
+      }
+      return;
+    }
+
+    // ── Assets API ─────────────────────────────────────────────
+
+    const getAssetsDataDir = async (): Promise<string> => {
+      const settingsPath = join(homedir(), '.woodbury', 'data', 'assets-settings.json');
+      try {
+        const settings = JSON.parse(await readFile(settingsPath, 'utf-8'));
+        if (settings.dataDir) return settings.dataDir;
+      } catch { /* no settings file */ }
+      return process.env.ASSETS_DATA_DIR || join(homedir(), '.woodbury', 'creator-assets');
+    };
+
+    const readAssetsJson = async (dataDir: string): Promise<any[]> => {
+      try {
+        const raw = await readFile(join(dataDir, 'assets.json'), 'utf-8');
+        const data = JSON.parse(raw);
+        return Array.isArray(data) ? data : [];
+      } catch { return []; }
+    };
+
+    const writeAssetsJson = async (dataDir: string, assets: any[]): Promise<void> => {
+      await mkdir(dataDir, { recursive: true });
+      await writeFile(join(dataDir, 'assets.json'), JSON.stringify(assets, null, 2));
+    };
+
+    const readCollectionsJson = async (dataDir: string): Promise<any[]> => {
+      try {
+        const raw = await readFile(join(dataDir, 'collections.json'), 'utf-8');
+        const data = JSON.parse(raw);
+        return Array.isArray(data) ? data : [];
+      } catch { return []; }
+    };
+
+    const writeCollectionsJson = async (dataDir: string, collections: any[]): Promise<void> => {
+      await mkdir(dataDir, { recursive: true });
+      await writeFile(join(dataDir, 'collections.json'), JSON.stringify(collections, null, 2));
+    };
+
+    const resolveAssetPath = (asset: any, dataDir: string, collections: any[]): string | null => {
+      const filePath = asset.file_path;
+      if (!filePath) return null;
+      const mode = asset.path_mode || 'relative';
+      if (mode === 'absolute' || isAbsolute(filePath)) return filePath;
+      if (mode === 'collection_root') {
+        const colSlug = asset.collections?.[0];
+        if (colSlug) {
+          const col = collections.find((c: any) => c.slug === colSlug);
+          if (col?.rootPath) return join(col.rootPath, filePath);
+        }
+      }
+      return join(dataDir, filePath);
+    };
+
+    const assetSlugify = (str: string): string =>
+      str.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+
+    const generateAssetId = (): string => {
+      const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+      let id = 'ast_';
+      for (let i = 0; i < 8; i++) id += chars[Math.floor(Math.random() * chars.length)];
+      return id;
+    };
+
+    const ASSET_MIME_MAP: Record<string, string> = {
+      '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+      '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml',
+      '.bmp': 'image/bmp', '.ico': 'image/x-icon', '.avif': 'image/avif',
+      '.mp4': 'video/mp4', '.mov': 'video/quicktime', '.avi': 'video/x-msvideo',
+      '.webm': 'video/webm', '.mkv': 'video/x-matroska',
+      '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.ogg': 'audio/ogg',
+      '.aac': 'audio/aac', '.flac': 'audio/flac', '.m4a': 'audio/mp4',
+      '.pdf': 'application/pdf', '.json': 'application/json', '.csv': 'text/csv',
+      '.txt': 'text/plain', '.md': 'text/markdown',
+      '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    };
+
+    const detectAssetCategory = (mimeType: string): string => {
+      if (mimeType.startsWith('image/')) return 'image';
+      if (mimeType.startsWith('video/')) return 'video';
+      if (mimeType.startsWith('audio/')) return 'audio';
+      if (mimeType.startsWith('text/') || mimeType === 'application/json') return 'text';
+      return 'document';
+    };
+
+    // GET /api/assets — list all assets
+    if (req.method === 'GET' && pathname === '/api/assets') {
+      try {
+        const dataDir = await getAssetsDataDir();
+        let assets = await readAssetsJson(dataDir);
+
+        const category = url.searchParams.get('category');
+        const collection = url.searchParams.get('collection');
+        const search = url.searchParams.get('search');
+        const tag = url.searchParams.get('tag');
+
+        if (category) assets = assets.filter((a: any) => a.category === category);
+        if (collection && collection !== '__all__') assets = assets.filter((a: any) => a.collections && a.collections.includes(collection));
+        if (tag) assets = assets.filter((a: any) => a.tags && a.tags.includes(tag));
+        if (search) {
+          const s = search.toLowerCase();
+          assets = assets.filter((a: any) =>
+            (a.name && a.name.toLowerCase().includes(s)) ||
+            (a.description && a.description.toLowerCase().includes(s)) ||
+            (a.tags && a.tags.some((t: string) => t.toLowerCase().includes(s)))
+          );
+        }
+
+        const collections = await readCollectionsJson(dataDir);
+        assets = assets.map((a: any) => ({
+          ...a,
+          file_path_absolute: resolveAssetPath(a, dataDir, collections),
+        }));
+
+        sendJson(res, 200, { assets, dataDir });
+      } catch (err) {
+        sendJson(res, 500, { error: String(err) });
+      }
+      return;
+    }
+
+    // GET /api/assets/collections — list collections with counts
+    if (req.method === 'GET' && pathname === '/api/assets/collections') {
+      try {
+        const dataDir = await getAssetsDataDir();
+        const collections = await readCollectionsJson(dataDir);
+        const assets = await readAssetsJson(dataDir);
+
+        const result = collections.map((c: any) => ({
+          ...c,
+          asset_count: assets.filter((a: any) => a.collections && a.collections.includes(c.slug)).length,
+        }));
+
+        sendJson(res, 200, { collections: result });
+      } catch (err) {
+        sendJson(res, 500, { error: String(err) });
+      }
+      return;
+    }
+
+    // POST /api/assets/collections — create collection
+    if (req.method === 'POST' && pathname === '/api/assets/collections') {
+      try {
+        const body = await readBody(req);
+        if (!body?.name) { sendJson(res, 400, { error: 'Name is required' }); return; }
+
+        const dataDir = await getAssetsDataDir();
+        const collections = await readCollectionsJson(dataDir);
+        const slug = assetSlugify(body.name);
+
+        if (collections.find((c: any) => c.slug === slug)) {
+          sendJson(res, 409, { error: 'Collection already exists' }); return;
+        }
+
+        const colId = generateAssetId().replace('ast_', 'col_');
+        const collection = {
+          id: colId,
+          name: body.name,
+          slug,
+          description: body.description || '',
+          tags: body.tags || [],
+          rootPath: body.rootPath || null,
+          created_at: new Date().toISOString(),
+        };
+
+        collections.push(collection);
+        await writeCollectionsJson(dataDir, collections);
+        sendJson(res, 201, { collection });
+      } catch (err) {
+        sendJson(res, 500, { error: String(err) });
+      }
+      return;
+    }
+
+    // DELETE /api/assets/collections/:slug
+    {
+      const colMatch = pathname.match(/^\/api\/assets\/collections\/([^/]+)$/);
+      if (req.method === 'DELETE' && colMatch) {
+        try {
+          const slug = decodeURIComponent(colMatch[1]);
+          const dataDir = await getAssetsDataDir();
+          let collections = await readCollectionsJson(dataDir);
+          collections = collections.filter((c: any) => c.slug !== slug);
+          await writeCollectionsJson(dataDir, collections);
+
+          let assets = await readAssetsJson(dataDir);
+          assets = assets.map((a: any) => ({
+            ...a,
+            collections: a.collections ? a.collections.filter((c: string) => c !== slug) : [],
+          }));
+          await writeAssetsJson(dataDir, assets);
+
+          sendJson(res, 200, { success: true });
+        } catch (err) {
+          sendJson(res, 500, { error: String(err) });
+        }
+        return;
+      }
+    }
+
+    // PUT /api/assets/collections/:slug — update collection
+    {
+      const colPutMatch = pathname.match(/^\/api\/assets\/collections\/([^/]+)$/);
+      if (req.method === 'PUT' && colPutMatch) {
+        try {
+          const slug = decodeURIComponent(colPutMatch[1]);
+          const body = await readBody(req);
+          const dataDir = await getAssetsDataDir();
+          const collections = await readCollectionsJson(dataDir);
+          const idx = collections.findIndex((c: any) => c.slug === slug);
+          if (idx === -1) { sendJson(res, 404, { error: 'Collection not found' }); return; }
+
+          const col = collections[idx];
+          if (body.name !== undefined) col.name = body.name;
+          if (body.description !== undefined) col.description = body.description;
+          if (body.rootPath !== undefined) col.rootPath = body.rootPath || null;
+          if (body.tags !== undefined) col.tags = body.tags;
+
+          collections[idx] = col;
+          await writeCollectionsJson(dataDir, collections);
+          sendJson(res, 200, { collection: col });
+        } catch (err) {
+          sendJson(res, 500, { error: String(err) });
+        }
+        return;
+      }
+    }
+
+    // GET /api/assets/defaults — get all defaults
+    if (req.method === 'GET' && pathname === '/api/assets/defaults') {
+      try {
+        const dataDir = await getAssetsDataDir();
+        const assets = await readAssetsJson(dataDir);
+        const collections = await readCollectionsJson(dataDir);
+
+        const defaults: Record<string, any> = {};
+        for (const a of assets) {
+          if (a.is_default_for) {
+            defaults[a.is_default_for] = {
+              id: a.id,
+              name: a.name,
+              category: a.category,
+              file_path_absolute: resolveAssetPath(a, dataDir, collections),
+              metadata: a.metadata,
+            };
+          }
+        }
+
+        sendJson(res, 200, { defaults });
+      } catch (err) {
+        sendJson(res, 500, { error: String(err) });
+      }
+      return;
+    }
+
+    // GET /api/assets/settings
+    if (req.method === 'GET' && pathname === '/api/assets/settings') {
+      try {
+        const settingsPath = join(homedir(), '.woodbury', 'data', 'assets-settings.json');
+        let settings: any = {};
+        try {
+          settings = JSON.parse(await readFile(settingsPath, 'utf-8'));
+        } catch { /* no settings file */ }
+
+        const dataDir = await getAssetsDataDir();
+        sendJson(res, 200, { dataDir, settings });
+      } catch (err) {
+        sendJson(res, 500, { error: String(err) });
+      }
+      return;
+    }
+
+    // PUT /api/assets/settings
+    if (req.method === 'PUT' && pathname === '/api/assets/settings') {
+      try {
+        const body = await readBody(req);
+        const settingsPath = join(homedir(), '.woodbury', 'data', 'assets-settings.json');
+        await mkdir(join(homedir(), '.woodbury', 'data'), { recursive: true });
+
+        const settings: any = {};
+        if (body?.dataDir) {
+          await mkdir(body.dataDir, { recursive: true });
+          await mkdir(join(body.dataDir, 'files'), { recursive: true });
+          settings.dataDir = body.dataDir;
+        }
+
+        await writeFile(settingsPath, JSON.stringify(settings, null, 2));
+        sendJson(res, 200, { success: true, settings });
+      } catch (err) {
+        sendJson(res, 500, { error: String(err) });
+      }
+      return;
+    }
+
+    // POST /api/assets/import — import file as new asset
+    if (req.method === 'POST' && pathname === '/api/assets/import') {
+      try {
+        const body = await readBody(req);
+        if (!body?.file_path) { sendJson(res, 400, { error: 'file_path is required' }); return; }
+        if (!body?.name) { sendJson(res, 400, { error: 'name is required' }); return; }
+
+        const srcStat = await stat(body.file_path);
+        if (!srcStat.isFile()) { sendJson(res, 400, { error: 'Not a file' }); return; }
+
+        const dataDir = await getAssetsDataDir();
+        const filesDir = join(dataDir, 'files');
+        await mkdir(filesDir, { recursive: true });
+
+        const id = generateAssetId();
+        const ext = extname(body.file_path);
+        const slug = assetSlugify(body.name);
+        const mimeType = ASSET_MIME_MAP[ext.toLowerCase()] || 'application/octet-stream';
+        const collections = await readCollectionsJson(dataDir);
+
+        let storedFilePath: string;
+        let pathMode = 'relative';
+
+        if (body.reference_only) {
+          // Reference in place — don't copy
+          storedFilePath = body.file_path;
+          pathMode = 'absolute';
+          // Check if under a collection rootPath
+          if (body.collection) {
+            const col = collections.find((c: any) => c.slug === body.collection);
+            if (col?.rootPath && body.file_path.startsWith(col.rootPath)) {
+              storedFilePath = body.file_path.slice(col.rootPath.length);
+              if (storedFilePath.startsWith('/')) storedFilePath = storedFilePath.slice(1);
+              pathMode = 'collection_root';
+            }
+          }
+        } else {
+          // Copy into library (existing behavior)
+          const destFilename = `${id}_${slug}${ext}`;
+          const destPath = join(filesDir, destFilename);
+          await copyFile(body.file_path, destPath);
+          storedFilePath = `files/${destFilename}`;
+        }
+
+        const asset: any = {
+          id,
+          name: body.name,
+          description: body.description || '',
+          file_path: storedFilePath,
+          path_mode: pathMode,
+          file_type: mimeType,
+          file_size: srcStat.size,
+          category: detectAssetCategory(mimeType),
+          tags: body.tags || [],
+          collections: body.collection ? [body.collection] : [],
+          version: 1,
+          versions: [{
+            version: 1,
+            file_path: storedFilePath,
+            created_at: new Date().toISOString(),
+            notes: 'Initial import',
+          }],
+          metadata: body.metadata || {},
+          is_default_for: null,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        };
+
+        const assets = await readAssetsJson(dataDir);
+        assets.push(asset);
+        await writeAssetsJson(dataDir, assets);
+
+        sendJson(res, 201, { asset: { ...asset, file_path_absolute: resolveAssetPath(asset, dataDir, collections) } });
+      } catch (err) {
+        sendJson(res, 500, { error: String(err) });
+      }
+      return;
+    }
+
+    // POST /api/browse-files — list files and directories for file picker
+    if (req.method === 'POST' && pathname === '/api/browse-files') {
+      try {
+        const body = await readBody(req);
+        const dir = body?.path || homedir();
+
+        const entries = await readdir(dir, { withFileTypes: true });
+        const dirs: Array<{ name: string; path: string }> = [];
+        const files: Array<{ name: string; path: string; size: number }> = [];
+
+        for (const entry of entries) {
+          if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
+          try {
+            const fullPath = join(dir, entry.name);
+            const stats = await stat(fullPath);
+            if (stats.isDirectory()) {
+              dirs.push({ name: entry.name, path: fullPath });
+            } else if (stats.isFile()) {
+              files.push({ name: entry.name, path: fullPath, size: stats.size });
+            }
+          } catch { /* skip unreadable */ }
+        }
+
+        dirs.sort((a, b) => a.name.localeCompare(b.name));
+        files.sort((a, b) => a.name.localeCompare(b.name));
+
+        sendJson(res, 200, { current: dir, parent: join(dir, '..'), dirs, files });
+      } catch (err) {
+        sendJson(res, 400, { error: `Cannot read directory: ${err}` });
+      }
+      return;
+    }
+
+    // GET /api/assets/file/:id — serve asset file
+    {
+      const fileMatch = pathname.match(/^\/api\/assets\/file\/([^/]+)$/);
+      if (req.method === 'GET' && fileMatch) {
+        try {
+          const assetId = decodeURIComponent(fileMatch[1]);
+          const dataDir = await getAssetsDataDir();
+          const assets = await readAssetsJson(dataDir);
+          const asset = assets.find((a: any) => a.id === assetId);
+
+          if (!asset || !asset.file_path) {
+            sendJson(res, 404, { error: 'Asset not found' }); return;
+          }
+
+          const collections = await readCollectionsJson(dataDir);
+          const absPath = resolveAssetPath(asset, dataDir, collections);
+          if (!absPath) { sendJson(res, 404, { error: 'File path not resolved' }); return; }
+          const fileStat = await stat(absPath);
+
+          if (!fileStat.isFile()) {
+            sendJson(res, 404, { error: 'File not found' }); return;
+          }
+
+          const ext = extname(absPath).toLowerCase();
+          const mimeType = ASSET_MIME_MAP[ext] || 'application/octet-stream';
+
+          res.writeHead(200, {
+            'Content-Type': mimeType,
+            'Content-Length': fileStat.size,
+            'Cache-Control': 'no-cache',
+          });
+          const stream = createReadStream(absPath);
+          stream.pipe(res);
+          stream.on('error', () => {
+            if (!res.headersSent) sendJson(res, 500, { error: 'Failed to read file' });
+          });
+        } catch {
+          sendJson(res, 404, { error: 'Asset file not found' });
+        }
+        return;
+      }
+    }
+
+    // POST /api/assets/:id/reveal — show asset file in system file manager
+    {
+      const revealMatch = pathname.match(/^\/api\/assets\/([^/]+)\/reveal$/);
+      if (req.method === 'POST' && revealMatch) {
+        try {
+          const assetId = decodeURIComponent(revealMatch[1]);
+          const dataDir = await getAssetsDataDir();
+          const assets = await readAssetsJson(dataDir);
+          const asset = assets.find((a: any) => a.id === assetId);
+          if (!asset || !asset.file_path) {
+            sendJson(res, 404, { error: 'Asset not found' }); return;
+          }
+          const collections = await readCollectionsJson(dataDir);
+          const absPath = resolveAssetPath(asset, dataDir, collections);
+          if (!absPath) { sendJson(res, 404, { error: 'File path not resolved' }); return; }
+
+          const platform = process.platform;
+          if (platform === 'darwin') {
+            exec(`open -R "${absPath}"`);
+          } else if (platform === 'win32') {
+            exec(`explorer /select,"${absPath.replace(/\//g, '\\\\')}"`);
+          } else {
+            // Linux: open the containing directory
+            const { dirname } = await import('path');
+            exec(`xdg-open "${dirname(absPath)}"`);
+          }
+          sendJson(res, 200, { success: true });
+        } catch {
+          sendJson(res, 500, { error: 'Failed to reveal file' });
+        }
+        return;
+      }
+    }
+
+    // GET /api/assets/:id — get single asset
+    {
+      const assetGetMatch = pathname.match(/^\/api\/assets\/([^/]+)$/);
+      if (req.method === 'GET' && assetGetMatch) {
+        try {
+          const assetId = decodeURIComponent(assetGetMatch[1]);
+          const dataDir = await getAssetsDataDir();
+          const assets = await readAssetsJson(dataDir);
+          const asset = assets.find((a: any) => a.id === assetId);
+
+          if (!asset) { sendJson(res, 404, { error: 'Asset not found' }); return; }
+
+          const collections = await readCollectionsJson(dataDir);
+          sendJson(res, 200, {
+            asset: {
+              ...asset,
+              file_path_absolute: resolveAssetPath(asset, dataDir, collections),
+              versions: (asset.versions || []).map((v: any) => ({
+                ...v,
+                file_path_absolute: resolveAssetPath({ ...asset, file_path: v.file_path }, dataDir, collections),
+              })),
+            },
+          });
+        } catch (err) {
+          sendJson(res, 500, { error: String(err) });
+        }
+        return;
+      }
+    }
+
+    // PUT /api/assets/:id — update asset metadata
+    {
+      const assetPutMatch = pathname.match(/^\/api\/assets\/([^/]+)$/);
+      if (req.method === 'PUT' && assetPutMatch) {
+        try {
+          const assetId = decodeURIComponent(assetPutMatch[1]);
+          const body = await readBody(req);
+          const dataDir = await getAssetsDataDir();
+          const assets = await readAssetsJson(dataDir);
+          const idx = assets.findIndex((a: any) => a.id === assetId);
+
+          if (idx === -1) { sendJson(res, 404, { error: 'Asset not found' }); return; }
+
+          const asset = assets[idx];
+
+          if (body.name !== undefined) asset.name = body.name;
+          if (body.description !== undefined) asset.description = body.description;
+          if (body.tags !== undefined) asset.tags = body.tags;
+          if (body.collections !== undefined) asset.collections = body.collections;
+          if (body.is_default_for !== undefined) {
+            if (body.is_default_for) {
+              for (const a of assets) {
+                if (a.is_default_for === body.is_default_for && a.id !== assetId) {
+                  a.is_default_for = null;
+                }
+              }
+            }
+            asset.is_default_for = body.is_default_for || null;
+          }
+          if (body.metadata !== undefined) {
+            asset.metadata = { ...(asset.metadata || {}), ...body.metadata };
+          }
+
+          asset.updated_at = new Date().toISOString();
+          assets[idx] = asset;
+          await writeAssetsJson(dataDir, assets);
+
+          const collections = await readCollectionsJson(dataDir);
+          sendJson(res, 200, {
+            asset: { ...asset, file_path_absolute: resolveAssetPath(asset, dataDir, collections) },
+          });
+        } catch (err) {
+          sendJson(res, 500, { error: String(err) });
+        }
+        return;
+      }
+    }
+
+    // DELETE /api/assets/:id — delete asset
+    {
+      const assetDelMatch = pathname.match(/^\/api\/assets\/([^/]+)$/);
+      if (req.method === 'DELETE' && assetDelMatch) {
+        try {
+          const assetId = decodeURIComponent(assetDelMatch[1]);
+          const dataDir = await getAssetsDataDir();
+          const assets = await readAssetsJson(dataDir);
+          const asset = assets.find((a: any) => a.id === assetId);
+
+          if (!asset) { sendJson(res, 404, { error: 'Asset not found' }); return; }
+
+          // Only delete files for library-owned assets (not external references)
+          const isOwned = !asset.path_mode || asset.path_mode === 'relative';
+          if (isOwned) {
+            if (asset.file_path) {
+              try { await unlink(join(dataDir, asset.file_path)); } catch { /* ok */ }
+            }
+            if (asset.versions) {
+              for (const v of asset.versions) {
+                if (v.file_path && !v.deleted) {
+                  try { await unlink(join(dataDir, v.file_path)); } catch { /* ok */ }
+                }
+              }
+            }
+          }
+
+          const remaining = assets.filter((a: any) => a.id !== assetId);
+          await writeAssetsJson(dataDir, remaining);
+
+          sendJson(res, 200, { success: true });
+        } catch (err) {
+          sendJson(res, 500, { error: String(err) });
+        }
+        return;
+      }
+    }
+
     // ── Static File Serving ─────────────────────────────────
     const filePath =
       pathname === '/' ? '/index.html' : pathname.split('?')[0];
@@ -9490,11 +12292,22 @@ Fix the bug and return the corrected code. Do not change the @input/@output anno
     connectionUrl: relayHandle?.connectionUrl,
     pair: relayHandle ? (code: string) => relayHandle!.pair(code) : undefined,
     isPaired: relayHandle ? () => relayHandle!.isPaired() : undefined,
-    close: () => {
+    close: async () => {
       relayHandle?.stop();
       stopScheduler();
       stopInferenceServer();
       discoverySocket?.close();
+
+      if (chatAgent) {
+        await chatAgent.stop().catch(() => {});
+        chatAgent = null;
+      }
+
+      if (chatMcpManager) {
+        await chatMcpManager.disconnectAll().catch(() => {});
+        chatMcpManager = null;
+      }
+
       return new Promise<void>((resolve) => server.close(() => resolve()));
     },
   };

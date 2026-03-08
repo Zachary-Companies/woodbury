@@ -66,9 +66,9 @@ async function startBackend() {
   const handle = await startDashboard(false, extensionManager, workDir, 9001);
   console.log(`[electron] Dashboard running at ${handle.url}`);
 
-  // Load extensions in the background with a timeout
+  // Load extensions in the background (pipeline execution and /api/tools await whenReady())
   console.log('[electron] Loading extensions in background...');
-  withTimeout(extensionManager.loadAll(), 15000, 'Extension loading')
+  extensionManager.loadAll()
     .then(() => console.log('[electron] Extensions loaded.'))
     .catch((err) => console.error('[electron] Extension loading error:', err.message || err));
 

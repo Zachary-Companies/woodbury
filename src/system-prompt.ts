@@ -1,10 +1,16 @@
 import { platform, homedir } from 'node:os';
 import { loadProjectContext, loadContextDirectory } from './context-loader.js';
 
+export interface McpServerInfo {
+  name: string;
+  toolNames: string[];
+}
+
 export async function buildSystemPrompt(
   workingDirectory: string,
   contextDir?: string,
-  extensionPromptSections?: string[]
+  extensionPromptSections?: string[],
+  mcpServers?: McpServerInfo[]
 ): Promise<string> {
   const parts: string[] = [];
 
@@ -1011,6 +1017,28 @@ If a required key is missing, the extension should still load but return a helpf
 ## Extension Instructions
 
 ${extensionPromptSections.join('\n\n')}`);
+  }
+
+  // MCP server intelligence
+  if (mcpServers && mcpServers.length > 0) {
+    const serverDescriptions = mcpServers.map((s) => {
+      const toolList = s.toolNames.map((t) => `  - \`${t}\``).join('\n');
+      return `### ${s.name}\nTools:\n${toolList}`;
+    }).join('\n\n');
+
+    parts.push(`
+## MCP Intelligence Servers
+
+You have access to external AI intelligence via MCP (Model Context Protocol) servers. These tools are available alongside your built-in tools and can be called the same way.
+
+${serverDescriptions}
+
+**When to use MCP intelligence tools:**
+- \`mcp__intelligence__*\` tools: Use for AI-powered generation of pipelines, workflows, tool compositions, failure diagnosis, and explanations. These delegate to external AI models (Claude, GPT) for complex reasoning.
+- \`mcp__claude-code__*\` tools: Use to delegate complex multi-step coding tasks, file operations, or research to a Claude Code agent. The \`mcp__claude-code__Agent\` tool is especially powerful for autonomous sub-tasks.
+- \`mcp__codex__*\` tools: Use to delegate coding tasks to OpenAI Codex MCP tools. Use \`mcp__codex__codex\` to start a new Codex task and \`mcp__codex__codex-reply\` to continue an existing Codex conversation.
+
+**How to use:** Call MCP tools exactly like built-in tools. Parameters are passed through to the remote server.`);
   }
 
   // Project context

@@ -3,12 +3,14 @@ import { marked } from 'marked';
 import TerminalRenderer from 'marked-terminal';
 import { WoodburyConfig, SlashCommand, SlashCommandContext } from './types';
 import { logger } from './logger';
-import { createAgent, AgentHandle } from './agent-factory';
+import { createAgent, createClosureAgent, AgentHandle } from './agent-factory';
 import { colors, icons, labels, format, box, markdownTheme } from './colors';
 import { slashCommands } from './slash-commands.js';
 import { FileConversationManager } from './conversation.js';
 import { compactContext } from './context-compactor.js';
 import type { ExtensionManager } from './extension-manager.js';
+import { McpClientManager } from './mcp-client-manager.js';
+import { loadMcpConfig } from './mcp-config.js';
 import type { DashboardHandle } from './config-dashboard.js';
 import { GO_HOSTNAME, type GoLinksHandle } from './go-links.js';
 import { debugLog } from './debug-log.js';
@@ -289,6 +291,7 @@ export class Repl {
 
   // Extension system
   private extensionManager?: ExtensionManager;
+  private mcpClientManager?: McpClientManager;
   private allSlashCommands: SlashCommand[];
 
   // Background task message queue
@@ -325,9 +328,49 @@ export class Repl {
       debugLog.info('repl', 'Initializing agent (first use)');
       this.print(`${icons.running}  ${colors.muted('Initializing agent...')}`);
       const doneAgent = debugLog.time('repl', 'Agent initialization');
-      this.agent = await createAgent(this.config, this.extensionManager);
+
+      // Connect to MCP servers (if configured)
+      if (!this.mcpClientManager) {
+        const mcpConfigs = loadMcpConfig();
+        if (mcpConfigs.length > 0) {
+          this.mcpClientManager = new McpClientManager();
+          await this.mcpClientManager.connectAll(mcpConfigs);
+          const summaries = this.mcpClientManager.getConnectionSummaries();
+          if (summaries.length > 0) {
+            debugLog.info('repl', 'MCP servers connected', { servers: summaries });
+          }
+        }
+      }
+
+      // Use V3 Closure Engine by default, fall back to V1 with --engine v1
+      const useV1 = process.argv.includes('--engine') && process.argv[process.argv.indexOf('--engine') + 1] === 'v1';
+      if (useV1) {
+        debugLog.info('repl', 'Using V1 agent (--engine v1)');
+        this.agent = await createAgent(this.config, this.extensionManager, this.mcpClientManager);
+      } else {
+        debugLog.info('repl', 'Using V3 Closure Engine');
+        this.agent = await createClosureAgent(this.config, this.extensionManager, this.mcpClientManager);
+      }
       doneAgent();
       this.print(`${icons.complete}  ${colors.success('Agent ready')}`);
+
+      // Show MCP connection status
+      if (this.mcpClientManager) {
+        const summaries = this.mcpClientManager.getConnectionSummaries();
+        const failedCount = this.mcpClientManager.getFailedCount();
+        const totalTools = summaries.reduce((sum: number, s: any) => sum + s.toolCount, 0);
+
+        if (summaries.length > 0 && failedCount === 0) {
+          this.print(`${icons.complete}  ${colors.success(`${summaries.length} MCP server${summaries.length === 1 ? '' : 's'} connected`)} ${colors.muted(`(${totalTools} tools)`)}`);
+        } else if (summaries.length > 0 && failedCount > 0) {
+          this.print(`${icons.complete}  ${colors.success(`${summaries.length} MCP server${summaries.length === 1 ? '' : 's'} connected`)} ${colors.muted(`(${totalTools} tools)`)} ${colors.warning(`· ${failedCount} failed`)}`);
+          this.print(colors.muted('    Type /mcp for details'));
+        } else if (failedCount > 0) {
+          this.print(`${icons.error}  ${colors.warning(`${failedCount} MCP server${failedCount === 1 ? '' : 's'} failed to connect`)}`);
+          this.print(colors.muted('    Type /mcp for details'));
+        }
+      }
+
       this.print('');
     }
     return this.agent;
@@ -377,7 +420,8 @@ export class Repl {
       } : undefined,
       print: (msg: string) => this.print(msg),
       extensionManager: this.extensionManager,
-      dashboardHandle: this.options.dashboardHandle
+      dashboardHandle: this.options.dashboardHandle,
+      mcpClientManager: this.mcpClientManager,
     };
 
     try {
@@ -1128,6 +1172,12 @@ export class Repl {
     // Close go-links proxy
     if (this.options.goLinksHandle) {
       await this.options.goLinksHandle.close();
+    }
+
+    // Disconnect MCP servers
+    if (this.mcpClientManager) {
+      debugLog.info('repl', 'Disconnecting MCP servers');
+      await this.mcpClientManager.disconnectAll();
     }
 
     // Deactivate all extensions (close web servers, etc.)

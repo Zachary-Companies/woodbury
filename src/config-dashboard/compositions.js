@@ -25,6 +25,12 @@ var undoStack = [];
 var redoStack = [];
 var MAX_UNDO = 50;
 
+// Folder collapse state
+var collapsedFolders = {};
+
+// Tools cache for Tool nodes
+var toolsCache = [];
+
 // Copy/Paste
 var clipboard = null; // { nodes: [...], edges: [...] }
 
@@ -110,6 +116,61 @@ function lookupPortValue(nodeId, portName, direction) {
   }
 }
 
+function truncateForContext(value, maxChars) {
+  maxChars = maxChars || 2000;
+  if (value === undefined || value === null) return null;
+
+  // Primitives
+  if (typeof value === 'string') {
+    if (value.length <= maxChars) return value;
+    return value.substring(0, Math.floor(maxChars * 0.75)) + '\n... (truncated, total ' + value.length + ' chars)';
+  }
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+
+  // Depth-limited serializer for objects/arrays
+  function serialize(val, depth) {
+    if (depth > 3) return typeof val === 'object' && val !== null ? (Array.isArray(val) ? '[...]' : '{...}') : JSON.stringify(val);
+    if (val === null || val === undefined) return String(val);
+    if (typeof val !== 'object') return JSON.stringify(val);
+
+    if (Array.isArray(val)) {
+      if (val.length === 0) return '[]';
+      var items = [];
+      var showCount = Math.min(val.length, 3);
+      for (var i = 0; i < showCount; i++) {
+        items.push(serialize(val[i], depth + 1));
+      }
+      var result = '[\n' + items.map(function(it) { return '  ' + it; }).join(',\n');
+      if (val.length > 3) {
+        result += ',\n  "... and ' + (val.length - 3) + ' more items"';
+      }
+      result += '\n]';
+      return result;
+    }
+
+    // Object
+    var keys = Object.keys(val);
+    if (keys.length === 0) return '{}';
+    var parts = [];
+    var showKeys = Math.min(keys.length, 10);
+    for (var k = 0; k < showKeys; k++) {
+      parts.push('  ' + JSON.stringify(keys[k]) + ': ' + serialize(val[keys[k]], depth + 1));
+    }
+    var out = '{\n' + parts.join(',\n');
+    if (keys.length > 10) {
+      out += ',\n  "... and ' + (keys.length - 10) + ' more keys"';
+    }
+    out += '\n}';
+    return out;
+  }
+
+  var result = serialize(value, 0);
+  if (result.length > maxChars) {
+    return result.substring(0, Math.floor(maxChars * 0.75)) + '\n... (truncated, total ' + result.length + ' chars)';
+  }
+  return result;
+}
+
 function describeExpectation(exp) {
   if (!exp || !exp.type) return 'Unknown expectation';
   switch (exp.type) {
@@ -133,11 +194,34 @@ async function fetchCompositions() {
     var res = await fetch('/api/compositions');
     var data = await res.json();
     compositions = data.compositions || [];
+    // Clean up empty folder placeholders that now have compositions
+    if (window._emptyFolders) {
+      window._emptyFolders = window._emptyFolders.filter(function(f) {
+        return !compositions.some(function(c) { return c.folder === f; });
+      });
+    }
     renderCompSidebar();
   } catch (err) {
     document.querySelector('#comp-list').innerHTML =
       '<div style="padding:1rem;color:#ef4444;font-size:0.8rem;">Failed to load pipelines.</div>';
   }
+}
+
+function fetchAvailableTools(callback) {
+  fetch('/api/tools')
+    .then(function(res) { return res.json(); })
+    .then(function(data) {
+      toolsCache = data.tools || [];
+      if (callback) callback(toolsCache);
+    })
+    .catch(function() { toolsCache = []; });
+}
+
+function getToolDef(toolName) {
+  for (var i = 0; i < toolsCache.length; i++) {
+    if (toolsCache[i].name === toolName) return toolsCache[i];
+  }
+  return null;
 }
 
 async function fetchCompositionDetail(id) {
@@ -157,11 +241,13 @@ async function saveComposition(comp) {
   return data;
 }
 
-async function createComposition(name, description) {
+async function createComposition(name, description, folder) {
+  var body = { name: name, description: description };
+  if (folder) body.folder = folder;
   var res = await fetch('/api/compositions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name: name, description: description }),
+    body: JSON.stringify(body),
   });
   var data = await res.json();
   if (!res.ok) throw new Error(data.error || 'Create failed');
@@ -341,7 +427,7 @@ function computeValidationWarnings() {
     }
 
     // Missing workflows (skip special nodes)
-    if (node.workflowId !== '__approval_gate__' && node.workflowId !== '__script__' && node.workflowId !== '__output__' && node.workflowId !== '__image_viewer__' && node.workflowId !== '__branch__' && node.workflowId !== '__delay__' && node.workflowId !== '__gate__' && node.workflowId !== '__for_each__' && node.workflowId !== '__switch__' && !node.workflowId.startsWith('comp:')) {
+    if (node.workflowId !== '__approval_gate__' && node.workflowId !== '__script__' && node.workflowId !== '__output__' && node.workflowId !== '__image_viewer__' && node.workflowId !== '__branch__' && node.workflowId !== '__delay__' && node.workflowId !== '__gate__' && node.workflowId !== '__for_each__' && node.workflowId !== '__switch__' && node.workflowId !== '__asset__' && node.workflowId !== '__text__' && node.workflowId !== '__file_op__' && node.workflowId !== '__json_keys__' && node.workflowId !== '__tool__' && !node.workflowId.startsWith('comp:')) {
       var wf = getWorkflowForNode(node);
       if (!wf) {
         warnings.push({ nodeId: node.id, type: 'missing', message: 'Workflow was deleted or renamed' });
@@ -359,41 +445,133 @@ function computeValidationWarnings() {
 
 // ── Sidebar ──────────────────────────────────────────────────
 
+function renderTreeItem(c, indent) {
+  var active = selectedComposition === c.id ? ' active' : '';
+  var pad = indent || 0;
+  return '<div class="tree-item' + active + '" data-comp-id="' + compEscAttr(c.id) + '" draggable="true" style="padding-left:' + (8 + pad * 16) + 'px;">' +
+    '<svg class="tree-icon" width="16" height="16" viewBox="0 0 16 16"><path d="M4 3h8a1 1 0 011 1v1H3V4a1 1 0 011-1zm-1 3h10v6a1 1 0 01-1 1H4a1 1 0 01-1-1V6z" fill="#94a3b8" opacity="0.5"/></svg>' +
+    '<span class="tree-item-name">' + compEscHtml(c.name) + '</span>' +
+  '</div>';
+}
+
+function getUniqueFolders() {
+  var folders = [];
+  for (var i = 0; i < compositions.length; i++) {
+    var f = compositions[i].folder || '';
+    if (f && folders.indexOf(f) === -1) folders.push(f);
+  }
+  // Include empty folders created via "New Folder" button
+  if (window._emptyFolders) {
+    for (var j = 0; j < window._emptyFolders.length; j++) {
+      if (folders.indexOf(window._emptyFolders[j]) === -1) folders.push(window._emptyFolders[j]);
+    }
+  }
+  folders.sort();
+  return folders;
+}
+
 function renderCompSidebar() {
   var list = document.querySelector('#comp-list');
   if (!list) return;
 
-  var html = '<div style="padding:0.5rem;">';
-  html += '<button class="btn-new-comp" id="btn-new-comp" style="width:100%;padding:0.5rem;background:#7c3aed;color:white;border:none;border-radius:6px;cursor:pointer;font-size:0.8rem;margin-bottom:0.5rem;">';
-  html += '+ New Pipeline</button>';
+  var html = '';
+  // Toolbar row with New Folder, New Pipeline, Refresh buttons
+  html += '<div class="comp-sidebar-toolbar">';
+  html += '<span class="comp-sidebar-toolbar-title">PIPELINES</span>';
+  html += '<div class="comp-sidebar-toolbar-actions">';
+  // New Pipeline
+  html += '<button class="comp-toolbar-btn" id="btn-new-comp" title="New Pipeline"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></button>';
+  // New Folder
+  html += '<button class="comp-toolbar-btn" id="btn-new-folder" title="New Folder"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M1.5 2h4l1 1.5H14a.5.5 0 01.5.5v9a.5.5 0 01-.5.5H2a.5.5 0 01-.5-.5V2z" fill="none" stroke="currentColor" stroke-width="1" opacity="0.9"/><path d="M8 6.5v5M5.5 9h5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg></button>';
+  // Refresh
+  html += '<button class="comp-toolbar-btn" id="btn-refresh-comps" title="Refresh"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M13.5 8a5.5 5.5 0 01-9.78 3.4M2.5 8a5.5 5.5 0 019.78-3.4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><path d="M13.5 3.5v4h-4M2.5 12.5v-4h4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg></button>';
+  html += '</div></div>';
+  html += '<div style="padding:0 0.5rem 0.5rem;">';
   html += '<input type="text" class="comp-sidebar-search" id="comp-sidebar-search" placeholder="Search pipelines...">';
   html += '</div>';
 
   if (compositions.length === 0) {
     html += '<div style="padding:1rem;color:#64748b;font-size:0.8rem;">No pipelines yet. Create one to chain workflows together.</div>';
   } else {
-    html += compositions.map(function(c) {
-      var active = selectedComposition === c.id ? ' active' : '';
-      return '<div class="ext-item' + active + '" data-comp-id="' + compEscAttr(c.id) + '">' +
-        '<div class="ext-item-name">' + compEscHtml(c.name) + '</div>' +
-        '<div class="ext-item-meta">' + c.nodeCount + ' step' + (c.nodeCount !== 1 ? 's' : '') + ' &middot; ' + c.edgeCount + ' connection' + (c.edgeCount !== 1 ? 's' : '') + '</div>' +
-      '</div>';
-    }).join('');
+    var folders = getUniqueFolders();
+    var unfiled = compositions.filter(function(c) { return !c.folder; });
+
+    // Render folders as tree nodes
+    for (var fi = 0; fi < folders.length; fi++) {
+      var folder = folders[fi];
+      var folderComps = compositions.filter(function(c) { return c.folder === folder; });
+      var isCollapsed = !!collapsedFolders[folder];
+      html += '<div class="tree-folder" data-folder="' + compEscAttr(folder) + '">';
+      html += '<div class="tree-folder-row" data-folder="' + compEscAttr(folder) + '">';
+      html += '<svg class="tree-chevron' + (isCollapsed ? ' collapsed' : '') + '" width="16" height="16" viewBox="0 0 16 16"><path d="M6 4l4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+      html += '<svg class="tree-icon" width="16" height="16" viewBox="0 0 16 16">';
+      if (isCollapsed) {
+        html += '<path d="M1.5 2h4l1 1.5H14a.5.5 0 01.5.5v9a.5.5 0 01-.5.5H2a.5.5 0 01-.5-.5V2z" fill="#c4a35a" opacity="0.85"/>';
+      } else {
+        html += '<path d="M1.5 2h4l1 1.5H14a.5.5 0 01.5.5V5H1.5V2z" fill="#c4a35a" opacity="0.85"/><path d="M1.5 5h13v8a.5.5 0 01-.5.5H2a.5.5 0 01-.5-.5V5z" fill="#c4a35a" opacity="0.6"/>';
+      }
+      html += '</svg>';
+      html += '<span class="tree-folder-name">' + compEscHtml(folder) + '</span>';
+      html += '</div>';
+      html += '<div class="tree-folder-children"' + (isCollapsed ? ' style="display:none;"' : '') + '>';
+      for (var ci = 0; ci < folderComps.length; ci++) {
+        html += renderTreeItem(folderComps[ci], 1);
+      }
+      html += '</div></div>';
+    }
+
+    // Render unfiled compositions at root level
+    for (var ui = 0; ui < unfiled.length; ui++) {
+      html += renderTreeItem(unfiled[ui], 0);
+    }
+
+    // Root drop zone — drop here to remove from folder
+    html += '<div class="tree-root-drop" id="tree-root-drop" style="min-height:24px;"></div>';
   }
 
   list.innerHTML = html;
 
-  // Wire up clicks
+  // Wire up toolbar clicks
   var newBtn = document.querySelector('#btn-new-comp');
   if (newBtn) {
     newBtn.addEventListener('click', function() {
       showCreateForm();
     });
   }
+  var newFolderBtn = document.querySelector('#btn-new-folder');
+  if (newFolderBtn) {
+    newFolderBtn.addEventListener('click', function() {
+      showNewFolderModal();
+    });
+  }
+  var refreshBtn = document.querySelector('#btn-refresh-comps');
+  if (refreshBtn) {
+    refreshBtn.addEventListener('click', function() {
+      fetchCompositions();
+    });
+  }
 
-  list.querySelectorAll('.ext-item[data-comp-id]').forEach(function(el) {
+  list.querySelectorAll('.tree-item[data-comp-id]').forEach(function(el) {
     el.addEventListener('click', function() {
       selectComposition(el.dataset.compId);
+    });
+    el.addEventListener('contextmenu', function(e) {
+      e.preventDefault();
+      showCompContextMenu(e.clientX, e.clientY, el.dataset.compId);
+    });
+  });
+
+  // Wire up folder row clicks (expand/collapse)
+  list.querySelectorAll('.tree-folder-row').forEach(function(row) {
+    row.addEventListener('click', function() {
+      var folder = row.dataset.folder;
+      collapsedFolders[folder] = !collapsedFolders[folder];
+      // Re-render to update folder icon (open vs closed)
+      renderCompSidebar();
+    });
+    row.addEventListener('contextmenu', function(e) {
+      e.preventDefault();
+      showFolderContextMenu(e.clientX, e.clientY, row.dataset.folder);
     });
   });
 
@@ -402,12 +580,449 @@ function renderCompSidebar() {
   if (searchInput) {
     searchInput.addEventListener('input', function() {
       var q = searchInput.value.toLowerCase().trim();
-      list.querySelectorAll('.ext-item[data-comp-id]').forEach(function(el) {
-        var name = (el.querySelector('.ext-item-name') || {}).textContent || '';
+      list.querySelectorAll('.tree-item[data-comp-id]').forEach(function(el) {
+        var name = (el.querySelector('.tree-item-name') || {}).textContent || '';
         el.style.display = (!q || name.toLowerCase().indexOf(q) !== -1) ? '' : 'none';
+      });
+      list.querySelectorAll('.tree-folder').forEach(function(grp) {
+        var children = grp.querySelector('.tree-folder-children');
+        var chevron = grp.querySelector('.tree-chevron');
+        var folder = grp.dataset.folder;
+        if (q) {
+          children.style.display = '';
+          if (chevron) chevron.classList.remove('collapsed');
+          var anyVisible = false;
+          children.querySelectorAll('.tree-item').forEach(function(item) {
+            if (item.style.display !== 'none') anyVisible = true;
+          });
+          grp.style.display = anyVisible ? '' : 'none';
+        } else {
+          grp.style.display = '';
+          if (collapsedFolders[folder]) {
+            children.style.display = 'none';
+            if (chevron) chevron.classList.add('collapsed');
+          }
+        }
       });
     });
   }
+
+  // ── Drag & Drop ──────────────────────────────────────────
+  // Drag start on tree items
+  list.querySelectorAll('.tree-item[data-comp-id]').forEach(function(el) {
+    el.addEventListener('dragstart', function(e) {
+      e.dataTransfer.setData('text/plain', el.dataset.compId);
+      e.dataTransfer.effectAllowed = 'move';
+      el.classList.add('tree-item-dragging');
+      // Expand collapsed folders after a short delay while dragging
+      window._dragCompId = el.dataset.compId;
+    });
+    el.addEventListener('dragend', function() {
+      el.classList.remove('tree-item-dragging');
+      window._dragCompId = null;
+      // Clear all drag-over highlights
+      list.querySelectorAll('.tree-drag-over').forEach(function(d) {
+        d.classList.remove('tree-drag-over');
+      });
+    });
+  });
+
+  // Drop targets: folder rows
+  list.querySelectorAll('.tree-folder-row').forEach(function(row) {
+    row.addEventListener('dragover', function(e) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      row.classList.add('tree-drag-over');
+      // Auto-expand collapsed folder on hover
+      var folder = row.dataset.folder;
+      if (collapsedFolders[folder]) {
+        if (!row._expandTimer) {
+          row._expandTimer = setTimeout(function() {
+            collapsedFolders[folder] = false;
+            renderCompSidebar();
+          }, 600);
+        }
+      }
+    });
+    row.addEventListener('dragleave', function(e) {
+      // Only remove highlight if actually leaving the row (not entering a child)
+      if (!row.contains(e.relatedTarget)) {
+        row.classList.remove('tree-drag-over');
+        if (row._expandTimer) { clearTimeout(row._expandTimer); row._expandTimer = null; }
+      }
+    });
+    row.addEventListener('drop', function(e) {
+      e.preventDefault();
+      row.classList.remove('tree-drag-over');
+      if (row._expandTimer) { clearTimeout(row._expandTimer); row._expandTimer = null; }
+      var compId = e.dataTransfer.getData('text/plain');
+      var targetFolder = row.dataset.folder;
+      if (!compId || !targetFolder) return;
+      // Don't move if already in this folder
+      var comp = compositions.find(function(c) { return c.id === compId; });
+      if (comp && comp.folder === targetFolder) return;
+      // Move via API
+      fetch('/api/compositions/' + encodeURIComponent(compId) + '/move', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ folder: targetFolder }),
+      }).then(function() {
+        return fetchCompositions();
+      });
+    });
+  });
+
+  // Drop on folder children area (also counts as dropping into that folder)
+  list.querySelectorAll('.tree-folder').forEach(function(folderEl) {
+    var childrenDiv = folderEl.querySelector('.tree-folder-children');
+    if (!childrenDiv) return;
+    childrenDiv.addEventListener('dragover', function(e) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      folderEl.querySelector('.tree-folder-row').classList.add('tree-drag-over');
+    });
+    childrenDiv.addEventListener('dragleave', function(e) {
+      if (!childrenDiv.contains(e.relatedTarget)) {
+        folderEl.querySelector('.tree-folder-row').classList.remove('tree-drag-over');
+      }
+    });
+    childrenDiv.addEventListener('drop', function(e) {
+      e.preventDefault();
+      e.stopPropagation();
+      folderEl.querySelector('.tree-folder-row').classList.remove('tree-drag-over');
+      var compId = e.dataTransfer.getData('text/plain');
+      var targetFolder = folderEl.dataset.folder;
+      if (!compId || !targetFolder) return;
+      var comp = compositions.find(function(c) { return c.id === compId; });
+      if (comp && comp.folder === targetFolder) return;
+      fetch('/api/compositions/' + encodeURIComponent(compId) + '/move', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ folder: targetFolder }),
+      }).then(function() {
+        return fetchCompositions();
+      });
+    });
+  });
+
+  // Root drop zone — drop here to remove from any folder
+  var rootDrop = list.querySelector('#tree-root-drop');
+  if (rootDrop) {
+    rootDrop.addEventListener('dragover', function(e) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      rootDrop.classList.add('tree-drag-over');
+    });
+    rootDrop.addEventListener('dragleave', function(e) {
+      if (!rootDrop.contains(e.relatedTarget)) {
+        rootDrop.classList.remove('tree-drag-over');
+      }
+    });
+    rootDrop.addEventListener('drop', function(e) {
+      e.preventDefault();
+      rootDrop.classList.remove('tree-drag-over');
+      var compId = e.dataTransfer.getData('text/plain');
+      if (!compId) return;
+      var comp = compositions.find(function(c) { return c.id === compId; });
+      if (comp && !comp.folder) return; // already unfiled
+      fetch('/api/compositions/' + encodeURIComponent(compId) + '/move', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ folder: '' }),
+      }).then(function() {
+        return fetchCompositions();
+      });
+    });
+  }
+}
+
+function showFolderContextMenu(x, y, folderName) {
+  dismissCompContextMenu();
+  var menu = document.createElement('div');
+  menu.className = 'comp-context-menu';
+  menu.style.left = x + 'px';
+  menu.style.top = y + 'px';
+
+  menu.innerHTML =
+    '<div class="comp-context-item" data-action="rename-folder">Rename Folder</div>' +
+    '<div class="comp-context-item comp-context-danger" data-action="delete-folder">Delete Folder</div>';
+
+  document.body.appendChild(menu);
+
+  var rect = menu.getBoundingClientRect();
+  if (rect.right > window.innerWidth) menu.style.left = (x - rect.width) + 'px';
+  if (rect.bottom > window.innerHeight) menu.style.top = (y - rect.height) + 'px';
+
+  menu.addEventListener('click', function(e) {
+    var action = e.target.dataset.action;
+    dismissCompContextMenu();
+    if (action === 'rename-folder') {
+      var newName = prompt('Rename folder:', folderName);
+      if (newName && newName.trim() && newName.trim() !== folderName) {
+        // Move all compositions in this folder to the new name
+        var folderComps = compositions.filter(function(c) { return c.folder === folderName; });
+        var promises = folderComps.map(function(c) {
+          return fetch('/api/compositions/' + encodeURIComponent(c.id) + '/move', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ folder: newName.trim() }),
+          });
+        });
+        Promise.all(promises).then(function() {
+          // Transfer collapsed state
+          collapsedFolders[newName.trim()] = collapsedFolders[folderName];
+          delete collapsedFolders[folderName];
+          return fetchCompositions();
+        }).catch(function(err) {
+          toast('Rename failed: ' + err.message, 'error');
+        });
+      }
+    } else if (action === 'delete-folder') {
+      var folderComps = compositions.filter(function(c) { return c.folder === folderName; });
+      if (confirm('Remove folder "' + folderName + '"? The ' + folderComps.length + ' pipeline(s) inside will become unfiled.')) {
+        var promises = folderComps.map(function(c) {
+          return fetch('/api/compositions/' + encodeURIComponent(c.id) + '/move', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ folder: '' }),
+          });
+        });
+        Promise.all(promises).then(function() {
+          delete collapsedFolders[folderName];
+          return fetchCompositions();
+        }).catch(function(err) {
+          toast('Delete folder failed: ' + err.message, 'error');
+        });
+      }
+    }
+  });
+
+  setTimeout(function() {
+    document.addEventListener('click', dismissCompContextMenu, { once: true });
+  }, 0);
+}
+
+// ── Context Menu & Folder Management ─────────────────────────
+
+function dismissCompContextMenu() {
+  var existing = document.querySelector('.comp-context-menu');
+  if (existing) existing.remove();
+}
+
+function showCompContextMenu(x, y, compId) {
+  dismissCompContextMenu();
+  var menu = document.createElement('div');
+  menu.className = 'comp-context-menu';
+  menu.style.left = x + 'px';
+  menu.style.top = y + 'px';
+
+  var comp = compositions.find(function(c) { return c.id === compId; });
+  var compName = comp ? comp.name : compId;
+
+  menu.innerHTML =
+    '<div class="comp-context-item" data-action="move">Move to Folder...</div>' +
+    '<div class="comp-context-item" data-action="rename">Rename</div>' +
+    '<div class="comp-context-item" data-action="duplicate">Duplicate</div>' +
+    '<div class="comp-context-item comp-context-danger" data-action="delete">Delete</div>';
+
+  document.body.appendChild(menu);
+
+  // Keep menu in viewport
+  var rect = menu.getBoundingClientRect();
+  if (rect.right > window.innerWidth) menu.style.left = (x - rect.width) + 'px';
+  if (rect.bottom > window.innerHeight) menu.style.top = (y - rect.height) + 'px';
+
+  menu.addEventListener('click', function(e) {
+    var action = e.target.dataset.action;
+    dismissCompContextMenu();
+    if (action === 'move') {
+      showMoveToFolderModal(compId);
+    } else if (action === 'rename') {
+      var newName = prompt('Rename pipeline:', compName);
+      if (newName && newName.trim() && newName.trim() !== compName) {
+        renameComposition(compId, newName.trim()).then(function() {
+          return fetchCompositions();
+        }).catch(function(err) {
+          toast('Rename failed: ' + err.message, 'error');
+        });
+      }
+    } else if (action === 'duplicate') {
+      fetch('/api/compositions/' + encodeURIComponent(compId) + '/duplicate', { method: 'POST' })
+        .then(function(r) { return r.json(); })
+        .then(function() { return fetchCompositions(); })
+        .catch(function(err) { toast('Duplicate failed: ' + err.message, 'error'); });
+    } else if (action === 'delete') {
+      if (confirm('Delete "' + compName + '"? This cannot be undone.')) {
+        deleteComposition(compId).then(function() {
+          if (selectedComposition === compId) {
+            selectedComposition = null;
+            compData = null;
+            document.querySelector('#main').innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#64748b;">Select a pipeline or create a new one</div>';
+          }
+          return fetchCompositions();
+        }).catch(function(err) {
+          toast('Delete failed: ' + err.message, 'error');
+        });
+      }
+    }
+  });
+
+  // Dismiss on click outside
+  setTimeout(function() {
+    document.addEventListener('click', dismissCompContextMenu, { once: true });
+  }, 0);
+}
+
+function showNewFolderModal() {
+  var overlay = document.createElement('div');
+  overlay.className = 'comp-modal-overlay';
+  overlay.innerHTML =
+    '<div class="comp-modal" style="width:340px;">' +
+      '<h3 style="margin:0 0 16px;font-size:16px;color:#e2e8f0;">New Folder</h3>' +
+      '<div style="margin-bottom:16px;">' +
+        '<label style="display:block;font-size:12px;color:#94a3b8;margin-bottom:6px;">Folder Name</label>' +
+        '<input type="text" id="new-folder-name-input" placeholder="e.g. Content Pipelines" style="width:100%;padding:8px 10px;border-radius:6px;border:1px solid #334155;background:#0f172a;color:#e2e8f0;font-size:13px;outline:none;box-sizing:border-box;">' +
+      '</div>' +
+      '<div style="display:flex;gap:8px;justify-content:flex-end;">' +
+        '<button id="new-folder-cancel" style="padding:8px 16px;border-radius:6px;background:transparent;border:1px solid #334155;color:#94a3b8;cursor:pointer;font-size:13px;">Cancel</button>' +
+        '<button id="new-folder-create" style="padding:8px 16px;border-radius:6px;background:#7c3aed;border:none;color:#fff;cursor:pointer;font-size:13px;font-weight:600;">Create</button>' +
+      '</div>' +
+    '</div>';
+
+  document.body.appendChild(overlay);
+
+  var input = overlay.querySelector('#new-folder-name-input');
+  input.focus();
+
+  function doCreate() {
+    var name = input.value.trim();
+    if (!name) { input.style.borderColor = '#ef4444'; return; }
+    // Check for duplicate
+    var existing = getUniqueFolders();
+    if (existing.indexOf(name) !== -1) {
+      input.style.borderColor = '#ef4444';
+      input.value = '';
+      input.placeholder = 'Folder already exists';
+      return;
+    }
+    if (!window._emptyFolders) window._emptyFolders = [];
+    window._emptyFolders.push(name);
+    collapsedFolders[name] = false;
+    document.body.removeChild(overlay);
+    renderCompSidebar();
+  }
+
+  overlay.querySelector('#new-folder-create').addEventListener('click', doCreate);
+  overlay.querySelector('#new-folder-cancel').addEventListener('click', function() {
+    document.body.removeChild(overlay);
+  });
+  overlay.addEventListener('click', function(e) {
+    if (e.target === overlay) document.body.removeChild(overlay);
+  });
+  input.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') doCreate();
+    if (e.key === 'Escape') document.body.removeChild(overlay);
+  });
+  input.addEventListener('input', function() {
+    input.style.borderColor = '#334155';
+  });
+}
+
+function showMoveToFolderModal(compId) {
+  var comp = compositions.find(function(c) { return c.id === compId; });
+  if (!comp) return;
+
+  var folders = getUniqueFolders();
+  var overlay = document.createElement('div');
+  overlay.className = 'comp-modal-overlay';
+  overlay.innerHTML =
+    '<div class="comp-modal" style="width:320px;">' +
+      '<h3 style="margin:0 0 16px;font-size:16px;color:#e2e8f0;">Move to Folder</h3>' +
+      '<div style="font-size:12px;color:#94a3b8;margin-bottom:12px;">Moving: <strong style="color:#e2e8f0;">' + compEscHtml(comp.name) + '</strong></div>' +
+      '<div id="folder-options" style="max-height:200px;overflow:auto;margin-bottom:12px;">' +
+        '<div class="folder-option' + (!comp.folder ? ' selected' : '') + '" data-folder="" style="padding:8px 12px;border-radius:6px;cursor:pointer;font-size:13px;color:#94a3b8;">No Folder (Unfiled)</div>' +
+        folders.map(function(f) {
+          return '<div class="folder-option' + (comp.folder === f ? ' selected' : '') + '" data-folder="' + compEscAttr(f) + '" style="padding:8px 12px;border-radius:6px;cursor:pointer;font-size:13px;color:#e2e8f0;">' + compEscHtml(f) + '</div>';
+        }).join('') +
+      '</div>' +
+      '<div style="display:flex;gap:8px;margin-bottom:16px;">' +
+        '<input type="text" id="new-folder-input" placeholder="New folder name..." style="flex:1;padding:6px 10px;border-radius:6px;border:1px solid #334155;background:#0f172a;color:#e2e8f0;font-size:13px;outline:none;">' +
+        '<button id="new-folder-btn" style="padding:6px 12px;border-radius:6px;background:rgba(124,58,237,0.2);border:1px solid rgba(124,58,237,0.3);color:#a78bfa;cursor:pointer;font-size:12px;white-space:nowrap;">+ Create</button>' +
+      '</div>' +
+      '<div style="display:flex;gap:8px;justify-content:flex-end;">' +
+        '<button id="folder-cancel-btn" style="padding:8px 16px;border-radius:6px;background:transparent;border:1px solid #334155;color:#94a3b8;cursor:pointer;font-size:13px;">Cancel</button>' +
+        '<button id="folder-move-btn" style="padding:8px 16px;border-radius:6px;background:#7c3aed;border:none;color:#fff;cursor:pointer;font-size:13px;font-weight:600;">Move</button>' +
+      '</div>' +
+    '</div>';
+
+  document.body.appendChild(overlay);
+
+  var chosenFolder = comp.folder || '';
+
+  // Wire folder option clicks
+  overlay.querySelectorAll('.folder-option').forEach(function(opt) {
+    opt.addEventListener('click', function() {
+      overlay.querySelectorAll('.folder-option').forEach(function(o) { o.classList.remove('selected'); });
+      opt.classList.add('selected');
+      chosenFolder = opt.dataset.folder;
+    });
+  });
+
+  // Create new folder
+  var newFolderBtn = overlay.querySelector('#new-folder-btn');
+  var newFolderInput = overlay.querySelector('#new-folder-input');
+  newFolderBtn.addEventListener('click', function() {
+    var name = newFolderInput.value.trim();
+    if (!name) return;
+    // Add as new option and select it
+    var optionsDiv = overlay.querySelector('#folder-options');
+    var newOpt = document.createElement('div');
+    newOpt.className = 'folder-option selected';
+    newOpt.dataset.folder = name;
+    newOpt.style.cssText = 'padding:8px 12px;border-radius:6px;cursor:pointer;font-size:13px;color:#e2e8f0;';
+    newOpt.textContent = name;
+    overlay.querySelectorAll('.folder-option').forEach(function(o) { o.classList.remove('selected'); });
+    optionsDiv.appendChild(newOpt);
+    chosenFolder = name;
+    newFolderInput.value = '';
+    newOpt.addEventListener('click', function() {
+      overlay.querySelectorAll('.folder-option').forEach(function(o) { o.classList.remove('selected'); });
+      newOpt.classList.add('selected');
+      chosenFolder = name;
+    });
+  });
+
+  // Enter key creates folder
+  newFolderInput.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') newFolderBtn.click();
+  });
+
+  // Cancel
+  overlay.querySelector('#folder-cancel-btn').addEventListener('click', function() {
+    overlay.remove();
+  });
+  overlay.addEventListener('click', function(e) {
+    if (e.target === overlay) overlay.remove();
+  });
+
+  // Move
+  overlay.querySelector('#folder-move-btn').addEventListener('click', function() {
+    fetch('/api/compositions/' + encodeURIComponent(compId) + '/move', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ folder: chosenFolder }),
+    })
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        if (data.error) throw new Error(data.error);
+        overlay.remove();
+        toast('Moved to ' + (chosenFolder || 'Unfiled'), 'success');
+        return fetchCompositions();
+      })
+      .catch(function(err) {
+        toast('Move failed: ' + err.message, 'error');
+      });
+  });
 }
 
 function showCreateForm() {
@@ -418,7 +1033,15 @@ function showCreateForm() {
       '<label>Name</label>' +
       '<input type="text" id="comp-name-input" placeholder="e.g. Song Pipeline" style="width:100%;padding:0.5rem;background:#0f172a;border:1px solid #334155;color:#e2e8f0;border-radius:6px;margin-bottom:0.75rem;">' +
       '<label>Description (optional)</label>' +
-      '<input type="text" id="comp-desc-input" placeholder="What does this pipeline do?" style="width:100%;padding:0.5rem;background:#0f172a;border:1px solid #334155;color:#e2e8f0;border-radius:6px;margin-bottom:1rem;">' +
+      '<input type="text" id="comp-desc-input" placeholder="What does this pipeline do?" style="width:100%;padding:0.5rem;background:#0f172a;border:1px solid #334155;color:#e2e8f0;border-radius:6px;margin-bottom:0.75rem;">' +
+      '<label>Folder (optional)</label>' +
+      '<div style="display:flex;gap:8px;margin-bottom:1rem;">' +
+        '<select id="comp-folder-input" style="flex:1;padding:0.5rem;background:#0f172a;border:1px solid #334155;color:#e2e8f0;border-radius:6px;font-size:13px;">' +
+          '<option value="">No Folder</option>' +
+          getUniqueFolders().map(function(f) { return '<option value="' + compEscAttr(f) + '">' + compEscHtml(f) + '</option>'; }).join('') +
+        '</select>' +
+        '<input type="text" id="comp-folder-new" placeholder="or type new..." style="flex:1;padding:0.5rem;background:#0f172a;border:1px solid #334155;color:#e2e8f0;border-radius:6px;font-size:13px;">' +
+      '</div>' +
       '<div class="comp-template-section">' +
         '<div class="comp-template-label">Or start from a pattern:</div>' +
         '<div class="comp-template-card" data-tmpl-name="Two-Step Chain" data-tmpl-desc="Run one workflow, pass its output to the next">' +
@@ -455,10 +1078,13 @@ function showCreateForm() {
   document.querySelector('#comp-create-btn').addEventListener('click', async function() {
     var nameInput = document.querySelector('#comp-name-input');
     var descInput = document.querySelector('#comp-desc-input');
+    var folderSelect = document.querySelector('#comp-folder-input');
+    var folderNewInput = document.querySelector('#comp-folder-new');
     var name = nameInput.value.trim();
     if (!name) { toast('Give your pipeline a name', 'error'); return; }
+    var folder = (folderNewInput.value.trim()) || (folderSelect ? folderSelect.value : '');
     try {
-      var result = await createComposition(name, descInput.value.trim());
+      var result = await createComposition(name, descInput.value.trim(), folder);
       toast('Pipeline created!', 'success');
       await fetchCompositions();
       selectComposition(result.composition.id);
@@ -488,7 +1114,7 @@ async function selectComposition(id) {
   }
 
   // Update sidebar active state
-  document.querySelectorAll('#comp-list .ext-item').forEach(function(el) {
+  document.querySelectorAll('#comp-list .tree-item').forEach(function(el) {
     el.classList.toggle('active', el.dataset.compId === id);
   });
 
@@ -496,10 +1122,11 @@ async function selectComposition(id) {
   main.innerHTML = '<div class="loading"><div class="spinner"></div> Loading...</div>';
 
   try {
-    // Fetch composition and workflow data in parallel
+    // Fetch composition, workflow, and tools data in parallel
     var [compResult] = await Promise.all([
       fetchCompositionDetail(id),
       fetchWorkflowsForNodes(),
+      new Promise(function(resolve) { fetchAvailableTools(resolve); }),
     ]);
 
     compData = compResult.composition;
@@ -543,6 +1170,7 @@ function renderGraphEditor() {
   }
   html += '</div>';
   html += '<div class="comp-toolbar-right">';
+  html += '<button class="comp-tb-btn comp-tb-btn-generate" id="comp-generate-pipeline" title="Generate a multi-step pipeline from a description">&#x2728; Generate</button>';
   html += '<div class="comp-add-dropdown-wrap" id="comp-add-dropdown-wrap">';
   html += '<button class="comp-tb-btn comp-tb-btn-add" id="comp-add-dropdown-toggle" title="Add a node">+ Add Node &#x25be;</button>' + helpIcon('pipelines-nodes');
   html += '<div class="comp-add-dropdown" id="comp-add-dropdown" style="display:none;">';
@@ -559,6 +1187,12 @@ function renderGraphEditor() {
   html += '<button class="comp-add-dropdown-item comp-add-dropdown-gatenode" id="comp-add-gate-node">&#x26d4; Gate</button>';
   html += '<button class="comp-add-dropdown-item comp-add-dropdown-loop" id="comp-add-loop">&#x1f504; ForEach Loop</button>';
   html += '<button class="comp-add-dropdown-item comp-add-dropdown-switch" id="comp-add-switch">&#x2b82; Switch</button>';
+  html += '<div class="comp-add-dropdown-group-label">Data</div>';
+  html += '<button class="comp-add-dropdown-item comp-add-dropdown-asset" id="comp-add-asset">&#x1f4be; Asset</button>';
+  html += '<button class="comp-add-dropdown-item comp-add-dropdown-text" id="comp-add-text">&#x1f4dd; Text</button>';
+  html += '<button class="comp-add-dropdown-item comp-add-dropdown-file-op" id="comp-add-file-op">&#x1f4c1; File Op</button>';
+  html += '<button class="comp-add-dropdown-item comp-add-dropdown-json-keys" id="comp-add-json-keys">&#x1f5dd; JSON Extract</button>';
+  html += '<button class="comp-add-dropdown-item comp-add-dropdown-tool" id="comp-add-tool">&#x1f527; Tool</button>';
   html += '</div>';
   html += '</div>';
   html += '<button class="comp-tb-btn" id="comp-undo-btn" title="Undo (Ctrl+Z)" disabled>&#x21a9;</button>';
@@ -671,8 +1305,13 @@ function renderNodes() {
     var isGateNode = node.workflowId === '__gate__';
     var isForEach = node.workflowId === '__for_each__';
     var isSwitch = node.workflowId === '__switch__';
+    var isAsset = node.workflowId === '__asset__';
+    var isText = node.workflowId === '__text__';
+    var isFileOp = node.workflowId === '__file_op__';
+    var isJsonKeys = node.workflowId === '__json_keys__';
+    var isTool = node.workflowId === '__tool__';
     var isFlowControl = isBranch || isDelay || isGateNode || isForEach || isSwitch;
-    var isSpecial = isGate || isScript || isOutput || isComposition || isImageViewer || isFlowControl;
+    var isSpecial = isGate || isScript || isOutput || isComposition || isImageViewer || isFlowControl || isAsset || isText || isFileOp || isJsonKeys || isTool;
     var wf = isSpecial ? null : getWorkflowForNode(node);
     var isSelected = selectedNodes.has(node.id);
     var nodeWarnings = warnings.filter(function(w) { return w.nodeId === node.id; });
@@ -686,6 +1325,11 @@ function renderNodes() {
         : isGateNode ? 'Gate'
         : isForEach ? 'ForEach Loop'
         : isSwitch ? 'Switch'
+        : isAsset ? 'Asset'
+        : isText ? 'Text'
+        : isFileOp ? (node.fileOp ? ({ copy: 'Copy File', move: 'Move File', delete: 'Delete File', mkdir: 'Create Folder', list: 'List Files' }[node.fileOp.operation] || 'File Op') : 'File Op')
+        : isJsonKeys ? 'JSON Extract'
+        : isTool ? (node.toolNode && node.toolNode.selectedTool ? node.toolNode.selectedTool : 'Tool')
         : isComposition ? 'Pipeline'
         : (wf ? wf.name : node.workflowId));
 
@@ -704,6 +1348,10 @@ function renderNodes() {
     if (isGateNode) nodeClass += ' comp-node-gate-node';
     if (isForEach) nodeClass += ' comp-node-for-each';
     if (isSwitch) nodeClass += ' comp-node-switch';
+    if (isAsset) nodeClass += ' comp-node-asset';
+    if (isText) nodeClass += ' comp-node-text';
+    if (isFileOp) nodeClass += ' comp-node-file-op';
+    if (isTool) nodeClass += ' comp-node-tool';
     if (isSelected) nodeClass += ' comp-node-selected';
     html += '<div class="' + nodeClass + '" data-node-id="' + compEscAttr(node.id) + '" style="left:' + node.position.x + 'px;top:' + node.position.y + 'px;' + nodeWidthStyle + '">';
 
@@ -724,7 +1372,7 @@ function renderNodes() {
       html += '<span class="comp-node-output-icon">&#x1f4e4;</span>';
       html += '<span class="comp-node-name">' + compEscHtml(displayName) + '</span>';
     } else if (isComposition) {
-      html += '<span class="comp-node-composition-icon">&#x1f517;</span>';
+      html += '<span class="comp-node-composition-icon comp-node-nav-link" title="Open pipeline" style="cursor:pointer;">&#x1f517;</span>';
       html += '<span class="comp-node-name">' + compEscHtml(displayName) + '</span>';
     } else if (isImageViewer) {
       html += '<span class="comp-node-image-viewer-icon">&#x1f5bc;</span>';
@@ -743,6 +1391,18 @@ function renderNodes() {
       html += '<span class="comp-node-name">' + compEscHtml(displayName) + '</span>';
     } else if (isSwitch) {
       html += '<span class="comp-node-flow-icon">&#x2b82;</span>';
+      html += '<span class="comp-node-name">' + compEscHtml(displayName) + '</span>';
+    } else if (isAsset) {
+      html += '<span class="comp-node-asset-icon">&#x1f4be;</span>';
+      html += '<span class="comp-node-name">' + compEscHtml(displayName) + '</span>';
+    } else if (isText) {
+      html += '<span class="comp-node-text-icon">&#x1f4dd;</span>';
+      html += '<span class="comp-node-name">' + compEscHtml(displayName) + '</span>';
+    } else if (isFileOp) {
+      html += '<span class="comp-node-file-op-icon">&#x1f4c1;</span>';
+      html += '<span class="comp-node-name">' + compEscHtml(displayName) + '</span>';
+    } else if (isTool) {
+      html += '<span class="comp-node-tool-icon">&#x1f527;</span>';
       html += '<span class="comp-node-name">' + compEscHtml(displayName) + '</span>';
     } else if (wf) {
       html += '<span class="comp-node-name">' + compEscHtml(displayName) + '</span>';
@@ -1053,7 +1713,7 @@ function renderNodes() {
       html += '</div>';
 
     } else if (isForEach) {
-      // ForEach node — 1 input (items), 3 outputs (current_item, results, count)
+      // ForEach node — UE-style: 1 input (items), 2 output groups (Loop Body / Completed)
       var feCfg = node.forEachNode || { itemVariable: 'item', maxIterations: 100 };
       html += '<div class="comp-node-body">';
       html += '<div class="comp-node-ports comp-node-inputs">';
@@ -1065,32 +1725,56 @@ function renderNodes() {
       html += '</div>';
       html += '</div>';
       html += '<div class="comp-node-ports comp-node-outputs">';
+
+      // ── Loop Body group (green) ──
+      html += '<div class="comp-port-group-label" style="color:#22c55e;font-size:0.55rem;padding:1px 4px;font-weight:600;">Loop Body</div>';
       // current_item output
       var feItemPortId = node.id + ':out:current_item';
       var feItemConn = isPortConnected(node.id, 'current_item', 'output');
       html += '<div class="comp-port comp-port-out' + (feItemConn ? ' comp-port-connected' : '') + '" data-port-id="' + compEscAttr(feItemPortId) + '" data-node-id="' + compEscAttr(node.id) + '" data-port-name="current_item" data-port-dir="out">';
       html += '<span class="comp-port-label" title="Current item in iteration">Item</span>';
-      html += '<div class="comp-port-dot comp-port-dot-out"></div>';
+      html += '<div class="comp-port-dot comp-port-dot-out" style="background:#22c55e;border-color:#16a34a;"></div>';
       html += '</div>';
+      // index output
+      var feIdxPortId = node.id + ':out:index';
+      var feIdxConn = isPortConnected(node.id, 'index', 'output');
+      html += '<div class="comp-port comp-port-out' + (feIdxConn ? ' comp-port-connected' : '') + '" data-port-id="' + compEscAttr(feIdxPortId) + '" data-node-id="' + compEscAttr(node.id) + '" data-port-name="index" data-port-dir="out">';
+      html += '<span class="comp-port-label" title="Current loop index (0-based)">Index</span>';
+      html += '<div class="comp-port-dot comp-port-dot-out" style="background:#22c55e;border-color:#16a34a;"></div>';
+      html += '</div>';
+      // count output (in loop body for convenience)
+      var feCntPortId = node.id + ':out:count';
+      var feCntConn = isPortConnected(node.id, 'count', 'output');
+      html += '<div class="comp-port comp-port-out' + (feCntConn ? ' comp-port-connected' : '') + '" data-port-id="' + compEscAttr(feCntPortId) + '" data-node-id="' + compEscAttr(node.id) + '" data-port-name="count" data-port-dir="out">';
+      html += '<span class="comp-port-label" title="Total number of items">Count</span>';
+      html += '<div class="comp-port-dot comp-port-dot-out" style="background:#22c55e;border-color:#16a34a;"></div>';
+      html += '</div>';
+
+      // ── Divider ──
+      html += '<div style="border-top:1px solid rgba(255,255,255,0.1);margin:3px 0;"></div>';
+
+      // ── Completed group (blue) ──
+      html += '<div class="comp-port-group-label" style="color:#38bdf8;font-size:0.55rem;padding:1px 4px;font-weight:600;">Completed</div>';
       // results output
       var feResPortId = node.id + ':out:results';
       var feResConn = isPortConnected(node.id, 'results', 'output');
       html += '<div class="comp-port comp-port-out' + (feResConn ? ' comp-port-connected' : '') + '" data-port-id="' + compEscAttr(feResPortId) + '" data-node-id="' + compEscAttr(node.id) + '" data-port-name="results" data-port-dir="out">';
-      html += '<span class="comp-port-label" title="All items (array)">Results</span>';
-      html += '<div class="comp-port-dot comp-port-dot-out"></div>';
+      html += '<span class="comp-port-label" title="Collected results from all iterations">Results</span>';
+      html += '<div class="comp-port-dot comp-port-dot-out" style="background:#38bdf8;border-color:#0ea5e9;"></div>';
       html += '</div>';
-      // count output
-      var feCntPortId = node.id + ':out:count';
-      var feCntConn = isPortConnected(node.id, 'count', 'output');
-      html += '<div class="comp-port comp-port-out' + (feCntConn ? ' comp-port-connected' : '') + '" data-port-id="' + compEscAttr(feCntPortId) + '" data-node-id="' + compEscAttr(node.id) + '" data-port-name="count" data-port-dir="out">';
-      html += '<span class="comp-port-label" title="Number of items">Count</span>';
-      html += '<div class="comp-port-dot comp-port-dot-out"></div>';
+      // total_count output
+      var feTcPortId = node.id + ':out:total_count';
+      var feTcConn = isPortConnected(node.id, 'total_count', 'output');
+      html += '<div class="comp-port comp-port-out' + (feTcConn ? ' comp-port-connected' : '') + '" data-port-id="' + compEscAttr(feTcPortId) + '" data-node-id="' + compEscAttr(node.id) + '" data-port-name="total_count" data-port-dir="out">';
+      html += '<span class="comp-port-label" title="Total iterations completed">Total Count</span>';
+      html += '<div class="comp-port-dot comp-port-dot-out" style="background:#38bdf8;border-color:#0ea5e9;"></div>';
       html += '</div>';
+
       html += '</div>';
       html += '</div>';
       // Footer
       html += '<div class="comp-node-footer">';
-      html += '<span style="color:#22c55e;font-size:0.6rem;">var: ' + compEscHtml(feCfg.itemVariable) + ' | max: ' + feCfg.maxIterations + '</span>';
+      html += '<span style="color:#22c55e;font-size:0.6rem;">max: ' + feCfg.maxIterations + '</span>';
       html += '</div>';
 
     } else if (isSwitch) {
@@ -1128,6 +1812,301 @@ function renderNodes() {
       // Footer
       html += '<div class="comp-node-footer">';
       html += '<span style="color:#f97316;font-size:0.6rem;">' + swCfg.cases.length + ' cases</span>';
+      html += '</div>';
+
+    } else if (isAsset) {
+      // Asset node — dynamic ports based on mode
+      var assetCfg = node.asset || { mode: 'pick' };
+      var assetMode = assetCfg.mode || 'pick';
+      html += '<div class="comp-node-body">';
+
+      // Inputs
+      html += '<div class="comp-node-ports comp-node-inputs">';
+      if (assetMode === 'save') {
+        var asSaveInPort1 = node.id + ':in:filePath';
+        var asSaveIn1Conn = isPortConnected(node.id, 'filePath', 'input');
+        html += '<div class="comp-port comp-port-in' + (asSaveIn1Conn ? ' comp-port-connected' : '') + '" data-port-id="' + compEscAttr(asSaveInPort1) + '" data-node-id="' + compEscAttr(node.id) + '" data-port-name="filePath" data-port-dir="in">';
+        html += '<div class="comp-port-dot comp-port-dot-in"></div>';
+        html += '<span class="comp-port-label" title="File path to save as asset">File Path</span>';
+        html += '</div>';
+        var asSaveInPort2 = node.id + ':in:name';
+        var asSaveIn2Conn = isPortConnected(node.id, 'name', 'input');
+        html += '<div class="comp-port comp-port-in' + (asSaveIn2Conn ? ' comp-port-connected' : '') + '" data-port-id="' + compEscAttr(asSaveInPort2) + '" data-node-id="' + compEscAttr(node.id) + '" data-port-name="name" data-port-dir="in">';
+        html += '<div class="comp-port-dot comp-port-dot-in"></div>';
+        html += '<span class="comp-port-label" title="Asset name (optional)">Name</span>';
+        html += '</div>';
+      } else if (assetMode === 'remove') {
+        var asRemInPort = node.id + ':in:assetId';
+        var asRemInConn = isPortConnected(node.id, 'assetId', 'input');
+        html += '<div class="comp-port comp-port-in' + (asRemInConn ? ' comp-port-connected' : '') + '" data-port-id="' + compEscAttr(asRemInPort) + '" data-node-id="' + compEscAttr(node.id) + '" data-port-name="assetId" data-port-dir="in">';
+        html += '<div class="comp-port-dot comp-port-dot-in"></div>';
+        html += '<span class="comp-port-label" title="Asset ID to remove">Asset ID</span>';
+        html += '</div>';
+      } else if (assetMode === 'generate_path') {
+        var gpInPort = node.id + ':in:name';
+        var gpInConn = isPortConnected(node.id, 'name', 'input');
+        html += '<div class="comp-port comp-port-in' + (gpInConn ? ' comp-port-connected' : '') + '" data-port-id="' + compEscAttr(gpInPort) + '" data-node-id="' + compEscAttr(node.id) + '" data-port-name="name" data-port-dir="in">';
+        html += '<div class="comp-port-dot comp-port-dot-in"></div>';
+        html += '<span class="comp-port-label" title="Name to use in pattern (optional, replaces {name} token)">Name</span>';
+        html += '</div>';
+      }
+      // pick and list have no inputs (configured in properties)
+      html += '</div>';
+
+      // Outputs
+      html += '<div class="comp-node-ports comp-node-outputs">';
+      if (assetMode === 'pick') {
+        var pickOuts = [
+          { name: 'filePath', label: 'File Path', title: 'Full path to the asset file' },
+          { name: 'fileName', label: 'File Name', title: 'Asset file name' },
+          { name: 'assetId', label: 'Asset ID', title: 'Unique asset identifier' },
+          { name: 'metadata', label: 'Metadata', title: 'Asset metadata JSON' },
+        ];
+        for (var po = 0; po < pickOuts.length; po++) {
+          var pOut = pickOuts[po];
+          var pOutPortId = node.id + ':out:' + pOut.name;
+          var pOutConn = isPortConnected(node.id, pOut.name, 'output');
+          html += '<div class="comp-port comp-port-out' + (pOutConn ? ' comp-port-connected' : '') + '" data-port-id="' + compEscAttr(pOutPortId) + '" data-node-id="' + compEscAttr(node.id) + '" data-port-name="' + compEscAttr(pOut.name) + '" data-port-dir="out">';
+          html += '<span class="comp-port-label" title="' + compEscAttr(pOut.title) + '">' + compEscHtml(pOut.label) + '</span>';
+          html += '<div class="comp-port-dot comp-port-dot-out"></div>';
+          html += '</div>';
+        }
+      } else if (assetMode === 'save') {
+        var saveOuts = [
+          { name: 'assetId', label: 'Asset ID', title: 'ID of the saved asset' },
+          { name: 'success', label: 'Success', title: 'Whether save succeeded' },
+        ];
+        for (var so = 0; so < saveOuts.length; so++) {
+          var sOut = saveOuts[so];
+          var sOutPortId = node.id + ':out:' + sOut.name;
+          var sOutConn = isPortConnected(node.id, sOut.name, 'output');
+          html += '<div class="comp-port comp-port-out' + (sOutConn ? ' comp-port-connected' : '') + '" data-port-id="' + compEscAttr(sOutPortId) + '" data-node-id="' + compEscAttr(node.id) + '" data-port-name="' + compEscAttr(sOut.name) + '" data-port-dir="out">';
+          html += '<span class="comp-port-label" title="' + compEscAttr(sOut.title) + '">' + compEscHtml(sOut.label) + '</span>';
+          html += '<div class="comp-port-dot comp-port-dot-out"></div>';
+          html += '</div>';
+        }
+      } else if (assetMode === 'list') {
+        var listOuts = [
+          { name: 'assets', label: 'Assets', title: 'JSON array of asset summaries' },
+          { name: 'count', label: 'Count', title: 'Number of assets' },
+        ];
+        for (var lo = 0; lo < listOuts.length; lo++) {
+          var lOut = listOuts[lo];
+          var lOutPortId = node.id + ':out:' + lOut.name;
+          var lOutConn = isPortConnected(node.id, lOut.name, 'output');
+          html += '<div class="comp-port comp-port-out' + (lOutConn ? ' comp-port-connected' : '') + '" data-port-id="' + compEscAttr(lOutPortId) + '" data-node-id="' + compEscAttr(node.id) + '" data-port-name="' + compEscAttr(lOut.name) + '" data-port-dir="out">';
+          html += '<span class="comp-port-label" title="' + compEscAttr(lOut.title) + '">' + compEscHtml(lOut.label) + '</span>';
+          html += '<div class="comp-port-dot comp-port-dot-out"></div>';
+          html += '</div>';
+        }
+      } else if (assetMode === 'remove') {
+        var remOutPortId = node.id + ':out:success';
+        var remOutConn = isPortConnected(node.id, 'success', 'output');
+        html += '<div class="comp-port comp-port-out' + (remOutConn ? ' comp-port-connected' : '') + '" data-port-id="' + compEscAttr(remOutPortId) + '" data-node-id="' + compEscAttr(node.id) + '" data-port-name="success" data-port-dir="out">';
+        html += '<span class="comp-port-label" title="Whether removal succeeded">Success</span>';
+        html += '<div class="comp-port-dot comp-port-dot-out"></div>';
+        html += '</div>';
+      } else if (assetMode === 'generate_path') {
+        var gpOuts = [
+          { name: 'filePath', label: 'File Path', title: 'Full generated file path' },
+          { name: 'fileName', label: 'File Name', title: 'Generated file name with extension' },
+          { name: 'directory', label: 'Directory', title: 'Output directory path' },
+          { name: 'collection', label: 'Collection', title: 'Collection slug (if set)' },
+        ];
+        for (var gpo = 0; gpo < gpOuts.length; gpo++) {
+          var gpOut = gpOuts[gpo];
+          var gpOutPortId = node.id + ':out:' + gpOut.name;
+          var gpOutConn = isPortConnected(node.id, gpOut.name, 'output');
+          html += '<div class="comp-port comp-port-out' + (gpOutConn ? ' comp-port-connected' : '') + '" data-port-id="' + compEscAttr(gpOutPortId) + '" data-node-id="' + compEscAttr(node.id) + '" data-port-name="' + compEscAttr(gpOut.name) + '" data-port-dir="out">';
+          html += '<span class="comp-port-label" title="' + compEscAttr(gpOut.title) + '">' + compEscHtml(gpOut.label) + '</span>';
+          html += '<div class="comp-port-dot comp-port-dot-out"></div>';
+          html += '</div>';
+        }
+      }
+      html += '</div>';
+      html += '</div>'; // .comp-node-body
+
+      // Footer — mode badge + collection name
+      html += '<div class="comp-node-footer">';
+      html += '<span class="comp-node-asset-badge">' + compEscHtml(assetMode) + '</span>';
+      if (assetCfg.collectionSlug) {
+        html += '<span class="comp-node-asset-info">' + compEscHtml(assetCfg.collectionSlug) + '</span>';
+      }
+      html += '</div>';
+
+    } else if (isText) {
+      // Text input node — preview + single output port
+      var txtCfg = node.textNode || { value: '' };
+      var txtPreview = txtCfg.value || '';
+      if (txtPreview.length > 60) txtPreview = txtPreview.substring(0, 57) + '...';
+      html += '<div class="comp-node-body">';
+      html += '<div class="comp-node-ports comp-node-inputs"></div>';
+      html += '<div class="comp-node-ports comp-node-outputs">';
+      var txtOutPortId = node.id + ':out:text';
+      var txtOutConn = isPortConnected(node.id, 'text', 'output');
+      html += '<div class="comp-port comp-port-out' + (txtOutConn ? ' comp-port-connected' : '') + '" data-port-id="' + compEscAttr(txtOutPortId) + '" data-node-id="' + compEscAttr(node.id) + '" data-port-name="text" data-port-dir="out">';
+      html += '<span class="comp-port-label" title="Text output">Text</span>';
+      html += '<div class="comp-port-dot comp-port-dot-out"></div>';
+      html += '</div>';
+      html += '</div>';
+      html += '</div>';
+      // Footer — text preview
+      html += '<div class="comp-node-footer">';
+      html += '<span class="comp-node-text-preview">' + compEscHtml(txtPreview || '(empty)') + '</span>';
+      html += '</div>';
+
+    } else if (isFileOp) {
+      // File operation node — dynamic ports based on operation
+      var fopCfg = node.fileOp || { operation: 'copy' };
+      var fopOp = fopCfg.operation || 'copy';
+
+      // Define ports per operation
+      var fopInputs = [];
+      var fopOutputs = [];
+      if (fopOp === 'copy' || fopOp === 'move') {
+        fopInputs = [{ name: 'sourcePath', label: 'Source Path' }, { name: 'destinationPath', label: 'Dest Path' }];
+        fopOutputs = [{ name: 'outputPath', label: 'Output Path' }, { name: 'success', label: 'Success' }];
+      } else if (fopOp === 'delete') {
+        fopInputs = [{ name: 'filePath', label: 'File Path' }];
+        fopOutputs = [{ name: 'success', label: 'Success' }];
+      } else if (fopOp === 'mkdir') {
+        fopInputs = [{ name: 'folderPath', label: 'Folder Path' }];
+        fopOutputs = [{ name: 'outputPath', label: 'Output Path' }, { name: 'success', label: 'Success' }];
+      } else if (fopOp === 'list') {
+        fopInputs = [{ name: 'folderPath', label: 'Folder Path' }];
+        fopOutputs = [{ name: 'files', label: 'Files' }, { name: 'count', label: 'Count' }];
+      }
+
+      html += '<div class="comp-node-body">';
+      // Input ports
+      html += '<div class="comp-node-ports comp-node-inputs">';
+      for (var fi = 0; fi < fopInputs.length; fi++) {
+        var fip = fopInputs[fi];
+        var fipId = node.id + ':in:' + fip.name;
+        var fipConn = isPortConnected(node.id, fip.name, 'input');
+        html += '<div class="comp-port comp-port-in' + (fipConn ? ' comp-port-connected' : '') + '" data-port-id="' + compEscAttr(fipId) + '" data-node-id="' + compEscAttr(node.id) + '" data-port-name="' + compEscAttr(fip.name) + '" data-port-dir="in">';
+        html += '<div class="comp-port-dot comp-port-dot-in"></div>';
+        html += '<span class="comp-port-label" title="' + compEscAttr(fip.label) + '">' + compEscHtml(fip.label) + '</span>';
+        html += '</div>';
+      }
+      html += '</div>';
+      // Output ports
+      html += '<div class="comp-node-ports comp-node-outputs">';
+      for (var fo = 0; fo < fopOutputs.length; fo++) {
+        var fop = fopOutputs[fo];
+        var fopId = node.id + ':out:' + fop.name;
+        var fopConn = isPortConnected(node.id, fop.name, 'output');
+        html += '<div class="comp-port comp-port-out' + (fopConn ? ' comp-port-connected' : '') + '" data-port-id="' + compEscAttr(fopId) + '" data-node-id="' + compEscAttr(node.id) + '" data-port-name="' + compEscAttr(fop.name) + '" data-port-dir="out">';
+        html += '<span class="comp-port-label" title="' + compEscAttr(fop.label) + '">' + compEscHtml(fop.label) + '</span>';
+        html += '<div class="comp-port-dot comp-port-dot-out"></div>';
+        html += '</div>';
+      }
+      html += '</div>';
+      html += '</div>';
+
+      // Footer — operation badge
+      html += '<div class="comp-node-footer">';
+      html += '<span class="comp-node-file-op-badge">' + compEscHtml(fopOp.toUpperCase()) + '</span>';
+      html += '</div>';
+
+    } else if (isJsonKeys) {
+      // JSON Keys/Extract node — inputs: json, path; outputs: keys, values, value, type, structure
+      var jkInputs = [
+        { name: 'json', label: 'JSON', title: 'JSON string or object to parse' },
+        { name: 'path', label: 'Path', title: 'Dot-notation path (e.g. categories.0.topics)' },
+      ];
+      var jkOutputs = [
+        { name: 'keys', label: 'Keys', title: 'Array of keys at the resolved path' },
+        { name: 'values', label: 'Values', title: 'Array of values at the resolved path' },
+        { name: 'value', label: 'Value', title: 'The resolved value at the path' },
+        { name: 'type', label: 'Type', title: 'Type of the resolved value (string, number, array, object, etc.)' },
+        { name: 'structure', label: 'Structure', title: 'Human-readable description of the JSON structure' },
+      ];
+
+      html += '<div class="comp-node-body">';
+      html += '<div class="comp-node-ports comp-node-inputs">';
+      for (var jki = 0; jki < jkInputs.length; jki++) {
+        var jkip = jkInputs[jki];
+        var jkipId = node.id + ':in:' + jkip.name;
+        var jkipConn = isPortConnected(node.id, jkip.name, 'input');
+        html += '<div class="comp-port comp-port-in' + (jkipConn ? ' comp-port-connected' : '') + '" data-port-id="' + compEscAttr(jkipId) + '" data-node-id="' + compEscAttr(node.id) + '" data-port-name="' + compEscAttr(jkip.name) + '" data-port-dir="in">';
+        html += '<div class="comp-port-dot comp-port-dot-in"></div>';
+        html += '<span class="comp-port-label" title="' + compEscAttr(jkip.title) + '">' + compEscHtml(jkip.label) + '</span>';
+        html += '</div>';
+      }
+      html += '</div>';
+      html += '<div class="comp-node-ports comp-node-outputs">';
+      for (var jko = 0; jko < jkOutputs.length; jko++) {
+        var jkop = jkOutputs[jko];
+        var jkopId = node.id + ':out:' + jkop.name;
+        var jkopConn = isPortConnected(node.id, jkop.name, 'output');
+        html += '<div class="comp-port comp-port-out' + (jkopConn ? ' comp-port-connected' : '') + '" data-port-id="' + compEscAttr(jkopId) + '" data-node-id="' + compEscAttr(node.id) + '" data-port-name="' + compEscAttr(jkop.name) + '" data-port-dir="out">';
+        html += '<span class="comp-port-label" title="' + compEscAttr(jkop.title) + '">' + compEscHtml(jkop.label) + '</span>';
+        html += '<div class="comp-port-dot comp-port-dot-out"></div>';
+        html += '</div>';
+      }
+      html += '</div>';
+      html += '</div>';
+      html += '<div class="comp-node-footer">';
+      html += '<span style="color:#a78bfa;font-size:0.6rem;">JSON Extract</span>';
+      html += '</div>';
+
+    } else if (isTool) {
+      // ── Tool Node ──
+      var toolCfg = node.toolNode || { selectedTool: '', paramDefaults: {} };
+      var toolDef = getToolDef(toolCfg.selectedTool);
+      // Fall back to cached schema if live tool def isn't available yet
+      var toolSchema = (toolDef && toolDef.parameters) ? toolDef.parameters : (toolCfg.paramSchema || {});
+      var toolProps = toolSchema.properties || {};
+      var toolRequired = toolSchema.required || [];
+      var toolParamNames = Object.keys(toolProps);
+
+      html += '<div class="comp-node-body">';
+      // Input ports — one per tool parameter
+      html += '<div class="comp-node-ports comp-node-inputs">';
+      if (toolParamNames.length === 0 && !toolCfg.selectedTool) {
+        html += '<div class="comp-port comp-port-in" style="opacity:0.4;pointer-events:none;">';
+        html += '<div class="comp-port-dot comp-port-dot-in" style="opacity:0.3;"></div>';
+        html += '<span class="comp-port-label" style="color:#64748b;font-style:italic;">Select a tool...</span>';
+        html += '</div>';
+      }
+      for (var tpi = 0; tpi < toolParamNames.length; tpi++) {
+        var tpName = toolParamNames[tpi];
+        var tpDef = toolProps[tpName];
+        var tpReq = toolRequired.indexOf(tpName) >= 0;
+        var tpPortId = node.id + ':in:' + tpName;
+        var tpConn = isPortConnected(node.id, tpName, 'input');
+        var tpTitle = (tpDef.description || tpName) + (tpReq ? ' (required)' : ' (optional)');
+        html += '<div class="comp-port comp-port-in' + (tpConn ? ' comp-port-connected' : '') + '" data-port-id="' + compEscAttr(tpPortId) + '" data-node-id="' + compEscAttr(node.id) + '" data-port-name="' + compEscAttr(tpName) + '" data-port-dir="in">';
+        html += '<div class="comp-port-dot comp-port-dot-in"></div>';
+        var tpType = tpDef.type || 'string';
+        html += '<span class="comp-port-label" title="' + compEscAttr(tpTitle) + '">' + compEscHtml(humanizeVarName(tpName)) + (tpReq ? '<span style="color:#f59e0b;margin-left:2px;">*</span>' : '') + ' <span class="comp-tool-port-type">' + compEscHtml(tpType) + '</span></span>';
+        html += '</div>';
+      }
+      html += '</div>';
+      // Output ports
+      html += '<div class="comp-node-ports comp-node-outputs">';
+      var toolOuts = [
+        { name: 'result', label: 'Result', type: 'object', title: 'Tool return value (parsed JSON object)' },
+        { name: 'success', label: 'Success', type: 'boolean', title: 'Whether the tool succeeded (true/false)' },
+      ];
+      for (var toi = 0; toi < toolOuts.length; toi++) {
+        var toOut = toolOuts[toi];
+        var toPortId = node.id + ':out:' + toOut.name;
+        var toConn = isPortConnected(node.id, toOut.name, 'output');
+        html += '<div class="comp-port comp-port-out' + (toConn ? ' comp-port-connected' : '') + '" data-port-id="' + compEscAttr(toPortId) + '" data-node-id="' + compEscAttr(node.id) + '" data-port-name="' + compEscAttr(toOut.name) + '" data-port-dir="out">';
+        html += '<span class="comp-port-label" title="' + compEscAttr(toOut.title) + '">' + compEscHtml(toOut.label) + ' <span class="comp-tool-port-type">' + toOut.type + '</span></span>';
+        html += '<div class="comp-port-dot comp-port-dot-out"></div>';
+        html += '</div>';
+      }
+      html += '</div>';
+      html += '</div>';
+      // Footer
+      html += '<div class="comp-node-footer">';
+      html += '<span class="comp-node-tool-badge">TOOL</span>';
+      if (toolCfg.selectedTool) {
+        html += ' <span style="color:#94a3b8;font-size:0.58rem;">' + compEscHtml(toolCfg.selectedTool) + '</span>';
+      }
       html += '</div>';
 
     } else {
@@ -1172,6 +2151,20 @@ function renderNodes() {
       }
       html += '</div>';
     }
+
+    // ── Universal flow-control ports (trigger/done) ──
+    var triggerConn = isPortConnected(node.id, '__trigger__', 'input');
+    var doneConn = isPortConnected(node.id, '__done__', 'output');
+    html += '<div class="comp-node-flow-ports">';
+    html += '<div class="comp-port comp-port-in comp-port-flow' + (triggerConn ? ' comp-port-connected' : '') + '" data-port-id="' + compEscAttr(node.id + ':in:__trigger__') + '" data-node-id="' + compEscAttr(node.id) + '" data-port-name="__trigger__" data-port-dir="in">';
+    html += '<div class="comp-port-dot comp-port-dot-in comp-port-dot-flow"></div>';
+    html += '<span class="comp-port-label comp-port-label-flow">Trigger</span>';
+    html += '</div>';
+    html += '<div class="comp-port comp-port-out comp-port-flow' + (doneConn ? ' comp-port-connected' : '') + '" data-port-id="' + compEscAttr(node.id + ':out:__done__') + '" data-node-id="' + compEscAttr(node.id) + '" data-port-name="__done__" data-port-dir="out">';
+    html += '<span class="comp-port-label comp-port-label-flow">Done</span>';
+    html += '<div class="comp-port-dot comp-port-dot-out comp-port-dot-flow"></div>';
+    html += '</div>';
+    html += '</div>';
 
     html += '</div>'; // .comp-node
   }
@@ -1301,9 +2294,12 @@ function renderEdges() {
     var edge = compData.edges[i];
     var isSelected = selectedEdge === edge.id;
 
-    html += '<path class="comp-edge' + (isSelected ? ' comp-edge-selected' : '') + '" data-edge-id="' + compEscAttr(edge.id) + '" d="" />';
-    // Edge label — humanized variable name
-    html += '<text class="comp-edge-label" data-edge-id="' + compEscAttr(edge.id) + '" x="0" y="0">' + compEscHtml(humanizeVarName(edge.sourcePort)) + '</text>';
+    var isFlowEdge = edge.sourcePort === '__done__' || edge.targetPort === '__trigger__';
+    html += '<path class="comp-edge' + (isFlowEdge ? ' comp-edge-flow' : '') + (isSelected ? ' comp-edge-selected' : '') + '" data-edge-id="' + compEscAttr(edge.id) + '" d="" />';
+    // Edge label — humanized variable name (skip for flow edges)
+    if (!isFlowEdge) {
+      html += '<text class="comp-edge-label" data-edge-id="' + compEscAttr(edge.id) + '" x="0" y="0">' + compEscHtml(humanizeVarName(edge.sourcePort)) + '</text>';
+    }
   }
 
   // Temp edge for drag
@@ -1371,6 +2367,11 @@ function wireUpToolbar() {
       'comp-add-gate-node': function() { addGateNode(); },
       'comp-add-loop': function() { addForEachNode(); },
       'comp-add-switch': function() { addSwitchNode(); },
+      'comp-add-asset': function() { addAssetNode(); },
+      'comp-add-text': function() { addTextNode(); },
+      'comp-add-file-op': function() { addFileOpNode(); },
+      'comp-add-json-keys': function() { addJsonKeysNode(); },
+      'comp-add-tool': function() { addToolNode(); },
     };
     Object.keys(dropdownActions).forEach(function(id) {
       var btn = document.querySelector('#' + id);
@@ -1408,6 +2409,10 @@ function wireUpToolbar() {
   if (undoBtn) { undoBtn.addEventListener('click', function() { undo(); }); }
   var redoBtn = document.querySelector('#comp-redo-btn');
   if (redoBtn) { redoBtn.addEventListener('click', function() { redo(); }); }
+
+  // Generate Pipeline button
+  var genPipelineBtn = document.querySelector('#comp-generate-pipeline');
+  if (genPipelineBtn) { genPipelineBtn.addEventListener('click', function() { showGeneratePipelineModal(); }); }
 
   // Auto-layout button
   var layoutBtn = document.querySelector('#comp-auto-layout');
@@ -1950,6 +2955,166 @@ function showAddScriptModal() {
   });
 }
 
+function showDataAwareScriptModal(srcNodeId, srcPortName, portValue, dropX, dropY) {
+  // Remove any existing overlay
+  var existing = document.querySelector('#comp-data-script-overlay');
+  if (existing) existing.remove();
+
+  var truncated = truncateForContext(portValue, 2000);
+  var hasData = truncated !== null;
+
+  // Build data preview HTML
+  var dataPreviewHtml = '';
+  if (hasData) {
+    var escaped = String(truncated)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+    dataPreviewHtml =
+      '<div class="comp-data-preview-section">' +
+        '<div class="comp-data-preview-label">Data from <strong>' + srcPortName.replace(/_/g, ' ') + '</strong></div>' +
+        '<pre class="comp-data-preview-box">' + escaped + '</pre>' +
+      '</div>';
+  } else {
+    dataPreviewHtml =
+      '<div class="comp-data-preview-section">' +
+        '<div class="comp-data-preview-empty">' +
+          '<span style="color:#64748b;">&#x24D8;</span> Run the pipeline first to include data context. ' +
+          'You can still generate a script without data.' +
+        '</div>' +
+      '</div>';
+  }
+
+  var overlay = document.createElement('div');
+  overlay.id = 'comp-data-script-overlay';
+  overlay.className = 'comp-modal-overlay';
+  overlay.innerHTML =
+    '<div class="comp-modal comp-script-modal" style="max-width:560px;">' +
+      '<div class="comp-modal-header">' +
+        '<span>&#x2728; Generate Script from Data</span>' +
+        '<button class="comp-modal-close" id="comp-data-script-close">&times;</button>' +
+      '</div>' +
+      '<div class="comp-modal-body">' +
+        dataPreviewHtml +
+        '<p style="color:#94a3b8;font-size:0.78rem;margin:0.75rem 0 0.5rem 0;">Describe what you want to do with this data. Mention any additional parameters you need (e.g. a key, index, or filter) — each will become its own input port.</p>' +
+        '<textarea id="comp-data-script-desc" class="comp-props-input comp-gate-textarea" style="min-height:80px;" placeholder="e.g. Return data.categories[key] — I need a key input to select which category"></textarea>' +
+        '<div style="display:flex;gap:0.5rem;margin-top:1rem;">' +
+          '<button class="comp-tb-btn comp-tb-btn-run" id="comp-data-script-generate" style="flex:1;">Generate Script</button>' +
+          '<button class="comp-tb-btn" id="comp-data-script-cancel" style="flex:0;">Cancel</button>' +
+        '</div>' +
+        '<div id="comp-data-script-status" style="margin-top:0.75rem;display:none;">' +
+          '<div class="spinner" style="display:inline-block;width:14px;height:14px;margin-right:6px;vertical-align:middle;"></div>' +
+          '<span style="color:#94a3b8;font-size:0.75rem;">Generating script...</span>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+
+  document.body.appendChild(overlay);
+
+  // Close handlers
+  overlay.querySelector('#comp-data-script-close').addEventListener('click', function() { overlay.remove(); });
+  overlay.querySelector('#comp-data-script-cancel').addEventListener('click', function() { overlay.remove(); });
+  overlay.addEventListener('click', function(e) { if (e.target === overlay) overlay.remove(); });
+
+  // Generate handler
+  overlay.querySelector('#comp-data-script-generate').addEventListener('click', async function() {
+    var desc = overlay.querySelector('#comp-data-script-desc').value.trim();
+    if (!desc) { toast('Please describe what the script should do', 'error'); return; }
+
+    var genBtn = overlay.querySelector('#comp-data-script-generate');
+    var statusEl = overlay.querySelector('#comp-data-script-status');
+    genBtn.disabled = true;
+    statusEl.style.display = '';
+
+    try {
+      var payload = { description: desc };
+      if (hasData) {
+        payload.dataContext = truncated;
+      }
+
+      var res = await fetch('/api/compositions/generate-script', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      var data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Generation failed');
+
+      // Create the script node at the drop position
+      addScriptNodeAt(desc, data.code, data.inputs, data.outputs, [
+        { role: 'user', content: desc },
+        { role: 'assistant', content: data.assistantMessage },
+      ], dropX, dropY);
+
+      // Auto-connect: find the first input port of the new node and create an edge
+      var newNode = compData.nodes[compData.nodes.length - 1];
+      if (newNode && newNode.script && newNode.script.inputs && newNode.script.inputs.length > 0) {
+        var firstInput = newNode.script.inputs[0].name;
+        var edge = {
+          id: genId('edge'),
+          sourceNodeId: srcNodeId,
+          sourcePort: srcPortName,
+          targetNodeId: newNode.id,
+          targetPort: firstInput,
+        };
+        compData.edges.push(edge);
+        renderEdges();
+        immediateSave();
+      }
+
+      overlay.remove();
+      toast('Script node created and connected!', 'success');
+    } catch (err) {
+      toast('Failed to generate script: ' + err.message, 'error');
+      genBtn.disabled = false;
+      statusEl.style.display = 'none';
+    }
+  });
+
+  // Focus the textarea
+  requestAnimationFrame(function() {
+    var ta = overlay.querySelector('#comp-data-script-desc');
+    if (ta) ta.focus();
+  });
+}
+
+function addScriptNodeAt(description, code, inputs, outputs, chatHistory, posX, posY) {
+  if (!compData) return;
+  pushUndoSnapshot();
+
+  var node = {
+    id: genId('script'),
+    workflowId: '__script__',
+    position: { x: Math.round(posX), y: Math.round(posY) },
+    label: description
+      ? description.split(/\s+/).slice(0, 4).map(function(w) { return w.charAt(0).toUpperCase() + w.slice(1); }).join(' ')
+      : 'Script',
+    script: {
+      description: description,
+      code: code,
+      inputs: inputs || [],
+      outputs: outputs || [],
+      chatHistory: chatHistory || [],
+    },
+  };
+
+  compData.nodes.push(node);
+
+  // Select the new node to show properties panel
+  selectedNodes.clear();
+  selectedNodes.add(node.id);
+  selectedEdge = null;
+
+  renderNodes();
+  renderEdges();
+  wireUpCanvas();
+  updateNodeSelection();
+  updateDeleteButton();
+  updatePropertiesPanel();
+  immediateSave();
+  fetchCompositions();
+}
+
 function addScriptNode(description, code, inputs, outputs, chatHistory) {
   if (!compData) return;
   pushUndoSnapshot();
@@ -1981,6 +3146,111 @@ function addScriptNode(description, code, inputs, outputs, chatHistory) {
   // Select the new node to show properties panel
   selectedNodes.clear();
   selectedNodes.add(node.id);
+  selectedEdge = null;
+
+  renderNodes();
+  renderEdges();
+  wireUpCanvas();
+  updateNodeSelection();
+  updateDeleteButton();
+  updatePropertiesPanel();
+  immediateSave();
+  fetchCompositions();
+}
+
+function showGeneratePipelineModal() {
+  var existing = document.querySelector('#comp-pipeline-gen-overlay');
+  if (existing) existing.remove();
+
+  var overlay = document.createElement('div');
+  overlay.id = 'comp-pipeline-gen-overlay';
+  overlay.className = 'comp-modal-overlay';
+  overlay.innerHTML =
+    '<div class="comp-modal comp-script-modal">' +
+      '<div class="comp-modal-header">' +
+        '<span>&#x2728; Generate Pipeline</span>' +
+        '<button class="comp-modal-close" id="comp-pipeline-gen-close">&times;</button>' +
+      '</div>' +
+      '<div class="comp-modal-body">' +
+        '<p style="color:#94a3b8;font-size:0.78rem;margin:0 0 0.75rem 0;">' +
+          'Describe a multi-step task. The AI will decompose it into connected pipeline nodes — each with simple, focused code.' +
+        '</p>' +
+        '<textarea id="comp-pipeline-gen-desc" class="comp-props-input comp-gate-textarea" style="min-height:100px;" ' +
+          'placeholder="e.g. Take a photo from the asset library, generate a cartoon version with nanobanana, then copy the result to ~/Gallery/cartoons"></textarea>' +
+        '<div style="display:flex;gap:0.5rem;margin-top:1rem;">' +
+          '<button class="comp-tb-btn comp-tb-btn-run" id="comp-pipeline-gen-go" style="flex:1;">Generate Pipeline</button>' +
+          '<button class="comp-tb-btn" id="comp-pipeline-gen-cancel" style="flex:0;">Cancel</button>' +
+        '</div>' +
+        '<div id="comp-pipeline-gen-status" style="margin-top:0.75rem;display:none;">' +
+          '<div class="spinner" style="display:inline-block;width:14px;height:14px;margin-right:6px;vertical-align:middle;"></div>' +
+          '<span style="color:#94a3b8;font-size:0.75rem;">Decomposing into pipeline steps...</span>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+
+  document.body.appendChild(overlay);
+
+  overlay.querySelector('#comp-pipeline-gen-close').addEventListener('click', function() { overlay.remove(); });
+  overlay.querySelector('#comp-pipeline-gen-cancel').addEventListener('click', function() { overlay.remove(); });
+  overlay.addEventListener('click', function(e) { if (e.target === overlay) overlay.remove(); });
+
+  overlay.querySelector('#comp-pipeline-gen-go').addEventListener('click', async function() {
+    var desc = overlay.querySelector('#comp-pipeline-gen-desc').value.trim();
+    if (!desc) { toast('Please describe the pipeline you want to create', 'error'); return; }
+
+    var genBtn = overlay.querySelector('#comp-pipeline-gen-go');
+    var statusEl = overlay.querySelector('#comp-pipeline-gen-status');
+    genBtn.disabled = true;
+    statusEl.style.display = '';
+
+    try {
+      var res = await fetch('/api/compositions/generate-pipeline', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ description: desc }),
+      });
+      var data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Pipeline generation failed');
+
+      addGeneratedPipeline(data.nodes, data.edges, data.name);
+
+      overlay.remove();
+      toast('Pipeline generated with ' + data.nodes.length + ' nodes!', 'success');
+    } catch (err) {
+      toast('Failed to generate pipeline: ' + err.message, 'error');
+      genBtn.disabled = false;
+      statusEl.style.display = 'none';
+    }
+  });
+
+  requestAnimationFrame(function() {
+    var ta = overlay.querySelector('#comp-pipeline-gen-desc');
+    if (ta) ta.focus();
+  });
+}
+
+function addGeneratedPipeline(nodes, edges, pipelineName) {
+  if (!compData) return;
+  pushUndoSnapshot();
+
+  // Add all nodes
+  for (var i = 0; i < nodes.length; i++) {
+    compData.nodes.push(nodes[i]);
+  }
+
+  // Add all edges
+  for (var j = 0; j < edges.length; j++) {
+    compData.edges.push(edges[j]);
+  }
+
+  // Auto-layout to position the new nodes
+  layoutNodesInternal();
+
+  // Select all new nodes
+  selectedNodes.clear();
+  for (var k = 0; k < nodes.length; k++) {
+    selectedNodes.add(nodes[k].id);
+  }
   selectedEdge = null;
 
   renderNodes();
@@ -2202,6 +3472,137 @@ function addSwitchNode() {
   immediateSave(); fetchCompositions();
 }
 
+function addAssetNode() {
+  if (!compData) return;
+  pushUndoSnapshot();
+  var wrap = document.querySelector('#comp-canvas-wrap');
+  var wrapRect = wrap.getBoundingClientRect();
+  var cx = (wrapRect.width / 2 - canvasState.panX) / canvasState.zoom;
+  var cy = (wrapRect.height / 2 - canvasState.panY) / canvasState.zoom;
+  var offset = compData.nodes.length * 30;
+  var node = {
+    id: genId('asset'),
+    workflowId: '__asset__',
+    position: { x: Math.round(cx + offset), y: Math.round(cy + offset) },
+    label: 'Asset',
+    asset: {
+      mode: 'pick',
+      collectionSlug: '',
+      assetId: '',
+      category: '',
+      tags: '',
+      defaultName: '',
+    },
+  };
+  compData.nodes.push(node);
+  selectedNodes.clear();
+  selectedNodes.add(node.id);
+  selectedEdge = null;
+  renderNodes(); renderEdges(); wireUpCanvas();
+  updateNodeSelection(); updateDeleteButton(); updatePropertiesPanel();
+  immediateSave(); fetchCompositions();
+}
+
+function addTextNode() {
+  if (!compData) return;
+  pushUndoSnapshot();
+  var wrap = document.querySelector('#comp-canvas-wrap');
+  var wrapRect = wrap.getBoundingClientRect();
+  var cx = (wrapRect.width / 2 - canvasState.panX) / canvasState.zoom;
+  var cy = (wrapRect.height / 2 - canvasState.panY) / canvasState.zoom;
+  var offset = compData.nodes.length * 30;
+  var node = {
+    id: genId('text'),
+    workflowId: '__text__',
+    position: { x: Math.round(cx + offset), y: Math.round(cy + offset) },
+    label: 'Text',
+    textNode: {
+      value: '',
+    },
+  };
+  compData.nodes.push(node);
+  selectedNodes.clear();
+  selectedNodes.add(node.id);
+  selectedEdge = null;
+  renderNodes(); renderEdges(); wireUpCanvas();
+  updateNodeSelection(); updateDeleteButton(); updatePropertiesPanel();
+  immediateSave(); fetchCompositions();
+}
+
+function addFileOpNode() {
+  if (!compData) return;
+  pushUndoSnapshot();
+  var wrap = document.querySelector('#comp-canvas-wrap');
+  var wrapRect = wrap.getBoundingClientRect();
+  var cx = (wrapRect.width / 2 - canvasState.panX) / canvasState.zoom;
+  var cy = (wrapRect.height / 2 - canvasState.panY) / canvasState.zoom;
+  var offset = compData.nodes.length * 30;
+  var node = {
+    id: genId('fileop'),
+    workflowId: '__file_op__',
+    position: { x: Math.round(cx + offset), y: Math.round(cy + offset) },
+    label: 'Copy File',
+    fileOp: {
+      operation: 'copy',
+    },
+  };
+  compData.nodes.push(node);
+  selectedNodes.clear();
+  selectedNodes.add(node.id);
+  selectedEdge = null;
+  renderNodes(); renderEdges(); wireUpCanvas();
+  updateNodeSelection(); updateDeleteButton(); updatePropertiesPanel();
+  immediateSave(); fetchCompositions();
+}
+
+function addJsonKeysNode() {
+  if (!compData) return;
+  pushUndoSnapshot();
+  var wrap = document.querySelector('#comp-canvas-wrap');
+  var wrapRect = wrap.getBoundingClientRect();
+  var cx = (wrapRect.width / 2 - canvasState.panX) / canvasState.zoom;
+  var cy = (wrapRect.height / 2 - canvasState.panY) / canvasState.zoom;
+  var offset = compData.nodes.length * 30;
+  var node = {
+    id: genId('jsonkeys'),
+    workflowId: '__json_keys__',
+    position: { x: Math.round(cx + offset), y: Math.round(cy + offset) },
+    label: 'JSON Extract',
+    jsonKeysNode: { defaultPath: '' },
+  };
+  compData.nodes.push(node);
+  selectedNodes.clear();
+  selectedNodes.add(node.id);
+  selectedEdge = null;
+  renderNodes(); renderEdges(); wireUpCanvas();
+  updateNodeSelection(); updateDeleteButton(); updatePropertiesPanel();
+  immediateSave(); fetchCompositions();
+}
+
+function addToolNode() {
+  if (!compData) return;
+  pushUndoSnapshot();
+  var wrap = document.querySelector('#comp-canvas-wrap');
+  var wrapRect = wrap.getBoundingClientRect();
+  var cx = (wrapRect.width / 2 - canvasState.panX) / canvasState.zoom;
+  var cy = (wrapRect.height / 2 - canvasState.panY) / canvasState.zoom;
+  var offset = compData.nodes.length * 30;
+  var node = {
+    id: genId('tool'),
+    workflowId: '__tool__',
+    position: { x: Math.round(cx + offset), y: Math.round(cy + offset) },
+    label: 'Tool',
+    toolNode: { selectedTool: '', paramDefaults: {} },
+  };
+  compData.nodes.push(node);
+  selectedNodes.clear();
+  selectedNodes.add(node.id);
+  selectedEdge = null;
+  renderNodes(); renderEdges(); wireUpCanvas();
+  updateNodeSelection(); updateDeleteButton(); updatePropertiesPanel();
+  immediateSave(); fetchCompositions();
+}
+
 function deleteSelected() {
   if (!compData) return;
   pushUndoSnapshot();
@@ -2312,6 +3713,22 @@ function wireUpCanvas() {
     if (inPortDot) {
       e.preventDefault();
       return;
+    }
+
+    // Check if clicking on pipeline nav link icon → navigate to that pipeline
+    if (target.closest('.comp-node-nav-link')) {
+      var navNodeEl = target.closest('.comp-node');
+      if (navNodeEl) {
+        var navNodeId = navNodeEl.dataset.nodeId;
+        var navNode = currentComposition && currentComposition.nodes.find(function(n) { return n.id === navNodeId; });
+        if (navNode && navNode.workflowId && navNode.workflowId.startsWith('comp:')) {
+          var targetCompId = (navNode.compositionRef && navNode.compositionRef.compositionId) || navNode.workflowId.replace('comp:', '');
+          e.preventDefault();
+          e.stopPropagation();
+          selectComposition(targetCompId);
+          return;
+        }
+      }
     }
 
     // Check if clicking on node header (start node drag)
@@ -2777,10 +4194,12 @@ function startEdgeDrag(portEl, e) {
   if (!srcPos) return;
 
   // Smart port matching (Step 3): highlight compatible/incompatible ports
+  var srcIsFlow = srcPortName === '__done__';
   document.querySelectorAll('.comp-port').forEach(function(p) {
     var pNodeId = p.dataset.nodeId;
     var pPortName = p.dataset.portName;
     var pDir = p.dataset.portDir;
+    var pIsFlow = pPortName === '__trigger__';
     if (pDir === 'out') {
       // All output ports are incompatible drop targets
       p.classList.add('comp-port-incompatible');
@@ -2790,6 +4209,9 @@ function startEdgeDrag(portEl, e) {
         p.classList.add('comp-port-incompatible');
       } else if (isPortConnected(pNodeId, pPortName, 'input')) {
         // Already connected — incompatible
+        p.classList.add('comp-port-incompatible');
+      } else if (srcIsFlow !== pIsFlow) {
+        // Flow-to-flow only, data-to-data only
         p.classList.add('comp-port-incompatible');
       } else {
         // Available input — compatible
@@ -2824,7 +4246,15 @@ function startEdgeDrag(portEl, e) {
     if (!inDot) {
       var inPort = target.closest('.comp-port-in');
       if (inPort) inDot = inPort;
-      else return;
+      else {
+        // Dropped on empty space — offer to create a data-aware script node
+        var portValue = lookupPortValue(srcNodeId, srcPortName, 'out');
+        var wrapRect = wrap.getBoundingClientRect();
+        var dropX = (e2.clientX - wrapRect.left - canvasState.panX) / canvasState.zoom;
+        var dropY = (e2.clientY - wrapRect.top - canvasState.panY) / canvasState.zoom;
+        showDataAwareScriptModal(srcNodeId, srcPortName, portValue, dropX, dropY);
+        return;
+      }
     }
 
     var inPortEl = inDot.closest('.comp-port');
@@ -3166,60 +4596,105 @@ function renderNodeProperties(nodeId) {
   // ── Approval Gate Properties ──
   if (node.workflowId === '__approval_gate__') {
     renderGateProperties(body, node, nodeId);
+    injectNodeErrorDisplay(body, nodeId);
     return;
   }
 
   // ── Script Node Properties ──
   if (node.workflowId === '__script__') {
     renderScriptProperties(body, node, nodeId);
+    // Error display is built into renderScriptProperties
     return;
   }
 
   // ── Output Node Properties ──
   if (node.workflowId === '__output__') {
     renderOutputProperties(body, node, nodeId);
+    injectNodeErrorDisplay(body, nodeId);
     return;
   }
 
   // ── Composition Node Properties ──
   if (node.workflowId.startsWith('comp:')) {
     renderCompositionNodeProperties(body, node, nodeId);
+    injectNodeErrorDisplay(body, nodeId);
     return;
   }
 
   // ── Image Viewer Properties ──
   if (node.workflowId === '__image_viewer__') {
     renderImageViewerProperties(body, node, nodeId);
+    injectNodeErrorDisplay(body, nodeId);
     return;
   }
 
   // ── Branch Node Properties ──
   if (node.workflowId === '__branch__') {
     renderBranchProperties(body, node, nodeId);
+    injectNodeErrorDisplay(body, nodeId);
     return;
   }
 
   // ── Delay Node Properties ──
   if (node.workflowId === '__delay__') {
     renderDelayProperties(body, node, nodeId);
+    injectNodeErrorDisplay(body, nodeId);
     return;
   }
 
   // ── Gate Node Properties ──
   if (node.workflowId === '__gate__') {
     renderGateNodeProperties(body, node, nodeId);
+    injectNodeErrorDisplay(body, nodeId);
     return;
   }
 
   // ── ForEach Node Properties ──
   if (node.workflowId === '__for_each__') {
     renderForEachProperties(body, node, nodeId);
+    injectNodeErrorDisplay(body, nodeId);
+    return;
+  }
+
+  // ── Text Node Properties ──
+  if (node.workflowId === '__text__') {
+    renderTextProperties(body, node, nodeId);
+    injectNodeErrorDisplay(body, nodeId);
+    return;
+  }
+
+  // ── File Op Node Properties ──
+  if (node.workflowId === '__file_op__') {
+    renderFileOpProperties(body, node, nodeId);
+    injectNodeErrorDisplay(body, nodeId);
+    return;
+  }
+
+  // ── JSON Extract Node Properties ──
+  if (node.workflowId === '__json_keys__') {
+    renderJsonKeysProperties(body, node, nodeId);
+    injectNodeErrorDisplay(body, nodeId);
+    return;
+  }
+
+  // ── Tool Node Properties ──
+  if (node.workflowId === '__tool__') {
+    renderToolProperties(body, node, nodeId);
+    injectNodeErrorDisplay(body, nodeId);
+    return;
+  }
+
+  // ── Asset Node Properties ──
+  if (node.workflowId === '__asset__') {
+    renderAssetProperties(body, node, nodeId);
+    injectNodeErrorDisplay(body, nodeId);
     return;
   }
 
   // ── Switch Node Properties ──
   if (node.workflowId === '__switch__') {
     renderSwitchProperties(body, node, nodeId);
+    injectNodeErrorDisplay(body, nodeId);
     return;
   }
 
@@ -3864,7 +5339,11 @@ function renderForEachProperties(body, node, nodeId) {
 
   html += '<div class="comp-props-section">';
   html += '<div class="comp-props-label" style="color:#22c55e;">&#x1f504; ForEach Loop</div>';
-  html += '<div class="comp-props-value" style="font-size:0.68rem;color:#64748b;">Iterates over an array input. Outputs the items, count, and last item.</div>';
+  html += '<div class="comp-props-value" style="font-size:0.68rem;color:#94a3b8;line-height:1.5;">';
+  html += 'Iterates over an array. Nodes connected to <b style="color:#22c55e;">Loop Body</b> ports ';
+  html += '(Item, Index, Count) execute <b>once per element</b>. Nodes connected to ';
+  html += '<b style="color:#38bdf8;">Completed</b> ports (Results, Total Count) execute after all iterations.';
+  html += '</div>';
   html += '</div>';
 
   html += '<div class="comp-props-section">';
@@ -3906,6 +5385,785 @@ function renderForEachProperties(body, node, nodeId) {
       debouncedSave();
     });
   }
+}
+
+function renderTextProperties(body, node, nodeId) {
+  if (!node.textNode) node.textNode = { value: '' };
+  var html = '';
+  html += '<div class="comp-props-section">';
+  html += '<div class="comp-props-label">Text Content</div>';
+  html += '<textarea id="comp-props-text-value" style="width:100%;min-height:120px;padding:8px;border-radius:6px;border:1px solid rgba(255,255,255,0.1);background:rgba(0,0,0,0.2);color:#fff;font-size:13px;font-family:inherit;outline:none;resize:vertical;">' + compEscHtml(node.textNode.value) + '</textarea>';
+  html += '</div>';
+  html += '<div class="comp-props-section">';
+  html += '<div class="comp-props-label">Output Port</div>';
+  html += '<div style="font-size:12px;color:#64748b;">text — The text content above is output as a string to connected nodes.</div>';
+  html += '</div>';
+  body.innerHTML = html;
+
+  var textarea = document.querySelector('#comp-props-text-value');
+  if (textarea) {
+    textarea.addEventListener('input', function() {
+      node.textNode.value = textarea.value;
+      immediateSave();
+      renderNodes(); renderEdges(); wireUpCanvas();
+    });
+  }
+}
+
+function renderJsonKeysProperties(body, node, nodeId) {
+  if (!node.jsonKeysNode) node.jsonKeysNode = { defaultPath: '' };
+  var cfg = node.jsonKeysNode;
+
+  var html = '';
+  // Label
+  html += '<div class="comp-props-section">';
+  html += '<div class="comp-props-label">Display Name</div>';
+  html += '<input class="comp-props-input" id="comp-props-json-keys-label" value="' + compEscAttr(node.label || 'JSON Extract') + '">';
+  html += '</div>';
+
+  // Default path
+  html += '<div class="comp-props-section">';
+  html += '<div class="comp-props-label">Default Path</div>';
+  html += '<input class="comp-props-input" id="comp-props-json-keys-path" value="' + compEscAttr(cfg.defaultPath || '') + '" placeholder="e.g. categories.0.topics">';
+  html += '<div style="font-size:0.65rem;color:#64748b;margin-top:4px;">Dot-notation path to navigate the JSON. Overridden if the <b>path</b> input port is connected.</div>';
+  html += '</div>';
+
+  // Description
+  html += '<div class="comp-props-section">';
+  html += '<div class="comp-props-label" style="color:#a78bfa;">How it works</div>';
+  html += '<div style="font-size:0.68rem;color:#94a3b8;line-height:1.5;">';
+  html += 'Parses JSON input and extracts structural info:<br>';
+  html += '<b style="color:#e2e8f0;">Keys</b> — array of keys at the resolved path<br>';
+  html += '<b style="color:#e2e8f0;">Values</b> — array of values at the resolved path<br>';
+  html += '<b style="color:#e2e8f0;">Value</b> — the resolved value (object/array/primitive)<br>';
+  html += '<b style="color:#e2e8f0;">Type</b> — "object", "array", "string", "number", etc.<br>';
+  html += '<b style="color:#e2e8f0;">Structure</b> — human-readable description of the shape';
+  html += '</div>';
+  html += '</div>';
+
+  body.innerHTML = html;
+
+  // Wire events
+  var labelInput = document.querySelector('#comp-props-json-keys-label');
+  if (labelInput) {
+    labelInput.addEventListener('change', function() {
+      node.label = labelInput.value || 'JSON Extract';
+      renderNodes(); renderEdges(); wireUpCanvas();
+      debouncedSave();
+    });
+  }
+  var pathInput = document.querySelector('#comp-props-json-keys-path');
+  if (pathInput) {
+    pathInput.addEventListener('change', function() {
+      cfg.defaultPath = pathInput.value.trim();
+      debouncedSave();
+    });
+  }
+}
+
+function renderFileOpProperties(body, node, nodeId) {
+  if (!node.fileOp) node.fileOp = { operation: 'copy' };
+  var cfg = node.fileOp;
+  var opLabels = { copy: 'Copy File', move: 'Move File', delete: 'Delete File', mkdir: 'Create Folder', list: 'List Files' };
+
+  var html = '';
+
+  // Operation selector
+  html += '<div class="comp-props-section">';
+  html += '<div class="comp-props-label">Operation</div>';
+  html += '<select id="comp-props-fileop-operation" style="width:100%;padding:6px 8px;border-radius:6px;border:1px solid rgba(255,255,255,0.1);background:rgba(0,0,0,0.3);color:#fff;font-size:13px;">';
+  var ops = ['copy', 'move', 'delete', 'mkdir', 'list'];
+  for (var i = 0; i < ops.length; i++) {
+    html += '<option value="' + ops[i] + '"' + (cfg.operation === ops[i] ? ' selected' : '') + '>' + opLabels[ops[i]] + '</option>';
+  }
+  html += '</select>';
+  html += '</div>';
+
+  // Port info
+  var portDescs = {
+    copy: { inputs: ['sourcePath — Path of the file to copy', 'destinationPath — Where to copy the file'], outputs: ['outputPath — Path of the copied file', 'success — Whether the operation succeeded'] },
+    move: { inputs: ['sourcePath — Path of the file to move', 'destinationPath — Where to move the file'], outputs: ['outputPath — New path of the moved file', 'success — Whether the operation succeeded'] },
+    delete: { inputs: ['filePath — Path of the file to delete'], outputs: ['success — Whether the deletion succeeded'] },
+    mkdir: { inputs: ['folderPath — Path of the folder to create'], outputs: ['outputPath — Path of the created folder', 'success — Whether the operation succeeded'] },
+    list: { inputs: ['folderPath — Path of the folder to list'], outputs: ['files — JSON array of file names', 'count — Number of files found'] },
+  };
+  var pd = portDescs[cfg.operation] || portDescs.copy;
+
+  html += '<div class="comp-props-section">';
+  html += '<div class="comp-props-label">Input Ports</div>';
+  for (var pi = 0; pi < pd.inputs.length; pi++) {
+    html += '<div style="font-size:12px;color:#64748b;margin-bottom:2px;">' + compEscHtml(pd.inputs[pi]) + '</div>';
+  }
+  html += '</div>';
+
+  html += '<div class="comp-props-section">';
+  html += '<div class="comp-props-label">Output Ports</div>';
+  for (var po = 0; po < pd.outputs.length; po++) {
+    html += '<div style="font-size:12px;color:#64748b;margin-bottom:2px;">' + compEscHtml(pd.outputs[po]) + '</div>';
+  }
+  html += '</div>';
+
+  body.innerHTML = html;
+
+  // Wire up operation selector
+  var opSelect = document.querySelector('#comp-props-fileop-operation');
+  if (opSelect) {
+    opSelect.addEventListener('change', function() {
+      var newOp = opSelect.value;
+      if (newOp !== cfg.operation) {
+        // Clear edges connected to this node (ports change with operation)
+        if (compData && compData.edges) {
+          compData.edges = compData.edges.filter(function(e) {
+            return e.sourceNodeId !== nodeId && e.targetNodeId !== nodeId;
+          });
+        }
+        cfg.operation = newOp;
+        // Update node label to match operation
+        node.label = opLabels[newOp] || 'File Op';
+        immediateSave();
+        renderNodes(); renderEdges(); wireUpCanvas();
+        updatePropertiesPanel();
+      }
+    });
+  }
+}
+
+function renderToolProperties(body, node, nodeId) {
+  var cfg = node.toolNode || (node.toolNode = { selectedTool: '', paramDefaults: {} });
+
+  function rebuildToolUI() {
+    renderToolProperties(body, node, nodeId);
+    injectNodeErrorDisplay(body, nodeId);
+  }
+
+  var html = '';
+
+  // Label
+  html += '<div class="comp-props-section">';
+  html += '<div class="comp-props-label">Display Name</div>';
+  html += '<input type="text" class="comp-props-input" id="comp-props-tool-label" value="' + compEscAttr(node.label || '') + '" placeholder="Tool">';
+  html += '</div>';
+
+  // Tool selector (custom searchable dropdown)
+  html += '<div class="comp-props-section">';
+  html += '<div class="comp-props-label">Tool</div>';
+  html += '<div class="comp-tool-picker" id="comp-tool-picker">';
+  html += '<div class="comp-tool-picker-selected" id="comp-tool-picker-btn">';
+  html += '<span class="comp-tool-picker-text">' + (cfg.selectedTool ? compEscHtml(cfg.selectedTool) : '<span style="color:#64748b;">— Select a tool —</span>') + '</span>';
+  html += '<span class="comp-tool-picker-arrow">&#x25BE;</span>';
+  html += '</div>';
+  html += '<div class="comp-tool-picker-dropdown" id="comp-tool-picker-dropdown" style="display:none;">';
+  html += '<input type="text" class="comp-tool-picker-search" id="comp-tool-picker-search" placeholder="Search tools...">';
+  html += '<div class="comp-tool-picker-list" id="comp-tool-picker-list">';
+  html += '<div class="comp-tool-picker-item" data-tool-value="">— None —</div>';
+  for (var ti = 0; ti < toolsCache.length; ti++) {
+    var t = toolsCache[ti];
+    var tDesc = t.description ? t.description.split('\n')[0] : '';
+    if (tDesc.length > 60) tDesc = tDesc.substring(0, 57) + '...';
+    html += '<div class="comp-tool-picker-item' + (cfg.selectedTool === t.name ? ' active' : '') + '" data-tool-value="' + compEscAttr(t.name) + '">';
+    html += '<div class="comp-tool-picker-item-name">' + compEscHtml(t.name) + '</div>';
+    if (tDesc) html += '<div class="comp-tool-picker-item-desc">' + compEscHtml(tDesc) + '</div>';
+    html += '</div>';
+  }
+  html += '</div>';
+  html += '</div>';
+  html += '</div>';
+  html += '</div>';
+
+  // Tool description
+  var toolDef = getToolDef(cfg.selectedTool);
+  if (toolDef && toolDef.description) {
+    var descLine = toolDef.description.split('\n')[0];
+    if (descLine.length > 120) descLine = descLine.substring(0, 117) + '...';
+    html += '<div class="comp-props-section">';
+    html += '<div style="font-size:0.65rem;color:#64748b;padding:0 0.25rem;">' + compEscHtml(descLine) + '</div>';
+    html += '</div>';
+  }
+
+  // Parameter defaults — use live def or cached schema
+  var toolParamsSource = (toolDef && toolDef.parameters) ? toolDef.parameters : (cfg.paramSchema || {});
+  if (toolParamsSource.properties) {
+    var props = toolParamsSource.properties;
+    var required = toolParamsSource.required || [];
+    var paramNames = Object.keys(props);
+
+    if (paramNames.length > 0) {
+      html += '<div class="comp-props-section">';
+      html += '<div class="comp-props-label">Parameter Defaults</div>';
+      html += '<div style="font-size:0.6rem;color:#475569;margin-bottom:0.4rem;">Values used when input port is not connected</div>';
+
+      for (var pi = 0; pi < paramNames.length; pi++) {
+        var pName = paramNames[pi];
+        var pDef = props[pName];
+        var pReq = required.indexOf(pName) >= 0;
+        var pVal = cfg.paramDefaults && cfg.paramDefaults[pName] !== undefined ? cfg.paramDefaults[pName] : (pDef.default !== undefined ? pDef.default : '');
+        var pType = pDef.type || 'string';
+        var pDesc = pDef.description || '';
+
+        html += '<div class="comp-tool-param">';
+        html += '<div class="comp-tool-param-header">';
+        html += '<span class="comp-tool-param-name">' + compEscHtml(pName) + '</span>';
+        html += '<span class="comp-tool-param-type">' + compEscHtml(pType) + '</span>';
+        if (pReq) html += '<span class="comp-tool-param-req">required</span>';
+        html += '</div>';
+        if (pDesc) {
+          var shortDesc = pDesc.length > 80 ? pDesc.substring(0, 77) + '...' : pDesc;
+          html += '<div class="comp-tool-param-desc">' + compEscHtml(shortDesc) + '</div>';
+        }
+
+        // Input control based on type
+        if (pDef.enum && pDef.enum.length > 0) {
+          // Enum → dropdown
+          html += '<select class="comp-props-input comp-tool-param-input" data-param="' + compEscAttr(pName) + '">';
+          html += '<option value="">—</option>';
+          for (var ei = 0; ei < pDef.enum.length; ei++) {
+            var ev = pDef.enum[ei];
+            html += '<option value="' + compEscAttr(String(ev)) + '"' + (String(pVal) === String(ev) ? ' selected' : '') + '>' + compEscHtml(String(ev)) + '</option>';
+          }
+          html += '</select>';
+        } else if (pType === 'boolean') {
+          // Boolean → checkbox
+          html += '<label style="display:flex;align-items:center;gap:6px;font-size:0.68rem;color:#e2e8f0;cursor:pointer;">';
+          html += '<input type="checkbox" class="comp-tool-param-input" data-param="' + compEscAttr(pName) + '" data-type="boolean"' + (pVal ? ' checked' : '') + ' style="accent-color:#f59e0b;">';
+          html += 'Enabled</label>';
+        } else if (pType === 'number') {
+          html += '<input type="number" class="comp-props-input comp-tool-param-input" data-param="' + compEscAttr(pName) + '" data-type="number" value="' + compEscAttr(String(pVal)) + '" placeholder="' + compEscAttr(pType) + '">';
+        } else {
+          // String, array, object → text input
+          var displayVal = typeof pVal === 'object' ? JSON.stringify(pVal) : String(pVal || '');
+          html += '<input type="text" class="comp-props-input comp-tool-param-input" data-param="' + compEscAttr(pName) + '" data-type="' + compEscAttr(pType) + '" value="' + compEscAttr(displayVal) + '" placeholder="' + compEscAttr(pType) + '">';
+        }
+        html += '</div>';
+      }
+      html += '</div>';
+    }
+  }
+
+  body.innerHTML = html;
+
+  // Wire events — label
+  var labelInput = document.querySelector('#comp-props-tool-label');
+  if (labelInput) {
+    labelInput.addEventListener('input', function() {
+      node.label = this.value || '';
+      renderNodes(); renderEdges(); wireUpCanvas();
+      debouncedSave();
+    });
+  }
+
+  // Wire events — custom tool picker
+  var toolPickerBtn = document.querySelector('#comp-tool-picker-btn');
+  var toolPickerDropdown = document.querySelector('#comp-tool-picker-dropdown');
+  var toolPickerSearch = document.querySelector('#comp-tool-picker-search');
+  var toolPickerList = document.querySelector('#comp-tool-picker-list');
+
+  if (toolPickerBtn && toolPickerDropdown) {
+    // Always re-query DOM to avoid stale references (panel may have been rebuilt)
+    function getPickerList() { return document.querySelector('#comp-tool-picker-list'); }
+    function getPickerDropdown() { return document.querySelector('#comp-tool-picker-dropdown'); }
+    function getPickerSearch() { return document.querySelector('#comp-tool-picker-search'); }
+
+    // Rebuild the dropdown list from current toolsCache
+    function rebuildToolPickerList() {
+      var list = getPickerList();
+      if (!list) return;
+      var listHtml = '<div class="comp-tool-picker-item" data-tool-value="">— None —</div>';
+      for (var ri = 0; ri < toolsCache.length; ri++) {
+        var rt = toolsCache[ri];
+        var rtDesc = rt.description ? rt.description.split('\n')[0] : '';
+        if (rtDesc.length > 60) rtDesc = rtDesc.substring(0, 57) + '...';
+        listHtml += '<div class="comp-tool-picker-item' + (cfg.selectedTool === rt.name ? ' active' : '') + '" data-tool-value="' + compEscAttr(rt.name) + '">';
+        listHtml += '<div class="comp-tool-picker-item-name">' + compEscHtml(rt.name) + '</div>';
+        if (rtDesc) listHtml += '<div class="comp-tool-picker-item-desc">' + compEscHtml(rtDesc) + '</div>';
+        listHtml += '</div>';
+      }
+      list.innerHTML = listHtml;
+      applyToolPickerFilter();
+    }
+
+    function applyToolPickerFilter() {
+      var list = getPickerList();
+      var search = getPickerSearch();
+      if (!list) return;
+      var q = search ? search.value.toLowerCase() : '';
+      var items = list.querySelectorAll('.comp-tool-picker-item');
+      for (var i = 0; i < items.length; i++) {
+        var val = items[i].dataset.toolValue || '';
+        var text = items[i].textContent.toLowerCase();
+        items[i].style.display = (!q || val === '' || text.indexOf(q) >= 0) ? '' : 'none';
+      }
+    }
+
+    // Toggle dropdown — fetch tools, then show
+    toolPickerBtn.addEventListener('click', function(e) {
+      e.stopPropagation();
+      var dd = getPickerDropdown();
+      if (!dd) return;
+      var isOpen = dd.style.display !== 'none';
+      if (isOpen) {
+        dd.style.display = 'none';
+        return;
+      }
+      // Fetch tools first, then show the dropdown once we have them
+      fetch('/api/tools')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+          toolsCache = data.tools || [];
+          console.log('[tool-picker] fetched ' + toolsCache.length + ' tools');
+          rebuildToolPickerList();
+          var dd2 = getPickerDropdown();
+          var search2 = getPickerSearch();
+          var list2 = getPickerList();
+          console.log('[tool-picker] dd2=' + !!dd2 + ' search2=' + !!search2 + ' list2=' + !!list2 + ' list2.children=' + (list2 ? list2.children.length : 'N/A'));
+          if (dd2) dd2.style.display = '';
+          if (search2) {
+            search2.value = '';
+            applyToolPickerFilter();
+            setTimeout(function() { search2.focus(); }, 50);
+          }
+        })
+        .catch(function(err) {
+          console.error('[tool-picker] fetch error:', err);
+          rebuildToolPickerList();
+          var dd2 = getPickerDropdown();
+          if (dd2) dd2.style.display = '';
+        });
+    });
+
+    // Search filter
+    if (toolPickerSearch) {
+      toolPickerSearch.addEventListener('input', function() {
+        applyToolPickerFilter();
+      });
+      // Prevent dropdown close on search input click
+      toolPickerSearch.addEventListener('click', function(e) { e.stopPropagation(); });
+    }
+
+    // Item selection
+    if (toolPickerList) {
+      toolPickerList.addEventListener('click', function(e) {
+        var item = e.target.closest('.comp-tool-picker-item');
+        if (!item) return;
+        e.stopPropagation();
+        var newVal = item.dataset.toolValue || '';
+        pushUndoSnapshot();
+        cfg.selectedTool = newVal;
+        cfg.paramDefaults = {};
+        // Cache the tool's parameter schema so ports render without live tools cache
+        var newToolDef = getToolDef(newVal);
+        cfg.paramSchema = newToolDef && newToolDef.parameters ? newToolDef.parameters : null;
+        // Clear edges when tool changes (ports change)
+        if (compData && compData.edges) {
+          compData.edges = compData.edges.filter(function(e) {
+            return e.sourceNodeId !== node.id && e.targetNodeId !== node.id;
+          });
+        }
+        renderNodes(); renderEdges(); wireUpCanvas();
+        rebuildToolUI();
+        immediateSave();
+      });
+    }
+
+    // Close on outside click
+    document.addEventListener('click', function closeToolPicker(e) {
+      if (!document.querySelector('#comp-tool-picker')) {
+        document.removeEventListener('click', closeToolPicker);
+        return;
+      }
+      if (!e.target.closest('#comp-tool-picker')) {
+        var dd = getPickerDropdown();
+        if (dd) dd.style.display = 'none';
+      }
+    });
+  }
+
+  // Wire events — param defaults
+  body.querySelectorAll('.comp-tool-param-input').forEach(function(input) {
+    var paramName = input.dataset.param;
+    var paramType = input.dataset.type;
+
+    function updateParam() {
+      if (!cfg.paramDefaults) cfg.paramDefaults = {};
+      if (input.type === 'checkbox') {
+        cfg.paramDefaults[paramName] = input.checked;
+      } else if (paramType === 'number') {
+        cfg.paramDefaults[paramName] = input.value ? Number(input.value) : undefined;
+      } else if (paramType === 'array' || paramType === 'object') {
+        try {
+          cfg.paramDefaults[paramName] = input.value ? JSON.parse(input.value) : undefined;
+        } catch (_e) {
+          cfg.paramDefaults[paramName] = input.value;
+        }
+      } else {
+        cfg.paramDefaults[paramName] = input.value || undefined;
+      }
+      // Clean undefined entries
+      if (cfg.paramDefaults[paramName] === undefined || cfg.paramDefaults[paramName] === '') {
+        delete cfg.paramDefaults[paramName];
+      }
+      debouncedSave();
+    }
+
+    if (input.tagName === 'SELECT') {
+      input.addEventListener('change', updateParam);
+    } else if (input.type === 'checkbox') {
+      input.addEventListener('change', updateParam);
+    } else {
+      input.addEventListener('input', updateParam);
+    }
+  });
+
+  // Fetch tools if cache is empty — update picker list in-place (don't destroy DOM)
+  if (toolsCache.length === 0) {
+    fetchAvailableTools(function() {
+      // Update the picker button text if a tool is selected
+      var pickerText = document.querySelector('#comp-tool-picker-btn .comp-tool-picker-text');
+      if (pickerText && cfg.selectedTool) {
+        pickerText.textContent = cfg.selectedTool;
+      }
+      // Rebuild the picker list items in-place
+      var list = document.querySelector('#comp-tool-picker-list');
+      if (list) {
+        var listHtml = '<div class="comp-tool-picker-item" data-tool-value="">— None —</div>';
+        for (var fi = 0; fi < toolsCache.length; fi++) {
+          var ft = toolsCache[fi];
+          var ftDesc = ft.description ? ft.description.split('\n')[0] : '';
+          if (ftDesc.length > 60) ftDesc = ftDesc.substring(0, 57) + '...';
+          listHtml += '<div class="comp-tool-picker-item' + (cfg.selectedTool === ft.name ? ' active' : '') + '" data-tool-value="' + compEscAttr(ft.name) + '">';
+          listHtml += '<div class="comp-tool-picker-item-name">' + compEscHtml(ft.name) + '</div>';
+          if (ftDesc) listHtml += '<div class="comp-tool-picker-item-desc">' + compEscHtml(ftDesc) + '</div>';
+          listHtml += '</div>';
+        }
+        list.innerHTML = listHtml;
+      }
+    });
+  }
+}
+
+function renderAssetProperties(body, node, nodeId) {
+  if (!node.asset) node.asset = { mode: 'pick', collectionSlug: '', assetId: '', category: '', tags: '', defaultName: '' };
+  var cfg = node.asset;
+
+  // Cache for fetched data
+  var collectionsCache = [];
+  var assetsCache = [];
+
+  function rebuildAssetUI() {
+    var mode = cfg.mode || 'pick';
+    var html = '';
+
+    // Display Name
+    html += '<div class="comp-props-section">';
+    html += '<div class="comp-props-label">Display Name</div>';
+    html += '<input type="text" class="comp-props-input" id="comp-props-asset-label" value="' + compEscAttr(node.label || '') + '" placeholder="Asset">';
+    html += '</div>';
+
+    // Node type info
+    html += '<div class="comp-props-section">';
+    html += '<div class="comp-props-label" style="color:#f59e0b;">&#x1f4be; Asset Node</div>';
+    html += '<div class="comp-props-value" style="font-size:0.68rem;color:#64748b;">Interact with asset collections. Choose a mode to pick, save, list, or remove assets.</div>';
+    html += '</div>';
+
+    // Mode selector
+    html += '<div class="comp-props-section">';
+    html += '<div class="comp-props-label">Mode</div>';
+    html += '<select class="comp-props-input" id="comp-props-asset-mode">';
+    html += '<option value="pick"' + (mode === 'pick' ? ' selected' : '') + '>Pick — Select an asset</option>';
+    html += '<option value="save"' + (mode === 'save' ? ' selected' : '') + '>Save — Store a file as asset</option>';
+    html += '<option value="list"' + (mode === 'list' ? ' selected' : '') + '>List — List collection assets</option>';
+    html += '<option value="remove"' + (mode === 'remove' ? ' selected' : '') + '>Remove — Delete an asset</option>';
+    html += '<option value="generate_path"' + (mode === 'generate_path' ? ' selected' : '') + '>Generate Path — Create a file path</option>';
+    html += '</select>';
+    html += '</div>';
+
+    // Collection picker (all modes except remove)
+    if (mode !== 'remove') {
+      html += '<div class="comp-props-section">';
+      html += '<div class="comp-props-label">Collection</div>';
+      html += '<select class="comp-props-input" id="comp-props-asset-collection">';
+      html += '<option value="">Loading collections...</option>';
+      html += '</select>';
+      html += '</div>';
+    }
+
+    // Asset picker (pick mode only)
+    if (mode === 'pick') {
+      html += '<div class="comp-props-section">';
+      html += '<div class="comp-props-label">Asset</div>';
+      html += '<select class="comp-props-input" id="comp-props-asset-picker">';
+      html += '<option value="">Select a collection first</option>';
+      html += '</select>';
+      html += '</div>';
+    }
+
+    // Category filter (pick/list modes)
+    if (mode === 'pick' || mode === 'list') {
+      html += '<div class="comp-props-section">';
+      html += '<div class="comp-props-label">Category Filter (optional)</div>';
+      html += '<input type="text" class="comp-props-input" id="comp-props-asset-category" value="' + compEscAttr(cfg.category || '') + '" placeholder="e.g. characters, backgrounds">';
+      html += '</div>';
+    }
+
+    // Tags (save mode)
+    if (mode === 'save') {
+      html += '<div class="comp-props-section">';
+      html += '<div class="comp-props-label">Tags (comma-separated)</div>';
+      html += '<input type="text" class="comp-props-input" id="comp-props-asset-tags" value="' + compEscAttr(cfg.tags || '') + '" placeholder="e.g. character, hero, generated">';
+      html += '</div>';
+
+      html += '<div class="comp-props-section">';
+      html += '<div class="comp-props-label">Default Name</div>';
+      html += '<input type="text" class="comp-props-input" id="comp-props-asset-default-name" value="' + compEscAttr(cfg.defaultName || '') + '" placeholder="Auto-generated if empty">';
+      html += '</div>';
+
+      html += '<div class="comp-props-section">';
+      html += '<label style="display:flex;align-items:center;gap:6px;font-size:0.72rem;color:#e2e8f0;cursor:pointer;">';
+      html += '<input type="checkbox" id="comp-props-asset-ref-only"' + (cfg.referenceOnly ? ' checked' : '') + ' style="accent-color:#f59e0b;">';
+      html += 'Reference only (don\'t copy file)';
+      html += '</label>';
+      html += '<div style="font-size:0.6rem;color:#64748b;margin-top:2px;margin-left:20px;">File stays at its original location</div>';
+      html += '</div>';
+    }
+
+    // Generate Path mode properties
+    if (mode === 'generate_path') {
+      // Determine effective directory: collection rootPath if available, else manual
+      var gpCollectionRoot = '';
+      if (cfg.collectionSlug && cfg.collectionSlug !== '__all__' && collectionsCache) {
+        for (var ci = 0; ci < collectionsCache.length; ci++) {
+          if ((collectionsCache[ci].slug || collectionsCache[ci].id) === cfg.collectionSlug && collectionsCache[ci].rootPath) {
+            gpCollectionRoot = collectionsCache[ci].rootPath;
+            break;
+          }
+        }
+      }
+
+      html += '<div class="comp-props-section">';
+      html += '<div class="comp-props-label">Directory</div>';
+      if (gpCollectionRoot) {
+        html += '<input type="text" class="comp-props-input" id="comp-props-asset-gp-dir" value="' + compEscAttr(gpCollectionRoot) + '" disabled style="opacity:0.6;cursor:not-allowed;">';
+        html += '<div style="font-size:0.6rem;color:#64748b;margin-top:2px;">Using collection root path</div>';
+      } else {
+        html += '<input type="text" class="comp-props-input" id="comp-props-asset-gp-dir" value="' + compEscAttr(cfg.outputDirectory || '~/.woodbury/data/output') + '" placeholder="~/.woodbury/data/output">';
+      }
+      html += '</div>';
+
+      html += '<div class="comp-props-section">';
+      html += '<div class="comp-props-label">Name Pattern</div>';
+      html += '<input type="text" class="comp-props-input" id="comp-props-asset-gp-pattern" value="' + compEscAttr(cfg.namePattern || 'output_{datetime}') + '" placeholder="output_{datetime}">';
+      html += '<div style="font-size:0.6rem;color:#64748b;margin-top:3px;">Tokens: <code style="color:#a5f3fc;">{name}</code> <code style="color:#a5f3fc;">{date}</code> <code style="color:#a5f3fc;">{time}</code> <code style="color:#a5f3fc;">{datetime}</code> <code style="color:#a5f3fc;">{timestamp}</code> <code style="color:#a5f3fc;">{uuid}</code></div>';
+      html += '</div>';
+
+      html += '<div class="comp-props-section">';
+      html += '<div class="comp-props-label">File Extension</div>';
+      html += '<input type="text" class="comp-props-input" id="comp-props-asset-gp-ext" value="' + compEscAttr(cfg.fileExtension || '.json') + '" placeholder=".json">';
+      html += '</div>';
+
+      // Preview
+      var previewPattern = cfg.namePattern || 'output_{datetime}';
+      var previewExt = cfg.fileExtension || '.json';
+      var previewDir = gpCollectionRoot || cfg.outputDirectory || '~/.woodbury/data/output';
+      var now = new Date();
+      var previewResolved = previewPattern
+        .replace(/\{name\}/g, 'my_file')
+        .replace(/\{datetime\}/g, now.getFullYear() + '-' + String(now.getMonth()+1).padStart(2,'0') + '-' + String(now.getDate()).padStart(2,'0') + '_' + String(now.getHours()).padStart(2,'0') + '-' + String(now.getMinutes()).padStart(2,'0') + '-' + String(now.getSeconds()).padStart(2,'0'))
+        .replace(/\{date\}/g, now.getFullYear() + '-' + String(now.getMonth()+1).padStart(2,'0') + '-' + String(now.getDate()).padStart(2,'0'))
+        .replace(/\{time\}/g, String(now.getHours()).padStart(2,'0') + '-' + String(now.getMinutes()).padStart(2,'0') + '-' + String(now.getSeconds()).padStart(2,'0'))
+        .replace(/\{timestamp\}/g, String(Math.floor(now.getTime()/1000)))
+        .replace(/\{uuid\}/g, 'a1b2c3d4');
+      html += '<div class="comp-props-section">';
+      html += '<div class="comp-props-label">Preview</div>';
+      html += '<div id="comp-props-asset-gp-preview" style="font-size:0.7rem;color:#a5f3fc;font-family:monospace;background:#0f172a;padding:6px 8px;border-radius:4px;word-break:break-all;">' + compEscHtml(previewDir + '/' + previewResolved + previewExt) + '</div>';
+      html += '</div>';
+    }
+
+    body.innerHTML = html;
+
+    // Wire events
+    var labelInput = document.querySelector('#comp-props-asset-label');
+    if (labelInput) {
+      labelInput.addEventListener('input', function() {
+        node.label = this.value || '';
+        renderNodes(); renderEdges(); wireUpCanvas();
+        debouncedSave();
+      });
+    }
+
+    var modeSelect = document.querySelector('#comp-props-asset-mode');
+    if (modeSelect) {
+      modeSelect.addEventListener('change', function() {
+        pushUndoSnapshot();
+        cfg.mode = this.value;
+        // Clear edges that reference ports from the old mode
+        if (compData && compData.edges) {
+          compData.edges = compData.edges.filter(function(e) {
+            return e.sourceNodeId !== node.id && e.targetNodeId !== node.id;
+          });
+        }
+        renderNodes(); renderEdges(); wireUpCanvas();
+        rebuildAssetUI();
+        immediateSave();
+      });
+    }
+
+    var categoryInput = document.querySelector('#comp-props-asset-category');
+    if (categoryInput) {
+      categoryInput.addEventListener('input', function() {
+        cfg.category = this.value;
+        debouncedSave();
+      });
+    }
+
+    var tagsInput = document.querySelector('#comp-props-asset-tags');
+    if (tagsInput) {
+      tagsInput.addEventListener('input', function() {
+        cfg.tags = this.value;
+        debouncedSave();
+      });
+    }
+
+    var defaultNameInput = document.querySelector('#comp-props-asset-default-name');
+    if (defaultNameInput) {
+      defaultNameInput.addEventListener('input', function() {
+        cfg.defaultName = this.value;
+        debouncedSave();
+      });
+    }
+
+    var refOnlyInput = document.querySelector('#comp-props-asset-ref-only');
+    if (refOnlyInput) {
+      refOnlyInput.addEventListener('change', function() {
+        cfg.referenceOnly = this.checked;
+        debouncedSave();
+      });
+    }
+
+    // Generate Path mode inputs
+    function updateGpPreview() {
+      var previewEl = document.querySelector('#comp-props-asset-gp-preview');
+      if (!previewEl) return;
+      var pat = cfg.namePattern || 'output_{datetime}';
+      var ext = cfg.fileExtension || '.json';
+      var dir = cfg.outputDirectory || '~/.woodbury/data/output';
+      // Check for collection rootPath override
+      if (cfg.collectionSlug && cfg.collectionSlug !== '__all__' && collectionsCache) {
+        for (var ci = 0; ci < collectionsCache.length; ci++) {
+          if ((collectionsCache[ci].slug || collectionsCache[ci].id) === cfg.collectionSlug && collectionsCache[ci].rootPath) {
+            dir = collectionsCache[ci].rootPath;
+            break;
+          }
+        }
+      }
+      var now = new Date();
+      var resolved = pat
+        .replace(/\{name\}/g, 'my_file')
+        .replace(/\{datetime\}/g, now.getFullYear() + '-' + String(now.getMonth()+1).padStart(2,'0') + '-' + String(now.getDate()).padStart(2,'0') + '_' + String(now.getHours()).padStart(2,'0') + '-' + String(now.getMinutes()).padStart(2,'0') + '-' + String(now.getSeconds()).padStart(2,'0'))
+        .replace(/\{date\}/g, now.getFullYear() + '-' + String(now.getMonth()+1).padStart(2,'0') + '-' + String(now.getDate()).padStart(2,'0'))
+        .replace(/\{time\}/g, String(now.getHours()).padStart(2,'0') + '-' + String(now.getMinutes()).padStart(2,'0') + '-' + String(now.getSeconds()).padStart(2,'0'))
+        .replace(/\{timestamp\}/g, String(Math.floor(now.getTime()/1000)))
+        .replace(/\{uuid\}/g, 'a1b2c3d4');
+      previewEl.textContent = dir + '/' + resolved + ext;
+    }
+    var gpDirInput = document.querySelector('#comp-props-asset-gp-dir');
+    if (gpDirInput) {
+      gpDirInput.addEventListener('input', function() {
+        cfg.outputDirectory = this.value;
+        debouncedSave();
+        updateGpPreview();
+      });
+    }
+    var gpPatternInput = document.querySelector('#comp-props-asset-gp-pattern');
+    if (gpPatternInput) {
+      gpPatternInput.addEventListener('input', function() {
+        cfg.namePattern = this.value;
+        debouncedSave();
+        updateGpPreview();
+      });
+    }
+    var gpExtInput = document.querySelector('#comp-props-asset-gp-ext');
+    if (gpExtInput) {
+      gpExtInput.addEventListener('input', function() {
+        cfg.fileExtension = this.value;
+        debouncedSave();
+        updateGpPreview();
+      });
+    }
+
+    // Fetch collections
+    fetchCollections();
+  }
+
+  function fetchCollections() {
+    fetch('/api/assets/collections')
+      .then(function(res) { return res.json(); })
+      .then(function(data) {
+        collectionsCache = data.collections || data || [];
+        var select = document.querySelector('#comp-props-asset-collection');
+        if (!select) return;
+        var html = '<option value="">— Select Collection —</option>';
+        html += '<option value="__all__"' + (cfg.collectionSlug === '__all__' ? ' selected' : '') + '>All Assets</option>';
+        for (var i = 0; i < collectionsCache.length; i++) {
+          var col = collectionsCache[i];
+          var slug = col.slug || col.id || col.name;
+          var name = col.name || slug;
+          html += '<option value="' + compEscAttr(slug) + '"' + (cfg.collectionSlug === slug ? ' selected' : '') + '>' + compEscHtml(name) + '</option>';
+        }
+        select.innerHTML = html;
+        select.addEventListener('change', function() {
+          cfg.collectionSlug = this.value;
+          renderNodes(); renderEdges(); wireUpCanvas();
+          debouncedSave();
+          // If pick mode, load assets for this collection
+          if (cfg.mode === 'pick' && this.value) {
+            fetchAssets(this.value);
+          }
+          // If generate_path mode, rebuild to update preview with collection rootPath
+          if (cfg.mode === 'generate_path') {
+            rebuildAssetUI();
+          }
+        });
+        // If collection already selected and in pick mode, load assets
+        if (cfg.mode === 'pick' && cfg.collectionSlug) {
+          fetchAssets(cfg.collectionSlug);
+        }
+      })
+      .catch(function(err) {
+        var select = document.querySelector('#comp-props-asset-collection');
+        if (select) select.innerHTML = '<option value="">Failed to load collections</option>';
+      });
+  }
+
+  function fetchAssets(collectionSlug) {
+    var assetUrl = '/api/assets';
+    if (collectionSlug && collectionSlug !== '__all__') {
+      assetUrl += '?collection=' + encodeURIComponent(collectionSlug);
+    }
+    fetch(assetUrl)
+      .then(function(res) { return res.json(); })
+      .then(function(data) {
+        assetsCache = data.assets || data || [];
+        var select = document.querySelector('#comp-props-asset-picker');
+        if (!select) return;
+        var html = '<option value="">— Select Asset —</option>';
+        for (var i = 0; i < assetsCache.length; i++) {
+          var asset = assetsCache[i];
+          var id = asset.id || asset.assetId;
+          var name = asset.name || asset.fileName || id;
+          html += '<option value="' + compEscAttr(id) + '"' + (cfg.assetId === id ? ' selected' : '') + '>' + compEscHtml(name) + '</option>';
+        }
+        select.innerHTML = html;
+        select.addEventListener('change', function() {
+          cfg.assetId = this.value;
+          debouncedSave();
+        });
+      })
+      .catch(function(err) {
+        var select = document.querySelector('#comp-props-asset-picker');
+        if (select) select.innerHTML = '<option value="">Failed to load assets</option>';
+      });
+  }
+
+  rebuildAssetUI();
 }
 
 function renderSwitchProperties(body, node, nodeId) {
@@ -4442,6 +6700,21 @@ function renderScriptProperties(body, node, nodeId) {
   var scriptCfg = node.script || { description: '', code: '', inputs: [], outputs: [], chatHistory: [] };
   var html = '';
 
+  // Error display (if node has a failed state)
+  var nodeError = lastNodeStates && lastNodeStates[nodeId] && lastNodeStates[nodeId].error;
+  if (nodeError) {
+    html += '<div class="comp-props-error-box" id="comp-props-error-box">';
+    html += '<div class="comp-props-error-header">';
+    html += '<span class="comp-props-error-title">&#x26A0; Execution Error</span>';
+    html += '<span style="display:flex;gap:4px;">';
+    html += '<span class="comp-props-error-repair" id="comp-props-error-repair">&#x26A1; Repair</span>';
+    html += '<span class="comp-props-error-clear" id="comp-props-error-clear">Clear</span>';
+    html += '</span>';
+    html += '</div>';
+    html += compEscHtml(nodeError);
+    html += '</div>';
+  }
+
   // Display Name
   html += '<div class="comp-props-section">';
   html += '<div class="comp-props-label">Display Name</div>';
@@ -4545,6 +6818,22 @@ function renderScriptProperties(body, node, nodeId) {
   html += '</div>';
 
   body.innerHTML = html;
+
+  // Wire up error clear button
+  var errorClearBtn = body.querySelector('#comp-props-error-clear');
+  if (errorClearBtn) {
+    errorClearBtn.addEventListener('click', function() {
+      clearNodeError(nodeId);
+    });
+  }
+
+  // Wire up error repair button
+  var errorRepairBtn = body.querySelector('#comp-props-error-repair');
+  if (errorRepairBtn) {
+    errorRepairBtn.addEventListener('click', function() {
+      repairScriptNode(node, nodeId);
+    });
+  }
 
   // Scroll chat to bottom
   var chatEl = body.querySelector('#comp-script-chat');
@@ -4753,9 +7042,8 @@ function renderEdgeProperties(edgeId) {
 
 // ── Auto-Layout ──────────────────────────────────────────────
 
-function autoLayoutNodes() {
+function layoutNodesInternal() {
   if (!compData || compData.nodes.length === 0) return;
-  pushUndoSnapshot();
 
   // Step 1: Build adjacency
   var adj = {};
@@ -4828,7 +7116,12 @@ function autoLayoutNodes() {
       delete grp[idx]._medianPredY;
     }
   }
+}
 
+function autoLayoutNodes() {
+  if (!compData || compData.nodes.length === 0) return;
+  pushUndoSnapshot();
+  layoutNodesInternal();
   renderNodes();
   renderEdges();
   wireUpCanvas();
@@ -5153,11 +7446,16 @@ function pollCompRunStatus() {
           }
         }
 
-        // Hide progress bar and clear overlays after 5s
+        // Hide progress bar after 5s; clear overlays only on success
+        // On failure, keep error banners visible so user can see what went wrong
         setTimeout(function() {
           var wrap = document.querySelector('#comp-progress-wrap');
           if (wrap) wrap.style.display = 'none';
-          clearNodeExecutionStates();
+          if (data.success) {
+            clearNodeExecutionStates();
+          } else {
+            clearNonErrorExecutionStates();
+          }
         }, 5000);
       }
     })
@@ -5461,7 +7759,11 @@ function pollBatchStatus() {
         setTimeout(function() {
           var wrap = document.querySelector('#comp-progress-wrap');
           if (wrap) wrap.style.display = 'none';
-          clearNodeExecutionStates();
+          if (data.failedIterations === 0) {
+            clearNodeExecutionStates();
+          } else {
+            clearNonErrorExecutionStates();
+          }
         }, 5000);
       }
     })
@@ -5605,6 +7907,182 @@ function updateNodeExecutionState(nodeId, status) {
   } else {
     indicator.innerHTML = '';
   }
+
+  // Show/hide error banner on the node
+  var existingBanner = nodeEl.querySelector('.comp-node-error-banner');
+  if (status === 'failed' && lastNodeStates && lastNodeStates[nodeId] && lastNodeStates[nodeId].error) {
+    var errorText = lastNodeStates[nodeId].error;
+    if (!existingBanner) {
+      existingBanner = document.createElement('div');
+      existingBanner.className = 'comp-node-error-banner';
+      nodeEl.appendChild(existingBanner);
+    }
+    // Truncate for node display, full error in properties panel
+    var shortError = errorText.length > 120 ? errorText.slice(0, 120) + '...' : errorText;
+    var isScriptNode = compData && compData.nodes && compData.nodes.find(function(n) { return n.id === nodeId && n.workflowId === '__script__'; });
+    var bannerButtons = '<span class="comp-error-dismiss" title="Clear error">&#x2715;</span>';
+    if (isScriptNode) {
+      bannerButtons = '<span class="comp-error-repair" title="Repair with AI">&#x26A1;</span>' + bannerButtons;
+    }
+    existingBanner.innerHTML = bannerButtons + compEscHtml(shortError);
+    existingBanner.title = 'Click to view full error in properties panel';
+    // Click banner to select the node and show properties
+    existingBanner.onclick = function(e) {
+      if (e.target.classList.contains('comp-error-dismiss')) {
+        // Clear this node's error
+        clearNodeError(nodeId);
+        e.stopPropagation();
+        return;
+      }
+      if (e.target.classList.contains('comp-error-repair')) {
+        // Repair this node
+        var repairNode = compData && compData.nodes ? compData.nodes.find(function(n) { return n.id === nodeId; }) : null;
+        if (repairNode && repairNode.script) {
+          selectedNodes.clear();
+          selectedNodes.add(nodeId);
+          selectedEdge = null;
+          updatePropertiesPanel();
+          repairScriptNode(repairNode, nodeId);
+        }
+        e.stopPropagation();
+        return;
+      }
+      selectedNodes.clear();
+      selectedNodes.add(nodeId);
+      selectedEdge = null;
+      updatePropertiesPanel();
+    };
+  } else if (existingBanner && status !== 'failed') {
+    existingBanner.remove();
+  }
+}
+
+function clearNodeError(nodeId) {
+  // Remove error from lastNodeStates
+  if (lastNodeStates && lastNodeStates[nodeId]) {
+    delete lastNodeStates[nodeId].error;
+    lastNodeStates[nodeId].status = 'completed'; // Reset visual state
+  }
+  // Remove error banner from node element
+  var nodeEl = document.querySelector('.comp-node[data-node-id="' + nodeId + '"]');
+  if (nodeEl) {
+    var banner = nodeEl.querySelector('.comp-node-error-banner');
+    if (banner) banner.remove();
+    nodeEl.classList.remove('comp-node-exec-failed');
+  }
+  // Re-render properties panel if this node is selected
+  if (selectedNodes.has(nodeId)) {
+    updatePropertiesPanel();
+  }
+}
+
+async function repairScriptNode(node, nodeId) {
+  if (!node || !node.script) { toast('Not a script node', 'error'); return; }
+
+  var nodeError = lastNodeStates && lastNodeStates[nodeId] && lastNodeStates[nodeId].error;
+  if (!nodeError) { toast('No error to repair', 'error'); return; }
+
+  // Disable repair button and show spinner
+  var repairBtn = document.querySelector('#comp-props-error-repair');
+  if (repairBtn) {
+    repairBtn.classList.add('disabled');
+    repairBtn.textContent = 'Repairing...';
+  }
+
+  try {
+    var repairDescription = 'Fix this script node. It failed during execution with the following error:\n\n' +
+      nodeError + '\n\nPlease fix the bug in the code. Do NOT change the @input/@output annotations — only fix the implementation.';
+
+    var res = await fetch('/api/compositions/generate-script', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        description: repairDescription,
+        chatHistory: node.script.chatHistory || [],
+        currentCode: node.script.code || '',
+      }),
+    });
+
+    var data = await res.json();
+    if (!res.ok || data.error) {
+      throw new Error(data.error || 'Repair request failed');
+    }
+
+    // Apply the fix
+    pushUndoSnapshot();
+    node.script.code = data.code;
+    if (data.inputs) node.script.inputs = data.inputs;
+    if (data.outputs) node.script.outputs = data.outputs;
+
+    // Add to chat history
+    if (!node.script.chatHistory) node.script.chatHistory = [];
+    node.script.chatHistory.push(
+      { role: 'user', content: '[Repair] Error: ' + nodeError },
+      { role: 'assistant', content: '```javascript\n' + data.code + '\n```' }
+    );
+
+    // Clear error state
+    clearNodeError(nodeId);
+
+    // Re-render
+    renderNodes();
+    renderEdges();
+    wireUpCanvas();
+    if (selectedNodes.has(nodeId)) {
+      selectedNodes.clear();
+      selectedNodes.add(nodeId);
+      updatePropertiesPanel();
+    }
+    debouncedSave();
+
+    toast('Code repaired — try running again', 'success');
+  } catch (err) {
+    toast('Repair failed: ' + (err.message || err), 'error');
+    // Re-enable button
+    if (repairBtn) {
+      repairBtn.classList.remove('disabled');
+      repairBtn.innerHTML = '&#x26A1; Repair';
+    }
+  }
+}
+
+function injectNodeErrorDisplay(body, nodeId) {
+  // Inject error box at the top of the properties panel body for any failed node
+  var nodeError = lastNodeStates && lastNodeStates[nodeId] && lastNodeStates[nodeId].error;
+  if (!nodeError) return;
+
+  // Check if this is a script node (to show repair button)
+  var theNode = compData && compData.nodes ? compData.nodes.find(function(n) { return n.id === nodeId; }) : null;
+  var isScript = theNode && theNode.workflowId === '__script__' && theNode.script;
+
+  var buttonsHtml = '<span style="display:flex;gap:4px;">';
+  if (isScript) {
+    buttonsHtml += '<span class="comp-props-error-repair" id="comp-props-error-repair">&#x26A1; Repair</span>';
+  }
+  buttonsHtml += '<span class="comp-props-error-clear" id="comp-props-error-clear">Clear</span>';
+  buttonsHtml += '</span>';
+
+  var errorDiv = document.createElement('div');
+  errorDiv.className = 'comp-props-error-box';
+  errorDiv.id = 'comp-props-error-box';
+  errorDiv.innerHTML = '<div class="comp-props-error-header">' +
+    '<span class="comp-props-error-title">&#x26A0; Execution Error</span>' +
+    buttonsHtml +
+    '</div>' + compEscHtml(nodeError);
+  body.insertBefore(errorDiv, body.firstChild);
+
+  var clearBtn = errorDiv.querySelector('#comp-props-error-clear');
+  if (clearBtn) {
+    clearBtn.addEventListener('click', function() {
+      clearNodeError(nodeId);
+    });
+  }
+  var repairBtn = errorDiv.querySelector('#comp-props-error-repair');
+  if (repairBtn && isScript) {
+    repairBtn.addEventListener('click', function() {
+      repairScriptNode(theNode, nodeId);
+    });
+  }
 }
 
 function updateNodeRetryBadge(nodeId, attempt, max) {
@@ -5661,6 +8139,27 @@ function clearNodeExecutionStates() {
     el.classList.remove('comp-node-exec-pending', 'comp-node-exec-running', 'comp-node-exec-retrying', 'comp-node-exec-completed', 'comp-node-exec-failed', 'comp-node-exec-skipped');
     var indicator = el.querySelector('.comp-node-exec-indicator');
     if (indicator) indicator.remove();
+    var barWrap = el.querySelector('.comp-node-step-bar-wrap');
+    if (barWrap) barWrap.remove();
+    var footerText = el.querySelector('.comp-node-footer-text');
+    if (footerText) footerText.remove();
+    var retryBadge = el.querySelector('.comp-node-retry-badge');
+    if (retryBadge) retryBadge.remove();
+    var errorBanner = el.querySelector('.comp-node-error-banner');
+    if (errorBanner) errorBanner.remove();
+  });
+}
+
+function clearNonErrorExecutionStates() {
+  // Clear all execution overlays EXCEPT error banners on failed nodes
+  document.querySelectorAll('.comp-node').forEach(function(el) {
+    var hasFailed = el.classList.contains('comp-node-exec-failed');
+    if (!hasFailed) {
+      el.classList.remove('comp-node-exec-pending', 'comp-node-exec-running', 'comp-node-exec-retrying', 'comp-node-exec-completed', 'comp-node-exec-skipped');
+      var indicator = el.querySelector('.comp-node-exec-indicator');
+      if (indicator) indicator.remove();
+    }
+    // Always remove these transient elements
     var barWrap = el.querySelector('.comp-node-step-bar-wrap');
     if (barWrap) barWrap.remove();
     var footerText = el.querySelector('.comp-node-footer-text');

@@ -50,7 +50,8 @@
     "puppeteer": "^24.37.4",
     "sharp": "^0.33.5",
     "uiohook-napi": "^1.5.4",
-    "ws": "^8.19.0"
+    "ws": "^8.19.0",
+    "@modelcontextprotocol/sdk": "^1.12.1"
   },
   "devDependencies": {
     "@types/jest": "^29.5.14",

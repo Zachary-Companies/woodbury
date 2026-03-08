@@ -11,13 +11,11 @@ export const listDirectoryDefinition: ToolDefinition = {
       path: {
         type: 'string',
         description: 'Directory path (relative to working directory or absolute). Default: current directory',
-        required: false,
         default: '.'
       },
       recursive: {
         type: 'boolean',
         description: 'Whether to list recursively (default: false)',
-        required: false,
         default: false
       }
     },

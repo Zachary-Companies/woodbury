@@ -10,18 +10,15 @@ export const fileWriteDefinition: ToolDefinition = {
     properties: {
       path: {
         type: 'string',
-        description: 'Path to the file (relative to working directory or absolute)',
-        required: true
+        description: 'Path to the file (relative to working directory or absolute)'
       },
       content: {
         type: 'string',
-        description: 'Content to write to the file',
-        required: true
+        description: 'Content to write to the file'
       },
       createDirectories: {
         type: 'boolean',
         description: 'Create parent directories if they do not exist (default: true)',
-        required: false,
         default: true
       }
     },

@@ -91,6 +91,7 @@ export class ExtensionManager {
   private verbose: boolean;
   private onBackgroundMessage: ((message: string, extensionName: string) => void) | null = null;
   private backgroundTasksRunning: boolean = false;
+  private _loadingPromise: Promise<any> | null = null;
 
   constructor(workingDirectory: string, verbose: boolean = false) {
     this.workingDirectory = workingDirectory;
@@ -98,10 +99,29 @@ export class ExtensionManager {
   }
 
   /**
+   * Returns a promise that resolves when all extensions have finished loading.
+   * Safe to call multiple times — returns immediately if already loaded or not loading.
+   */
+  async whenReady(): Promise<void> {
+    if (this._loadingPromise) {
+      try { await this._loadingPromise; } catch { /* ignore timeout errors */ }
+    }
+  }
+
+  /**
    * Discover and activate all extensions.
    * Returns lists of successfully loaded extensions and errors.
    */
-  async loadAll(): Promise<{
+  loadAll(): Promise<{
+    loaded: string[];
+    errors: Array<{ name: string; error: string }>;
+  }> {
+    const p = this._doLoadAll();
+    this._loadingPromise = p;
+    return p;
+  }
+
+  private async _doLoadAll(): Promise<{
     loaded: string[];
     errors: Array<{ name: string; error: string }>;
   }> {
