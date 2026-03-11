@@ -58,7 +58,14 @@ export { StateManager } from './state-manager.js';
 export { MemoryStore } from './memory-store.js';
 
 // Task graph
-export { createSingleTaskGraph, decomposeGoal, isSimpleGoal, topologicalSort } from './task-graph.js';
+export {
+  createPipelineLifecycleGraph,
+  createSingleTaskGraph,
+  decomposeGoal,
+  isPipelineBuildObjective,
+  isSimpleGoal,
+  topologicalSort,
+} from './task-graph.js';
 
 // Verification + Recovery (Milestone 2)
 export { Verifier } from './verifier.js';

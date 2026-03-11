@@ -26,10 +26,80 @@ const DEFAULT_MAX_TOOLS = 18;
 
 const DEFAULT_SKILLS: SkillDescriptor[] = [
   {
+    name: 'pipeline_design',
+    description: 'Turns pipeline intent into an explicit graph plan, node responsibilities, and interface contract.',
+    whenToUse: 'Use before generation when the task is defining a reusable pipeline structure, data flow, or node contract.',
+    promptGuidance: 'Translate user intent into a concrete graph plan. Define stages, responsibilities, inputs, outputs, and failure boundaries before generation. Do not claim a pipeline exists yet.',
+    preferredSubagent: 'plan',
+    completionContract: 'Return the planned stages, node responsibilities, and interface contract that generation must follow.',
+    keywords: ['pipeline design', 'workflow design', 'graph plan', 'node responsibilities', 'interface contract', 'design pipeline', 'design workflow', 'composition plan', 'data flow'],
+    exactTools: ['memory_recall', 'goal_contract', 'reflect', 'file_read', 'file_search', 'grep', 'list_directory'],
+    fallbackTools: ['web_fetch'],
+    maxTools: 10,
+    policy: {
+      hardBannedTools: ['file_write', 'shell_execute', 'code_execute', 'workflow_execute', 'workflow_play'],
+      defaultRecoveryHints: ['If the desired pipeline structure is unclear, refine the graph contract before moving to generation.'],
+    },
+  },
+  {
+    name: 'pipeline_generate',
+    description: 'Calls the MCP intelligence generator with tight constraints to produce the initial saved composition.',
+    whenToUse: 'Use once the pipeline design is clear and you need a real saved pipeline or workflow artifact.',
+    promptGuidance: 'Call the intelligence generation tools with the approved design contract and tight constraints. Require a real saved composition result; do not substitute one-off execution.',
+    preferredSubagent: 'execute',
+    completionContract: 'Return the generated composition artifact, including its saved id or equivalent creation result.',
+    keywords: ['generate pipeline', 'generate workflow', 'initial composition', 'saved pipeline', 'saved workflow', 'compose tools'],
+    exactTools: ['memory_recall', 'goal_contract', 'reflect'],
+    toolPrefixes: ['mcp__intelligence__'],
+    excludedTools: ['workflow_execute', 'workflow_play'],
+    fallbackTools: ['web_fetch'],
+    maxTools: 12,
+    policy: {
+      hardBannedTools: ['file_write', 'shell_execute', 'code_execute', 'workflow_execute', 'workflow_play'],
+      escalationPhrases: ['escalate', 'override', 'bypass the pipeline tools', 'edit the files directly', 'direct file mutation'],
+      defaultRecoveryHints: ['If generation fails, retry the intelligence generator with tighter constraints instead of switching to manual file creation.'],
+    },
+  },
+  {
+    name: 'pipeline_validate_and_repair',
+    description: 'Validates generated compositions, rejects malformed nodes, and drives repair before success is claimed.',
+    whenToUse: 'Use after initial generation to parse-check script nodes, verify edges and ports, and repair malformed pipeline artifacts.',
+    promptGuidance: 'Inspect the generated composition, parse-check embedded code, verify wiring, and reject malformed code blobs. Prefer regenerating or repairing through intelligence tools over manual file edits unless the user explicitly escalates.',
+    preferredSubagent: 'execute',
+    completionContract: 'Return the validation findings and either a repaired composition artifact or an explicit blocker.',
+    keywords: ['validate pipeline', 'repair pipeline', 'parse-check', 'port mismatch', 'edge mismatch', 'malformed code blob', 'repair composition'],
+    exactTools: ['memory_recall', 'reflect', 'file_read', 'file_search', 'grep', 'list_directory', 'code_execute'],
+    toolPrefixes: ['mcp__intelligence__'],
+    excludedTools: ['workflow_execute', 'workflow_play'],
+    fallbackTools: ['goal_contract'],
+    maxTools: 14,
+    policy: {
+      hardBannedTools: ['file_write', 'shell_execute', 'workflow_execute', 'workflow_play'],
+      defaultRecoveryHints: ['Do not accept a generated composition until script nodes parse and the graph wiring is internally consistent.'],
+    },
+  },
+  {
+    name: 'pipeline_verify',
+    description: 'Confirms a saved composition is discoverable and performs the lightest viable executable smoke test.',
+    whenToUse: 'Use after validation to confirm the artifact is visible in the dashboard and can be exercised with sample inputs or another concrete execution check.',
+    promptGuidance: 'Verify the saved artifact with concrete evidence. Confirm discoverability through composition discovery or dashboard APIs, and run the lightest viable smoke test available. If a live run is not possible, say exactly what was and was not verified.',
+    preferredSubagent: 'execute',
+    completionContract: 'Return the verification evidence for discoverability and executability, including any remaining gaps.',
+    keywords: ['verify pipeline', 'smoke test pipeline', 'sample inputs', 'dashboard visibility', 'discoverable composition', 'verify workflow artifact'],
+    exactTools: ['memory_recall', 'reflect', 'file_read', 'file_search', 'grep', 'list_directory', 'code_execute', 'shell_execute', 'web_fetch'],
+    fallbackTools: ['goal_contract'],
+    maxTools: 14,
+    policy: {
+      hardBannedTools: ['file_write'],
+      escalationPhrases: ['escalate', 'override', 'edit while verifying'],
+      defaultRecoveryHints: ['If smoke verification is incomplete, report the missing execution evidence instead of declaring the pipeline done.'],
+    },
+  },
+  {
     name: 'workflow_or_pipeline_build',
-    description: 'Builds or updates Woodbury pipelines and workflow automations.',
-    whenToUse: 'Use for pipeline generation, workflow automation, multi-step orchestration, or composition requests.',
-    promptGuidance: 'Prefer intelligence or workflow composition tools over ad-hoc file edits. Build the workflow structure explicitly and describe the automation in plain language. Do not fall back to one-off workflow execution when the user asked for a reusable pipeline.',
+    description: 'Legacy fallback for Woodbury pipelines and workflow automations when no explicit lifecycle stage is available.',
+    whenToUse: 'Use as a compatibility fallback for generic pipeline requests. Prefer the dedicated pipeline_design, pipeline_generate, pipeline_validate_and_repair, and pipeline_verify skills when the planner provides them.',
+    promptGuidance: 'Prefer the dedicated pipeline lifecycle skills. If you land here, keep using intelligence or workflow composition tools rather than ad-hoc file edits, and do not fall back to one-off execution when the user asked for a reusable pipeline.',
     preferredSubagent: 'plan',
     completionContract: 'Return the created or updated workflow/pipeline and explain what each stage does.',
     keywords: ['pipeline', 'workflow', 'automation', 'automate', 'compose', 'composition', 'node', 'orchestrate', 'schedule', 'generate pipeline'],
@@ -269,8 +339,17 @@ export class SkillRegistry {
       suggestions.add(/test|verify|build|compile|check/.test(lower) ? 'test_and_verify' : 'repo_explore');
     } else if (skillName === 'test_and_verify') {
       suggestions.add(/browser|page|screenshot|dom/.test(lower) ? 'browser_automation' : 'repo_explore');
+    } else if (skillName === 'pipeline_design') {
+      suggestions.add('pipeline_generate');
+    } else if (skillName === 'pipeline_generate') {
+      suggestions.add('pipeline_validate_and_repair');
+    } else if (skillName === 'pipeline_validate_and_repair') {
+      suggestions.add('pipeline_verify');
+      suggestions.add('pipeline_generate');
+    } else if (skillName === 'pipeline_verify') {
+      suggestions.add('pipeline_validate_and_repair');
     } else if (skillName === 'workflow_or_pipeline_build') {
-      suggestions.add('repo_explore');
+      suggestions.add('pipeline_design');
     } else if (skillName === 'browser_automation') {
       suggestions.add('repo_explore');
     } else if (skillName === 'web_research') {

@@ -59,4 +59,50 @@ describe('autoSaveComposition', () => {
 
     expect(invalidateCompositionCache).not.toHaveBeenCalled();
   });
+
+  it('flags malformed script blobs and port mismatches during validation', async () => {
+    const { validateComposition } = await import('../loop/v3/closure-engine.js');
+
+    const issues = validateComposition({
+      version: '1.0',
+      id: 'bad-comp',
+      name: 'Bad Comp',
+      nodes: [
+        {
+          id: 'n1',
+          workflowId: '__script__',
+          label: 'Broken Script',
+          script: {
+            code: '```json\n{"code":"async function execute() {}"}\n```',
+            inputs: [{ name: 'inputA' }],
+            outputs: [{ name: 'outputA' }],
+          },
+        },
+        {
+          id: 'n2',
+          workflowId: '__script__',
+          label: 'Receiver',
+          script: {
+            code: 'async function execute(inputs) { return { done: true }; }',
+            inputs: [{ name: 'expectedInput' }],
+            outputs: [{ name: 'done' }],
+          },
+        },
+      ],
+      edges: [
+        {
+          id: 'e1',
+          sourceNodeId: 'n1',
+          sourcePort: 'missingOutput',
+          targetNodeId: 'n2',
+          targetPort: 'missingInput',
+        },
+      ],
+    }, new Set<string>());
+
+    expect(issues.some(issue => issue.includes('markdown fences'))).toBe(true);
+    expect(issues.some(issue => issue.includes('serialized JSON blob'))).toBe(true);
+    expect(issues.some(issue => issue.includes('missing source port'))).toBe(true);
+    expect(issues.some(issue => issue.includes('missing target port'))).toBe(true);
+  });
 });

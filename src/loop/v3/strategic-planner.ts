@@ -9,7 +9,13 @@
 import type {
   ProviderAdapter,
 } from '../v2/core/provider-adapter.js';
-import { createSingleTaskGraph, decomposeGoal, topologicalSort } from './task-graph.js';
+import {
+  createPipelineLifecycleGraph,
+  createSingleTaskGraph,
+  decomposeGoal,
+  isPipelineBuildObjective,
+  topologicalSort,
+} from './task-graph.js';
 import type { Goal, TaskGraph, TaskNode } from './types.js';
 import type { StateManager } from './state-manager.js';
 import type { MemoryStore } from './memory-store.js';
@@ -58,6 +64,18 @@ export class StrategicPlanner {
    * Generate 2-5 candidate plans using different strategies.
    */
   async generatePlans(goal: Goal): Promise<CandidatePlan[]> {
+    if (isPipelineBuildObjective(goal.objective)) {
+      const lifecycleGraph = createPipelineLifecycleGraph(goal);
+      return [
+        this.buildCandidate(
+          'low_risk',
+          lifecycleGraph,
+          goal,
+          'Dedicated pipeline lifecycle: design, generate, validate/repair, then verify before completion.',
+        ),
+      ];
+    }
+
     const plans: CandidatePlan[] = [];
 
     // Strategy 1: Fast path — single task or minimal decomposition
@@ -288,6 +306,18 @@ export class StrategicPlanner {
       if (dependencySkills.includes('code_change') && node.preferredSkill === 'test_and_verify') {
         node.preferredSkillReason = 'Planner handoff from code_change to test_and_verify after implementation.';
       }
+
+      if (dependencySkills.includes('pipeline_design') && node.preferredSkill === 'pipeline_generate') {
+        node.preferredSkillReason = 'Planner handoff from pipeline_design to pipeline_generate after the graph contract is defined.';
+      }
+
+      if (dependencySkills.includes('pipeline_generate') && node.preferredSkill === 'pipeline_validate_and_repair') {
+        node.preferredSkillReason = 'Planner handoff from pipeline_generate to pipeline_validate_and_repair so the saved composition is structurally sound before completion.';
+      }
+
+      if (dependencySkills.includes('pipeline_validate_and_repair') && node.preferredSkill === 'pipeline_verify') {
+        node.preferredSkillReason = 'Planner handoff from pipeline_validate_and_repair to pipeline_verify so the validated artifact is discoverable and smoke-tested.';
+      }
     }
 
     if (!nodes.some(node => node.preferredSkill === 'test_and_verify')) {
@@ -310,6 +340,10 @@ export class StrategicPlanner {
 
   private inferPreferredSkill(description: string): string {
     const lower = description.toLowerCase();
+    if (/(smoke test|sample input|dashboard visibility|discoverable|saved composition|saved artifact|executable check)/.test(lower) && /(pipeline|workflow|composition)/.test(lower)) return 'pipeline_verify';
+    if (/(validate|repair|parse-check|parse check|ports|edges|malformed|regenerate|bad nodes)/.test(lower) && /(pipeline|workflow|composition)/.test(lower)) return 'pipeline_validate_and_repair';
+    if (/(generate|initial saved|saved pipeline|saved workflow|compose tools)/.test(lower) && /(pipeline|workflow|composition)/.test(lower)) return 'pipeline_generate';
+    if (/(design|graph plan|node responsibilities|interface contract|data flow|inputs|outputs)/.test(lower) && /(pipeline|workflow|composition|automation)/.test(lower)) return 'pipeline_design';
     if (/test|verify|validation|build|compile|assert|check/.test(lower)) return 'test_and_verify';
     if (/explore|inspect|investigate|understand|gather evidence|trace|analyze existing/.test(lower)) return 'repo_explore';
     if (/implement|fix|refactor|edit|change|update|write|code/.test(lower)) return 'code_change';

@@ -80,6 +80,8 @@ ${serverDescriptions}`);
 ## Intelligence Tools — MANDATORY
 **RULE: When a user asks you to create, build, set up, make, or automate ANY multi-step process, you MUST call \`mcp__intelligence__generate_pipeline\` or \`mcp__intelligence__generate_workflow\`. Do NOT attempt to do the work yourself using other tools like shell_execute, file_write, list_directory, etc. The intelligence tools create saved compositions visible in the dashboard UI.**
 
+For reusable pipeline requests, treat the work as a lifecycle: design the graph contract first, then generate, then validate/repair, then verify discoverability and smoke-test evidence before saying the pipeline is done.
+
 **NEVER** browse the filesystem looking for existing pipelines or workflows. **NEVER** use shell_execute, file_read, or list_directory to manually create or inspect pipeline files. ALWAYS call the intelligence tools directly.
 
 **NEVER** claim a pipeline was created unless you received a real successful result from an intelligence tool that includes a saved composition or composition id. If an intelligence tool fails, report the exact tool error. Do not speculate about causes like "response length" unless the tool output explicitly says that.
@@ -100,6 +102,8 @@ ${serverDescriptions}`);
 - Combining multiple tools into one reusable operation
 
 If \`generate_pipeline\` fails, either retry \`generate_pipeline\` with tighter constraints or tell the user the exact failure. Do not silently switch to ad-hoc file writing, shell commands, or one-off execution.
+
+Generation alone is not completion. Do not declare success until the saved composition has been validated and there is concrete verification evidence that the artifact is discoverable and runnable.
 
 **WHY:** Doing work directly gives a one-time result. Intelligence tools create a saved pipeline in the dashboard that users can see, modify, and re-run. Non-technical users expect to see their creation in the UI.
 

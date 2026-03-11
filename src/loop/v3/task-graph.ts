@@ -40,6 +40,101 @@ export function createSingleTaskGraph(goal: Goal): TaskGraph {
 }
 
 /**
+ * Identify goals that should use the dedicated pipeline lifecycle.
+ */
+export function isPipelineBuildObjective(objective: string): boolean {
+  const lower = objective.toLowerCase();
+  const pipelineNouns = /(pipeline|workflow|composition|automation|automate|orchestrate|orchestration)/;
+  const lifecycleVerbs = /(create|build|make|set up|setup|design|generate|update|modify|fix|repair)/;
+  return pipelineNouns.test(lower) && lifecycleVerbs.test(lower);
+}
+
+/**
+ * Create a four-stage lifecycle graph for reusable pipeline generation.
+ */
+export function createPipelineLifecycleGraph(goal: Goal): TaskGraph {
+  const now = new Date().toISOString();
+  const designId = generateId('task');
+  const generateIdValue = generateId('task');
+  const validateId = generateId('task');
+  const verifyId = generateId('task');
+
+  return {
+    nodes: [
+      {
+        id: designId,
+        goalId: goal.id,
+        title: 'Design pipeline',
+        description: `Design the pipeline graph for: ${goal.objective}. Define node responsibilities, data flow, inputs, outputs, and the interface contract before generating anything.`,
+        status: 'ready',
+        dependsOn: [],
+        blocks: [generateIdValue],
+        maxRetries: 2,
+        retryCount: 0,
+        validators: [],
+        createdAt: now,
+        preferredSkill: 'pipeline_design',
+        preferredSkillReason: 'Reusable pipelines must start with an explicit graph and interface contract.',
+        outputRefs: ['pipeline_design'],
+      },
+      {
+        id: generateIdValue,
+        goalId: goal.id,
+        title: 'Generate pipeline',
+        description: `Generate the initial saved pipeline or workflow composition for: ${goal.objective}. Use the approved design, keep the constraints tight, and return a real saved composition artifact.`,
+        status: 'pending',
+        dependsOn: [designId],
+        blocks: [validateId],
+        maxRetries: 3,
+        retryCount: 0,
+        validators: [],
+        createdAt: now,
+        preferredSkill: 'pipeline_generate',
+        preferredSkillReason: 'Generation should happen only after the design contract is defined.',
+        inputRefs: ['pipeline_design'],
+        outputRefs: ['generated_composition'],
+      },
+      {
+        id: validateId,
+        goalId: goal.id,
+        title: 'Validate and repair pipeline',
+        description: `Validate and repair the generated composition for: ${goal.objective}. Parse-check script nodes, verify ports and edges, reject malformed code blobs, and regenerate or repair bad nodes before claiming success.`,
+        status: 'pending',
+        dependsOn: [generateIdValue],
+        blocks: [verifyId],
+        maxRetries: 3,
+        retryCount: 0,
+        validators: [],
+        createdAt: now,
+        preferredSkill: 'pipeline_validate_and_repair',
+        preferredSkillReason: 'Generated compositions need structural validation before they can be trusted.',
+        inputRefs: ['pipeline_design', 'generated_composition'],
+        outputRefs: ['validated_composition'],
+      },
+      {
+        id: verifyId,
+        goalId: goal.id,
+        title: 'Verify pipeline',
+        description: `Verify the saved composition for: ${goal.objective}. Confirm it is discoverable in the dashboard and perform the lightest viable smoke test with sample inputs or another executable check before completion.`,
+        status: 'pending',
+        dependsOn: [validateId],
+        blocks: [],
+        maxRetries: 2,
+        retryCount: 0,
+        validators: goal.successCriteria
+          .filter(c => c.validator)
+          .map(c => c.validator!),
+        createdAt: now,
+        preferredSkill: 'pipeline_verify',
+        preferredSkillReason: 'A reusable pipeline is only done once it is visible and executable.',
+        inputRefs: ['validated_composition'],
+      },
+    ],
+    executionOrder: [designId, generateIdValue, validateId, verifyId],
+  };
+}
+
+/**
  * Decompose a goal into a task graph using the LLM.
  */
 export async function decomposeGoal(
@@ -93,6 +188,9 @@ Respond ONLY with valid JSON — no markdown fences, no explanation.`;
   }
 
   // Fallback: single task
+  if (isPipelineBuildObjective(goal.objective)) {
+    return createPipelineLifecycleGraph(goal);
+  }
   return createSingleTaskGraph(goal);
 }
 
@@ -193,6 +291,7 @@ export function topologicalSort(nodes: TaskNode[]): string[] {
  * Heuristic: short objectives without multi-step language.
  */
 export function isSimpleGoal(objective: string): boolean {
+  if (isPipelineBuildObjective(objective)) return false;
   const lower = objective.toLowerCase();
   const multiStepIndicators = [
     'and then', 'after that', 'first,', 'second,', 'finally,',

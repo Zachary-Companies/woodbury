@@ -228,7 +228,7 @@ export function autoSaveComposition(toolName: string, output: string): void {
  * - Edge port mismatches
  * Returns a list of issues found, or empty array if valid.
  */
-function validateComposition(composition: any, availableWorkflowIds: Set<string>): string[] {
+export function validateComposition(composition: any, availableWorkflowIds: Set<string>): string[] {
   const issues: string[] = [];
   const nodes: any[] = composition.nodes || [];
   const edges: any[] = composition.edges || [];
@@ -240,6 +240,16 @@ function validateComposition(composition: any, availableWorkflowIds: Set<string>
   ]);
 
   const nodeIds = new Set(nodes.map((n: any) => n.id));
+  const nodeMap = new Map(nodes.map((n: any) => [n.id, n]));
+  const AsyncFunction = Object.getPrototypeOf(async function() {}).constructor as new (body: string) => Function;
+
+  const getPortNames = (portDefs: any): Set<string> => new Set(
+    Array.isArray(portDefs)
+      ? portDefs
+        .map((port: any) => typeof port?.name === 'string' ? port.name : '')
+        .filter(Boolean)
+      : [],
+  );
 
   for (const node of nodes) {
     const wfId = node.workflowId;
@@ -253,6 +263,30 @@ function validateComposition(composition: any, availableWorkflowIds: Set<string>
     if (wfId === '__script__' && node.script) {
       if (!node.script.code || node.script.code.trim().length === 0) {
         issues.push(`Script node "${node.label || node.id}" has empty code.`);
+      } else {
+        const code = String(node.script.code).trim();
+        const normalizedCode = code.replace(/^```[a-zA-Z0-9_-]*\s*/, '').replace(/\s*```$/, '').trim();
+        if (code.startsWith('```') || code.includes('\n```')) {
+          issues.push(`Script node "${node.label || node.id}" contains markdown fences instead of executable code.`);
+        }
+        if ((normalizedCode.startsWith('{') && normalizedCode.includes('"code"')) || (normalizedCode.startsWith('{') && normalizedCode.includes('"inputs"'))) {
+          issues.push(`Script node "${node.label || node.id}" contains a serialized JSON blob instead of raw executable code.`);
+        }
+        if (!/(?:async\s+function\s+execute|function\s+execute)\s*\(/.test(code)) {
+          issues.push(`Script node "${node.label || node.id}" does not define an execute() function.`);
+        }
+        try {
+          new AsyncFunction(code);
+        } catch (error) {
+          issues.push(`Script node "${node.label || node.id}" has invalid JavaScript: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+
+      if (node.script.inputs && !Array.isArray(node.script.inputs)) {
+        issues.push(`Script node "${node.label || node.id}" has malformed input port definitions.`);
+      }
+      if (node.script.outputs && !Array.isArray(node.script.outputs)) {
+        issues.push(`Script node "${node.label || node.id}" has malformed output port definitions.`);
       }
     }
   }
@@ -264,6 +298,17 @@ function validateComposition(composition: any, availableWorkflowIds: Set<string>
     }
     if (!nodeIds.has(edge.targetNodeId)) {
       issues.push(`Edge "${edge.id}" references non-existent target node "${edge.targetNodeId}".`);
+    }
+
+    const sourceNode = nodeMap.get(edge.sourceNodeId);
+    const targetNode = nodeMap.get(edge.targetNodeId);
+    const sourcePorts = getPortNames(sourceNode?.script?.outputs);
+    const targetPorts = getPortNames(targetNode?.script?.inputs);
+    if (edge.sourcePort && sourcePorts.size > 0 && !sourcePorts.has(edge.sourcePort)) {
+      issues.push(`Edge "${edge.id}" references missing source port "${edge.sourcePort}" on node "${sourceNode?.label || edge.sourceNodeId}".`);
+    }
+    if (edge.targetPort && targetPorts.size > 0 && !targetPorts.has(edge.targetPort)) {
+      issues.push(`Edge "${edge.id}" references missing target port "${edge.targetPort}" on node "${targetNode?.label || edge.targetNodeId}".`);
     }
   }
 
@@ -819,6 +864,7 @@ export class ClosureEngine {
           default: return `- ${v.type}`;
         }
       }).join('\n')}` : '',
+      this.buildRecentTaskOutputsContext(task.id),
       this.currentCarryoverContext ? `## Prior Session State\n${this.currentCarryoverContext}` : '',
       beliefContext || '',
       failureWarnings ? `## Past Failure Warnings\n${failureWarnings}` : '',
@@ -1581,6 +1627,26 @@ export class ClosureEngine {
       recentObservations ? `Recent observations:\n${recentObservations}` : '',
       reflection ? `Latest reflection: ${reflection}` : '',
     ].filter(Boolean).join('\n\n');
+  }
+
+  /**
+   * Surface recent completed task outputs so downstream skills can use upstream results.
+   */
+  private buildRecentTaskOutputsContext(currentTaskId: string): string {
+    const nodes = this.stateManager.getTaskGraph()?.nodes || [];
+    const recent = nodes
+      .filter(node => node.id !== currentTaskId && node.status === 'done' && node.result?.output)
+      .slice(-3);
+
+    if (recent.length === 0) return '';
+
+    const details = recent.map(node => {
+      const output = (node.result?.output || '').trim().replace(/\s+/g, ' ');
+      const excerpt = output.length > 500 ? `${output.slice(0, 500)}...` : output;
+      return `- ${node.title || node.description}: ${excerpt}`;
+    }).join('\n');
+
+    return `## Recent Task Outputs\nUse these concrete results from earlier tasks when completing the current task:\n${details}`;
   }
 
   /**

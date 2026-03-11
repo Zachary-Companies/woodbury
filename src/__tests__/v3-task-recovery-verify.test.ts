@@ -78,6 +78,7 @@ describe('isSimpleGoal', () => {
     expect(isSimpleGoal('Build an app with authentication')).toBe(false);
     expect(isSimpleGoal('Set up CI/CD pipeline and configure linting')).toBe(false);
     expect(isSimpleGoal('Create a project with multiple components')).toBe(false);
+    expect(isSimpleGoal('Create a pipeline that summarizes RSS feeds every morning')).toBe(false);
   });
 
   it('returns false for very long objectives', () => {

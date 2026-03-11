@@ -254,4 +254,38 @@ describe('skill routing', () => {
     expect(annotated.nodes.find(node => node.id === 't3')?.preferredSkill).toBe('test_and_verify');
     expect(annotated.nodes.find(node => node.id === 't3')?.preferredSkillReason).toContain('code_change');
   });
+
+  it('planner generates the four-stage pipeline lifecycle for reusable pipeline goals', async () => {
+    const planner = new StrategicPlanner(
+      {} as any,
+      { query: () => [] } as any,
+      {} as any,
+      'anthropic',
+      'test-model',
+      'system',
+    );
+    const goal: Goal = {
+      id: 'g2',
+      objective: 'Create a pipeline that summarizes RSS feeds and posts a daily briefing',
+      successCriteria: [],
+      constraints: [],
+      forbiddenActions: [],
+      priority: 'normal',
+      status: 'active',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    const plans = await planner.generatePlans(goal);
+    const best = planner.selectBest(plans);
+    const preferredSkills = best.taskGraph.nodes.map(node => node.preferredSkill);
+
+    expect(best.taskGraph.nodes).toHaveLength(4);
+    expect(preferredSkills).toEqual([
+      'pipeline_design',
+      'pipeline_generate',
+      'pipeline_validate_and_repair',
+      'pipeline_verify',
+    ]);
+  });
 });
