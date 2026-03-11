@@ -5,6 +5,9 @@ Woodbury codebase. It describes the system's components, data flow, key interfac
 storage layout.
 
 For the current implementation status of dashboard chat and the v3 skills-first loop, see [docs/chat-skills-status.md](chat-skills-status.md).
+For the live docs map, see [docs/README.md](README.md).
+For the reusable pipeline lifecycle contract, see [docs/pipeline-lifecycle-contract.md](pipeline-lifecycle-contract.md).
+For composition artifact rules, see [docs/composition-schema-and-validation.md](composition-schema-and-validation.md).
 
 ---
 
@@ -26,7 +29,7 @@ The major subsystems are:
 | Workflow Engine | `src/workflow/` | Records and replays browser/desktop action sequences |
 | Visual AI Inference | `src/inference/` | Node.js ONNX runtime for Siamese network element matching |
 | Extension System | `src/extension-loader.ts`, `src/extension-manager.ts` | JSON registry, hot install/uninstall, tool/command registration |
-| Agentic Loop | `src/loop/` | AI agent runtime with 34 built-in tools, plus dynamic extension and MCP tools, and a 9-skill v3 routing layer |
+| Agentic Loop | `src/loop/` | AI agent runtime with 34 built-in tools, plus dynamic extension and MCP tools, and a 13-skill v3 routing layer |
 | Pipeline Builder | (within dashboard and loop) | DAG-based composition of workflow steps, scripts, and tools |
 | Social Media | `src/social/` | Scheduling, posting, content generation |
 | Training Pipeline | shells out to Python `woobury_models` | Siamese network training for visual element matching |

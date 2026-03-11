@@ -4,6 +4,9 @@ Last updated: 2026-03-11
 
 This document summarizes the current state of Woodbury's dashboard chat harness and the v3 skills-first closure engine.
 
+For the reusable pipeline lifecycle contract, see [docs/pipeline-lifecycle-contract.md](pipeline-lifecycle-contract.md).
+For the live chat request/stream contract, see [docs/chat-api-and-sse-contract.md](chat-api-and-sse-contract.md).
+
 ## Current State
 
 - Dashboard chat uses per-session v3 closure-engine agents, not a single shared singleton agent.
@@ -19,17 +22,21 @@ This document summarizes the current state of Woodbury's dashboard chat harness 
 ## Current Counts
 
 - Built-in default tools exposed by the core registry: 34
-- First-class v3 skills in the default skill registry: 9
+- First-class v3 skills in the default skill registry: 13
 - Dashboard route modules currently registered: 24
 
 Notes:
 
 - Extension tools and MCP tools are added dynamically at runtime, so the live tool count can exceed 34.
 - The 34 count refers to the default built-in registry assembled from `src/loop/tools/index.ts`.
-- The 9 skills refer to the default v3 `SkillRegistry` definitions.
+- The 13 skills refer to the default v3 `SkillRegistry` definitions.
 
 ## Default Skills
 
+- `pipeline_design`
+- `pipeline_generate`
+- `pipeline_validate_and_repair`
+- `pipeline_verify`
 - `workflow_or_pipeline_build`
 - `browser_automation`
 - `web_research`

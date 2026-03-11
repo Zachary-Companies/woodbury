@@ -2,6 +2,9 @@
 
 Complete reference for all HTTP endpoints served by the Woodbury dashboard (`config-dashboard.ts`).
 
+For the structured chat SSE contract, see [chat-api-and-sse-contract.md](chat-api-and-sse-contract.md).
+For composition artifact and validation rules, see [composition-schema-and-validation.md](composition-schema-and-validation.md).
+
 **Base URL:** `http://localhost:<dashboard-port>` (default: configured at startup)
 
 All endpoints return JSON via `sendJson(res, status, data)` unless otherwise noted.
@@ -294,6 +297,8 @@ Response: { success, ... }
 ---
 
 ## 7. Compositions (Pipelines)
+
+For composition artifact rules and validation expectations, see [composition-schema-and-validation.md](composition-schema-and-validation.md).
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -680,6 +685,8 @@ Response: { text, note }
 
 **POST `/api/chat`**
 Returns an SSE (Server-Sent Events) stream, not JSON.
+
+For the full event contract and client expectations, see [chat-api-and-sse-contract.md](chat-api-and-sse-contract.md).
 ```
 Body: { message, history?: [{ role, content }], activeCompositionId?, sessionId? }
 Events: session_context, token, tool_start, tool_end, phase, task_start, task_end,
