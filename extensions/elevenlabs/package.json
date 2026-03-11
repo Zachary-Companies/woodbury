@@ -1,0 +1,42 @@
+{
+  "name": "woodbury-ext-elevenlabs",
+  "version": "1.0.0",
+  "description": "Text-to-speech using ElevenLabs API. Generate voiceovers and narration as audio files.",
+  "main": "index.js",
+  "type": "module",
+  "woodbury": {
+    "name": "elevenlabs",
+    "displayName": "ElevenLabs Text-to-Speech",
+    "description": "Generate speech audio from text using ElevenLabs voices. Produces MP3 files for voiceovers, narration, and dialogue.",
+    "provides": ["tools", "prompts"],
+    "env": {
+      "ELEVENLABS_API_KEY": {
+        "required": true,
+        "description": "ElevenLabs API key. Get one at https://elevenlabs.io"
+      },
+      "AUDIO_OUTPUT_DIR": {
+        "required": false,
+        "description": "Default folder to save generated audio files. Defaults to working directory.",
+        "type": "path"
+      },
+      "ELEVENLABS_DEFAULT_VOICE": {
+        "required": false,
+        "description": "Default voice ID to use. Run tts_voices to list available voices."
+      },
+      "ELEVENLABS_DEFAULT_MODEL": {
+        "required": false,
+        "description": "Default model ID. Options: eleven_multilingual_v2 (quality), eleven_flash_v2_5 (fast). Default: eleven_multilingual_v2"
+      }
+    }
+  },
+  "keywords": [
+    "woodbury",
+    "extension",
+    "elevenlabs",
+    "tts",
+    "text-to-speech",
+    "voiceover",
+    "audio"
+  ],
+  "license": "MIT"
+}

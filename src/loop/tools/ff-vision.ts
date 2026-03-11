@@ -2,6 +2,39 @@ import { resolve } from 'path';
 import { ToolDefinition, ToolHandler, ToolContext } from '../types.js';
 import { getLastScreenshot, setLastScreenshot } from './ff-screenshot.js';
 
+/** Bridge standard env var names to flow-frame-core's expected names (called once per invocation). */
+function bridgeEnvVars(): void {
+  if (process.env.OPENAI_API_KEY && !process.env.OPEN_AI_KEY) {
+    process.env.OPEN_AI_KEY = process.env.OPENAI_API_KEY;
+  }
+  if (process.env.GROQ_API_KEY && !process.env.GROK_API_KEY) {
+    process.env.GROK_API_KEY = process.env.GROQ_API_KEY;
+  }
+}
+
+/**
+ * Resolve an image source — either an existing base64 data URL or a file path —
+ * to a base64 data URL.  File paths are resolved relative to `workingDir`.
+ */
+async function resolveToDataUrl(src: string, workingDir: string): Promise<string> {
+  if (src.startsWith('data:')) {
+    return src;
+  }
+  let fileToDataUrl: (path: string) => string;
+  try {
+    const imgMod = await import('flow-frame-core/dist/services/self-learning/image.js');
+    fileToDataUrl = imgMod.fileToDataUrl;
+  } catch (err: any) {
+    throw new Error(`Failed to load image utility module: ${err.message}`);
+  }
+  const fullPath = resolve(workingDir, src);
+  try {
+    return fileToDataUrl(fullPath);
+  } catch (err: any) {
+    throw new Error(`Failed to read image file "${fullPath}": ${err.message}`);
+  }
+}
+
 export const ffVisionDefinition: ToolDefinition = {
   name: 'vision_analyze',
   description: 'SEE THE SCREEN: This is your primary tool for looking at the screen. It captures a screenshot and sends it to a vision AI model that describes what is visible. Use this tool whenever you need to see what is on screen — it handles screenshot capture automatically. Ask questions like "What is on screen?", "Where is the Create button? Give x,y pixel coordinates.", "What text is visible?". You can also pass an existing image file path instead of capturing the screen.',
@@ -52,14 +85,7 @@ export const ffVisionHandler: ToolHandler = async (params: any, context?: ToolCo
     throw new Error('prompt parameter is required');
   }
 
-  // Bridge standard env var names to flow-frame-core's expected names
-  // flow-frame-core uses OPEN_AI_KEY (not OPENAI_API_KEY) and GROK_API_KEY (not GROQ_API_KEY)
-  if (process.env.OPENAI_API_KEY && !process.env.OPEN_AI_KEY) {
-    process.env.OPEN_AI_KEY = process.env.OPENAI_API_KEY;
-  }
-  if (process.env.GROQ_API_KEY && !process.env.GROK_API_KEY) {
-    process.env.GROK_API_KEY = process.env.GROQ_API_KEY;
-  }
+  bridgeEnvVars();
 
   const workingDirectory = context?.workingDirectory || process.cwd();
   const model = params.model || 'gpt-4o';
@@ -69,25 +95,7 @@ export const ffVisionHandler: ToolHandler = async (params: any, context?: ToolCo
   let imageDataUrl: string;
 
   if (params.image) {
-    if (params.image.startsWith('data:')) {
-      // Already a data URL
-      imageDataUrl = params.image;
-    } else {
-      // File path — convert to data URL
-      let fileToDataUrl: any;
-      try {
-        const imgMod = await import('flow-frame-core/dist/services/self-learning/image.js');
-        fileToDataUrl = imgMod.fileToDataUrl;
-      } catch (err: any) {
-        throw new Error(`Failed to load image utility module: ${err.message}`);
-      }
-      const fullPath = resolve(workingDirectory, params.image);
-      try {
-        imageDataUrl = fileToDataUrl(fullPath);
-      } catch (err: any) {
-        throw new Error(`Failed to read image file "${fullPath}": ${err.message}`);
-      }
-    }
+    imageDataUrl = await resolveToDataUrl(params.image, workingDirectory);
   } else {
     // No image provided — check if we have a recent cached screenshot first
     const cached = getLastScreenshot();
@@ -151,18 +159,10 @@ export const ffVisionHandler: ToolHandler = async (params: any, context?: ToolCo
       }
 
       let findImageDataUrl: string;
-      if (params.findImage.startsWith('data:')) {
-        findImageDataUrl = params.findImage;
-      } else {
-        let fileToDataUrl: any;
-        try {
-          const imgMod = await import('flow-frame-core/dist/services/self-learning/image.js');
-          fileToDataUrl = imgMod.fileToDataUrl;
-        } catch (err: any) {
-          throw new Error(`Failed to load image utility module: ${err.message}`);
-        }
-        const fullPath = resolve(workingDirectory, params.findImage);
-        findImageDataUrl = fileToDataUrl(fullPath);
+      try {
+        findImageDataUrl = await resolveToDataUrl(params.findImage, workingDirectory);
+      } catch (err: any) {
+        throw new Error(`Failed to resolve findImage: ${err.message}`);
       }
 
       const findImageInImageQuery = runPromptMod.findImageInImageQuery;

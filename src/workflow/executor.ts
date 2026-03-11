@@ -162,6 +162,7 @@ export class WorkflowExecutor {
   private onProgress?: (event: ExecutionProgressEvent) => void;
   private stopOnFailure: boolean;
   private workflowDir?: string;
+  private _robot: any = null;
 
   constructor(
     private bridge: BridgeInterface,
@@ -179,6 +180,145 @@ export class WorkflowExecutor {
     this.onProgress = options.onProgress;
     this.stopOnFailure = options.stopOnFailure ?? true;
   }
+
+  // ── Native Input Helpers (robotjs) ─────────────────────────
+
+  private async getRobot(): Promise<any> {
+    if (!this._robot) {
+      try {
+        const mod = await import('robotjs');
+        this._robot = mod.default || mod;
+        execLog('INFO', 'robotjs loaded successfully');
+      } catch (err: any) {
+        execLog('ERROR', `Failed to load robotjs: ${err.message}`);
+        throw err;
+      }
+    }
+    return this._robot;
+  }
+
+  private async getViewportOffset(): Promise<{ totalOffsetX: number; totalOffsetY: number }> {
+    try {
+      const ping = await this.bridge.send('ping', {}) as any;
+      if (ping?.chromeOffset) {
+        const result = {
+          totalOffsetX: ping.chromeOffset.totalOffsetX ?? ping.chromeOffset.windowX ?? 0,
+          totalOffsetY: ping.chromeOffset.totalOffsetY ?? ((ping.chromeOffset.windowY ?? 0) + (ping.chromeOffset.chromeUIHeight ?? 125)),
+        };
+        execLog('INFO', `getViewportOffset: chromeOffset=${JSON.stringify(ping.chromeOffset)}, result=${JSON.stringify(result)}`);
+        return result;
+      }
+      execLog('WARN', `getViewportOffset: ping returned no chromeOffset`, { ping });
+    } catch (err: any) {
+      execLog('ERROR', `getViewportOffset: ping failed: ${err.message}`);
+    }
+    return { totalOffsetX: 0, totalOffsetY: 125 };
+  }
+
+  private async viewportToScreen(viewportX: number, viewportY: number): Promise<{ x: number; y: number }> {
+    const offset = await this.getViewportOffset();
+    return {
+      x: Math.round(viewportX) + offset.totalOffsetX,
+      y: Math.round(viewportY) + offset.totalOffsetY,
+    };
+  }
+
+  private async nativeClick(
+    viewportX: number,
+    viewportY: number,
+    clickType: 'click' | 'double_click' | 'right_click' | 'move' = 'click',
+  ): Promise<void> {
+    const robot = await this.getRobot();
+    const screen = await this.viewportToScreen(viewportX, viewportY);
+
+    execLog('INFO', `nativeClick: viewport(${viewportX}, ${viewportY}) -> screen(${screen.x}, ${screen.y}), type=${clickType}`);
+
+    if (process.platform === 'win32') {
+      robot.moveMouse(screen.x, screen.y);
+    } else {
+      robot.moveMouseSmooth(screen.x, screen.y);
+    }
+
+    await this.sleepMs(80);
+
+    switch (clickType) {
+      case 'move':
+        break; // hover only
+      case 'double_click':
+        robot.mouseClick();
+        await this.sleepMs(80);
+        robot.mouseClick();
+        break;
+      case 'right_click':
+        robot.mouseClick('right');
+        break;
+      default:
+        robot.mouseClick();
+    }
+  }
+
+  private async nativeType(text: string): Promise<void> {
+    const robot = await this.getRobot();
+    robot.typeString(text);
+  }
+
+  private cdpKeyToRobotjs(key: string): string {
+    const map: Record<string, string> = {
+      Enter: 'enter', Tab: 'tab', Escape: 'escape',
+      Backspace: 'backspace', Delete: 'delete', Space: 'space',
+      ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right',
+      Home: 'home', End: 'end', PageUp: 'pageup', PageDown: 'pagedown',
+      F1: 'f1', F2: 'f2', F3: 'f3', F4: 'f4', F5: 'f5', F6: 'f6',
+      F7: 'f7', F8: 'f8', F9: 'f9', F10: 'f10', F11: 'f11', F12: 'f12',
+    };
+    return map[key] || key.toLowerCase();
+  }
+
+  private async nativeKeyPress(key: string, modifiers?: string[]): Promise<void> {
+    const robot = await this.getRobot();
+    const robotKey = this.cdpKeyToRobotjs(key);
+    const robotMods = (modifiers || []).map((m: string) => {
+      if (m === 'cmd') return process.platform === 'darwin' ? 'command' : 'control';
+      if (m === 'ctrl') return 'control';
+      return m; // 'alt', 'shift' are the same
+    });
+    robot.keyTap(robotKey, robotMods);
+  }
+
+  private async nativeHotkey(
+    key: string,
+    opts: { ctrl?: boolean; shift?: boolean; alt?: boolean } = {},
+  ): Promise<void> {
+    const mods: string[] = [];
+    if (opts.ctrl) mods.push('ctrl');
+    if (opts.shift) mods.push('shift');
+    if (opts.alt) mods.push('alt');
+    await this.nativeKeyPress(key, mods);
+  }
+
+  private async nativeScroll(
+    viewportX: number,
+    viewportY: number,
+    scrollY: number,
+  ): Promise<void> {
+    const robot = await this.getRobot();
+    const screen = await this.viewportToScreen(viewportX, viewportY);
+
+    if (process.platform === 'win32') {
+      robot.moveMouse(screen.x, screen.y);
+    } else {
+      robot.moveMouseSmooth(screen.x, screen.y);
+    }
+
+    await this.sleepMs(80);
+
+    if (scrollY !== 0) {
+      const direction = scrollY > 0 ? 'down' : 'up';
+      robot.scrollMouse(Math.abs(scrollY), direction);
+    }
+  }
+
+  // ── End Native Input Helpers ──────────────────────────────
 
   /**
    * Execute a workflow document.
@@ -587,7 +727,24 @@ export class WorkflowExecutor {
     // Bring Chrome to the foreground and maximise immediately (fire-and-forget)
     focusAndMaximizeChrome();
 
-    await this.bridge.send('open', { url: step.url }, 30000);
+    // Resolve URL — either static or extracted from a DOM element's attribute
+    let targetUrl = step.url;
+    if (step.selectorSource?.selector) {
+      const info = await this.bridge.send('get_element_info', {
+        selector: step.selectorSource.selector,
+      }) as any;
+      const attr = step.selectorSource.attribute || 'href';
+      // Prefer resolvedProperties (gives absolute URLs) over raw attributes
+      const extracted = info?.resolvedProperties?.[attr] || info?.attributes?.[attr] || info?.[attr];
+      if (extracted) {
+        targetUrl = extracted;
+        execLog('INFO', `Extracted ${attr}="${extracted}" from ${step.selectorSource.selector}`);
+      } else {
+        throw new Error(`Attribute "${attr}" not found on element "${step.selectorSource.selector}"`);
+      }
+    }
+
+    await this.bridge.send('open', { url: targetUrl }, 30000);
 
     if (step.waitMs) {
       await this.delay(step.waitMs);
@@ -689,32 +846,35 @@ export class WorkflowExecutor {
         y: Math.round(centerY),
       });
 
-      // Use robotjs for visible mouse movement
-      const robot = (await import('robotjs')).default || (await import('robotjs'));
-      let offsetX = 1;
-      let offsetY = 125;
+      // Use robotjs for native OS-level mouse input
+      await this.nativeClick(centerX, centerY, action as any);
+    } else if (step.clickType === 'hover' && step.target.selector) {
+      // Hover fallback: find element position and move mouse there (no click)
+      execLog('INFO', `execClick hover fallback via selector: ${step.id}`, {
+        selector: step.target.selector,
+      });
       try {
-        const ping = await this.bridge.send('ping', {}) as any;
-        if (ping?.chromeOffset) {
-          offsetX = ping.chromeOffset.chromeUIWidth ?? 1;
-          offsetY = ping.chromeOffset.chromeUIHeight ?? 125;
+        const els = await this.bridge.send('find_elements', {
+          selector: step.target.selector,
+          limit: 1,
+        }) as any[];
+        if (els && els.length > 0 && els[0].bounds && els[0].bounds.visible) {
+          const b = els[0].bounds;
+          await this.nativeClick(b.left + b.width / 2, b.top + b.height / 2, 'move');
+        } else {
+          await this.bridge.send('scroll_to_element', { selector: step.target.selector });
+          await this.sleepMs(300);
+          const els2 = await this.bridge.send('find_elements', {
+            selector: step.target.selector,
+            limit: 1,
+          }) as any[];
+          if (els2 && els2.length > 0 && els2[0].bounds) {
+            const b = els2[0].bounds;
+            await this.nativeClick(b.left + b.width / 2, b.top + b.height / 2, 'move');
+          }
         }
-      } catch { /* use defaults */ }
-
-      const targetX = Math.round(centerX) + offsetX;
-      const targetY = Math.round(centerY) + offsetY;
-      robot.moveMouseSmooth(targetX, targetY);
-
-      if (action === 'move') {
-        // hover — just move, don't click
-      } else if (action === 'double_click') {
-        robot.mouseClick();
-        await this.delay(100);
-        robot.mouseClick();
-      } else if (action === 'right_click') {
-        robot.mouseClick('right');
-      } else {
-        robot.mouseClick();
+      } catch (err: any) {
+        execLog('WARN', `execClick hover fallback failed: ${err.message}`);
       }
     } else {
       execLog('WARN', `execClick no position, using click_element: ${step.id}`, {
@@ -772,39 +932,15 @@ export class WorkflowExecutor {
       throw new Error(`click_selector: element matching "${step.selector}" is not visible`);
     }
 
-    // Import robotjs directly (same pattern as ff-mouse.ts)
-    const robot = (await import('robotjs')).default || (await import('robotjs'));
+    // Click via native robotjs input
+    const cx = bounds.left + bounds.width / 2;
+    const cy = bounds.top + bounds.height / 2;
+    const clickType = step.clickType === 'double' ? 'double_click'
+      : step.clickType === 'right' ? 'right_click' : 'click';
 
-    // Get Chrome offset from bridge
-    let offsetX = 1;
-    let offsetY = 125;
-    try {
-      const ping = await this.bridge.send('ping', {}) as any;
-      if (ping?.chromeOffset) {
-        offsetX = ping.chromeOffset.chromeUIWidth ?? 1;
-        offsetY = ping.chromeOffset.chromeUIHeight ?? 125;
-      }
-    } catch { /* use defaults */ }
+    execLog('INFO', `execClickSelector: clicking at viewport (${cx}, ${cy})`, { bounds });
 
-    // Calculate screen-absolute target: element center + chrome offset
-    const targetX = bounds.left + offsetX + (bounds.width / 2);
-    const targetY = bounds.top + offsetY + (bounds.height / 2);
-
-    execLog('INFO', `execClickSelector: moving to (${targetX}, ${targetY}), offset=(${offsetX}, ${offsetY})`, { bounds });
-
-    // Move mouse visibly via robotjs
-    robot.moveMouseSmooth(targetX, targetY);
-
-    // Click via robotjs
-    if (step.clickType === 'double') {
-      robot.mouseClick();
-      await this.delay(100);
-      robot.mouseClick();
-    } else if (step.clickType === 'right') {
-      robot.mouseClick('right');
-    } else {
-      robot.mouseClick();
-    }
+    await this.nativeClick(cx, cy, clickType as any);
 
     execLog('INFO', `execClickSelector: clicked element matching "${step.selector}"`);
 
@@ -890,10 +1026,10 @@ export class WorkflowExecutor {
         if (resolved.position && !step.skipClick) {
           const cx = resolved.position.left + resolved.position.width / 2;
           const cy = resolved.position.top + resolved.position.height / 2;
-          await this.bridge.send('mouse', { action: 'click', x: Math.round(cx), y: Math.round(cy) });
+          await this.nativeClick(cx, cy);
         }
-        await this.bridge.send('keyboard', { action: 'hotkey', key: 'a', ctrl: true });
-        await this.bridge.send('keyboard', { action: 'press', key: 'backspace' });
+        await this.nativeHotkey('a', { ctrl: true });
+        await this.nativeKeyPress('Backspace');
       }
     }
 
@@ -908,16 +1044,16 @@ export class WorkflowExecutor {
       if (resolved.position && !step.skipClick) {
         const cx = resolved.position.left + resolved.position.width / 2;
         const cy = resolved.position.top + resolved.position.height / 2;
-        await this.bridge.send('mouse', { action: 'click', x: Math.round(cx), y: Math.round(cy) });
+        await this.nativeClick(cx, cy);
       }
     } catch {
       // Fallback: type via keyboard (click to focus first unless skipClick is set)
       if (resolved.position && !step.skipClick) {
         const cx = resolved.position.left + resolved.position.width / 2;
         const cy = resolved.position.top + resolved.position.height / 2;
-        await this.bridge.send('mouse', { action: 'click', x: Math.round(cx), y: Math.round(cy) });
+        await this.nativeClick(cx, cy);
       }
-      await this.bridge.send('keyboard', { action: 'type', text: step.value });
+      await this.nativeType(step.value);
     }
 
     if (step.delayAfterMs) {
@@ -957,7 +1093,7 @@ export class WorkflowExecutor {
     if (resolved.position) {
       const cx = resolved.position.left + resolved.position.width / 2;
       const cy = resolved.position.top + resolved.position.height / 2;
-      await this.bridge.send('mouse', { action: 'click', x: Math.round(cx), y: Math.round(cy) });
+      await this.nativeClick(cx, cy);
     } else {
       await this.bridge.send('click_element', { selector: step.trigger.selector });
     }
@@ -1082,11 +1218,7 @@ export class WorkflowExecutor {
       if (resolved.position) {
         const cx = resolved.position.left + resolved.position.width / 2;
         const cy = resolved.position.top + resolved.position.height / 2;
-        await this.bridge.send('mouse', {
-          action: 'click',
-          x: Math.round(cx),
-          y: Math.round(cy),
-        });
+        await this.nativeClick(cx, cy);
       } else {
         await this.bridge.send('click_element', {
           selector: step.trigger.selector,
@@ -1127,29 +1259,15 @@ export class WorkflowExecutor {
         selector: step.target.selector,
       });
     } else {
-      await this.bridge.send('mouse', {
-        action: 'scroll',
-        scrollY: step.direction === 'down' ? (step.amount || 3) : -(step.amount || 3),
-        scrollX: step.direction === 'right' ? (step.amount || 3) : step.direction === 'left' ? -(step.amount || 3) : 0,
-      });
+      const scrollY = step.direction === 'down' ? (step.amount || 3)
+        : step.direction === 'up' ? -(step.amount || 3) : 0;
+      // Scroll at viewport center
+      await this.nativeScroll(400, 400, scrollY);
     }
   }
 
   private async execKeyboard(step: KeyboardStep): Promise<void> {
-    if (step.modifiers && step.modifiers.length > 0) {
-      await this.bridge.send('keyboard', {
-        action: 'hotkey',
-        key: step.key,
-        ctrl: step.modifiers.includes('ctrl'),
-        shift: step.modifiers.includes('shift'),
-        alt: step.modifiers.includes('alt'),
-      });
-    } else {
-      await this.bridge.send('keyboard', {
-        action: 'press',
-        key: step.key,
-      });
-    }
+    await this.nativeKeyPress(step.key, step.modifiers);
   }
 
   // ── Keyboard Nav helpers ───────────────────────────────────
@@ -1180,19 +1298,9 @@ export class WorkflowExecutor {
     return map[key] || key;
   }
 
-  /** Send a single key press via bridge */
+  /** Send a single key press via native robotjs */
   private async sendNavKeyPress(keyName: string, modifiers: string[]): Promise<void> {
-    if (modifiers.length > 0) {
-      await this.bridge.send('keyboard', {
-        action: 'hotkey',
-        key: keyName,
-        shift: modifiers.includes('shift'),
-        ctrl: modifiers.includes('ctrl'),
-        alt: modifiers.includes('alt'),
-      });
-    } else {
-      await this.bridge.send('keyboard', { action: 'press', key: keyName });
-    }
+    await this.nativeKeyPress(keyName, modifiers);
   }
 
   /** Check if focused element matches expected focus criteria (AND logic) */
@@ -1593,12 +1701,7 @@ export class WorkflowExecutor {
   private async execDesktopClick(step: DesktopClickStep): Promise<void> {
     execLog('INFO', `execDesktopClick: ${step.id}`, { x: step.x, y: step.y, action: step.action, app: step.app });
 
-    let robot: any;
-    try {
-      robot = (await import('robotjs')).default || (await import('robotjs'));
-    } catch (err: any) {
-      throw new Error(`Desktop click requires robotjs: ${err.message}`);
-    }
+    const robot = await this.getRobot();
 
     // Move mouse to absolute screen coordinates (no Chrome offset)
     const isWin = process.platform === 'win32';
@@ -1628,12 +1731,7 @@ export class WorkflowExecutor {
   private async execDesktopType(step: DesktopTypeStep): Promise<void> {
     execLog('INFO', `execDesktopType: ${step.id}`, { value: step.value?.slice(0, 50) });
 
-    let robot: any;
-    try {
-      robot = (await import('robotjs')).default || (await import('robotjs'));
-    } catch (err: any) {
-      throw new Error(`Desktop type requires robotjs: ${err.message}`);
-    }
+    const robot = await this.getRobot();
 
     // typeString handles full strings (not just single key codes)
     robot.typeString(step.value || '');
@@ -1646,12 +1744,7 @@ export class WorkflowExecutor {
   private async execDesktopKeyboard(step: DesktopKeyboardStep): Promise<void> {
     execLog('INFO', `execDesktopKeyboard: ${step.id}`, { key: step.key, modifiers: step.modifiers });
 
-    let robot: any;
-    try {
-      robot = (await import('robotjs')).default || (await import('robotjs'));
-    } catch (err: any) {
-      throw new Error(`Desktop keyboard requires robotjs: ${err.message}`);
-    }
+    const robot = await this.getRobot();
 
     // Map modifier names to robotjs format
     const robotMods = (step.modifiers || []).map((m: string) => {

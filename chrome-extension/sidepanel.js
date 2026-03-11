@@ -16,6 +16,13 @@ let runningAll = false;   // true while Run All is in progress
 let lastViewedStepIndex = null; // track which step's coord info is displayed (for editing)
 let lastPickData = null;        // element bounds/dpr from last "Pick from Page" (per-step)
 
+/* ── WCAG Audit State ── */
+let wcagAuditData = null;   // cached scan results
+let wcagCollapsed = {};     // track collapsed state per category
+let wcagScanning = false;   // true during scan
+let wcagLastUrl = null;     // track URL for auto-refresh on navigation
+let wcagInspecting = false; // true when inspect mode overlay is active
+
 const STEP_ICONS = {
   navigate: '\u{1F310}',
   click: '\u{1F5B1}',
@@ -39,6 +46,49 @@ const STEP_ICONS = {
 /* ── Lifecycle port — lets background.js track open/close state ── */
 
 chrome.runtime.connect({ name: 'woodbury-sidepanel' });
+
+/* ── Auto-refresh WCAG audit on URL/tab change ──────────── */
+
+chrome.tabs.onUpdated.addListener(function(tabId, changeInfo, tab) {
+  // Only react when the page finishes loading
+  if (changeInfo.status !== 'complete') return;
+  // Only react for the active tab in the current window
+  if (!tab.active) return;
+  // Skip if a debug session is active (debug UI is showing)
+  if (debugState && debugState.active) return;
+  // Skip if the WCAG audit view isn't rendered
+  if (!document.getElementById('wcag-content')) return;
+  // Only rescan if the URL actually changed
+  if (tab.url && tab.url !== wcagLastUrl) {
+    wcagLastUrl = tab.url;
+    wcagCollapsed = {};  // reset collapsed state for new page
+    // Stop inspect mode on navigation since the overlay is gone
+    if (wcagInspecting) {
+      wcagInspecting = false;
+      var inspBtn = document.getElementById('wcag-inspect');
+      if (inspBtn) { inspBtn.classList.remove('active'); inspBtn.textContent = '\uD83D\uDD0D Inspect'; }
+    }
+    scanWcagComponents();
+  }
+});
+
+chrome.tabs.onActivated.addListener(async function(activeInfo) {
+  // Skip if a debug session is active
+  if (debugState && debugState.active) return;
+  // Skip if the WCAG audit view isn't rendered
+  if (!document.getElementById('wcag-content')) return;
+
+  try {
+    var tab = await chrome.tabs.get(activeInfo.tabId);
+    if (tab.url && tab.url !== wcagLastUrl) {
+      wcagLastUrl = tab.url;
+      wcagCollapsed = {};
+      scanWcagComponents();
+    }
+  } catch (e) {
+    // Tab may not be accessible (e.g. chrome:// pages)
+  }
+});
 
 /* ── Initialization ────────────────────────────────────── */
 
@@ -214,6 +264,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (pickBtnCancel) { pickBtnCancel.textContent = '\uD83C\uDFAF Pick from Page'; pickBtnCancel.disabled = false; }
     setStatus('Pick cancelled', null);
   }
+
+  // WCAG inspect mode stopped (user pressed Esc on page)
+  if (message.type === 'wcag_inspect_stopped') {
+    wcagInspecting = false;
+    var inspectBtn = document.getElementById('wcag-inspect');
+    if (inspectBtn) {
+      inspectBtn.classList.remove('active');
+      inspectBtn.textContent = '\uD83D\uDD0D Inspect';
+    }
+  }
+
+  // WCAG inspect — user clicked an element
+  if (message.type === 'wcag_inspect_clicked' && message.data) {
+    renderInspectedElement(message.data);
+  }
 });
 
 /* ── Rendering ─────────────────────────────────────────── */
@@ -225,14 +290,7 @@ function escHtml(str) {
 }
 
 function renderEmptyState() {
-  document.getElementById('app').innerHTML =
-    '<div class="empty-state">' +
-      '<div class="empty-state-icon">&#x1f50d;</div>' +
-      '<div class="empty-state-text">' +
-        'No debug session active.<br>' +
-        'Start a debug session from the<br>Woodbury Dashboard.' +
-      '</div>' +
-    '</div>';
+  renderWcagAuditView();
 }
 
 function renderDebugUI() {
@@ -1370,4 +1428,351 @@ async function exitDebugMode() {
   stepping = false;
   runningAll = false;
   renderEmptyState();
+}
+
+/* ── WCAG Audit View ─────────────────────────────────────── */
+
+async function renderWcagAuditView() {
+  var app = document.getElementById('app');
+
+  var html = '';
+  html += '<div class="wcag-header">';
+  html += '<div class="wcag-header-title">\u2705 WCAG Audit</div>';
+  html += '<div class="wcag-header-actions">';
+  html += '<button class="wcag-inspect-btn' + (wcagInspecting ? ' active' : '') + '" id="wcag-inspect" title="Toggle inspect mode">\uD83D\uDD0D Inspect</button>';
+  html += '<button class="wcag-refresh-btn" id="wcag-refresh" title="Rescan page">\u21bb Refresh</button>';
+  html += '</div>';
+  html += '</div>';
+  html += '<div id="wcag-content" class="wcag-content"><div class="wcag-loading">\u23f3 Scanning page\u2026</div></div>';
+
+  app.innerHTML = html;
+
+  document.getElementById('wcag-refresh').addEventListener('click', function() {
+    scanWcagComponents();
+  });
+
+  document.getElementById('wcag-inspect').addEventListener('click', function() {
+    toggleWcagInspect();
+  });
+
+  // Auto-scan on open
+  await scanWcagComponents();
+}
+
+async function scanWcagComponents() {
+  if (wcagScanning) return;
+  wcagScanning = true;
+
+  var contentEl = document.getElementById('wcag-content');
+  if (contentEl) contentEl.innerHTML = '<div class="wcag-loading">\u23f3 Scanning page\u2026</div>';
+
+  var refreshBtn = document.getElementById('wcag-refresh');
+  if (refreshBtn) refreshBtn.disabled = true;
+
+  try {
+    var tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+    var tab = tabs && tabs[0];
+    if (!tab || !tab.id) throw new Error('No active tab found');
+
+    var response = await chrome.tabs.sendMessage(tab.id, {
+      action: 'audit_wcag_components',
+      params: {}
+    });
+
+    if (response && response.success) {
+      wcagAuditData = response.data;
+      // Track the URL we just scanned so onUpdated can detect changes
+      if (tab.url) wcagLastUrl = tab.url;
+      renderWcagResults();
+    } else {
+      throw new Error((response && response.error) || 'Scan failed');
+    }
+  } catch (err) {
+    if (contentEl) {
+      contentEl.innerHTML = '<div class="wcag-error">\u274c ' + escHtml(err.message) + '</div>';
+    }
+  } finally {
+    wcagScanning = false;
+    if (refreshBtn) refreshBtn.disabled = false;
+  }
+}
+
+function renderWcagResults() {
+  if (!wcagAuditData) return;
+
+  var data = wcagAuditData;
+  var contentEl = document.getElementById('wcag-content');
+  if (!contentEl) return;
+
+  var html = '';
+
+  // Summary bar
+  html += '<div class="wcag-summary">';
+  html += '<span class="wcag-summary-stat"><strong>' + data.summary.total + '</strong> components</span>';
+  if (data.summary.withIssues > 0) {
+    html += '<span class="wcag-summary-stat wcag-summary-issues"><strong>' + data.summary.withIssues + '</strong> with issues</span>';
+  }
+  html += '</div>';
+
+  // Page-level issues
+  if (data.pageIssues && data.pageIssues.length > 0) {
+    html += '<div class="wcag-page-issues">';
+    for (var p = 0; p < data.pageIssues.length; p++) {
+      html += '<div class="wcag-page-issue">\u26a0 ' + escHtml(data.pageIssues[p]) + '</div>';
+    }
+    html += '</div>';
+  }
+
+  // Categories
+  var firstNonEmpty = true;
+  for (var i = 0; i < data.categories.length; i++) {
+    var cat = data.categories[i];
+    if (cat.items.length === 0) continue;
+
+    // Default: first non-empty category expanded, rest collapsed
+    if (wcagCollapsed[cat.name] === undefined) {
+      wcagCollapsed[cat.name] = !firstNonEmpty;
+    }
+    if (firstNonEmpty) firstNonEmpty = false;
+
+    var isCollapsed = wcagCollapsed[cat.name];
+    var issueCount = 0;
+    for (var j = 0; j < cat.items.length; j++) {
+      if (cat.items[j].issues && cat.items[j].issues.length > 0) issueCount++;
+    }
+
+    html += '<div class="wcag-category">';
+    html += '<div class="wcag-category-header" data-cat="' + escHtml(cat.name) + '">';
+    html += '<span class="wcag-category-chevron">' + (isCollapsed ? '\u25b6' : '\u25bc') + '</span>';
+    html += '<span>' + cat.icon + ' ' + escHtml(cat.name) + '</span>';
+    html += '<span class="wcag-category-count">' + cat.items.length + '</span>';
+    if (issueCount > 0) {
+      html += '<span class="wcag-category-issues">' + issueCount + ' issue' + (issueCount > 1 ? 's' : '') + '</span>';
+    }
+    html += '</div>';
+
+    html += '<div class="wcag-category-items" style="display:' + (isCollapsed ? 'none' : 'block') + ';">';
+    for (var k = 0; k < cat.items.length; k++) {
+      var item = cat.items[k];
+      var hasIssues = item.issues && item.issues.length > 0;
+      var indent = (cat.name === 'Headings' && item.level) ? ((item.level - 1) * 12) : 0;
+      var paddingLeft = 8 + indent;
+
+      html += '<div class="wcag-item' + (hasIssues ? ' wcag-item-has-issues' : '') + '" data-selector="' + escHtml(item.selector || '') + '" style="padding-left:' + paddingLeft + 'px;">';
+      html += '<span class="wcag-item-role">' + escHtml(item.role || item.tag) + '</span>';
+      if (item.accessibleName) {
+        html += '<span class="wcag-item-name">' + escHtml(item.accessibleName.substring(0, 80)) + '</span>';
+      } else {
+        html += '<span class="wcag-item-name wcag-item-name-empty">(no name)</span>';
+      }
+      html += '<span class="wcag-item-tag">&lt;' + escHtml(item.tag) + '&gt;</span>';
+      if (hasIssues) {
+        html += '<div class="wcag-item-issues">';
+        for (var m = 0; m < item.issues.length; m++) {
+          html += '<span class="wcag-issue-badge">' + escHtml(item.issues[m]) + '</span>';
+        }
+        html += '</div>';
+      }
+      html += '</div>';
+    }
+    html += '</div>';
+    html += '</div>';
+  }
+
+  contentEl.innerHTML = html;
+
+  // Wire category collapse/expand
+  var headers = document.querySelectorAll('.wcag-category-header');
+  for (var h = 0; h < headers.length; h++) {
+    headers[h].addEventListener('click', function() {
+      var catName = this.getAttribute('data-cat');
+      wcagCollapsed[catName] = !wcagCollapsed[catName];
+      renderWcagResults();
+    });
+  }
+
+  // Wire item click -> highlight on page
+  var items = document.querySelectorAll('.wcag-item');
+  for (var it = 0; it < items.length; it++) {
+    items[it].addEventListener('click', function(e) {
+      e.stopPropagation();
+      var selector = this.getAttribute('data-selector');
+      if (selector) highlightWcagElement(selector);
+    });
+  }
+}
+
+async function highlightWcagElement(selector) {
+  try {
+    var tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+    var tab = tabs && tabs[0];
+    if (!tab || !tab.id) return;
+
+    await chrome.tabs.sendMessage(tab.id, {
+      action: 'scroll_and_highlight',
+      params: {
+        selector: selector,
+        duration: 2500,
+        color: 'rgba(59, 130, 246, 0.3)'
+      }
+    });
+  } catch (err) {
+    console.log('[Woodbury WCAG] Highlight failed:', err.message);
+  }
+}
+
+async function toggleWcagInspect() {
+  wcagInspecting = !wcagInspecting;
+
+  // Update button appearance
+  var btn = document.getElementById('wcag-inspect');
+  if (btn) {
+    if (wcagInspecting) {
+      btn.classList.add('active');
+      btn.textContent = '\uD83D\uDD0D Stop';
+    } else {
+      btn.classList.remove('active');
+      btn.textContent = '\uD83D\uDD0D Inspect';
+    }
+  }
+
+  try {
+    var tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+    var tab = tabs && tabs[0];
+    if (!tab || !tab.id) return;
+
+    if (wcagInspecting) {
+      await chrome.tabs.sendMessage(tab.id, {
+        action: 'start_wcag_inspect',
+        params: {}
+      });
+    } else {
+      await chrome.tabs.sendMessage(tab.id, {
+        action: 'stop_wcag_inspect',
+        params: {}
+      });
+    }
+  } catch (err) {
+    console.log('[Woodbury WCAG] Inspect toggle failed:', err.message);
+    // Revert state on failure
+    wcagInspecting = false;
+    if (btn) {
+      btn.classList.remove('active');
+      btn.textContent = '\uD83D\uDD0D Inspect';
+    }
+  }
+}
+
+/**
+ * Render a pinned panel at the top of the WCAG content showing the clicked
+ * element's information — selectors, strategies, attributes — with copyable values.
+ */
+function renderInspectedElement(data) {
+  var contentEl = document.getElementById('wcag-content');
+  if (!contentEl) return;
+
+  // Remove existing pinned panel if any
+  var existing = document.getElementById('wcag-inspected-panel');
+  if (existing) existing.remove();
+
+  var panel = document.createElement('div');
+  panel.id = 'wcag-inspected-panel';
+  panel.className = 'wcag-inspected-panel';
+
+  var html = '';
+
+  // Header row with tag, role, category, dismiss
+  html += '<div class="wcag-ip-header">';
+  html += '<div class="wcag-ip-badges">';
+  html += '<span class="wcag-ip-tag">&lt;' + escHtml(data.tag) + '&gt;</span>';
+  if (data.role) {
+    html += '<span class="wcag-ip-role">role=' + escHtml(data.role) + '</span>';
+  }
+  if (data.category) {
+    html += '<span class="wcag-ip-cat">' + escHtml(data.category) + '</span>';
+  } else {
+    html += '<span class="wcag-ip-nonwcag">Non-WCAG</span>';
+  }
+  html += '</div>';
+  html += '<button class="wcag-ip-close" id="wcag-ip-close" title="Dismiss">\u2715</button>';
+  html += '</div>';
+
+  // Accessible name
+  if (data.accName) {
+    html += '<div class="wcag-ip-row">';
+    html += '<span class="wcag-ip-label">Name</span>';
+    html += '<span class="wcag-ip-value wcag-ip-copyable" data-copy="' + escHtml(data.accName) + '">' + escHtml(truncStr(data.accName, 100)) + '</span>';
+    html += '</div>';
+  }
+
+  // Strategies — the copyable selectors
+  if (data.strategies && data.strategies.length > 0) {
+    html += '<div class="wcag-ip-section-label">Findable via</div>';
+    for (var i = 0; i < data.strategies.length; i++) {
+      var s = data.strategies[i];
+      var cls = s.unique ? 'wcag-ip-unique' : 'wcag-ip-nonunique';
+      var icon = s.unique ? '\u2705' : '\u26a0\ufe0f';
+      var countStr = !s.unique && s.matchCount > 0 ? ' (' + s.matchCount + ')' : '';
+      html += '<div class="wcag-ip-row">';
+      html += '<span class="wcag-ip-label">' + icon + ' ' + escHtml(s.method) + countStr + '</span>';
+      html += '<span class="wcag-ip-value wcag-ip-copyable ' + cls + '" data-copy="' + escHtml(s.value) + '">' + escHtml(truncStr(s.value, 80)) + '</span>';
+      html += '</div>';
+    }
+  }
+
+  // Attributes
+  if (data.attrs && Object.keys(data.attrs).length > 0) {
+    html += '<div class="wcag-ip-section-label">Attributes</div>';
+    var keys = Object.keys(data.attrs);
+    for (var i = 0; i < keys.length; i++) {
+      var k = keys[i];
+      var v = data.attrs[k];
+      html += '<div class="wcag-ip-row">';
+      html += '<span class="wcag-ip-label">' + escHtml(k) + '</span>';
+      html += '<span class="wcag-ip-value wcag-ip-copyable" data-copy="' + escHtml(v) + '">' + escHtml(truncStr(v, 80)) + '</span>';
+      html += '</div>';
+    }
+  }
+
+  // Issues
+  if (data.issues && data.issues.length > 0) {
+    html += '<div class="wcag-ip-section-label">Issues</div>';
+    html += '<div class="wcag-ip-issues">';
+    for (var i = 0; i < data.issues.length; i++) {
+      html += '<span class="wcag-ip-issue">' + escHtml(data.issues[i]) + '</span>';
+    }
+    html += '</div>';
+  }
+
+  panel.innerHTML = html;
+
+  // Insert at the top of wcag-content
+  contentEl.insertBefore(panel, contentEl.firstChild);
+
+  // Dismiss button
+  document.getElementById('wcag-ip-close').addEventListener('click', function() {
+    panel.remove();
+  });
+
+  // Click-to-copy on copyable values
+  panel.querySelectorAll('.wcag-ip-copyable').forEach(function(el) {
+    el.addEventListener('click', function() {
+      var text = el.getAttribute('data-copy');
+      if (!text) return;
+      navigator.clipboard.writeText(text).then(function() {
+        var orig = el.textContent;
+        el.textContent = '\u2705 Copied!';
+        el.classList.add('wcag-ip-copied');
+        setTimeout(function() {
+          el.textContent = orig;
+          el.classList.remove('wcag-ip-copied');
+        }, 1200);
+      });
+    });
+  });
+}
+
+function truncStr(str, max) {
+  if (!str) return '';
+  return str.length > max ? str.substring(0, max) + '\u2026' : str;
 }

@@ -8,7 +8,7 @@
  * Each extension must have a package.json with a "woodbury" field.
  */
 
-import { readdir, readFile, access, stat } from 'node:fs/promises';
+import { readdir, readFile, access, stat, writeFile as fsWriteFile, mkdir } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { existsSync } from 'node:fs';
@@ -40,7 +40,7 @@ export interface ExtensionManifest {
   /** Absolute path to the JS entry point */
   entryPoint: string;
   /** Where the extension was found */
-  source: 'local' | 'npm';
+  source: 'local' | 'npm' | 'bundled';
   /** Absolute path to the extension root directory */
   directory: string;
   /** Declared environment variables from woodbury.env field in package.json */
@@ -53,8 +53,14 @@ export interface LoadedExtension {
   module: WoodburyExtension;
 }
 
-/** Root directory for all extensions */
+/** Root directory for user-installed extensions */
 export const EXTENSIONS_DIR = join(homedir(), '.woodbury', 'extensions');
+
+/** Bundled extensions shipped with Woodbury */
+// In dev: dist/../extensions (repo root). In packaged: dist/extensions.
+const BUNDLED_EXTENSIONS_DIR = existsSync(join(__dirname, 'extensions'))
+  ? join(__dirname, 'extensions')
+  : join(__dirname, '..', 'extensions');
 
 /** npm package name prefix for Woodbury extensions */
 const NPM_PREFIX = 'woodbury-ext-';
@@ -84,6 +90,31 @@ export async function discoverExtensions(): Promise<ExtensionManifest[]> {
   const manifests: ExtensionManifest[] = [];
   debugLog.debug('ext-loader', 'Discovering extensions', { dir: EXTENSIONS_DIR });
 
+  // 0. Bundled extensions: <repo>/extensions/<name>/
+  //    These ship with Woodbury and are always available.
+  //    User-installed extensions with the same name will override them.
+  const bundledNames = new Set<string>();
+  if (existsSync(BUNDLED_EXTENSIONS_DIR)) {
+    try {
+      const entries = await readdir(BUNDLED_EXTENSIONS_DIR, { withFileTypes: true });
+      for (const entry of entries) {
+        const isDir = await isDirectoryEntry(entry, BUNDLED_EXTENSIONS_DIR);
+        if (!isDir) continue;
+        const dir = join(BUNDLED_EXTENSIONS_DIR, entry.name);
+        const manifest = await readManifest(dir, 'bundled');
+        if (manifest) {
+          debugLog.debug('ext-loader', `Discovered bundled extension: ${manifest.name}`, {
+            displayName: manifest.displayName,
+          });
+          bundledNames.add(manifest.name);
+          manifests.push(manifest);
+        }
+      }
+    } catch (err) {
+      debugLog.warn('ext-loader', 'Bundled extensions directory not readable', { error: String(err) });
+    }
+  }
+
   // 1. Local extensions: ~/.woodbury/extensions/<name>/
   if (existsSync(EXTENSIONS_DIR)) {
     try {
@@ -96,6 +127,14 @@ export async function discoverExtensions(): Promise<ExtensionManifest[]> {
         const dir = join(EXTENSIONS_DIR, entry.name);
         const manifest = await readManifest(dir, 'local');
         if (manifest) {
+          // If a bundled extension has the same name, the local one overrides it
+          if (bundledNames.has(manifest.name)) {
+            const idx = manifests.findIndex(m => m.name === manifest.name && m.source === 'bundled');
+            if (idx !== -1) {
+              debugLog.info('ext-loader', `Local extension "${manifest.name}" overrides bundled version`);
+              manifests.splice(idx, 1);
+            }
+          }
           debugLog.debug('ext-loader', `Discovered local extension: ${manifest.name}`, {
             displayName: manifest.displayName,
             entryPoint: manifest.entryPoint,
@@ -160,9 +199,9 @@ export async function discoverExtensions(): Promise<ExtensionManifest[]> {
  * Read and validate a manifest from an extension directory.
  * Returns null if the directory isn't a valid extension.
  */
-async function readManifest(
+export async function readManifest(
   dir: string,
-  source: 'local' | 'npm'
+  source: 'local' | 'npm' | 'bundled'
 ): Promise<ExtensionManifest | null> {
   try {
     const pkgPath = join(dir, 'package.json');
@@ -288,4 +327,226 @@ export function writeEnvFile(vars: Record<string, string>): string {
       })
       .join('\n') + '\n'
   );
+}
+
+// ────────────────────────────────────────────────────────────────
+//  Extension Registry
+// ────────────────────────────────────────────────────────────────
+
+/** A single entry in the extension registry */
+export interface ExtensionRegistryEntry {
+  /** Short unique name (e.g. "nanobanana") */
+  name: string;
+  /** npm package name */
+  packageName: string;
+  /** Human-readable display name */
+  displayName: string;
+  /** What the extension does */
+  description: string;
+  /** Semantic version */
+  version: string;
+  /** What it provides: "tools", "commands", "prompts", "webui" */
+  provides: string[];
+  /** Absolute path to the JS entry point */
+  entryPoint: string;
+  /** Where it came from */
+  source: 'local' | 'npm' | 'bundled';
+  /** Absolute path to extension directory */
+  directory: string;
+  /** Declared env vars from package.json */
+  envDeclarations: Record<string, EnvVarDeclaration>;
+  /** Whether the extension is enabled */
+  enabled: boolean;
+  /** ISO timestamp of when it was registered */
+  registeredAt: string;
+}
+
+/** On-disk registry file format */
+export interface ExtensionRegistryFile {
+  /** Schema version for forward compat */
+  version: 1;
+  /** Map from extension name to entry */
+  extensions: Record<string, ExtensionRegistryEntry>;
+}
+
+/** Path to the registry file */
+export const REGISTRY_PATH = join(EXTENSIONS_DIR, 'registry.json');
+
+/**
+ * Extension Registry — single source of truth for installed extensions.
+ * Reads/writes ~/.woodbury/extensions/registry.json.
+ * Provides instant metadata lookup without filesystem scanning.
+ */
+export class ExtensionRegistry {
+  private data: ExtensionRegistryFile = { version: 1, extensions: {} };
+  private _loaded = false;
+
+  /** Load registry from disk. If missing, starts empty. */
+  async load(): Promise<void> {
+    try {
+      const raw = await readFile(REGISTRY_PATH, 'utf-8');
+      this.data = JSON.parse(raw);
+      this._loaded = true;
+      debugLog.debug('registry', `Loaded registry with ${Object.keys(this.data.extensions).length} extension(s)`);
+    } catch {
+      this.data = { version: 1, extensions: {} };
+      this._loaded = true;
+      debugLog.debug('registry', 'No registry file found, starting fresh');
+    }
+  }
+
+  /** Persist registry to disk. */
+  async save(): Promise<void> {
+    await mkdir(join(REGISTRY_PATH, '..'), { recursive: true });
+    await fsWriteFile(REGISTRY_PATH, JSON.stringify(this.data, null, 2));
+    debugLog.debug('registry', 'Registry saved');
+  }
+
+  /** Check if registry has no entries. */
+  get isEmpty(): boolean {
+    return Object.keys(this.data.extensions).length === 0;
+  }
+
+  /** Get all registered extensions. */
+  getAll(): ExtensionRegistryEntry[] {
+    return Object.values(this.data.extensions);
+  }
+
+  /** Get only enabled extensions. */
+  getEnabled(): ExtensionRegistryEntry[] {
+    return Object.values(this.data.extensions).filter(e => e.enabled);
+  }
+
+  /** Get a single extension by name. */
+  get(name: string): ExtensionRegistryEntry | undefined {
+    return this.data.extensions[name];
+  }
+
+  /** Register an extension from a full entry. */
+  register(entry: ExtensionRegistryEntry): void {
+    this.data.extensions[entry.name] = entry;
+  }
+
+  /** Register from an ExtensionManifest (used during migration and install). */
+  registerFromManifest(manifest: ExtensionManifest, enabled: boolean = true): ExtensionRegistryEntry {
+    const entry: ExtensionRegistryEntry = {
+      name: manifest.name,
+      packageName: manifest.packageName,
+      displayName: manifest.displayName,
+      description: manifest.description,
+      version: manifest.version,
+      provides: manifest.provides,
+      entryPoint: manifest.entryPoint,
+      source: manifest.source,
+      directory: manifest.directory,
+      envDeclarations: manifest.envDeclarations,
+      enabled,
+      registeredAt: new Date().toISOString(),
+    };
+    this.data.extensions[manifest.name] = entry;
+    return entry;
+  }
+
+  /** Remove an extension by name. Returns true if it existed. */
+  remove(name: string): boolean {
+    if (this.data.extensions[name]) {
+      delete this.data.extensions[name];
+      return true;
+    }
+    return false;
+  }
+
+  /** Toggle enabled state. Returns true if the extension exists. */
+  setEnabled(name: string, enabled: boolean): boolean {
+    const entry = this.data.extensions[name];
+    if (!entry) return false;
+    entry.enabled = enabled;
+    return true;
+  }
+
+  /** Update an entry's manifest fields (e.g., after version bump). */
+  updateFromManifest(name: string, manifest: ExtensionManifest): void {
+    const entry = this.data.extensions[name];
+    if (!entry) return;
+    entry.packageName = manifest.packageName;
+    entry.displayName = manifest.displayName;
+    entry.description = manifest.description;
+    entry.version = manifest.version;
+    entry.provides = manifest.provides;
+    entry.entryPoint = manifest.entryPoint;
+    entry.directory = manifest.directory;
+    entry.envDeclarations = manifest.envDeclarations;
+  }
+
+  /** Convert a registry entry back to an ExtensionManifest (backward compat). */
+  static toManifest(entry: ExtensionRegistryEntry): ExtensionManifest {
+    return {
+      packageName: entry.packageName,
+      name: entry.name,
+      displayName: entry.displayName,
+      description: entry.description,
+      version: entry.version,
+      provides: entry.provides,
+      entryPoint: entry.entryPoint,
+      source: entry.source,
+      directory: entry.directory,
+      envDeclarations: entry.envDeclarations,
+    };
+  }
+}
+
+/**
+ * One-time migration: scan disk with discoverExtensions(), populate registry, save.
+ * Called on first startup after upgrade when registry.json doesn't exist.
+ */
+export async function migrateToRegistry(registry: ExtensionRegistry): Promise<void> {
+  debugLog.info('registry', 'Performing one-time migration from disk scanning to registry');
+  const manifests = await discoverExtensions();
+  for (const manifest of manifests) {
+    registry.registerFromManifest(manifest, true);
+  }
+  await registry.save();
+  debugLog.info('registry', `Migration complete: ${manifests.length} extension(s) registered`);
+}
+
+/**
+ * Sync bundled extensions with the registry.
+ * Adds new bundled extensions, updates versions if changed.
+ * Does not touch user-installed overrides (source !== 'bundled').
+ */
+export async function syncBundledExtensions(registry: ExtensionRegistry): Promise<void> {
+  if (!existsSync(BUNDLED_EXTENSIONS_DIR)) return;
+
+  try {
+    const entries = await readdir(BUNDLED_EXTENSIONS_DIR, { withFileTypes: true });
+    let changed = false;
+
+    for (const entry of entries) {
+      const isDir = await isDirectoryEntry(entry, BUNDLED_EXTENSIONS_DIR);
+      if (!isDir) continue;
+      const dir = join(BUNDLED_EXTENSIONS_DIR, entry.name);
+      const manifest = await readManifest(dir, 'bundled');
+      if (!manifest) continue;
+
+      const existing = registry.get(manifest.name);
+      if (!existing) {
+        // New bundled extension — register it
+        registry.registerFromManifest(manifest, true);
+        changed = true;
+        debugLog.info('registry', `Registered new bundled extension: ${manifest.name}`);
+      } else if (existing.source === 'bundled' && existing.version !== manifest.version) {
+        // Updated bundled extension — update registry
+        registry.updateFromManifest(manifest.name, manifest);
+        changed = true;
+        debugLog.info('registry', `Updated bundled extension: ${manifest.name} (${existing.version} → ${manifest.version})`);
+      }
+      // If user has a local override (source !== 'bundled'), don't touch it
+    }
+
+    if (changed) {
+      await registry.save();
+    }
+  } catch (err) {
+    debugLog.warn('registry', 'Failed to sync bundled extensions', { error: String(err) });
+  }
 }

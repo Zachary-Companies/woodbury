@@ -15,6 +15,7 @@ import type {
 } from './types.js';
 import type { StateManager } from './state-manager.js';
 import type { MemoryStore } from './memory-store.js';
+import type { SkillRegistry } from './skill-registry.js';
 import { debugLog } from '../../debug-log.js';
 
 /** Error category determined by pattern matching. */
@@ -47,6 +48,7 @@ export class RecoveryEngine {
   constructor(
     private stateManager: StateManager,
     private memoryStore: MemoryStore,
+    private skillRegistry?: SkillRegistry,
   ) {}
 
   /**
@@ -76,6 +78,11 @@ export class RecoveryEngine {
       debugLog.info('recovery', 'Found matching failure memory', {
         memory: failureMemories[0].content.slice(0, 100),
       });
+    }
+
+    const alternateSkill = this.selectAlternateSkill(task, category, attemptCount);
+    if (alternateSkill) {
+      return alternateSkill;
     }
 
     switch (category) {
@@ -314,5 +321,29 @@ export class RecoveryEngine {
 
     // No alternatives — just retry
     return { type: 'retry', maxAttempts: task.maxRetries };
+  }
+
+  private selectAlternateSkill(
+    task: TaskNode,
+    category: ErrorCategory,
+    attemptCount: number,
+  ): RecoveryStrategy | null {
+    if (!task.preferredSkill || !this.skillRegistry || attemptCount < 1) {
+      return null;
+    }
+    if (!['tool_error', 'validation', 'verification', 'plan_invalidated', 'unknown', 'not_found'].includes(category)) {
+      return null;
+    }
+
+    const alternatives = this.skillRegistry.suggestAlternateSkills(task.preferredSkill, task.description);
+    if (alternatives.length === 0) {
+      return null;
+    }
+
+    return {
+      type: 'alternative_skill',
+      fallbackSkill: alternatives[0],
+      reason: `${task.preferredSkill} has failed repeatedly for this task; retry with ${alternatives[0]}.`,
+    };
   }
 }

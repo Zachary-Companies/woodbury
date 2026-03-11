@@ -23,6 +23,13 @@ export interface AgentHandle {
   setOnToken(callback: ((token: string) => void) | undefined): void;
   setOnToolStart(callback: ((name: string, params?: any) => void) | undefined): void;
   setOnToolEnd(callback: ((name: string, success: boolean, result?: string, duration?: number) => void) | undefined): void;
+  setOnPhaseChange?(callback: ((from: string, to: string) => void) | undefined): void;
+  setOnTaskStart?(callback: ((task: any) => void) | undefined): void;
+  setOnTaskEnd?(callback: ((task: any, result: any) => void) | undefined): void;
+  setOnBeliefUpdate?(callback: ((belief: any) => void) | undefined): void;
+  setOnReflection?(callback: ((reflection: any) => void) | undefined): void;
+  setOnSkillSelected?(callback: ((selection: any) => void) | undefined): void;
+  setOnRecovery?(callback: ((event: any) => void) | undefined): void;
 }
 
 export { type AgentResult } from './types';
@@ -282,6 +289,8 @@ export async function createClosureAgent(
     const engineConfig: ClosureEngineConfig = {
       provider,
       model: config.model || getDefaultModel(provider),
+      sessionId: config.sessionId,
+      continuationMode: config.continuationMode,
       maxIterations: config.maxIterations || 1000,
       maxTaskRetries: 3,
       timeout: config.timeout || 300000,

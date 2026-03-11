@@ -8,7 +8,10 @@
 
 export type PostStatus = 'draft' | 'scheduled' | 'posting' | 'posted' | 'partial' | 'failed';
 
-export type PlatformName = 'instagram' | 'twitter' | 'youtube';
+/** Built-in platform names (for type hints, not enforced) */
+export type BuiltInPlatform = 'instagram' | 'twitter' | 'youtube';
+/** Platform name — any string (user can add custom platforms) */
+export type PlatformName = string;
 
 export interface PostImage {
   /** Filename within the post's media directory */
@@ -115,12 +118,44 @@ export interface SocialConfig {
 // ── Connector ────────────────────────────────────────────────
 
 export interface PlatformConnector {
-  /** Platform name */
-  platform: PlatformName;
+  /** Platform slug (unique identifier) */
+  platform: string;
   /** Whether the connector is enabled */
   enabled: boolean;
-  /** Display name */
+  /** Display name (e.g. "Instagram", "Twitter / X") */
   displayName?: string;
+  /** Emoji or icon identifier */
+  icon?: string;
+  /** Brand color (hex) */
+  color?: string;
+  /** Platform base URL */
+  baseUrl?: string;
+  /** Semantic version */
+  version?: string;
+  /** Platform capabilities */
+  capabilities?: {
+    text?: boolean;
+    images?: boolean;
+    video?: boolean;
+    stories?: boolean;
+    scheduling?: boolean;
+  };
+  /** Max text/caption length */
+  maxTextLength?: number;
+  /** Max number of images */
+  maxImages?: number;
+  /** Allowed image formats */
+  imageFormats?: string[];
+  /** Max image size in bytes */
+  maxImageSize?: number;
+  /** Whether image is required for posting */
+  requiresImage?: boolean;
+  /** Whether video is required for posting */
+  requiresVideo?: boolean;
+  /** Linked composition pipeline ID (alternative to browser script) */
+  compositionId?: string;
+  /** Human-readable notes */
+  notes?: string;
   /** Additional connector-specific config */
   config?: Record<string, unknown>;
 }

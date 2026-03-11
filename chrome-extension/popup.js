@@ -25,6 +25,22 @@ chrome.runtime.sendMessage({ type: 'getStatus' }, (response) => {
   if (response) updateUI(response);
 });
 
+// WCAG Audit button — opens side panel
+const wcagBtn = document.getElementById('wcag-audit');
+wcagBtn.addEventListener('click', async () => {
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (tab) {
+      await chrome.sidePanel.open({ windowId: tab.windowId });
+    }
+  } catch (e) {
+    console.log('[Woodbury Popup] Failed to open side panel:', e.message);
+    // Fallback: try via background.js
+    chrome.runtime.sendMessage({ type: 'open_sidepanel' });
+  }
+  window.close();
+});
+
 // Reconnect button
 reconnectBtn.addEventListener('click', () => {
   statusText.textContent = 'Reconnecting...';

@@ -9,7 +9,7 @@
   },
   "scripts": {
     "build": "tsc",
-    "postbuild": "node -e \"const fs=require('fs');if(process.platform!=='win32'){try{fs.chmodSync('dist/index.js',0o755)}catch{}};fs.cpSync('src/config-dashboard','dist/config-dashboard',{recursive:true,force:true})\"",
+    "postbuild": "node -e \"const fs=require('fs');if(process.platform!=='win32'){try{fs.chmodSync('dist/index.js',0o755)}catch{}};fs.cpSync('src/config-dashboard','dist/config-dashboard',{recursive:true,force:true});if(fs.existsSync('extensions')){fs.cpSync('extensions','dist/extensions',{recursive:true,force:true})}\"",
     "clean": "rimraf dist",
     "watch": "tsc --watch",
     "test": "jest",

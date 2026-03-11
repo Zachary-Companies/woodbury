@@ -17,6 +17,40 @@ import type { WorkflowDocument, CompositionDocument } from './types.js';
 const EXTENSIONS_DIR = join(homedir(), '.woodbury', 'extensions');
 const GLOBAL_WORKFLOWS_DIR = join(homedir(), '.woodbury', 'workflows');
 
+// ── In-memory registry ───────────────────────────────────────
+// Loaded once on first access, then kept in memory permanently.
+// Only re-scans when explicitly invalidated by a mutation
+// (write, delete, rename, etc.).
+
+interface RegistryEntry<T> {
+  data: T;
+  key: string; // workingDirectory key
+}
+
+let workflowRegistry: RegistryEntry<DiscoveredWorkflow[]> | null = null;
+let compositionRegistry: RegistryEntry<DiscoveredComposition[]> | null = null;
+
+function isRegistryValid<T>(reg: RegistryEntry<T> | null, key: string): reg is RegistryEntry<T> {
+  if (!reg) return false;
+  return reg.key === key;
+}
+
+/** Invalidate the workflow registry (call after workflow mutations). */
+export function invalidateWorkflowCache(): void {
+  workflowRegistry = null;
+}
+
+/** Invalidate the composition registry (call after composition mutations). */
+export function invalidateCompositionCache(): void {
+  compositionRegistry = null;
+}
+
+/** Invalidate both registries. */
+export function invalidateAllCaches(): void {
+  workflowRegistry = null;
+  compositionRegistry = null;
+}
+
 export interface DiscoveredWorkflow {
   /** Full path to the workflow file */
   path: string;
@@ -75,6 +109,13 @@ export async function loadWorkflow(filePath: string): Promise<WorkflowDocument> 
 export async function discoverWorkflows(
   workingDirectory?: string
 ): Promise<DiscoveredWorkflow[]> {
+  const regKey = workingDirectory || '__no_workdir__';
+
+  // Return from in-memory registry if populated
+  if (isRegistryValid(workflowRegistry, regKey)) {
+    return workflowRegistry.data;
+  }
+
   const results: DiscoveredWorkflow[] = [];
 
   // 1. Extension workflows
@@ -91,6 +132,9 @@ export async function discoverWorkflows(
   // 3. Global user workflows
   const globalWorkflows = await discoverFromDirectory(GLOBAL_WORKFLOWS_DIR, 'global');
   results.push(...globalWorkflows);
+
+  // Store in registry — stays until explicitly invalidated
+  workflowRegistry = { data: results, key: regKey };
 
   return results;
 }
@@ -235,6 +279,13 @@ export async function loadComposition(filePath: string): Promise<CompositionDocu
 export async function discoverCompositions(
   workingDirectory?: string
 ): Promise<DiscoveredComposition[]> {
+  const regKey = workingDirectory || '__no_workdir__';
+
+  // Return from in-memory registry if populated
+  if (isRegistryValid(compositionRegistry, regKey)) {
+    return compositionRegistry.data;
+  }
+
   const results: DiscoveredComposition[] = [];
 
   // 1. Project-local compositions
@@ -245,6 +296,9 @@ export async function discoverCompositions(
 
   // 2. Global user compositions
   results.push(...await discoverCompositionsFromDir(GLOBAL_WORKFLOWS_DIR, 'global'));
+
+  // Store in registry — stays until explicitly invalidated
+  compositionRegistry = { data: results, key: regKey };
 
   return results;
 }

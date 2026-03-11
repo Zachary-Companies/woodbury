@@ -496,6 +496,11 @@ function switchTab(tab, opts) {
     if (typeof initAssets === 'function') {
       initAssets();
     }
+  } else if (tab === 'storyboard') {
+    selectedExtension = null;
+    if (typeof initStoryboard === 'function') {
+      initStoryboard();
+    }
   } else if (tab === 'mcp') {
     selectedExtension = null;
     if (typeof initMcp === 'function') {
@@ -533,7 +538,7 @@ function parseHash() {
 
 function handleHash() {
   var state = parseHash();
-  var validTabs = ['home', 'chat', 'workflows', 'compositions', 'runs', 'training', 'marketplace', 'social', 'assets', 'mcp'];
+  var validTabs = ['home', 'chat', 'workflows', 'compositions', 'runs', 'training', 'marketplace', 'social', 'assets', 'storyboard', 'mcp'];
   var tab = validTabs.indexOf(state.tab) !== -1 ? state.tab : 'home';
 
   // Only switch tab if it changed
@@ -616,7 +621,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Restore state from hash on initial load
   var state = parseHash();
-  var validTabs = ['home', 'chat', 'workflows', 'compositions', 'runs', 'training', 'marketplace', 'social', 'assets', 'mcp'];
+  var validTabs = ['home', 'chat', 'workflows', 'compositions', 'runs', 'training', 'marketplace', 'social', 'assets', 'storyboard', 'mcp'];
   var initialTab = validTabs.indexOf(state.tab) !== -1 ? state.tab : 'home';
 
   // Set detailView early so workflow render picks it up

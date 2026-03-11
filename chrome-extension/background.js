@@ -649,15 +649,10 @@ async function handleMessage(message) {
       return;
     }
 
-    // Mouse actions via Chrome Debugger API
-    if (action === 'mouse') {
-      await handleMouseAction(tab.id, id, params);
-      return;
-    }
-
-    // Keyboard actions via Chrome Debugger API
-    if (action === 'keyboard') {
-      await handleKeyboardAction(tab.id, id, params);
+    // Mouse and keyboard input is now handled via native OS input (robotjs) in the executor.
+    // These stubs exist for backward compatibility.
+    if (action === 'mouse' || action === 'keyboard') {
+      sendResponse({ id, success: true, data: { action, performed: params.action, native: true } });
       return;
     }
 
@@ -703,44 +698,8 @@ function waitForTabLoad(tabId, timeout = 15000) {
   });
 }
 
-// ── Debugger-based input (mouse & keyboard) ──────────────────
-
-let attachedTabs = new Set();
-
-async function ensureDebuggerAttached(tabId) {
-  if (attachedTabs.has(tabId)) return;
-  try {
-    await chrome.debugger.attach({ tabId }, '1.3');
-    attachedTabs.add(tabId);
-  } catch (err) {
-    // May already be attached
-    if (!err.message?.includes('Already attached')) {
-      throw err;
-    }
-    attachedTabs.add(tabId);
-  }
-}
-
-function debuggerSend(tabId, method, params = {}) {
-  return new Promise((resolve, reject) => {
-    chrome.debugger.sendCommand({ tabId }, method, params, (result) => {
-      if (chrome.runtime.lastError) {
-        reject(new Error(chrome.runtime.lastError.message));
-      } else {
-        resolve(result);
-      }
-    });
-  });
-}
-
-// Detach debugger when tab navigates or closes
-chrome.debugger.onDetach?.addListener((source) => {
-  if (source.tabId) attachedTabs.delete(source.tabId);
-});
-
+// Clean up debug mode if the debugged tab is closed
 chrome.tabs.onRemoved?.addListener((tabId) => {
-  attachedTabs.delete(tabId);
-  // Clean up debug mode if the debugged tab is closed
   if (debugModeData && debugModeData.tabId === tabId) {
     console.log('[Woodbury DBG] Debugged tab closed, clearing debug state');
     debugModeData = null;
@@ -751,239 +710,36 @@ chrome.tabs.onRemoved?.addListener((tabId) => {
   }
 });
 
-async function handleMouseAction(tabId, requestId, params) {
-  try {
-    await ensureDebuggerAttached(tabId);
-    const x = params.x || 0;
-    const y = params.y || 0;
-
-    switch (params.action) {
-      case 'move':
-        await debuggerSend(tabId, 'Input.dispatchMouseEvent', {
-          type: 'mouseMoved', x, y
-        });
-        break;
-
-      case 'click':
-        await debuggerSend(tabId, 'Input.dispatchMouseEvent', {
-          type: 'mousePressed', x, y, button: 'left', clickCount: 1
-        });
-        await debuggerSend(tabId, 'Input.dispatchMouseEvent', {
-          type: 'mouseReleased', x, y, button: 'left', clickCount: 1
-        });
-        break;
-
-      case 'double_click':
-        await debuggerSend(tabId, 'Input.dispatchMouseEvent', {
-          type: 'mousePressed', x, y, button: 'left', clickCount: 1
-        });
-        await debuggerSend(tabId, 'Input.dispatchMouseEvent', {
-          type: 'mouseReleased', x, y, button: 'left', clickCount: 1
-        });
-        await debuggerSend(tabId, 'Input.dispatchMouseEvent', {
-          type: 'mousePressed', x, y, button: 'left', clickCount: 2
-        });
-        await debuggerSend(tabId, 'Input.dispatchMouseEvent', {
-          type: 'mouseReleased', x, y, button: 'left', clickCount: 2
-        });
-        break;
-
-      case 'right_click':
-        await debuggerSend(tabId, 'Input.dispatchMouseEvent', {
-          type: 'mousePressed', x, y, button: 'right', clickCount: 1
-        });
-        await debuggerSend(tabId, 'Input.dispatchMouseEvent', {
-          type: 'mouseReleased', x, y, button: 'right', clickCount: 1
-        });
-        break;
-
-      case 'scroll': {
-        const scrollX = params.scrollX || 0;
-        const scrollY = params.scrollY || 0;
-        // Chrome's Input.dispatchMouseEvent scroll uses deltaX/deltaY
-        await debuggerSend(tabId, 'Input.dispatchMouseEvent', {
-          type: 'mouseWheel', x, y, deltaX: scrollX, deltaY: scrollY
-        });
-        break;
-      }
-
-      default:
-        sendResponse({ id: requestId, success: false, error: `Unknown mouse action: ${params.action}` });
-        return;
-    }
-
-    sendResponse({ id: requestId, success: true, data: { action: 'mouse', performed: params.action } });
-  } catch (err) {
-    sendResponse({ id: requestId, success: false, error: err.message });
-  }
-}
-
-async function handleKeyboardAction(tabId, requestId, params) {
-  try {
-    await ensureDebuggerAttached(tabId);
-
-    switch (params.action) {
-      case 'type': {
-        // Type each character individually
-        const text = params.text || '';
-        for (const char of text) {
-          await debuggerSend(tabId, 'Input.dispatchKeyEvent', {
-            type: 'keyDown', text: char, key: char, code: `Key${char.toUpperCase()}`
-          });
-          await debuggerSend(tabId, 'Input.dispatchKeyEvent', {
-            type: 'keyUp', text: char, key: char, code: `Key${char.toUpperCase()}`
-          });
-        }
-        break;
-      }
-
-      case 'press': {
-        const key = params.key || '';
-        const keyMap = getKeyMapping(key);
-        const modifiers = getModifierFlags(params);
-
-        await debuggerSend(tabId, 'Input.dispatchKeyEvent', {
-          type: 'keyDown',
-          key: keyMap.key,
-          code: keyMap.code,
-          windowsVirtualKeyCode: keyMap.keyCode,
-          nativeVirtualKeyCode: keyMap.keyCode,
-          modifiers,
-        });
-        await debuggerSend(tabId, 'Input.dispatchKeyEvent', {
-          type: 'keyUp',
-          key: keyMap.key,
-          code: keyMap.code,
-          windowsVirtualKeyCode: keyMap.keyCode,
-          nativeVirtualKeyCode: keyMap.keyCode,
-          modifiers,
-        });
-        break;
-      }
-
-      case 'clear': {
-        // Select all (Ctrl+A / Cmd+A) then Delete
-        const selectMod = 2; // Ctrl
-        await debuggerSend(tabId, 'Input.dispatchKeyEvent', {
-          type: 'keyDown', key: 'a', code: 'KeyA',
-          windowsVirtualKeyCode: 65, modifiers: selectMod
-        });
-        await debuggerSend(tabId, 'Input.dispatchKeyEvent', {
-          type: 'keyUp', key: 'a', code: 'KeyA',
-          windowsVirtualKeyCode: 65, modifiers: selectMod
-        });
-        await debuggerSend(tabId, 'Input.dispatchKeyEvent', {
-          type: 'keyDown', key: 'Backspace', code: 'Backspace',
-          windowsVirtualKeyCode: 8
-        });
-        await debuggerSend(tabId, 'Input.dispatchKeyEvent', {
-          type: 'keyUp', key: 'Backspace', code: 'Backspace',
-          windowsVirtualKeyCode: 8
-        });
-        break;
-      }
-
-      default:
-        sendResponse({ id: requestId, success: false, error: `Unknown keyboard action: ${params.action}` });
-        return;
-    }
-
-    sendResponse({ id: requestId, success: true, data: { action: 'keyboard', performed: params.action } });
-  } catch (err) {
-    sendResponse({ id: requestId, success: false, error: err.message });
-  }
-}
-
-function getKeyMapping(key) {
-  const mappings = {
-    'Enter': { key: 'Enter', code: 'Enter', keyCode: 13 },
-    'Tab': { key: 'Tab', code: 'Tab', keyCode: 9 },
-    'Escape': { key: 'Escape', code: 'Escape', keyCode: 27 },
-    'Backspace': { key: 'Backspace', code: 'Backspace', keyCode: 8 },
-    'Delete': { key: 'Delete', code: 'Delete', keyCode: 46 },
-    'Space': { key: ' ', code: 'Space', keyCode: 32 },
-    'ArrowUp': { key: 'ArrowUp', code: 'ArrowUp', keyCode: 38 },
-    'ArrowDown': { key: 'ArrowDown', code: 'ArrowDown', keyCode: 40 },
-    'ArrowLeft': { key: 'ArrowLeft', code: 'ArrowLeft', keyCode: 37 },
-    'ArrowRight': { key: 'ArrowRight', code: 'ArrowRight', keyCode: 39 },
-    'Home': { key: 'Home', code: 'Home', keyCode: 36 },
-    'End': { key: 'End', code: 'End', keyCode: 35 },
-    'PageUp': { key: 'PageUp', code: 'PageUp', keyCode: 33 },
-    'PageDown': { key: 'PageDown', code: 'PageDown', keyCode: 34 },
-  };
-
-  // Check exact match
-  if (mappings[key]) return mappings[key];
-
-  // Case-insensitive match
-  const lower = key.toLowerCase();
-  for (const [k, v] of Object.entries(mappings)) {
-    if (k.toLowerCase() === lower) return v;
-  }
-
-  // Single character
-  if (key.length === 1) {
-    const upper = key.toUpperCase();
-    return {
-      key: key,
-      code: upper >= 'A' && upper <= 'Z' ? `Key${upper}` : `Digit${key}`,
-      keyCode: upper.charCodeAt(0),
-    };
-  }
-
-  // Fallback
-  return { key, code: key, keyCode: 0 };
-}
-
-function getModifierFlags(params) {
-  let flags = 0;
-  if (params.alt) flags |= 1;
-  if (params.ctrl || params.control) flags |= 2;
-  if (params.meta || params.cmd) flags |= 4;
-  if (params.shift) flags |= 8;
-  // Also check modifiers array
-  if (Array.isArray(params.modifiers)) {
-    for (const mod of params.modifiers) {
-      const m = mod.toLowerCase();
-      if (m === 'alt' || m === 'option') flags |= 1;
-      if (m === 'ctrl' || m === 'control') flags |= 2;
-      if (m === 'meta' || m === 'cmd' || m === 'command') flags |= 4;
-      if (m === 'shift') flags |= 8;
-    }
-  }
-  return flags;
-}
-
 // ── Lifecycle ────────────────────────────────────────────────
 
 // Start connection on service worker startup
 connect();
 
-// When extension icon is clicked and debug mode is active (popup is disabled),
-// open the debug side panel. This provides the required user gesture context
-// that chrome.sidePanel.open() needs.
+// When extension icon is clicked (popup is disabled), toggle the side panel.
+// Works for both debug mode and WCAG audit mode.
+// This provides the required user gesture context that chrome.sidePanel.open() needs.
 chrome.action.onClicked.addListener(async (tab) => {
-  if (debugModeData) {
-    if (sidePanelOpen) {
-      // Toggle: close the panel
-      try {
-        await chrome.sidePanel.setOptions({ enabled: false });
-        await chrome.sidePanel.setOptions({ enabled: true });
-        console.log('[Woodbury DBG] Side panel closed via icon click');
-      } catch (e) {
-        console.log('[Woodbury DBG] Failed to close side panel:', e.message);
-      }
-    } else {
-      // Toggle: open the panel
-      try {
-        await chrome.sidePanel.open({ windowId: tab.windowId });
-        console.log('[Woodbury DBG] Side panel opened via extension icon click');
+  if (sidePanelOpen) {
+    // Toggle: close the panel
+    try {
+      await chrome.sidePanel.setOptions({ enabled: false });
+      await chrome.sidePanel.setOptions({ enabled: true });
+      console.log('[Woodbury] Side panel closed via icon click');
+    } catch (e) {
+      console.log('[Woodbury] Failed to close side panel:', e.message);
+    }
+  } else {
+    // Toggle: open the panel
+    try {
+      await chrome.sidePanel.open({ windowId: tab.windowId });
+      console.log('[Woodbury] Side panel opened via extension icon click');
+      if (debugModeData) {
         setTimeout(() => {
           chrome.runtime.sendMessage({ type: 'debug_started', data: debugModeData }).catch(() => {});
         }, 500);
-      } catch (e) {
-        console.log('[Woodbury DBG] Failed to open side panel:', e.message);
       }
+    } catch (e) {
+      console.log('[Woodbury] Failed to open side panel:', e.message);
     }
   }
 });

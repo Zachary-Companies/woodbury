@@ -339,6 +339,13 @@ export class StateManager {
     return this.state.iteration;
   }
 
+  startNewTurn(): void {
+    this.state.iteration = 0;
+    this.state.phase = 'idle';
+    this.state.updatedAt = new Date().toISOString();
+    this.persist();
+  }
+
   // ── Persistence ─────────────────────────────────────────
 
   private persist(): void {

@@ -19,7 +19,8 @@ import type {
   AgentInstruction,
   PostingSessionState,
 } from './types.js';
-import { getScript } from './scripts/index.js';
+import { getScriptSync, getScript } from './scripts/index.js';
+import { getConnector } from './storage.js';
 
 export const SESSION_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
 
@@ -396,7 +397,7 @@ export class PostingEngine {
     }
 
     // Load the script
-    const script = getScript(state.scriptPlatform);
+    const script = getScriptSync(state.scriptPlatform);
     if (!script) return null;
 
     const engine = new PostingEngine(bridgeServer, script, state.variables, {
@@ -407,4 +408,60 @@ export class PostingEngine {
     engine._createdAt = state.createdAt;
     return engine;
   }
+
+  /**
+   * Async version of fromState that supports dynamic (disk-based) scripts.
+   * Use this for user-defined platforms whose scripts aren't built in.
+   */
+  static async fromStateAsync(
+    state: PostingSessionState,
+    bridgeServer: BridgeServer,
+    log?: (msg: string) => void,
+  ): Promise<PostingEngine | null> {
+    // Check expiry
+    const updatedAt = new Date(state.updatedAt || state.createdAt);
+    if (Date.now() - updatedAt.getTime() > SESSION_TIMEOUT_MS) {
+      return null; // expired
+    }
+
+    // Load the script — async version checks disk first, then built-in
+    const script = await getScript(state.scriptPlatform);
+    if (!script) return null;
+
+    const engine = new PostingEngine(bridgeServer, script, state.variables, {
+      sessionId: state.sessionId,
+      stepIndex: state.stepIndex,
+      log: log || (() => {}),
+    });
+    engine._createdAt = state.createdAt;
+    return engine;
+  }
+}
+
+// ── Posting Method Resolution ─────────────────────────────────
+
+export type PostingMethod =
+  | { type: 'script'; script: PlatformScript }
+  | { type: 'composition'; compositionId: string }
+  | { type: 'none'; reason: string };
+
+/**
+ * Determine how a platform should post: via browser script or composition pipeline.
+ * Checks the connector config first — if it has a compositionId, use that.
+ * Otherwise, load the platform script (disk then built-in).
+ */
+export async function getPostingMethod(platform: string): Promise<PostingMethod> {
+  // Check connector for a linked composition pipeline
+  const connector = await getConnector(platform);
+  if (connector?.compositionId) {
+    return { type: 'composition', compositionId: connector.compositionId };
+  }
+
+  // Fall back to platform script (disk first, then built-in)
+  const script = await getScript(platform);
+  if (script) {
+    return { type: 'script', script };
+  }
+
+  return { type: 'none', reason: `No posting method configured for platform: ${platform}` };
 }

@@ -346,6 +346,341 @@
     }
     .dbg-status-success { color: #22c55e; }
     .dbg-status-error { color: #ef4444; }
+
+    /* ── WCAG Audit View ── */
+    .wcag-header {
+      padding: 0.75rem 1rem;
+      background: #1e293b;
+      border-bottom: 1px solid #334155;
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .wcag-header-title {
+      font-size: 0.85rem;
+      font-weight: 700;
+      color: #e2e8f0;
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+    }
+    .wcag-refresh-btn {
+      padding: 0.3rem 0.6rem;
+      border: 1px solid #334155;
+      border-radius: 5px;
+      background: #0f172a;
+      color: #94a3b8;
+      font-size: 0.68rem;
+      font-weight: 600;
+      cursor: pointer;
+      font-family: inherit;
+      transition: background 0.15s, color 0.15s;
+    }
+    .wcag-refresh-btn:hover { background: #334155; color: #e2e8f0; }
+    .wcag-refresh-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .wcag-header-actions {
+      display: flex;
+      gap: 0.4rem;
+      align-items: center;
+    }
+    .wcag-inspect-btn {
+      padding: 0.3rem 0.6rem;
+      border: 1px solid #334155;
+      border-radius: 5px;
+      background: #0f172a;
+      color: #94a3b8;
+      font-size: 0.68rem;
+      font-weight: 600;
+      cursor: pointer;
+      font-family: inherit;
+      transition: background 0.15s, color 0.15s, border-color 0.15s;
+    }
+    .wcag-inspect-btn:hover { background: #334155; color: #e2e8f0; }
+    .wcag-inspect-btn.active {
+      background: #1e3a5f;
+      color: #60a5fa;
+      border-color: #3b82f6;
+    }
+    .wcag-inspect-btn.active:hover {
+      background: #1e40af;
+      color: #93c5fd;
+    }
+
+    /* ── Inspected element panel ─────────────────── */
+    .wcag-inspected-panel {
+      background: #0c1222;
+      border: 1px solid #1e3a5f;
+      border-radius: 6px;
+      margin: 0.5rem 0.75rem;
+      padding: 0.6rem 0.75rem;
+      font-size: 0.75rem;
+    }
+    .wcag-ip-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 0.4rem;
+    }
+    .wcag-ip-badges {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      flex-wrap: wrap;
+    }
+    .wcag-ip-tag {
+      background: #1e293b;
+      color: #94a3b8;
+      padding: 1px 6px;
+      border-radius: 3px;
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      font-size: 0.68rem;
+    }
+    .wcag-ip-role {
+      background: #1e3a5f;
+      color: #60a5fa;
+      padding: 1px 6px;
+      border-radius: 3px;
+      font-size: 0.68rem;
+    }
+    .wcag-ip-cat {
+      background: #064e3b;
+      color: #6ee7b7;
+      padding: 1px 6px;
+      border-radius: 3px;
+      font-size: 0.68rem;
+    }
+    .wcag-ip-nonwcag {
+      background: #44403c;
+      color: #a8a29e;
+      padding: 1px 6px;
+      border-radius: 3px;
+      font-size: 0.68rem;
+    }
+    .wcag-ip-close {
+      background: none;
+      border: none;
+      color: #64748b;
+      cursor: pointer;
+      font-size: 0.85rem;
+      padding: 2px 6px;
+      border-radius: 3px;
+    }
+    .wcag-ip-close:hover {
+      background: #1e293b;
+      color: #e2e8f0;
+    }
+    .wcag-ip-section-label {
+      color: #64748b;
+      font-size: 0.62rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-top: 0.4rem;
+      margin-bottom: 0.15rem;
+      padding-top: 0.3rem;
+      border-top: 1px solid #1e293b;
+    }
+    .wcag-ip-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 0.5rem;
+      padding: 2px 0;
+    }
+    .wcag-ip-label {
+      color: #94a3b8;
+      font-size: 0.68rem;
+      min-width: 70px;
+      flex-shrink: 0;
+      padding-top: 1px;
+    }
+    .wcag-ip-value {
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      font-size: 0.68rem;
+      color: #e2e8f0;
+      word-break: break-all;
+      min-width: 0;
+    }
+    .wcag-ip-copyable {
+      cursor: pointer;
+      padding: 1px 4px;
+      border-radius: 3px;
+      transition: background 0.15s;
+    }
+    .wcag-ip-copyable:hover {
+      background: #1e293b;
+    }
+    .wcag-ip-copied {
+      background: #064e3b !important;
+      color: #6ee7b7 !important;
+    }
+    .wcag-ip-unique { color: #6ee7b7; }
+    .wcag-ip-nonunique { color: #fbbf24; }
+    .wcag-ip-issues {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 3px;
+      margin-top: 2px;
+    }
+    .wcag-ip-issue {
+      background: #7f1d1d;
+      color: #fca5a5;
+      padding: 1px 6px;
+      border-radius: 3px;
+      font-size: 0.65rem;
+    }
+
+    .wcag-summary {
+      display: flex;
+      gap: 0.75rem;
+      padding: 0.5rem 1rem;
+      background: #020617;
+      border-bottom: 1px solid #1e293b;
+      flex-shrink: 0;
+    }
+    .wcag-summary-stat {
+      font-size: 0.72rem;
+      color: #94a3b8;
+      font-weight: 500;
+    }
+    .wcag-summary-stat strong { color: #e2e8f0; font-weight: 700; }
+    .wcag-summary-issues strong { color: #fca5a5; }
+    .wcag-page-issues {
+      padding: 0.4rem 1rem;
+      background: rgba(239, 68, 68, 0.08);
+      border-bottom: 1px solid #1e293b;
+    }
+    .wcag-page-issue {
+      font-size: 0.68rem;
+      color: #fca5a5;
+      padding: 0.15rem 0;
+    }
+    .wcag-content {
+      flex: 1;
+      overflow-y: auto;
+    }
+    .wcag-category {
+      border-bottom: 1px solid #1e293b;
+    }
+    .wcag-category-header {
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      padding: 0.55rem 0.75rem;
+      background: #1e293b;
+      cursor: pointer;
+      user-select: none;
+      font-size: 0.75rem;
+      font-weight: 600;
+      color: #e2e8f0;
+      transition: background 0.15s;
+    }
+    .wcag-category-header:hover { background: #263349; }
+    .wcag-category-chevron {
+      font-size: 0.55rem;
+      color: #64748b;
+      width: 12px;
+      text-align: center;
+      flex-shrink: 0;
+      transition: transform 0.15s;
+    }
+    .wcag-category-count {
+      margin-left: auto;
+      background: #0f172a;
+      color: #64748b;
+      font-size: 0.6rem;
+      font-weight: 700;
+      padding: 1px 6px;
+      border-radius: 8px;
+      min-width: 20px;
+      text-align: center;
+    }
+    .wcag-category-issues {
+      margin-left: 4px;
+      background: rgba(239, 68, 68, 0.15);
+      color: #fca5a5;
+      font-size: 0.58rem;
+      font-weight: 600;
+      padding: 1px 5px;
+      border-radius: 8px;
+    }
+    .wcag-category-items {
+      background: #0f172a;
+    }
+    .wcag-item {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.35rem;
+      padding: 0.4rem 0.75rem;
+      font-size: 0.72rem;
+      border-bottom: 1px solid #1a2332;
+      color: #cbd5e1;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .wcag-item:last-child { border-bottom: none; }
+    .wcag-item:hover { background: rgba(59, 130, 246, 0.08); }
+    .wcag-item-has-issues {
+      border-left: 3px solid rgba(239, 68, 68, 0.5);
+    }
+    .wcag-item-role {
+      background: #1e3a5f;
+      color: #7dd3fc;
+      font-size: 0.6rem;
+      font-weight: 600;
+      padding: 1px 5px;
+      border-radius: 3px;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+    .wcag-item-name {
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      min-width: 0;
+    }
+    .wcag-item-name-empty {
+      color: #64748b;
+      font-style: italic;
+    }
+    .wcag-item-tag {
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      font-size: 0.6rem;
+      color: #475569;
+      flex-shrink: 0;
+    }
+    .wcag-item-issues {
+      width: 100%;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 3px;
+      padding-left: 0;
+      margin-top: 2px;
+    }
+    .wcag-issue-badge {
+      background: rgba(239, 68, 68, 0.15);
+      color: #fca5a5;
+      font-size: 0.58rem;
+      font-weight: 500;
+      padding: 1px 5px;
+      border-radius: 3px;
+      white-space: nowrap;
+    }
+    .wcag-loading {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 3rem 1rem;
+      color: #64748b;
+      font-size: 0.8rem;
+    }
+    .wcag-error {
+      padding: 1.5rem 1rem;
+      color: #fca5a5;
+      font-size: 0.75rem;
+      text-align: center;
+    }
   </style>
 </head>
 <body>

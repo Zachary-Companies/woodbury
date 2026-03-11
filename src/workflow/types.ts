@@ -335,6 +335,13 @@ export interface NavigateStep extends StepBase {
   waitForSelector?: string;
   /** Wait this many ms after navigation */
   waitMs?: number;
+  /** Extract URL dynamically from a DOM element's attribute at runtime */
+  selectorSource?: {
+    /** CSS selector to find the element */
+    selector: string;
+    /** Attribute name to extract (e.g. 'href', 'src', 'data-url') */
+    attribute: string;
+  };
 }
 
 /** Click an element */
@@ -829,6 +836,8 @@ export interface CompositionNode {
   outputNode?: OutputNodeConfig;
   /** Image viewer configuration (only when workflowId is '__image_viewer__') */
   imageViewer?: ImageViewerNodeConfig;
+  /** Media player configuration (only when workflowId is '__media__') */
+  mediaPlayer?: MediaNodeConfig;
   /** Branch node configuration (only when workflowId is '__branch__') */
   branchNode?: BranchNodeConfig;
   /** Delay node configuration (only when workflowId is '__delay__') */
@@ -845,12 +854,24 @@ export interface CompositionNode {
   asset?: AssetNodeConfig;
   /** Text node configuration (only when workflowId is '__text__') */
   textNode?: TextNodeConfig;
+  /** Variable node configuration (only when workflowId is '__variable__') */
+  variableNode?: VariableNodeConfig;
+  /** Get Variable node configuration (only when workflowId is '__get_variable__') */
+  getVariableNode?: GetVariableNodeConfig;
   /** File operation node configuration (only when workflowId is '__file_op__') */
   fileOp?: FileOpNodeConfig;
   /** JSON keys/extract node configuration (only when workflowId is '__json_keys__') */
   jsonKeysNode?: JsonKeysNodeConfig;
   /** Tool node configuration (only when workflowId is '__tool__') */
   toolNode?: ToolNodeConfig;
+  /** File write node configuration (only when workflowId is '__file_write__') */
+  fileWriteNode?: FileWriteNodeConfig;
+  /** File read node configuration (only when workflowId is '__file_read__') */
+  fileReadNode?: FileReadNodeConfig;
+  /** Junction/hub node configuration (only when workflowId is '__junction__') */
+  junctionNode?: JunctionNodeConfig;
+  /** Whether to cache this node's output and skip re-execution when inputs are unchanged */
+  idempotent?: boolean;
   /** Sub-pipeline reference (only when workflowId starts with 'comp:') */
   compositionRef?: { compositionId: string };
 }
@@ -904,6 +925,36 @@ export interface ImageViewerNodeConfig {
   width: number;
   /** Display height in pixels */
   height: number;
+}
+
+/** Configuration for a media player node — plays video, audio, images, PDF, text */
+export interface MediaNodeConfig {
+  /** How to resolve the media source */
+  sourceMode: 'file_path' | 'url' | 'asset_id';
+  /** File path (sourceMode='file_path') — supports {{variable}} syntax */
+  filePath: string;
+  /** URL (sourceMode='url') — supports {{variable}} syntax */
+  url: string;
+  /** Asset ID (sourceMode='asset_id') */
+  assetId: string;
+  /** Force a specific media type instead of auto-detection from extension */
+  mediaType: 'auto' | 'image' | 'video' | 'audio' | 'pdf' | 'text';
+  /** Display width in pixels */
+  width: number;
+  /** Display height in pixels */
+  height: number;
+  /** Optional display label */
+  title: string;
+  /** Auto-play video/audio when pipeline runs */
+  autoPlay: boolean;
+  /** Default volume 0-1 */
+  defaultVolume: number;
+  /** Loop playback for video/audio */
+  loop: boolean;
+  /** Playback speed (1.0 = normal) */
+  playbackRate: number;
+  /** Image fit mode */
+  imageFit: 'contain' | 'cover' | 'actual';
 }
 
 /** Configuration for a branch node — conditional if/else routing */
@@ -972,6 +1023,20 @@ export interface TextNodeConfig {
   value: string;
 }
 
+/** Configuration for a variable node in a composition */
+export interface VariableNodeConfig {
+  /** Value type */
+  type: 'string' | 'number' | 'array' | 'boolean';
+  /** Initial value as JSON string (parsed at execution time) */
+  initialValue: string;
+}
+
+/** Configuration for a Get Variable node — reads a Variable node's value by reference */
+export interface GetVariableNodeConfig {
+  /** ID of the Variable node to read from */
+  targetNodeId: string;
+}
+
 /** Configuration for a file operation node in a composition */
 export interface FileOpNodeConfig {
   /** File operation to perform */
@@ -992,6 +1057,28 @@ export interface ToolNodeConfig {
   paramDefaults?: Record<string, any>;
   /** Cached parameter schema so ports render without live tools cache */
   paramSchema?: { properties?: Record<string, any>; required?: string[] };
+}
+
+/** Configuration for a file write node — writes text or JSON content to a file */
+export interface FileWriteNodeConfig {
+  /** Write mode: 'overwrite' replaces file, 'append' adds to end */
+  mode: 'overwrite' | 'append';
+  /** Content format: 'auto' detects JSON objects, 'json' always pretty-prints, 'text' writes raw */
+  format: 'auto' | 'json' | 'text';
+  /** Whether to pretty-print JSON output (default true) */
+  prettyPrint?: boolean;
+}
+
+/** Configuration for a file read node — reads a text file and returns JSON object or string */
+export interface FileReadNodeConfig {
+  /** Parse mode: 'auto' tries JSON first then falls back to string, 'json' always parses as JSON, 'text' always returns raw string */
+  parseMode: 'auto' | 'json' | 'text';
+}
+
+/** Configuration for a junction/hub node — pass-through wiring point with mirrored input/output ports */
+export interface JunctionNodeConfig {
+  /** Dynamic pass-through ports — each port appears on both input and output sides */
+  ports: Array<{ name: string; type: string; description: string }>;
 }
 
 /** Runtime state of a pending approval gate */

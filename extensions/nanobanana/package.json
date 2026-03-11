@@ -1,0 +1,34 @@
+{
+  "name": "woodbury-ext-nanobanana",
+  "version": "1.0.0",
+  "description": "Generate and edit images using Google's Gemini AI (Nano Banana)",
+  "main": "index.js",
+  "type": "module",
+  "woodbury": {
+    "name": "nanobanana",
+    "displayName": "Nano Banana Image Generator",
+    "description": "Generate and edit images using Google's Gemini image models (Nano Banana). Supports text-to-image generation and image editing with natural language.",
+    "provides": ["tools", "prompts"],
+    "env": {
+      "GEMINI_API_KEY": {
+        "required": true,
+        "description": "Google Gemini API key. Get one at https://aistudio.google.com/app/apikey"
+      },
+      "IMAGE_OUTPUT_DIR": {
+        "required": false,
+        "description": "Folder to save generated images. Absolute path or relative to working directory. Defaults to working directory.",
+        "type": "path"
+      }
+    }
+  },
+  "keywords": [
+    "woodbury",
+    "extension",
+    "gemini",
+    "image-generation",
+    "ai",
+    "nano-banana"
+  ],
+  "author": "",
+  "license": "MIT"
+}

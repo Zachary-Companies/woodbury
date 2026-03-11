@@ -21,10 +21,11 @@ import type {
   BackgroundTaskOptions,
 } from './extension-api.js';
 import {
-  discoverExtensions,
   loadExtension,
   parseEnvFile,
+  EXTENSIONS_DIR,
   type ExtensionManifest,
+  ExtensionRegistry,
 } from './extension-loader.js';
 import { bridgeServer } from './bridge-server.js';
 import { debugLog } from './debug-log.js';
@@ -91,72 +92,156 @@ export class ExtensionManager {
   private verbose: boolean;
   private onBackgroundMessage: ((message: string, extensionName: string) => void) | null = null;
   private backgroundTasksRunning: boolean = false;
-  private _loadingPromise: Promise<any> | null = null;
+  private _ready = false;
+  private _readyResolve: (() => void) | null = null;
+  private _readyPromise: Promise<void>;
+  private _registry: ExtensionRegistry;
 
-  constructor(workingDirectory: string, verbose: boolean = false) {
+  /** Per-extension activation timeout in milliseconds */
+  static ACTIVATION_TIMEOUT_MS = 10_000;
+
+  /** Maximum wait for whenReady() as a safeguard */
+  static READY_TIMEOUT_MS = 30_000;
+
+  constructor(registry: ExtensionRegistry, workingDirectory: string, verbose: boolean = false) {
+    this._registry = registry;
     this.workingDirectory = workingDirectory;
     this.verbose = verbose;
+    this._readyPromise = new Promise<void>(resolve => {
+      this._readyResolve = resolve;
+    });
+  }
+
+  /** Public access to the extension registry */
+  get registryInstance(): ExtensionRegistry {
+    return this._registry;
   }
 
   /**
    * Returns a promise that resolves when all extensions have finished loading.
-   * Safe to call multiple times — returns immediately if already loaded or not loading.
+   * Always resolves (never hangs) — has a maximum wait as a safeguard.
    */
   async whenReady(): Promise<void> {
-    if (this._loadingPromise) {
-      try { await this._loadingPromise; } catch { /* ignore timeout errors */ }
-    }
+    if (this._ready) return;
+    await Promise.race([
+      this._readyPromise,
+      new Promise<void>(resolve => setTimeout(resolve, ExtensionManager.READY_TIMEOUT_MS)),
+    ]);
   }
 
   /**
-   * Discover and activate all extensions.
-   * Returns lists of successfully loaded extensions and errors.
+   * Load all enabled extensions from the registry.
+   * Activates in parallel with per-extension timeouts.
    */
-  loadAll(): Promise<{
+  async loadAll(): Promise<{
     loaded: string[];
     errors: Array<{ name: string; error: string }>;
   }> {
-    const p = this._doLoadAll();
-    this._loadingPromise = p;
-    return p;
-  }
-
-  private async _doLoadAll(): Promise<{
-    loaded: string[];
-    errors: Array<{ name: string; error: string }>;
-  }> {
-    debugLog.info('ext-mgr', 'Loading all extensions');
-    const manifests = await discoverExtensions();
+    debugLog.info('ext-mgr', 'Loading all extensions from registry');
+    const entries = this._registry.getEnabled();
     const loaded: string[] = [];
     const errors: Array<{ name: string; error: string }> = [];
 
-    for (const manifest of manifests) {
-      try {
-        const doneActivate = debugLog.time('ext-mgr', `Activating "${manifest.name}"`);
-        await this.activate(manifest);
-        doneActivate();
-        loaded.push(manifest.name);
-      } catch (err) {
-        const errorMsg = err instanceof Error ? err.message : String(err);
-        debugLog.error('ext-mgr', `Failed to activate "${manifest.name}"`, {
-          error: errorMsg,
-          stack: err instanceof Error ? err.stack : undefined,
-        });
-        errors.push({
-          name: manifest.name,
-          error: errorMsg,
-        });
+    // Activate all in parallel with per-extension timeout
+    const results = await Promise.allSettled(
+      entries.map(async (entry) => {
+        const manifest = ExtensionRegistry.toManifest(entry);
+        try {
+          const result = await Promise.race([
+            this.activate(manifest).then(() => true as const),
+            new Promise<false>((resolve) =>
+              setTimeout(() => resolve(false), ExtensionManager.ACTIVATION_TIMEOUT_MS)
+            ),
+          ]);
+          if (result) {
+            return { name: entry.name, ok: true as const };
+          } else {
+            return { name: entry.name, ok: false as const, error: `Activation timed out after ${ExtensionManager.ACTIVATION_TIMEOUT_MS}ms` };
+          }
+        } catch (err) {
+          const errorMsg = err instanceof Error ? err.message : String(err);
+          return { name: entry.name, ok: false as const, error: errorMsg };
+        }
+      })
+    );
+
+    for (const result of results) {
+      if (result.status === 'fulfilled') {
+        if (result.value.ok) {
+          loaded.push(result.value.name);
+        } else {
+          const errResult = result.value as { name: string; ok: false; error: string };
+          debugLog.error('ext-mgr', `Failed to activate "${errResult.name}"`, { error: errResult.error });
+          errors.push({ name: errResult.name, error: errResult.error });
+        }
       }
     }
+
+    // Mark ready
+    this._ready = true;
+    this._readyResolve?.();
 
     debugLog.info('ext-mgr', 'All extensions processed', { loaded, errorCount: errors.length });
     return { loaded, errors };
   }
 
   /**
+   * Hot-install: register in registry + activate immediately.
+   * Called by the dashboard after git clone + npm install.
+   */
+  async hotInstall(manifest: ExtensionManifest): Promise<void> {
+    this._registry.registerFromManifest(manifest, true);
+    await this._registry.save();
+
+    const result = await Promise.race([
+      this.activate(manifest).then(() => true),
+      new Promise<false>((resolve) =>
+        setTimeout(() => resolve(false), ExtensionManager.ACTIVATION_TIMEOUT_MS)
+      ),
+    ]);
+
+    if (!result) {
+      debugLog.warn('ext-mgr', `Hot-install of "${manifest.name}" timed out during activation`);
+    }
+  }
+
+  /**
+   * Enable an extension: set enabled + activate if not already active.
+   */
+  async enable(name: string): Promise<boolean> {
+    const entry = this._registry.get(name);
+    if (!entry) return false;
+    this._registry.setEnabled(name, true);
+    await this._registry.save();
+
+    if (!this.extensions.has(name)) {
+      const manifest = ExtensionRegistry.toManifest(entry);
+      try {
+        await this.activate(manifest);
+      } catch (err) {
+        debugLog.error('ext-mgr', `Failed to activate "${name}" on enable`, { error: String(err) });
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /**
+   * Disable an extension: deactivate but keep in registry.
+   */
+  async disable(name: string): Promise<boolean> {
+    const entry = this._registry.get(name);
+    if (!entry) return false;
+    this._registry.setEnabled(name, false);
+    await this._registry.save();
+    await this.deactivate(name);
+    return true;
+  }
+
+  /**
    * Activate a single extension from its manifest.
    */
-  private async activate(manifest: ExtensionManifest): Promise<void> {
+  async activate(manifest: ExtensionManifest): Promise<void> {
     debugLog.debug('ext-mgr', `Loading extension module: ${manifest.name}`, {
       entryPoint: manifest.entryPoint,
       source: manifest.source,
@@ -164,15 +249,30 @@ export class ExtensionManager {
     const { module } = await loadExtension(manifest);
 
     // ── Load per-extension .env file ──────────────────────────
+    // For bundled extensions, look for .env in ~/.woodbury/extensions/<name>/
+    // (API keys shouldn't live in the repo). Falls back to the extension directory.
     let extensionEnv: Record<string, string> = {};
-    const envFilePath = join(manifest.directory, '.env');
-    try {
-      const envContent = await readFile(envFilePath, 'utf-8');
-      extensionEnv = parseEnvFile(envContent);
-      debugLog.debug('ext-mgr', `Loaded .env for "${manifest.name}"`, {
-        keysFound: Object.keys(extensionEnv),
-      });
-    } catch {
+    const envPaths = manifest.source === 'bundled'
+      ? [
+          join(EXTENSIONS_DIR, manifest.name, '.env'),
+          join(EXTENSIONS_DIR, `woodbury-ext-${manifest.name}`, '.env'),
+          join(manifest.directory, '.env'),
+        ]
+      : [join(manifest.directory, '.env')];
+    for (const envFilePath of envPaths) {
+      try {
+        const envContent = await readFile(envFilePath, 'utf-8');
+        extensionEnv = parseEnvFile(envContent);
+        debugLog.debug('ext-mgr', `Loaded .env for "${manifest.name}"`, {
+          path: envFilePath,
+          keysFound: Object.keys(extensionEnv),
+        });
+        break;
+      } catch {
+        // Try next path
+      }
+    }
+    if (Object.keys(extensionEnv).length === 0) {
       debugLog.debug('ext-mgr', `No .env file for "${manifest.name}"`);
     }
 
@@ -184,7 +284,9 @@ export class ExtensionManager {
       }
     }
     if (missing.length > 0) {
-      const envPath = join(manifest.directory, '.env');
+      const envPath = manifest.source === 'bundled'
+        ? join(EXTENSIONS_DIR, manifest.name, '.env')
+        : join(manifest.directory, '.env');
       debugLog.warn('ext-mgr', `Extension "${manifest.name}" missing required env vars`, { missing });
       console.warn(
         `[ext:${manifest.name}] Missing required env var(s): ${missing.join(', ')}. ` +

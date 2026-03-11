@@ -1,21 +1,46 @@
 /**
- * Social Scheduler Dashboard — Client-side JavaScript
+ * Social Scheduler Dashboard -- Core
  *
- * Full social media post management: create, schedule, edit, calendar view.
- * Loaded alongside app.js in the same SPA.
+ * Contains:
+ *   - State variables (socialPosts, socialFilter, socialView, etc.)
+ *   - Helpers (socialEsc, socialFormatDate/Time, socialStatusDot, socialPlatformBadge, socialGetCharLimit, socialInitComposeData)
+ *   - API functions (socialFetchPosts, socialFetchStats, socialFetchConfig, socialSaveConfig, etc.)
+ *   - Init (initSocial)
+ *   - View Router (socialRenderCurrentView)
+ *   - Sidebar (socialRenderSidebar, socialFilterBtn, socialFilterPill, socialRefresh)
+ *   - Overview (socialRenderOverview, socialStatCard)
+ *   - Detail view (socialRenderDetail, socialPlatformCheckboxes, socialPlatformToggles)
+ *   - Calendar (socialRenderCalendar)
+ *   - Queue (socialRenderQueue)
+ *   - Templates placeholder (socialRenderTemplates)
+ *   - Hashtags placeholder (socialRenderHashtags)
+ *
+ * Loaded BEFORE social-compose.js (compose, settings, platform editor depend on core).
+ * All functions are globals shared across files via <script> tags.
  */
 
-// ── State ────────────────────────────────────────────────────
+// -- State --------------------------------------------------------
 var socialPosts = [];
 var socialSelectedPost = null;
 var socialFilter = 'all'; // all | draft | scheduled | posting | posted | failed
 var socialStats = null;
 var socialConfig = null;
 var socialScripts = null;
-var socialView = 'overview'; // overview | detail | create | calendar
+var socialView = 'overview'; // overview | compose | detail | calendar | queue | templates | hashtags | settings
 var socialCalendarMonth = new Date();
+var socialTemplates = [];
+var socialHashtagGroups = [];
+var socialLabels = [];
+var socialComposeData = null; // working state for compose view
+var socialEditingPostId = null; // non-null when editing existing post
+var socialComposeTab = 'all'; // 'all' | 'instagram' | 'twitter' | 'youtube'
+var socialAssetPickerOpen = false;
+var socialAssetCache = null;
+var socialPlatforms = []; // Loaded from GET /api/social/platforms
+var socialQueueSearch = '';
+var socialQueuePlatformFilter = 'all';
 
-// ── Helpers ──────────────────────────────────────────────────
+// -- Helpers ------------------------------------------------------
 
 function socialEsc(str) {
   var div = document.createElement('div');
@@ -24,7 +49,7 @@ function socialEsc(str) {
 }
 
 function socialFormatDate(iso) {
-  if (!iso) return '—';
+  if (!iso) return '\u2014';
   var d = new Date(iso);
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 }
@@ -36,7 +61,7 @@ function socialFormatTime(iso) {
 }
 
 function socialFormatDateTime(iso) {
-  if (!iso) return '—';
+  if (!iso) return '\u2014';
   return socialFormatDate(iso) + ' ' + socialFormatTime(iso);
 }
 
@@ -53,16 +78,60 @@ function socialStatusDot(status) {
 }
 
 function socialPlatformBadge(platform, small) {
-  var icons = {
-    instagram: '\ud83d\udcf7',
-    twitter: '\ud83d\udc26',
-    youtube: '\u25b6\ufe0f',
-  };
+  var connector = socialPlatforms.find(function (c) { return c.platform === platform; });
+  var icon = (connector && connector.icon) || { instagram: '\ud83d\udcf7', twitter: '\ud83d\udc26', youtube: '\u25b6\ufe0f' }[platform] || '\ud83c\udf10';
+  var displayName = (connector && connector.displayName) || platform;
   var cls = small ? 'social-platform-badge social-platform-badge-sm' : 'social-platform-badge';
-  return '<span class="' + cls + '" data-platform="' + platform + '">' + (icons[platform] || '') + ' ' + platform + '</span>';
+  return '<span class="' + cls + '" data-platform="' + platform + '">' + icon + ' ' + displayName + '</span>';
 }
 
-// ── API ──────────────────────────────────────────────────────
+function socialGetCharLimit(platform) {
+  // Check connector first
+  var connector = socialPlatforms.find(function (c) { return c.platform === platform; });
+  if (connector && connector.maxTextLength) return connector.maxTextLength;
+  // Fall back to script metadata
+  if (!socialScripts) return 0;
+  var script = socialScripts.find(function (s) { return s.platform === platform; });
+  if (!script) return 0;
+  return script.maxCaptionLength || script.maxTextLength || script.maxDescriptionLength || 0;
+}
+
+function socialInitComposeData(post) {
+  var allPlatforms = socialPlatforms.map(function (c) { return c.platform; });
+  if (allPlatforms.length === 0) allPlatforms = ['instagram', 'twitter', 'youtube']; // fallback
+  if (post) {
+    var enabledMap = {};
+    (post.platforms || []).forEach(function (p) { if (p.enabled) enabledMap[p.platform] = true; });
+    var overrides = {};
+    if (post.content && post.content.platformOverrides) {
+      for (var k in post.content.platformOverrides) {
+        overrides[k] = post.content.platformOverrides[k].text || '';
+      }
+    }
+    return {
+      text: (post.content && post.content.text) || '',
+      platformOverrides: overrides,
+      platforms: allPlatforms.map(function (p) { return { platform: p, enabled: !!enabledMap[p] }; }),
+      images: (post.content && post.content.images) || [],
+      tags: (post.tags || []).slice(),
+      scheduledAt: post.scheduledAt || null,
+      scheduleMode: post.scheduledAt ? 'schedule' : 'draft',
+    };
+  }
+  // Default for new post
+  var defPlats = (socialConfig && socialConfig.defaultPlatforms) || [];
+  return {
+    text: '',
+    platformOverrides: {},
+    platforms: allPlatforms.map(function (p) { return { platform: p, enabled: defPlats.indexOf(p) !== -1 }; }),
+    images: [],
+    tags: [],
+    scheduledAt: null,
+    scheduleMode: 'draft',
+  };
+}
+
+// -- API ----------------------------------------------------------
 
 async function socialFetchPosts(filters) {
   var qs = '';
@@ -106,6 +175,12 @@ async function socialFetchScripts() {
   return res.json();
 }
 
+async function socialFetchPlatforms() {
+  var res = await fetch('/api/social/platforms');
+  if (!res.ok) throw new Error('Failed to fetch platforms');
+  return res.json();
+}
+
 async function socialCreatePost(data) {
   var res = await fetch('/api/social/posts', {
     method: 'POST',
@@ -131,7 +206,12 @@ async function socialDeletePost(id) {
   return res.json();
 }
 
-// ── Init ─────────────────────────────────────────────────────
+async function socialFetchAssets() {
+  var res = await fetch('/api/assets?category=image');
+  return res.json();
+}
+
+// -- Init ---------------------------------------------------------
 
 async function initSocial() {
   var main = document.querySelector('#main');
@@ -150,15 +230,18 @@ async function initSocial() {
       socialFetchPosts(socialFilter !== 'all' ? { status: socialFilter } : {}),
       socialFetchStats(),
       socialFetchScripts(),
+      socialFetchPlatforms(),
     ]);
     socialPosts = results[0];
     socialStats = results[1];
     socialScripts = results[2];
+    socialPlatforms = results[3] || [];
+
+    // Also try to load config for default platform settings
+    try { socialConfig = await socialFetchConfig(); } catch (e) { /* ignore */ }
 
     socialRenderSidebar();
-    if (socialView === 'overview') {
-      socialRenderOverview();
-    }
+    socialRenderCurrentView();
   } catch (err) {
     main.innerHTML =
       '<div class="empty-state">' +
@@ -169,7 +252,20 @@ async function initSocial() {
   }
 }
 
-// ── Sidebar ──────────────────────────────────────────────────
+// -- View Router --------------------------------------------------
+
+function socialRenderCurrentView() {
+  if (socialView === 'compose')        socialRenderCompose();
+  else if (socialView === 'detail')    socialRenderDetail();
+  else if (socialView === 'calendar')  socialRenderCalendar();
+  else if (socialView === 'queue')     socialRenderQueue();
+  else if (socialView === 'templates') socialRenderTemplates();
+  else if (socialView === 'hashtags')  socialRenderHashtags();
+  else if (socialView === 'settings')  socialRenderSettings();
+  else                                 socialRenderOverview();
+}
+
+// -- Sidebar ------------------------------------------------------
 
 function socialRenderSidebar() {
   var sidebar = document.querySelector('#social-list');
@@ -181,13 +277,13 @@ function socialRenderSidebar() {
   var html =
     '<div class="ss-sidebar">' +
 
-    // ── New Post button ──
+    // -- New Post button --
     '<button class="ss-new-btn" id="social-new-post-btn">' +
     '<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>' +
     '<span>New Post</span>' +
     '</button>' +
 
-    // ── Filter pills ──
+    // -- Filter pills --
     '<div class="ss-filters">' +
     socialFilterPill('all', 'All', counts.total) +
     socialFilterPill('draft', 'Drafts', counts.draft) +
@@ -196,29 +292,38 @@ function socialRenderSidebar() {
     socialFilterPill('failed', 'Failed', counts.failed) +
     '</div>' +
 
-    // ── View switcher ──
+    // -- View switcher --
     '<div class="ss-view-switch">' +
-    '<button class="ss-view-btn' + (socialView === 'overview' || socialView === 'detail' || socialView === 'create' ? ' active' : '') + '" data-social-view="overview">' +
+    '<button class="ss-view-btn' + (socialView === 'overview' || socialView === 'detail' || socialView === 'compose' ? ' active' : '') + '" data-social-view="overview">' +
     '<svg width="13" height="13" viewBox="0 0 16 16" fill="none"><rect x="1.5" y="1.5" width="5" height="5" rx="1" stroke="currentColor" stroke-width="1.3"/><rect x="9.5" y="1.5" width="5" height="5" rx="1" stroke="currentColor" stroke-width="1.3"/><rect x="1.5" y="9.5" width="5" height="5" rx="1" stroke="currentColor" stroke-width="1.3"/><rect x="9.5" y="9.5" width="5" height="5" rx="1" stroke="currentColor" stroke-width="1.3"/></svg>' +
     'Overview</button>' +
     '<button class="ss-view-btn' + (socialView === 'calendar' ? ' active' : '') + '" data-social-view="calendar">' +
     '<svg width="13" height="13" viewBox="0 0 16 16" fill="none"><rect x="2" y="3" width="12" height="11" rx="1.5" stroke="currentColor" stroke-width="1.3"/><path d="M2 6.5h12M5.5 1.5v3M10.5 1.5v3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>' +
     'Calendar</button>' +
+    '<button class="ss-view-btn' + (socialView === 'queue' ? ' active' : '') + '" data-social-view="queue">' +
+    '<svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M2 4h12M2 8h12M2 12h12" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>' +
+    'Queue</button>' +
+    '<button class="ss-view-btn' + (socialView === 'templates' ? ' active' : '') + '" data-social-view="templates">' +
+    '<svg width="13" height="13" viewBox="0 0 16 16" fill="none"><rect x="2" y="2" width="12" height="12" rx="1.5" stroke="currentColor" stroke-width="1.3"/><path d="M5 5h6M5 8h4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>' +
+    '</button>' +
+    '<button class="ss-view-btn' + (socialView === 'hashtags' ? ' active' : '') + '" data-social-view="hashtags">' +
+    '<svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M4 1v14M12 1v14M1 5h14M1 11h14" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>' +
+    '</button>' +
     '<button class="ss-view-btn' + (socialView === 'settings' ? ' active' : '') + '" id="social-settings-btn">' +
     '<svg width="13" height="13" viewBox="0 0 16 16" fill="none"><path d="M6.9 1.7l-.2 1.2c-.5.2-.9.5-1.3.8l-1.1-.4-1.1 1.9 1 .8c-.1.3-.1.5-.1.8s0 .5.1.8l-1 .8 1.1 1.9 1.1-.4c.4.3.8.6 1.3.8l.2 1.2h2.2l.2-1.2c.5-.2.9-.5 1.3-.8l1.1.4 1.1-1.9-1-.8c.1-.3.1-.5.1-.8s0-.5-.1-.8l1-.8-1.1-1.9-1.1.4c-.4-.3-.8-.6-1.3-.8l-.2-1.2H6.9z" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="8" cy="8" r="1.8" stroke="currentColor" stroke-width="1.2"/></svg>' +
     '</button>' +
     '</div>' +
 
-    // ── Divider ──
+    // -- Divider --
     '<div class="ss-divider"></div>' +
 
-    // ── Post list header ──
+    // -- Post list header --
     '<div class="ss-list-header">' +
     '<span>Posts</span>' +
     '<span class="ss-list-count">' + socialPosts.length + '</span>' +
     '</div>';
 
-  // ── Post items ──
+  // -- Post items --
   if (socialPosts.length === 0) {
     html += '<div class="ss-empty">' +
       '<div class="ss-empty-icon">\ud83d\udcdd</div>' +
@@ -230,8 +335,11 @@ function socialRenderSidebar() {
       var isSelected = socialSelectedPost && socialSelectedPost.id === post.id;
       var preview = (post.content.text || '').slice(0, 55) || '(no text)';
       var platforms = post.platforms.filter(function (p) { return p.enabled; });
-      var platformIcons = { instagram: '\ud83d\udcf7', twitter: '\ud83d\udc26', youtube: '\u25b6\ufe0f' };
-      var platStr = platforms.map(function (p) { return platformIcons[p.platform] || ''; }).join(' ');
+      var defaultPlatIcons = { instagram: '\ud83d\udcf7', twitter: '\ud83d\udc26', youtube: '\u25b6\ufe0f' };
+      var platStr = platforms.map(function (p) {
+        var conn = socialPlatforms.find(function (c) { return c.platform === p.platform; });
+        return (conn && conn.icon) || defaultPlatIcons[p.platform] || '\ud83c\udf10';
+      }).join(' ');
       var time = post.scheduledAt ? socialFormatDateTime(post.scheduledAt) : 'Draft';
       var statusColors = {
         draft: '#64748b', scheduled: '#3b82f6', posting: '#f59e0b',
@@ -258,9 +366,13 @@ function socialRenderSidebar() {
 
   // Wire events
   sidebar.querySelector('#social-new-post-btn').addEventListener('click', function () {
-    socialView = 'create';
+    socialEditingPostId = null;
+    socialComposeData = socialInitComposeData(null);
+    socialComposeTab = 'all';
+    socialAssetPickerOpen = false;
+    socialView = 'compose';
     socialSelectedPost = null;
-    socialRenderCreateForm();
+    socialRenderCompose();
     socialRenderSidebar();
   });
 
@@ -275,8 +387,7 @@ function socialRenderSidebar() {
     btn.addEventListener('click', function () {
       socialView = btn.dataset.socialView;
       socialSelectedPost = null;
-      if (socialView === 'overview') socialRenderOverview();
-      else if (socialView === 'calendar') socialRenderCalendar();
+      socialRenderCurrentView();
       socialRenderSidebar();
     });
   });
@@ -286,7 +397,7 @@ function socialRenderSidebar() {
     settingsBtn.addEventListener('click', function () {
       socialView = 'settings';
       socialSelectedPost = null;
-      socialRenderSettings();
+      socialRenderCurrentView();
       socialRenderSidebar();
     });
   }
@@ -330,7 +441,7 @@ async function socialRefresh() {
   }
 }
 
-// ── Overview ─────────────────────────────────────────────────
+// -- Overview -----------------------------------------------------
 
 function socialRenderOverview() {
   var main = document.querySelector('#main');
@@ -435,7 +546,7 @@ function socialStatCard(label, value, color) {
     '</div>';
 }
 
-// ── Post Detail ──────────────────────────────────────────────
+// -- Post Detail --------------------------------------------------
 
 function socialRenderDetail() {
   var main = document.querySelector('#main');
@@ -473,14 +584,37 @@ function socialRenderDetail() {
       '</div>';
   }).join('');
 
-  // Content preview (first 100 chars for the hero card)
-  var preview = (post.content.text || '').slice(0, 100);
-  if ((post.content.text || '').length > 100) preview += '...';
+  // Content text
+  var textContent = (post.content && post.content.text) || '';
+
+  // Images
+  var imagesHtml = '';
+  if (post.content && post.content.images && post.content.images.length > 0) {
+    imagesHtml = '<div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:12px;">';
+    post.content.images.forEach(function (img) {
+      var src = typeof img === 'string' ? img : (img.url || img.path || '');
+      imagesHtml += '<div style="width:80px;height:80px;border-radius:8px;overflow:hidden;border:1px solid #1e293b;">' +
+        '<img src="' + socialEsc(src) + '" style="width:100%;height:100%;object-fit:cover;" onerror="this.style.display=\'none\'" />' +
+        '</div>';
+    });
+    imagesHtml += '</div>';
+  }
+
+  // Tags
+  var tagsHtml = '';
+  if (post.tags && post.tags.length > 0) {
+    tagsHtml = '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;">';
+    post.tags.forEach(function (tag) {
+      tagsHtml += '<span style="padding:2px 10px;background:#7c3aed22;border:1px solid #7c3aed44;border-radius:12px;font-size:0.75rem;color:#c4b5fd;">' +
+        socialEsc(tag) + '</span>';
+    });
+    tagsHtml += '</div>';
+  }
 
   var html =
     '<div class="sd-container">' +
 
-    // ── Header bar ──
+    // -- Header bar --
     '<div class="sd-header">' +
     '<button class="sd-back-btn" id="social-back-btn">' +
     '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M10 12L6 8l4-4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>' +
@@ -491,80 +625,53 @@ function socialRenderDetail() {
     '</div>' +
     '</div>' +
 
-    // ── Content card ──
+    // -- Content card --
     '<div class="sd-card">' +
     '<div class="sd-card-header">' +
     '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M13.3 2H2.7C2.3 2 2 2.3 2 2.7v10.6c0 .4.3.7.7.7h10.6c.4 0 .7-.3.7-.7V2.7c0-.4-.3-.7-.7-.7zM5 5h6M5 8h6M5 11h3" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>' +
     '<span>Content</span>' +
     '</div>' +
-    '<textarea id="social-edit-text" class="sd-textarea" placeholder="Write your post...">' +
-    socialEsc(post.content.text) + '</textarea>' +
+    '<div style="padding:4px 0;font-size:0.9rem;line-height:1.5;color:#e2e8f0;white-space:pre-wrap;">' +
+    socialEsc(textContent || '(no text)') +
+    '</div>' +
+    imagesHtml +
+    tagsHtml +
     '</div>' +
 
-    // ── Platforms card ──
+    // -- Platforms card --
     '<div class="sd-card">' +
     '<div class="sd-card-header">' +
     '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 1v14M1 8h14" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><circle cx="8" cy="8" r="6.5" stroke="currentColor" stroke-width="1.2"/></svg>' +
     '<span>Platforms</span>' +
-    '</div>' +
-    '<div class="sd-platforms-grid" id="social-edit-platforms">' +
-    socialPlatformToggles(post) +
-    '</div>' +
-    '</div>' +
-
-    // ── Schedule card ──
-    '<div class="sd-card">' +
-    '<div class="sd-card-header">' +
-    '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><rect x="2" y="3" width="12" height="11" rx="1.5" stroke="currentColor" stroke-width="1.2"/><path d="M2 6.5h12M5 1.5v3M11 1.5v3" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>' +
-    '<span>Schedule</span>' +
-    '</div>' +
-    '<div class="sd-schedule-row">' +
-    '<div class="sd-field">' +
-    '<label class="sd-label">Date</label>' +
-    '<input type="date" id="social-edit-date" class="sd-input" value="' +
-    (post.scheduledAt ? new Date(post.scheduledAt).toISOString().split('T')[0] : '') + '" />' +
-    '</div>' +
-    '<div class="sd-field">' +
-    '<label class="sd-label">Time</label>' +
-    '<input type="time" id="social-edit-time" class="sd-input" value="' +
-    (post.scheduledAt ? new Date(post.scheduledAt).toTimeString().slice(0, 5) : '') + '" />' +
-    '</div>' +
-    '</div>' +
-    '</div>' +
-
-    // ── Tags card ──
-    '<div class="sd-card">' +
-    '<div class="sd-card-header">' +
-    '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M1.5 8.7V2.5c0-.6.4-1 1-1h6.2L14.5 7l-6 6.5-7-4.8z" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="5" cy="5" r="1" fill="currentColor"/></svg>' +
-    '<span>Tags</span>' +
-    '</div>' +
-    '<input type="text" id="social-edit-tags" class="sd-input" placeholder="marketing, product, launch" value="' +
-    socialEsc((post.tags || []).join(', ')) + '" />' +
-    '</div>' +
-
-    // ── Platform status card ──
-    '<div class="sd-card">' +
-    '<div class="sd-card-header">' +
-    '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 14A6 6 0 108 2a6 6 0 000 12z" stroke="currentColor" stroke-width="1.2"/><path d="M8 5v3l2 1.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>' +
-    '<span>Delivery Status</span>' +
     '</div>' +
     '<div class="sd-platform-statuses">' +
     platformRows +
     '</div>' +
     '</div>' +
 
-    // ── Meta footer ──
+    // -- Schedule card --
+    '<div class="sd-card">' +
+    '<div class="sd-card-header">' +
+    '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><rect x="2" y="3" width="12" height="11" rx="1.5" stroke="currentColor" stroke-width="1.2"/><path d="M2 6.5h12M5 1.5v3M11 1.5v3" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>' +
+    '<span>Schedule</span>' +
+    '</div>' +
+    '<div style="font-size:0.9rem;color:#e2e8f0;">' +
+    (post.scheduledAt ? socialFormatDateTime(post.scheduledAt) : 'Not scheduled (Draft)') +
+    '</div>' +
+    '</div>' +
+
+    // -- Meta footer --
     '<div class="sd-meta">' +
     'Created ' + socialFormatDateTime(post.createdAt) +
     ' &middot; Updated ' + socialFormatDateTime(post.updatedAt) +
     ' &middot; <span style="font-family:monospace;">' + post.id.slice(0, 8) + '</span>' +
     '</div>' +
 
-    // ── Action bar ──
+    // -- Action bar --
     '<div class="sd-actions">' +
-    '<button class="sd-btn sd-btn-primary" id="social-save-btn">' +
-    '<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M12.7 1.3H3.3c-1.1 0-2 .9-2 2v9.4c0 1.1.9 2 2 2h9.4c1.1 0 2-.9 2-2V3.3c0-1.1-.9-2-2-2z" stroke="currentColor" stroke-width="1.2"/><path d="M11.3 14.7V9.3H4.7v5.4M4.7 1.3v4h5.3" stroke="currentColor" stroke-width="1.2"/></svg>' +
-    'Save Changes</button>' +
+    '<button class="sd-btn sd-btn-primary" id="social-edit-btn">' +
+    '<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M11.5 1.5l3 3L5 14H2v-3L11.5 1.5z" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>' +
+    'Edit</button>' +
     (post.status === 'draft' || post.status === 'failed'
       ? '<button class="sd-btn sd-btn-schedule" id="social-schedule-btn">' +
         '<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M14 8A6 6 0 112 8a6 6 0 0112 0z" stroke="currentColor" stroke-width="1.2"/><path d="M8 4.7V8l2.7 1.3" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>' +
@@ -587,37 +694,35 @@ function socialRenderDetail() {
     socialRenderSidebar();
   });
 
-  // Platform toggle interaction
-  main.querySelectorAll('.sd-platform-toggle input[type="checkbox"]').forEach(function (cb) {
-    cb.addEventListener('change', function () {
-      var toggle = cb.closest('.sd-platform-toggle');
-      if (cb.checked) {
-        toggle.classList.add('sd-platform-toggle-active');
-        toggle.querySelector('.sd-platform-check').textContent = '\u2713';
-      } else {
-        toggle.classList.remove('sd-platform-toggle-active');
-        toggle.querySelector('.sd-platform-check').textContent = '';
-      }
-    });
-  });
-
-  main.querySelector('#social-save-btn').addEventListener('click', async function () {
-    await socialSavePost();
+  // Edit button -- opens compose view with this post's data
+  main.querySelector('#social-edit-btn').addEventListener('click', function () {
+    socialEditingPostId = post.id;
+    socialComposeData = socialInitComposeData(post);
+    socialComposeTab = 'all';
+    socialAssetPickerOpen = false;
+    socialView = 'compose';
+    socialRenderCompose();
+    socialRenderSidebar();
   });
 
   var scheduleBtn = main.querySelector('#social-schedule-btn');
   if (scheduleBtn) {
     scheduleBtn.addEventListener('click', async function () {
-      // Set schedule to now + 1 minute if no date/time set
-      var dateInput = main.querySelector('#social-edit-date');
-      var timeInput = main.querySelector('#social-edit-time');
-      if (!dateInput.value) {
-        var now = new Date();
-        now.setMinutes(now.getMinutes() + 5);
-        dateInput.value = now.toISOString().split('T')[0];
-        timeInput.value = now.toTimeString().slice(0, 5);
+      // Schedule for now + 5 minutes
+      var now = new Date();
+      now.setMinutes(now.getMinutes() + 5);
+      try {
+        var updated = await socialUpdatePost(post.id, {
+          scheduledAt: now.toISOString(),
+          status: 'scheduled',
+        });
+        socialSelectedPost = updated;
+        await socialRefresh();
+        socialRenderDetail();
+        if (typeof toast === 'function') toast('Post scheduled', 'success');
+      } catch (err) {
+        if (typeof toast === 'function') toast('Schedule failed: ' + err, 'error');
       }
-      await socialSavePost('scheduled');
     });
   }
 
@@ -637,7 +742,8 @@ function socialRenderDetail() {
 }
 
 function socialPlatformCheckboxes(post) {
-  var allPlatforms = ['instagram', 'twitter', 'youtube'];
+  var allPlatforms = socialPlatforms.map(function (c) { return c.platform; });
+  if (allPlatforms.length === 0) allPlatforms = ['instagram', 'twitter', 'youtube']; // fallback
   var enabled = {};
   (post ? post.platforms : []).forEach(function (p) {
     if (p.enabled) enabled[p.platform] = true;
@@ -653,193 +759,30 @@ function socialPlatformCheckboxes(post) {
 }
 
 function socialPlatformToggles(post) {
-  var allPlatforms = ['instagram', 'twitter', 'youtube'];
-  var icons = { instagram: '\ud83d\udcf7', twitter: '\ud83d\udc26', youtube: '\u25b6\ufe0f' };
-  var labels = { instagram: 'Instagram', twitter: 'Twitter', youtube: 'YouTube' };
+  var allPlatforms = socialPlatforms.map(function (c) { return c.platform; });
+  if (allPlatforms.length === 0) allPlatforms = ['instagram', 'twitter', 'youtube']; // fallback
+  var defaultIcons = { instagram: '\ud83d\udcf7', twitter: '\ud83d\udc26', youtube: '\u25b6\ufe0f' };
   var enabled = {};
   (post ? post.platforms : []).forEach(function (p) {
     if (p.enabled) enabled[p.platform] = true;
   });
 
   return allPlatforms.map(function (p) {
+    var connector = socialPlatforms.find(function (c) { return c.platform === p; });
+    var icon = (connector && connector.icon) || defaultIcons[p] || '\ud83c\udf10';
+    var label = (connector && connector.displayName) || p;
     var checked = enabled[p] ? ' checked' : '';
     var active = enabled[p] ? ' sd-platform-toggle-active' : '';
     return '<label class="sd-platform-toggle' + active + '" data-platform="' + p + '">' +
       '<input type="checkbox" class="social-platform-cb" value="' + p + '"' + checked + ' style="display:none;" />' +
-      '<span class="sd-platform-icon">' + icons[p] + '</span>' +
-      '<span class="sd-platform-name">' + labels[p] + '</span>' +
+      '<span class="sd-platform-icon">' + icon + '</span>' +
+      '<span class="sd-platform-name">' + label + '</span>' +
       '<span class="sd-platform-check">' + (enabled[p] ? '\u2713' : '') + '</span>' +
       '</label>';
   }).join('');
 }
 
-async function socialSavePost(forceStatus) {
-  var main = document.querySelector('#main');
-  var post = socialSelectedPost;
-  if (!post) return;
-
-  var text = main.querySelector('#social-edit-text').value;
-  var dateVal = main.querySelector('#social-edit-date').value;
-  var timeVal = main.querySelector('#social-edit-time').value;
-  var tagsVal = main.querySelector('#social-edit-tags').value;
-
-  var scheduledAt = null;
-  if (dateVal) {
-    scheduledAt = new Date(dateVal + 'T' + (timeVal || '12:00') + ':00').toISOString();
-  }
-
-  var platforms = [];
-  main.querySelectorAll('.social-platform-cb').forEach(function (cb) {
-    platforms.push({
-      platform: cb.value,
-      enabled: cb.checked,
-      status: 'pending',
-      retryCount: 0,
-    });
-  });
-
-  var data = {
-    content: { text: text },
-    scheduledAt: scheduledAt,
-    platforms: platforms,
-    tags: tagsVal.split(',').map(function (t) { return t.trim(); }).filter(Boolean),
-  };
-
-  if (forceStatus) {
-    data.status = forceStatus;
-  }
-
-  try {
-    var updated = await socialUpdatePost(post.id, data);
-    socialSelectedPost = updated;
-    await socialRefresh();
-    socialRenderDetail();
-    if (typeof toast === 'function') toast('Post saved', 'success');
-  } catch (err) {
-    if (typeof toast === 'function') toast('Save failed: ' + err, 'error');
-  }
-}
-
-// ── Create Post ──────────────────────────────────────────────
-
-function socialRenderCreateForm() {
-  var main = document.querySelector('#main');
-
-  var html =
-    '<div style="padding:1.5rem;">' +
-    '<div style="display:flex;align-items:center;gap:12px;margin-bottom:1.5rem;">' +
-    '<button class="btn-secondary" id="social-create-back" style="padding:4px 8px;">&larr;</button>' +
-    '<h2 style="color:#fff;font-size:1.25rem;">New Post</h2>' +
-    '</div>' +
-
-    // Text
-    '<div style="margin-bottom:1rem;">' +
-    '<label style="display:block;font-size:0.75rem;color:#94a3b8;margin-bottom:4px;">Content</label>' +
-    '<textarea id="social-create-text" class="wf-run-input" style="width:100%;min-height:120px;resize:vertical;" placeholder="What do you want to share?"></textarea>' +
-    '</div>' +
-
-    // Platforms
-    '<div style="margin-bottom:1rem;">' +
-    '<label style="display:block;font-size:0.75rem;color:#94a3b8;margin-bottom:4px;">Platforms</label>' +
-    '<div id="social-create-platforms">' +
-    socialPlatformCheckboxes(null) +
-    '</div>' +
-    '</div>' +
-
-    // Schedule
-    '<div style="display:flex;gap:0.75rem;margin-bottom:1rem;">' +
-    '<div style="flex:1;">' +
-    '<label style="display:block;font-size:0.75rem;color:#94a3b8;margin-bottom:4px;">Schedule Date (optional)</label>' +
-    '<input type="date" id="social-create-date" class="wf-run-input" style="width:100%;" />' +
-    '</div>' +
-    '<div style="flex:1;">' +
-    '<label style="display:block;font-size:0.75rem;color:#94a3b8;margin-bottom:4px;">Schedule Time</label>' +
-    '<input type="time" id="social-create-time" class="wf-run-input" style="width:100%;" />' +
-    '</div>' +
-    '</div>' +
-
-    // Tags
-    '<div style="margin-bottom:1rem;">' +
-    '<label style="display:block;font-size:0.75rem;color:#94a3b8;margin-bottom:4px;">Tags (comma-separated)</label>' +
-    '<input type="text" id="social-create-tags" class="wf-run-input" style="width:100%;" placeholder="marketing, product" />' +
-    '</div>' +
-
-    // Actions
-    '<div style="display:flex;gap:0.5rem;">' +
-    '<button class="btn-primary" id="social-create-draft" style="background:#64748b;">Save as Draft</button>' +
-    '<button class="btn-primary" id="social-create-schedule" style="background:linear-gradient(135deg,#7c3aed,#6d28d9);">Schedule</button>' +
-    '</div>' +
-    '</div>';
-
-  main.innerHTML = html;
-
-  main.querySelector('#social-create-back').addEventListener('click', function () {
-    socialView = 'overview';
-    socialRenderOverview();
-    socialRenderSidebar();
-  });
-
-  main.querySelector('#social-create-draft').addEventListener('click', function () {
-    socialDoCreate(false);
-  });
-
-  main.querySelector('#social-create-schedule').addEventListener('click', function () {
-    socialDoCreate(true);
-  });
-}
-
-async function socialDoCreate(schedule) {
-  var main = document.querySelector('#main');
-  var text = main.querySelector('#social-create-text').value.trim();
-  var dateVal = main.querySelector('#social-create-date').value;
-  var timeVal = main.querySelector('#social-create-time').value;
-  var tagsVal = main.querySelector('#social-create-tags').value;
-
-  if (!text) {
-    if (typeof toast === 'function') toast('Post text is required', 'error');
-    return;
-  }
-
-  var platforms = [];
-  main.querySelectorAll('.social-platform-cb').forEach(function (cb) {
-    if (cb.checked) platforms.push(cb.value);
-  });
-
-  if (platforms.length === 0) {
-    if (typeof toast === 'function') toast('Select at least one platform', 'error');
-    return;
-  }
-
-  var scheduledAt = null;
-  if (schedule) {
-    if (!dateVal) {
-      if (typeof toast === 'function') toast('Set a date to schedule', 'error');
-      return;
-    }
-    scheduledAt = new Date(dateVal + 'T' + (timeVal || '12:00') + ':00').toISOString();
-  }
-
-  var tags = tagsVal.split(',').map(function (t) { return t.trim(); }).filter(Boolean);
-
-  try {
-    var post = await socialCreatePost({
-      text: text,
-      platforms: platforms,
-      scheduledAt: scheduledAt,
-      tags: tags,
-    });
-    socialSelectedPost = post;
-    socialView = 'detail';
-    await socialRefresh();
-    socialRenderDetail();
-    socialRenderSidebar();
-    if (typeof toast === 'function') toast('Post created!', 'success');
-  } catch (err) {
-    if (typeof toast === 'function') toast('Create failed: ' + err, 'error');
-  }
-}
-
-// ── Calendar ─────────────────────────────────────────────────
+// -- Calendar -----------------------------------------------------
 
 function socialRenderCalendar() {
   var main = document.querySelector('#main');
@@ -891,7 +834,7 @@ function socialRenderCalendar() {
     var posts = postsByDay[day] || [];
     var cellClass = 'social-cal-cell' + (isToday ? ' social-cal-today' : '') + (posts.length ? ' social-cal-has-posts' : '');
 
-    html += '<div class="' + cellClass + '">' +
+    html += '<div class="' + cellClass + '" data-social-cal-day="' + day + '">' +
       '<div class="social-cal-day">' + day + '</div>';
     posts.slice(0, 3).forEach(function (p) {
       var preview = (p.content.text || '').slice(0, 20) || '(no text)';
@@ -932,179 +875,248 @@ function socialRenderCalendar() {
       }
     });
   });
+
+  // Wire day click to create post for that date
+  main.querySelectorAll('[data-social-cal-day]').forEach(function (cell) {
+    cell.addEventListener('click', function (e) {
+      // Don't trigger if clicking a post inside the cell
+      if (e.target.closest('[data-social-cal-post]')) return;
+      var dayNum = parseInt(cell.dataset.socialCalDay, 10);
+      var dateStr = year + '-' + String(m + 1).padStart(2, '0') + '-' + String(dayNum).padStart(2, '0');
+      socialEditingPostId = null;
+      socialComposeData = socialInitComposeData(null);
+      socialComposeData.scheduleMode = 'schedule';
+      socialComposeData.scheduledAt = new Date(dateStr + 'T12:00:00').toISOString();
+      socialComposeTab = 'all';
+      socialAssetPickerOpen = false;
+      socialView = 'compose';
+      socialRenderCompose();
+      socialRenderSidebar();
+    });
+  });
 }
 
-// ── Settings ────────────────────────────────────────────────
+// -- Queue --------------------------------------------------------
 
-async function socialRenderSettings() {
+function socialRenderQueue() {
   var main = document.querySelector('#main');
-  main.innerHTML = '<div class="empty-state"><div class="spinner" style="margin:0 auto 16px;"></div><h2>Loading settings...</h2></div>';
 
-  try {
-    socialConfig = await socialFetchConfig();
-  } catch (err) {
-    main.innerHTML = '<div class="empty-state"><div class="empty-state-icon">\u26a0\ufe0f</div><h2>Failed to load settings</h2><p>' + socialEsc(String(err)) + '</p></div>';
-    return;
+  // Filter posts
+  var filtered = socialPosts.slice();
+  if (socialQueuePlatformFilter !== 'all') {
+    filtered = filtered.filter(function (post) {
+      return post.platforms.some(function (p) { return p.enabled && p.platform === socialQueuePlatformFilter; });
+    });
+  }
+  if (socialQueueSearch) {
+    var search = socialQueueSearch.toLowerCase();
+    filtered = filtered.filter(function (post) {
+      var text = ((post.content && post.content.text) || '').toLowerCase();
+      var tags = (post.tags || []).join(' ').toLowerCase();
+      return text.indexOf(search) !== -1 || tags.indexOf(search) !== -1;
+    });
   }
 
-  var cfg = socialConfig;
-
-  // Common timezones
-  var timezones = [
-    'America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles',
-    'America/Anchorage', 'Pacific/Honolulu', 'America/Toronto', 'America/Vancouver',
-    'Europe/London', 'Europe/Paris', 'Europe/Berlin', 'Europe/Moscow',
-    'Asia/Tokyo', 'Asia/Shanghai', 'Asia/Kolkata', 'Asia/Dubai',
-    'Australia/Sydney', 'Pacific/Auckland',
-  ];
-  var tzOptions = timezones.map(function (tz) {
-    var sel = (cfg.defaultTimezone === tz) ? ' selected' : '';
-    return '<option value="' + tz + '"' + sel + '>' + tz.replace(/_/g, ' ') + '</option>';
-  }).join('');
-
-  // Default platforms
-  var allPlats = ['instagram', 'twitter', 'youtube'];
-  var platLabels = { instagram: '\ud83d\udcf7 Instagram', twitter: '\ud83d\udc26 Twitter', youtube: '\u25b6\ufe0f YouTube' };
-  var defPlats = cfg.defaultPlatforms || [];
+  var statusLabels = {
+    draft: 'Draft', scheduled: 'Scheduled', posting: 'Posting',
+    posted: 'Posted', partial: 'Partial', failed: 'Failed',
+  };
+  var statusColors = {
+    draft: '#64748b', scheduled: '#3b82f6', posting: '#f59e0b',
+    posted: '#22c55e', partial: '#f97316', failed: '#ef4444',
+  };
 
   var html =
-    '<div class="sd-container">' +
-
-    // ── Header ──
-    '<div class="sd-header">' +
-    '<button class="sd-back-btn" id="social-settings-back">' +
-    '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M10 12L6 8l4-4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>' +
-    '</button>' +
-    '<div class="sd-header-title">Settings</div>' +
+    '<div style="padding:1.5rem;">' +
+    '<div style="display:flex;align-items:center;gap:12px;margin-bottom:1.25rem;">' +
+    '<h2 style="color:#fff;font-size:1.25rem;flex:1;">Post Queue</h2>' +
+    '<span style="color:#64748b;font-size:0.8rem;">' + filtered.length + ' post' + (filtered.length !== 1 ? 's' : '') + '</span>' +
     '</div>' +
 
-    // ── Grid ──
-    '<div class="grid-12">' +
-
-    // ── Timezone ──
-    '<div class="sd-card col-6">' +
-    '<div class="sd-card-header">' +
-    '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6.5" stroke="currentColor" stroke-width="1.2"/><path d="M8 3.5V8l3 2" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>' +
-    '<span>Default Timezone</span>' +
+    // Toolbar
+    '<div style="display:flex;gap:10px;margin-bottom:16px;align-items:center;">' +
+    // Search
+    '<div style="flex:1;position:relative;">' +
+    '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" style="position:absolute;left:10px;top:50%;transform:translateY(-50%);opacity:0.4;pointer-events:none;">' +
+    '<circle cx="7" cy="7" r="5" stroke="currentColor" stroke-width="1.3"/><path d="M11 11l3.5 3.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>' +
+    '<input type="text" id="social-queue-search" placeholder="Search posts..." value="' + socialEsc(socialQueueSearch) + '" style="' +
+    'width:100%;padding:8px 10px 8px 30px;background:#0a0f1a;border:1px solid #1e293b;border-radius:8px;' +
+    'color:#e2e8f0;font-size:0.8rem;outline:none;' +
+    '" />' +
     '</div>' +
-    '<select id="social-cfg-tz" class="sd-input" style="width:100%;">' + tzOptions + '</select>' +
-    '</div>' +
-
-    // ── Default Platforms ──
-    '<div class="sd-card col-6">' +
-    '<div class="sd-card-header">' +
-    '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 1v14M1 8h14" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><circle cx="8" cy="8" r="6.5" stroke="currentColor" stroke-width="1.2"/></svg>' +
-    '<span>Default Platforms</span>' +
-    '</div>' +
-    '<div style="display:flex;flex-wrap:wrap;gap:8px;">' +
-    allPlats.map(function (p) {
-      var checked = defPlats.indexOf(p) !== -1 ? ' checked' : '';
-      return '<label style="display:flex;align-items:center;gap:6px;padding:8px 14px;background:#1e293b;border:1px solid #334155;border-radius:8px;cursor:pointer;font-size:0.85rem;color:#e2e8f0;">' +
-        '<input type="checkbox" class="social-cfg-plat" value="' + p + '"' + checked + '>' +
-        platLabels[p] +
-        '</label>';
-    }).join('') +
-    '</div>' +
-    '</div>' +
-
-    // ── LLM Settings ──
-    '<div class="sd-card col-6">' +
-    '<div class="sd-card-header">' +
-    '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2 4.5h12M2 8h8M2 11.5h10" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>' +
-    '<span>AI Text Generation</span>' +
-    '</div>' +
-    '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">' +
-    '<div class="sd-field">' +
-    '<label class="sd-label">Text Provider</label>' +
-    '<input type="text" id="social-cfg-text-provider" class="sd-input" value="' + socialEsc((cfg.llm || {}).textProvider || '') + '" placeholder="anthropic" />' +
-    '</div>' +
-    '<div class="sd-field">' +
-    '<label class="sd-label">Text Model</label>' +
-    '<input type="text" id="social-cfg-text-model" class="sd-input" value="' + socialEsc((cfg.llm || {}).textModel || '') + '" placeholder="claude-opus-4-5-20251101" />' +
-    '</div>' +
-    '</div>' +
-    '</div>' +
-
-    // ── Posting Behavior ──
-    '<div class="sd-card col-6">' +
-    '<div class="sd-card-header">' +
-    '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M14 8A6 6 0 112 8a6 6 0 0112 0z" stroke="currentColor" stroke-width="1.2"/><path d="M8 4.7V8l2.7 1.3" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>' +
-    '<span>Posting Behavior</span>' +
-    '</div>' +
-    '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;">' +
-    '<div class="sd-field">' +
-    '<label class="sd-label">Delay Between Platforms (ms)</label>' +
-    '<input type="number" id="social-cfg-delay" class="sd-input" value="' + ((cfg.posting || {}).delayBetweenPlatforms || 5000) + '" />' +
-    '</div>' +
-    '<div class="sd-field">' +
-    '<label class="sd-label">Retry Limit</label>' +
-    '<input type="number" id="social-cfg-retry-limit" class="sd-input" value="' + ((cfg.posting || {}).retryLimit || 2) + '" />' +
-    '</div>' +
-    '<div class="sd-field">' +
-    '<label class="sd-label">Retry Delay (ms)</label>' +
-    '<input type="number" id="social-cfg-retry-delay" class="sd-input" value="' + ((cfg.posting || {}).retryDelay || 10000) + '" />' +
-    '</div>' +
-    '</div>' +
-    '</div>' +
-
-    '</div>' +
-
-    // ── Save ──
-    '<div class="sd-actions">' +
-    '<button class="sd-btn sd-btn-primary" id="social-cfg-save">' +
-    '<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M12.7 1.3H3.3c-1.1 0-2 .9-2 2v9.4c0 1.1.9 2 2 2h9.4c1.1 0 2-.9 2-2V3.3c0-1.1-.9-2-2-2z" stroke="currentColor" stroke-width="1.2"/><path d="M11.3 14.7V9.3H4.7v5.4M4.7 1.3v4h5.3" stroke="currentColor" stroke-width="1.2"/></svg>' +
-    'Save Settings</button>' +
-    '</div>' +
-
+    // Platform filter
+    '<select id="social-queue-platform" style="' +
+    'padding:8px 12px;background:#0a0f1a;border:1px solid #1e293b;border-radius:8px;' +
+    'color:#e2e8f0;font-size:0.8rem;outline:none;cursor:pointer;' +
+    '">' +
+    '<option value="all"' + (socialQueuePlatformFilter === 'all' ? ' selected' : '') + '>All Platforms</option>' +
+    (socialPlatforms.length > 0
+      ? socialPlatforms.map(function (c) {
+          return '<option value="' + c.platform + '"' + (socialQueuePlatformFilter === c.platform ? ' selected' : '') + '>' + socialEsc(c.displayName || c.platform) + '</option>';
+        }).join('')
+      : '<option value="instagram"' + (socialQueuePlatformFilter === 'instagram' ? ' selected' : '') + '>Instagram</option>' +
+        '<option value="twitter"' + (socialQueuePlatformFilter === 'twitter' ? ' selected' : '') + '>Twitter</option>' +
+        '<option value="youtube"' + (socialQueuePlatformFilter === 'youtube' ? ' selected' : '') + '>YouTube</option>') +
+    '</select>' +
     '</div>';
 
+  // Post list
+  if (filtered.length === 0) {
+    html += '<div style="text-align:center;padding:40px 20px;color:#475569;">' +
+      '<div style="font-size:2rem;margin-bottom:8px;">\ud83d\udcad</div>' +
+      '<div style="font-size:0.9rem;">No posts match your filters.</div>' +
+      '</div>';
+  } else {
+    html += '<div style="display:flex;flex-direction:column;gap:2px;">';
+
+    // Table header
+    html += '<div style="display:grid;grid-template-columns:32px 1fr 120px 140px 80px;gap:8px;padding:8px 12px;font-size:0.7rem;text-transform:uppercase;letter-spacing:0.05em;color:#475569;font-weight:600;">' +
+      '<span></span><span>Content</span><span>Platforms</span><span>Scheduled</span><span>Actions</span>' +
+      '</div>';
+
+    filtered.forEach(function (post) {
+      var sColor = statusColors[post.status] || '#64748b';
+      var preview = ((post.content && post.content.text) || '').slice(0, 60) || '(no text)';
+      var enabledPlats = post.platforms.filter(function (p) { return p.enabled; });
+      var defaultQueueIcons = { instagram: '\ud83d\udcf7', twitter: '\ud83d\udc26', youtube: '\u25b6\ufe0f' };
+      var platStr = enabledPlats.map(function (p) {
+        var conn = socialPlatforms.find(function (c) { return c.platform === p.platform; });
+        return (conn && conn.icon) || defaultQueueIcons[p.platform] || '\ud83c\udf10';
+      }).join(' ');
+      var schedStr = post.scheduledAt ? socialFormatDateTime(post.scheduledAt) : 'Draft';
+
+      html += '<div class="social-queue-row" data-social-queue-post="' + post.id + '" style="' +
+        'display:grid;grid-template-columns:32px 1fr 120px 140px 80px;gap:8px;' +
+        'padding:10px 12px;background:#0f172a;border:1px solid #1e293b;border-radius:8px;' +
+        'align-items:center;cursor:pointer;transition:all 0.15s;' +
+        '">' +
+        // Status dot
+        '<div>' +
+        '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + sColor + ';" title="' + (statusLabels[post.status] || post.status) + '"></span>' +
+        '</div>' +
+        // Content preview
+        '<div style="font-size:0.85rem;color:#e2e8f0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' +
+        socialEsc(preview) +
+        '</div>' +
+        // Platforms
+        '<div style="font-size:0.85rem;">' + platStr + '</div>' +
+        // Schedule time
+        '<div style="font-size:0.75rem;color:#94a3b8;">' + socialEsc(schedStr) + '</div>' +
+        // Actions
+        '<div style="display:flex;gap:4px;">' +
+        '<button class="social-queue-edit-btn" data-queue-edit="' + post.id + '" style="' +
+        'padding:4px 8px;background:transparent;border:1px solid #334155;border-radius:6px;' +
+        'color:#94a3b8;font-size:0.7rem;cursor:pointer;transition:all 0.15s;' +
+        '" title="Edit">Edit</button>' +
+        '<button class="social-queue-delete-btn" data-queue-delete="' + post.id + '" style="' +
+        'padding:4px 8px;background:transparent;border:1px solid #33415540;border-radius:6px;' +
+        'color:#64748b;font-size:0.7rem;cursor:pointer;transition:all 0.15s;' +
+        '" title="Delete">&times;</button>' +
+        '</div>' +
+        '</div>';
+    });
+    html += '</div>';
+  }
+
+  html += '</div>';
   main.innerHTML = html;
 
-  // Wire back button
-  main.querySelector('#social-settings-back').addEventListener('click', function () {
-    socialView = 'overview';
-    socialRenderOverview();
-    socialRenderSidebar();
-  });
-
-  // Wire save
-  main.querySelector('#social-cfg-save').addEventListener('click', async function () {
-    var btn = main.querySelector('#social-cfg-save');
-    btn.disabled = true;
-    btn.innerHTML = 'Saving...';
-
-    var platforms = [];
-    main.querySelectorAll('.social-cfg-plat').forEach(function (cb) {
-      if (cb.checked) platforms.push(cb.value);
+  // Wire search
+  var searchInput = main.querySelector('#social-queue-search');
+  if (searchInput) {
+    searchInput.addEventListener('input', function () {
+      socialQueueSearch = searchInput.value;
+      socialRenderQueue();
     });
+    // Focus and restore cursor position
+    searchInput.focus();
+    searchInput.selectionStart = searchInput.selectionEnd = searchInput.value.length;
+  }
 
-    var data = {
-      defaultTimezone: main.querySelector('#social-cfg-tz').value,
-      defaultPlatforms: platforms,
-      llm: {
-        textProvider: main.querySelector('#social-cfg-text-provider').value.trim(),
-        textModel: main.querySelector('#social-cfg-text-model').value.trim(),
-      },
-      posting: {
-        delayBetweenPlatforms: parseInt(main.querySelector('#social-cfg-delay').value, 10) || 5000,
-        retryLimit: parseInt(main.querySelector('#social-cfg-retry-limit').value, 10) || 2,
-        retryDelay: parseInt(main.querySelector('#social-cfg-retry-delay').value, 10) || 10000,
-      },
-    };
+  // Wire platform filter
+  var platSelect = main.querySelector('#social-queue-platform');
+  if (platSelect) {
+    platSelect.addEventListener('change', function () {
+      socialQueuePlatformFilter = platSelect.value;
+      socialRenderQueue();
+    });
+  }
 
-    try {
-      await socialSaveConfig(data);
-      if (typeof toast === 'function') toast('Settings saved', 'success');
-      btn.disabled = false;
-      btn.innerHTML =
-        '<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M12.7 1.3H3.3c-1.1 0-2 .9-2 2v9.4c0 1.1.9 2 2 2h9.4c1.1 0 2-.9 2-2V3.3c0-1.1-.9-2-2-2z" stroke="currentColor" stroke-width="1.2"/><path d="M11.3 14.7V9.3H4.7v5.4M4.7 1.3v4h5.3" stroke="currentColor" stroke-width="1.2"/></svg>' +
-        'Save Settings';
-    } catch (err) {
-      if (typeof toast === 'function') toast('Save failed: ' + err, 'error');
-      btn.disabled = false;
-      btn.innerHTML =
-        '<svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M12.7 1.3H3.3c-1.1 0-2 .9-2 2v9.4c0 1.1.9 2 2 2h9.4c1.1 0 2-.9 2-2V3.3c0-1.1-.9-2-2-2z" stroke="currentColor" stroke-width="1.2"/><path d="M11.3 14.7V9.3H4.7v5.4M4.7 1.3v4h5.3" stroke="currentColor" stroke-width="1.2"/></svg>' +
-        'Save Settings';
-    }
+  // Wire row clicks (open detail)
+  main.querySelectorAll('[data-social-queue-post]').forEach(function (row) {
+    row.addEventListener('click', function (e) {
+      // Don't navigate if clicking action buttons
+      if (e.target.closest('.social-queue-edit-btn') || e.target.closest('.social-queue-delete-btn')) return;
+      var id = row.dataset.socialQueuePost;
+      socialSelectedPost = socialPosts.find(function (p) { return p.id === id; }) || null;
+      if (socialSelectedPost) {
+        socialView = 'detail';
+        socialRenderDetail();
+        socialRenderSidebar();
+      }
+    });
   });
+
+  // Wire edit buttons
+  main.querySelectorAll('.social-queue-edit-btn').forEach(function (btn) {
+    btn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      var id = btn.dataset.queueEdit;
+      var post = socialPosts.find(function (p) { return p.id === id; });
+      if (post) {
+        socialEditingPostId = post.id;
+        socialComposeData = socialInitComposeData(post);
+        socialComposeTab = 'all';
+        socialAssetPickerOpen = false;
+        socialView = 'compose';
+        socialRenderCompose();
+        socialRenderSidebar();
+      }
+    });
+  });
+
+  // Wire delete buttons
+  main.querySelectorAll('.social-queue-delete-btn').forEach(function (btn) {
+    btn.addEventListener('click', async function (e) {
+      e.stopPropagation();
+      var id = btn.dataset.queueDelete;
+      if (!confirm('Delete this post?')) return;
+      try {
+        await socialDeletePost(id);
+        await socialRefresh();
+        socialRenderQueue();
+        if (typeof toast === 'function') toast('Post deleted', 'success');
+      } catch (err) {
+        if (typeof toast === 'function') toast('Delete failed: ' + err, 'error');
+      }
+    });
+  });
+}
+
+// -- Templates (placeholder) --------------------------------------
+
+function socialRenderTemplates() {
+  var main = document.querySelector('#main');
+  main.innerHTML =
+    '<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;padding:40px;">' +
+    '<div style="width:64px;height:64px;border-radius:16px;background:#7c3aed12;border:1px solid #7c3aed30;display:flex;align-items:center;justify-content:center;margin-bottom:16px;">' +
+    '<svg width="28" height="28" viewBox="0 0 16 16" fill="none"><rect x="2" y="2" width="12" height="12" rx="1.5" stroke="#7c3aed" stroke-width="1.2"/><path d="M5 5h6M5 8h4" stroke="#7c3aed" stroke-width="1.2" stroke-linecap="round"/></svg>' +
+    '</div>' +
+    '<h2 style="color:#e2e8f0;font-size:1.15rem;margin-bottom:6px;">Templates</h2>' +
+    '<p style="color:#64748b;font-size:0.85rem;text-align:center;max-width:320px;line-height:1.5;">Coming soon. Save and reuse post templates to speed up your content creation workflow.</p>' +
+    '</div>';
+}
+
+// -- Hashtags (placeholder) ---------------------------------------
+
+function socialRenderHashtags() {
+  var main = document.querySelector('#main');
+  main.innerHTML =
+    '<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;padding:40px;">' +
+    '<div style="width:64px;height:64px;border-radius:16px;background:#7c3aed12;border:1px solid #7c3aed30;display:flex;align-items:center;justify-content:center;margin-bottom:16px;">' +
+    '<svg width="28" height="28" viewBox="0 0 16 16" fill="none"><path d="M4 1v14M12 1v14M1 5h14M1 11h14" stroke="#7c3aed" stroke-width="1.2" stroke-linecap="round"/></svg>' +
+    '</div>' +
+    '<h2 style="color:#e2e8f0;font-size:1.15rem;margin-bottom:6px;">Hashtag Groups</h2>' +
+    '<p style="color:#64748b;font-size:0.85rem;text-align:center;max-width:320px;line-height:1.5;">Coming soon. Save and organize hashtag clusters to quickly add relevant tags to your posts.</p>' +
+    '</div>';
 }

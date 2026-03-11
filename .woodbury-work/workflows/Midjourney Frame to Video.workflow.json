@@ -1,0 +1,656 @@
+{
+  "version": "1.0",
+  "id": "Midjourney frame to video",
+  "name": "Midjourney Frame To Video",
+  "description": "Recorded workflow for midjourney.com",
+  "site": "midjourney.com",
+  "variables": [
+    {
+      "name": "input_value",
+      "description": "Value to enter in the input field",
+      "type": "string",
+      "required": true,
+      "default": "C:\\fakepath\\generated_image_1772758936140.png"
+    },
+    {
+      "name": "input_value_2",
+      "description": "Value to enter in the input field",
+      "type": "string",
+      "required": true,
+      "default": "doing"
+    },
+    {
+      "name": "input_value_3",
+      "description": "Value to enter in the input field",
+      "type": "string",
+      "required": true,
+      "default": "doing something"
+    },
+    {
+      "name": "input_value_4",
+      "description": "Value to enter in the input field",
+      "type": "string",
+      "required": true,
+      "default": "doing something cool"
+    }
+  ],
+  "steps": [
+    {
+      "id": "step-1-navigate",
+      "label": "Navigate to https://midjourney.com",
+      "type": "navigate",
+      "url": "https://midjourney.com",
+      "waitMs": 2000
+    },
+    {
+      "id": "step-2-wait",
+      "label": "Wait 4.5s",
+      "type": "wait",
+      "condition": {
+        "type": "delay",
+        "ms": 4454
+      }
+    },
+    {
+      "id": "step-3-click-p",
+      "label": "Click p \"Create\"",
+      "type": "click",
+      "target": {
+        "selector": "div > div:nth-of-type(1) > div:nth-of-type(3) > a > p",
+        "textContent": "Create",
+        "expectedBounds": {
+          "left": 60,
+          "top": 145,
+          "width": 46,
+          "height": 24,
+          "tolerance": 80,
+          "pctX": 4.03,
+          "pctY": 14.31,
+          "pctW": 2.23,
+          "pctH": 2.19,
+          "viewportW": 2056,
+          "viewportH": 1097
+        },
+        "context": {
+          "ancestors": [
+            "a",
+            "div",
+            "div",
+            "div"
+          ],
+          "landmark": {
+            "tag": "nav",
+            "label": "<nav>"
+          }
+        },
+        "referenceImage": "/Users/andrewporter/.woodbury/data/workflows/Midjourney frame to video/refs/step-3-click-p.png"
+      },
+      "delayAfterMs": 1000
+    },
+    {
+      "id": "step-4-navigate",
+      "label": "Navigate to https://www.midjourney.com/imagine",
+      "type": "navigate",
+      "url": "https://www.midjourney.com/imagine",
+      "waitMs": 2000
+    },
+    {
+      "id": "step-5-wait",
+      "label": "Wait 2.0s",
+      "type": "wait",
+      "condition": {
+        "type": "delay",
+        "ms": 2000
+      }
+    },
+    {
+      "id": "step-6-click-svg",
+      "label": "Click div:nth-of-type(1) > div > div > button ",
+      "type": "click",
+      "target": {
+        "selector": "div:nth-of-type(1) > div > div > button > svg",
+        "expectedBounds": {
+          "left": 335,
+          "top": 31,
+          "width": 24,
+          "height": 24,
+          "tolerance": 80,
+          "pctX": 16.88,
+          "pctY": 3.92,
+          "pctW": 1.17,
+          "pctH": 2.19,
+          "viewportW": 2056,
+          "viewportH": 1097
+        },
+        "context": {
+          "ancestors": [
+            "button \"Add Images\"",
+            "div",
+            "div",
+            "div"
+          ],
+          "siblings": [
+            {
+              "tag": "div",
+              "text": "Add Images",
+              "position": "after"
+            }
+          ]
+        },
+        "referenceImage": "/Users/andrewporter/.woodbury/data/workflows/Midjourney frame to video/refs/step-6-click-svg.png"
+      },
+      "delayAfterMs": 1000
+    },
+    {
+      "id": "step-7-click-button",
+      "label": "Click div > div > div:nth-of-type(3) > div:nth",
+      "type": "click",
+      "target": {
+        "selector": "div > div > div:nth-of-type(3) > div:nth-of-type(2) > button",
+        "expectedBounds": {
+          "left": 337,
+          "top": 180,
+          "width": 176,
+          "height": 316,
+          "tolerance": 80,
+          "pctX": 20.67,
+          "pctY": 30.81,
+          "pctW": 8.56,
+          "pctH": 28.81,
+          "viewportW": 2056,
+          "viewportH": 1097
+        },
+        "context": {
+          "ancestors": [
+            "div",
+            "div",
+            "div",
+            "div"
+          ],
+          "siblings": [
+            {
+              "tag": "div",
+              "text": "DescribeEditDeleteDescribeEditDeleteDesc",
+              "position": "after"
+            }
+          ]
+        },
+        "referenceImage": "/Users/andrewporter/.woodbury/data/workflows/Midjourney frame to video/refs/step-7-click-button.png"
+      },
+      "delayAfterMs": 1000
+    },
+    {
+      "id": "step-8-file-dialog-input",
+      "label": "File dialog: select file",
+      "type": "file_dialog",
+      "filePath": "{{filePath}}",
+      "trigger": {
+        "selector": "input.hidden",
+        "fallbackSelectors": [
+          "div > div > div:nth-of-type(3) > div:nth-of-type(2) > input"
+        ],
+        "expectedBounds": {
+          "left": 0,
+          "top": 0,
+          "width": 0,
+          "height": 0,
+          "tolerance": 80,
+          "pctX": 0,
+          "pctY": 0,
+          "pctW": 0,
+          "pctH": 0,
+          "viewportW": 2056,
+          "viewportH": 1097
+        },
+        "context": {
+          "ancestors": [
+            "div",
+            "div",
+            "div",
+            "div"
+          ],
+          "siblings": [
+            {
+              "tag": "button",
+              "text": "Upload a file ordrop it here",
+              "position": "after"
+            },
+            {
+              "tag": "div",
+              "text": "DescribeEditDeleteDescribeEditDeleteDesc",
+              "position": "after"
+            }
+          ]
+        }
+      },
+      "delayBeforeMs": 2000,
+      "delayAfterMs": 1000
+    },
+    {
+      "id": "step-9-wait",
+      "label": "Wait 5.6s",
+      "type": "wait",
+      "condition": {
+        "type": "delay",
+        "ms": 5565
+      }
+    },
+    {
+      "id": "step-10-type-input",
+      "label": "Type {{input_value}}",
+      "type": "type",
+      "target": {
+        "selector": "input.hidden",
+        "fallbackSelectors": [
+          "div > div > div:nth-of-type(3) > div:nth-of-type(2) > input"
+        ],
+        "expectedBounds": {
+          "left": 0,
+          "top": 0,
+          "width": 0,
+          "height": 0,
+          "tolerance": 80,
+          "pctX": 0,
+          "pctY": 0,
+          "pctW": 0,
+          "pctH": 0,
+          "viewportW": 2056,
+          "viewportH": 1097
+        },
+        "context": {
+          "ancestors": [
+            "div",
+            "div",
+            "div",
+            "div"
+          ],
+          "siblings": [
+            {
+              "tag": "button",
+              "text": "Upload a file ordrop it here",
+              "position": "after"
+            },
+            {
+              "tag": "div",
+              "text": "DescribeEditDeleteDescribeEditDeleteDesc",
+              "position": "after"
+            }
+          ]
+        }
+      },
+      "value": "{{input_value}}",
+      "clearFirst": true
+    },
+    {
+      "id": "step-11-click-textarea",
+      "label": "Click #desktop_input_bar",
+      "type": "click",
+      "target": {
+        "selector": "#desktop_input_bar",
+        "expectedBounds": {
+          "left": 414,
+          "top": 31,
+          "width": 1411,
+          "height": 24,
+          "tolerance": 80,
+          "pctX": 54.45,
+          "pctY": 3.92,
+          "pctW": 68.63,
+          "pctH": 2.19,
+          "viewportW": 2056,
+          "viewportH": 1097
+        },
+        "placeholder": "What will you imagine?",
+        "context": {
+          "ancestors": [
+            "div",
+            "div",
+            "div",
+            "div"
+          ],
+          "siblings": [
+            {
+              "tag": "div",
+              "text": "Switch to Image",
+              "position": "before"
+            }
+          ]
+        },
+        "referenceImage": "/Users/andrewporter/.woodbury/data/workflows/Midjourney frame to video/refs/step-11-click-textarea.png"
+      },
+      "delayAfterMs": 1000
+    },
+    {
+      "id": "step-12-wait",
+      "label": "Wait 6.4s",
+      "type": "wait",
+      "condition": {
+        "type": "delay",
+        "ms": 6370
+      }
+    },
+    {
+      "id": "step-13-type-input",
+      "label": "Type {{input_value_2}}",
+      "type": "type",
+      "target": {
+        "selector": "#desktop_input_bar",
+        "expectedBounds": {
+          "left": 414,
+          "top": 31,
+          "width": 1411,
+          "height": 24,
+          "tolerance": 80,
+          "pctX": 54.45,
+          "pctY": 3.92,
+          "pctW": 68.63,
+          "pctH": 2.19,
+          "viewportW": 2056,
+          "viewportH": 1097
+        },
+        "placeholder": "What will you imagine?",
+        "context": {
+          "ancestors": [
+            "div",
+            "div",
+            "div",
+            "div"
+          ],
+          "siblings": [
+            {
+              "tag": "div",
+              "text": "Switch to Image",
+              "position": "before"
+            }
+          ]
+        },
+        "referenceImage": "/Users/andrewporter/.woodbury/data/workflows/Midjourney frame to video/refs/step-13-type-input.png"
+      },
+      "value": "{{input_value_2}}",
+      "clearFirst": true
+    },
+    {
+      "id": "step-14-keyboard_nav-space",
+      "label": "Space",
+      "type": "keyboard_nav",
+      "actions": [
+        {
+          "key": "space",
+          "count": 1
+        }
+      ],
+      "autoFix": true
+    },
+    {
+      "id": "step-15-type-input",
+      "label": "Type {{input_value_3}}",
+      "type": "type",
+      "target": {
+        "selector": "#desktop_input_bar",
+        "textContent": "doing",
+        "expectedBounds": {
+          "left": 414,
+          "top": 31,
+          "width": 1411,
+          "height": 24,
+          "tolerance": 80,
+          "pctX": 54.45,
+          "pctY": 3.92,
+          "pctW": 68.63,
+          "pctH": 2.19,
+          "viewportW": 2056,
+          "viewportH": 1097
+        },
+        "placeholder": "What will you imagine?",
+        "context": {
+          "ancestors": [
+            "div",
+            "div",
+            "div",
+            "div"
+          ],
+          "siblings": [
+            {
+              "tag": "div",
+              "text": "Switch to Image",
+              "position": "before"
+            }
+          ]
+        },
+        "referenceImage": "/Users/andrewporter/.woodbury/data/workflows/Midjourney frame to video/refs/step-15-type-input.png"
+      },
+      "value": "{{input_value_3}}",
+      "clearFirst": true
+    },
+    {
+      "id": "step-16-keyboard_nav-space",
+      "label": "Space",
+      "type": "keyboard_nav",
+      "actions": [
+        {
+          "key": "space",
+          "count": 1
+        }
+      ],
+      "autoFix": true
+    },
+    {
+      "id": "step-17-wait",
+      "label": "Wait 3.3s",
+      "type": "wait",
+      "condition": {
+        "type": "delay",
+        "ms": 3292
+      }
+    },
+    {
+      "id": "step-18-type-input",
+      "label": "Type {{input_value_4}}",
+      "type": "type",
+      "target": {
+        "selector": "#desktop_input_bar",
+        "textContent": "doing something",
+        "expectedBounds": {
+          "left": 414,
+          "top": 31,
+          "width": 1411,
+          "height": 24,
+          "tolerance": 80,
+          "pctX": 54.45,
+          "pctY": 3.92,
+          "pctW": 68.63,
+          "pctH": 2.19,
+          "viewportW": 2056,
+          "viewportH": 1097
+        },
+        "placeholder": "What will you imagine?",
+        "context": {
+          "ancestors": [
+            "div",
+            "div",
+            "div",
+            "div"
+          ],
+          "siblings": [
+            {
+              "tag": "div",
+              "text": "Switch to Image",
+              "position": "before"
+            }
+          ]
+        },
+        "referenceImage": "/Users/andrewporter/.woodbury/data/workflows/Midjourney frame to video/refs/step-18-type-input.png"
+      },
+      "value": "{{input_value_4}}",
+      "clearFirst": true
+    },
+    {
+      "id": "step-19-click-path",
+      "label": "Click #PaperAirplane > path",
+      "type": "click",
+      "target": {
+        "selector": "#PaperAirplane > path",
+        "expectedBounds": {
+          "left": 1835,
+          "top": 35,
+          "width": 21,
+          "height": 16,
+          "tolerance": 80,
+          "pctX": 89.74,
+          "pctY": 3.94,
+          "pctW": 1.01,
+          "pctH": 1.48,
+          "viewportW": 2056,
+          "viewportH": 1097
+        },
+        "context": {
+          "ancestors": [
+            "g#PaperAirplane",
+            "svg",
+            "button",
+            "div"
+          ]
+        },
+        "referenceImage": "/Users/andrewporter/.woodbury/data/workflows/Midjourney frame to video/refs/step-19-click-path.png"
+      },
+      "delayAfterMs": 1000
+    },
+    {
+      "id": "step-20-wait",
+      "label": "Wait for \"Extend Manual\" to appear on page",
+      "type": "wait",
+      "condition": {
+        "type": "text_appears",
+        "text": "Extend Manual"
+      },
+      "timeoutMs": 120000
+    },
+    {
+      "id": "step-21-click-video",
+      "label": "Click #grid-video-fe0de66b-6933-4ee5-ad90-a1cd",
+      "type": "click",
+      "target": {
+        "selector": "#grid-video-fe0de66b-6933-4ee5-ad90-a1cd8ac007f2-0",
+        "expectedBounds": {
+          "left": 312,
+          "top": 150,
+          "width": 581,
+          "height": 324,
+          "tolerance": 80,
+          "pctX": 29.3,
+          "pctY": 28.43,
+          "pctW": 28.25,
+          "pctH": 29.52,
+          "viewportW": 2056,
+          "viewportH": 1097
+        },
+        "context": {
+          "ancestors": [
+            "div",
+            "a",
+            "div",
+            "div"
+          ],
+          "siblings": [
+            {
+              "tag": "div",
+              "text": "⌘ to scrub",
+              "position": "after"
+            }
+          ]
+        },
+        "referenceImage": "/Users/andrewporter/.woodbury/data/workflows/Midjourney frame to video/refs/step-21-click-video.png"
+      },
+      "delayAfterMs": 1000
+    },
+    {
+      "id": "step-22-navigate",
+      "label": "Navigate to https://www.midjourney.com/jobs/fe0de66b-6933-4ee5-ad90-a1cd8ac007f2?index=0",
+      "type": "navigate",
+      "url": "https://www.midjourney.com/jobs/fe0de66b-6933-4ee5-ad90-a1cd8ac007f2?index=0",
+      "waitMs": 2000
+    },
+    {
+      "id": "step-23-wait",
+      "label": "Wait 2.0s",
+      "type": "wait",
+      "condition": {
+        "type": "delay",
+        "ms": 2000
+      }
+    },
+    {
+      "id": "step-24-wait",
+      "label": "Wait 10.0s",
+      "type": "wait",
+      "condition": {
+        "type": "delay",
+        "ms": 10000
+      }
+    },
+    {
+      "id": "step-25-click-svg",
+      "label": "Click div > div > button:nth-of-type(1) > div ",
+      "type": "click",
+      "target": {
+        "selector": "div > div > button:nth-of-type(1) > div > svg",
+        "expectedBounds": {
+          "left": 1861,
+          "top": 102,
+          "width": 18,
+          "height": 18,
+          "tolerance": 80,
+          "pctX": 90.95,
+          "pctY": 10.12,
+          "pctW": 0.88,
+          "pctH": 1.64,
+          "viewportW": 2056,
+          "viewportH": 1097
+        },
+        "context": {
+          "ancestors": [
+            "div",
+            "button",
+            "div",
+            "div"
+          ]
+        },
+        "referenceImage": "/Users/andrewporter/.woodbury/data/workflows/Midjourney frame to video/refs/step-25-click-svg.png"
+      },
+      "delayAfterMs": 1000
+    },
+    {
+      "id": "step-26-wait",
+      "label": "Wait 4.8s",
+      "type": "wait",
+      "condition": {
+        "type": "delay",
+        "ms": 4784
+      }
+    },
+    {
+      "id": "step-27-capture-download",
+      "label": "Capture downloaded video file",
+      "type": "capture_download",
+      "filenamePattern": "\\.(mp4|webm|mov)$",
+      "maxFiles": 1,
+      "lookbackMs": 300000,
+      "waitTimeoutMs": 300000,
+      "outputVariable": "downloadedVideo"
+    }
+  ],
+  "metadata": {
+    "createdAt": "2026-03-08T20:25:05.513Z",
+    "updatedAt": "2026-03-08T20:27:09.786Z",
+    "recordedBy": "recorder",
+    "recordingMode": "accessibility",
+    "trainingStatus": "failed",
+    "trainingRun": {
+      "startedAt": "2026-03-08T20:27:09.790Z",
+      "completedAt": "2026-03-08T20:27:11.928Z",
+      "error": "Prepare failed (exit code 1)",
+      "version": "1.0.0",
+      "promoted": false
+    }
+  }
+}

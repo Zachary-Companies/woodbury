@@ -260,8 +260,9 @@ export class ConditionValidator {
 
   private async checkPageTextContains(text: string): Promise<boolean> {
     try {
-      const pageText = await this.bridge.send('get_page_text') as string;
-      return typeof pageText === 'string' && pageText.includes(text);
+      const result = await this.bridge.send('get_page_text') as any;
+      const pageText = typeof result === 'string' ? result : result?.text || '';
+      return pageText.includes(text);
     } catch {
       return false;
     }

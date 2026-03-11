@@ -120,6 +120,10 @@ export interface TaskNode {
   riskLevel?: RiskLevel;
   /** Estimated cost in dollars */
   estimatedCost?: number;
+  /** Planner-selected skill that should execute this task */
+  preferredSkill?: string;
+  /** Why the planner selected this skill */
+  preferredSkillReason?: string;
 }
 
 export interface TaskGraph {
@@ -267,6 +271,7 @@ export interface ActionSpec {
 export type RecoveryStrategy =
   | { type: 'retry'; maxAttempts: number; backoffMs?: number }
   | { type: 'alternative_tool'; fallbackTool: string; reason: string }
+  | { type: 'alternative_skill'; fallbackSkill: string; reason: string }
   | { type: 'decompose'; subTasks: string[] }
   | { type: 'ask_user'; question: string }
   | { type: 'skip'; reason: string }
@@ -352,6 +357,39 @@ export interface ClosureEngineResult {
   error?: string;
 }
 
+// ── Skills ──────────────────────────────────────────────────
+
+export interface SkillDefinition {
+  name: string;
+  description: string;
+  whenToUse: string;
+  promptGuidance: string;
+  preferredSubagent?: 'explore' | 'plan' | 'execute';
+  completionContract?: string;
+  policy?: SkillPolicy;
+}
+
+export interface SkillPolicy {
+  hardBannedTools: string[];
+  escalationPhrases?: string[];
+  defaultRecoveryHints?: string[];
+}
+
+export interface SkillSelection {
+  skill: SkillDefinition;
+  reason: string;
+  matchedKeywords: string[];
+  allowedToolNames: string[];
+  hardBannedToolNames: string[];
+  escalationActive: boolean;
+  recoveryHints: string[];
+  previousSkillName?: string;
+  previousSkillReason?: string;
+  handoffRationale?: string;
+  taskId?: string;
+  taskTitle?: string;
+}
+
 // ── Engine Callbacks ────────────────────────────────────────
 
 export interface EngineCallbacks {
@@ -363,6 +401,16 @@ export interface EngineCallbacks {
   onTaskEnd?: (task: TaskNode, result: TaskResult) => void;
   onBeliefUpdate?: (belief: Belief) => void;
   onReflection?: (reflection: ReflectionRecord) => void;
+  onSkillSelected?: (selection: SkillSelection) => void;
+  onRecovery?: (event: {
+    taskId: string;
+    taskTitle: string;
+    strategyType: RecoveryStrategy['type'];
+    attempt: number;
+    currentSkill?: string;
+    targetSkill?: string;
+    reason: string;
+  }) => void;
 }
 
 // ── Engine Config ───────────────────────────────────────────
@@ -385,6 +433,8 @@ export interface ClosureEngineConfig {
   provider: 'openai' | 'anthropic' | 'groq';
   model: string;
   apiKey?: string;
+  sessionId?: string;
+  continuationMode?: 'off' | 'summary' | 'resume';
   maxIterations: number;
   maxTaskRetries: number;
   timeout: number;
@@ -432,7 +482,7 @@ export interface EpisodeStep {
 
 // ── Learning Products ──────────────────────────────────────
 
-export type LearningProductKind = 'validator' | 'heuristic' | 'task_template' | 'ranking_update';
+export type LearningProductKind = 'validator' | 'heuristic' | 'task_template' | 'ranking_update' | 'skill_update';
 
 export interface LearningProductValidator {
   kind: 'validator';
@@ -478,8 +528,31 @@ export interface LearningProductRankingUpdate {
   reason: string;
 }
 
+export interface LearningProductSkillUpdate {
+  kind: 'skill_update';
+  skillName: string;
+  updateType: 'applicability' | 'recovery_hint';
+  applicabilityPattern: string;
+  guidance: string;
+  confidence: number;
+}
+
+export interface SkillPolicyUpdateRecord {
+  id: string;
+  skillName: string;
+  updateType: 'applicability' | 'recovery_hint' | 'policy';
+  applicabilityPattern: string;
+  guidance: string;
+  confidence: number;
+  source: 'synthesized' | 'manual';
+  reviewStatus: 'suggested' | 'approved' | 'rejected';
+  createdAt: string;
+  updatedAt: string;
+}
+
 export type LearningProduct =
   | LearningProductValidator
   | LearningProductHeuristic
   | LearningProductTaskTemplate
-  | LearningProductRankingUpdate;
+  | LearningProductRankingUpdate
+  | LearningProductSkillUpdate;

@@ -51,10 +51,58 @@
   var currentSessionId = null;
   var sessionCreatedAt = null;
   var sessionList = [];           // [{ id, title, messageCount, updatedAt }]
+  var taskPanelState = createTaskPanelState();
 
   // Graph state (subset of compositions.js state for the read-only graph view)
   var graphData = null;            // CompositionDocument { nodes, edges, ... }
   var graphPanX = 0, graphPanY = 0, graphZoom = 1;
+
+  function createTaskPanelState() {
+    return {
+      phase: 'idle',
+      sessionSummary: '',
+      summaryTurnCount: 0,
+      selectedSkill: null,
+      allowedTools: [],
+      skillHandoff: null,
+      skillTransitions: [],
+      recoveryEvents: [],
+      skillPolicyUpdates: [],
+      tasks: {},
+      taskOrder: [],
+      verifications: [],
+      reflections: [],
+      beliefs: [],
+      activeCompositionId: null
+    };
+  }
+
+  function resetTaskPanelState() {
+    taskPanelState = createTaskPanelState();
+    renderTaskPanel();
+  }
+
+  function loadSkillPolicyUpdates() {
+    return fetch('/api/skill-policies')
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        taskPanelState.skillPolicyUpdates = data.updates || [];
+        renderTaskPanel();
+      })
+      .catch(function () { /* silent */ });
+  }
+
+  function updateSkillPolicy(updateId, body) {
+    return fetch('/api/skill-policies/' + encodeURIComponent(updateId), {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+      .then(function (r) { return r.json(); })
+      .then(function () {
+        return loadSkillPolicyUpdates();
+      });
+  }
 
   // ── Session API ─────────────────────────────────────────────
 
@@ -79,6 +127,8 @@
       title: deriveTitle(chatHistory),
       history: chatHistory,
       activeCompositionId: activeCompositionId,
+      engineSessionId: currentSessionId,
+      taskPanelState: taskPanelState,
       createdAt: sessionCreatedAt,
     };
     fetch('/api/chat/sessions/' + encodeURIComponent(currentSessionId), {
@@ -99,6 +149,13 @@
         sessionCreatedAt = data.createdAt;
         chatHistory = data.history || [];
         activeCompositionId = data.activeCompositionId || null;
+        taskPanelState = data.taskPanelState || createTaskPanelState();
+        taskPanelState.sessionSummary = taskPanelState.sessionSummary || data.rollingSummary || '';
+        taskPanelState.summaryTurnCount = taskPanelState.summaryTurnCount || data.summaryTurnCount || 0;
+        taskPanelState.skillTransitions = taskPanelState.skillTransitions || [];
+        taskPanelState.recoveryEvents = taskPanelState.recoveryEvents || [];
+        taskPanelState.skillPolicyUpdates = taskPanelState.skillPolicyUpdates || [];
+        taskPanelState.activeCompositionId = activeCompositionId;
         graphData = null;
         chatInitialized = false;
         initChat();
@@ -142,6 +199,7 @@
     chatHistory = [];
     activeCompositionId = null;
     graphData = null;
+    resetTaskPanelState();
     currentSessionId = generateSessionId();
     sessionCreatedAt = new Date().toISOString();
     chatInitialized = false;
@@ -248,14 +306,55 @@
           '<button class="chat-send-btn" id="chat-send-btn">Send</button>' +
         '</div>' +
       '</div>' +
-      '<div class="chat-graph-panel" id="chat-graph-panel">' +
-        '<svg class="chat-graph-svg" id="chat-graph-svg" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;overflow:visible;">' +
-          '<g id="chat-graph-edges"></g>' +
-        '</svg>' +
-        '<div id="chat-graph-nodes" style="position:absolute;top:0;left:0;width:0;height:0;transform-origin:0 0;"></div>' +
-        '<div class="chat-graph-empty" id="chat-graph-empty">' +
-          '<div class="chat-graph-empty-icon">&#x1f4ca;</div>' +
-          '<div>Your pipeline will appear here<br>as we build it together.</div>' +
+      '<div class="chat-workspace-panel">' +
+        '<div class="chat-workspace-header">Agent Workspace</div>' +
+        '<div class="chat-workspace-body">' +
+          '<div class="chat-status-bar">' +
+            '<div class="chat-status-card"><div class="chat-status-label">Phase</div><div class="chat-status-value" id="chat-status-phase">Idle</div></div>' +
+            '<div class="chat-status-card"><div class="chat-status-label">Tasks</div><div class="chat-status-value" id="chat-status-task-count">0</div></div>' +
+            '<div class="chat-status-card"><div class="chat-status-label">Checks</div><div class="chat-status-value" id="chat-status-check-count">0</div></div>' +
+          '</div>' +
+          '<div class="chat-panel-section">' +
+            '<div class="chat-panel-section-title">Session Context</div>' +
+            '<div class="chat-panel-summary" id="chat-session-summary">No summary yet.</div>' +
+          '</div>' +
+          '<div class="chat-panel-section">' +
+            '<div class="chat-panel-section-title">Task Execution</div>' +
+            '<div class="chat-task-list" id="chat-task-list"></div>' +
+          '</div>' +
+          '<div class="chat-panel-section">' +
+            '<div class="chat-panel-section-title">Verification</div>' +
+            '<div class="chat-verification-list" id="chat-verification-list"></div>' +
+          '</div>' +
+          '<div class="chat-panel-section">' +
+            '<div class="chat-panel-section-title">Reflections</div>' +
+            '<div class="chat-reflection-list" id="chat-reflection-list"></div>' +
+          '</div>' +
+          '<div class="chat-panel-section">' +
+            '<div class="chat-panel-section-title">Skill Transitions</div>' +
+            '<div class="chat-reflection-list" id="chat-skill-transition-list"></div>' +
+          '</div>' +
+          '<div class="chat-panel-section">' +
+            '<div class="chat-panel-section-title">Recovery Events</div>' +
+            '<div class="chat-verification-list" id="chat-recovery-list"></div>' +
+          '</div>' +
+          '<div class="chat-panel-section">' +
+            '<div class="chat-panel-section-title">Skill Policy Review</div>' +
+            '<div class="chat-task-list" id="chat-skill-policy-list"></div>' +
+          '</div>' +
+          '<div class="chat-panel-section chat-graph-section">' +
+            '<div class="chat-panel-section-title">Pipeline Preview</div>' +
+            '<div class="chat-graph-panel" id="chat-graph-panel">' +
+              '<svg class="chat-graph-svg" id="chat-graph-svg" style="position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;overflow:visible;">' +
+                '<g id="chat-graph-edges"></g>' +
+              '</svg>' +
+              '<div id="chat-graph-nodes" style="position:absolute;top:0;left:0;width:0;height:0;transform-origin:0 0;"></div>' +
+              '<div class="chat-graph-empty" id="chat-graph-empty">' +
+                '<div class="chat-graph-empty-icon">&#x1f4ca;</div>' +
+                '<div>Your pipeline preview will appear here.</div>' +
+              '</div>' +
+            '</div>' +
+          '</div>' +
         '</div>' +
       '</div>';
     main.appendChild(split);
@@ -289,9 +388,11 @@
     }
 
     chatInitialized = true;
+    renderTaskPanel();
 
     // Load session list for sidebar
     refreshSessionList();
+    loadSkillPolicyUpdates();
   }
 
   // ── Send Message ───────────────────────────────────────────
@@ -333,6 +434,7 @@
         message: text,
         history: chatHistory.slice(0, -1),  // exclude current message (it's in message field)
         activeCompositionId: activeCompositionId,
+        sessionId: currentSessionId,
       }),
       signal: abortController.signal,
     })
@@ -551,7 +653,126 @@
       case 'composition_updated':
         if (data.compositionId) {
           activeCompositionId = data.compositionId;
+          taskPanelState.activeCompositionId = data.compositionId;
+          renderTaskPanel();
           refreshGraph(data.compositionId);
+        }
+        break;
+
+      case 'session_context':
+        taskPanelState.sessionSummary = data.summary || '';
+        taskPanelState.summaryTurnCount = data.summaryTurnCount || 0;
+        renderTaskPanel();
+        break;
+
+      case 'skill_selection':
+        taskPanelState.selectedSkill = {
+          name: data.name || '',
+          description: data.description || '',
+          whenToUse: data.whenToUse || '',
+          promptGuidance: data.promptGuidance || '',
+          reason: data.reason || '',
+          matchedKeywords: data.matchedKeywords || []
+        };
+        taskPanelState.skillHandoff = {
+          previousSkillName: data.previousSkillName || '',
+          previousSkillReason: data.previousSkillReason || '',
+          handoffRationale: data.handoffRationale || '',
+          taskId: data.taskId || '',
+          taskTitle: data.taskTitle || ''
+        };
+        taskPanelState.skillTransitions.unshift({
+          from: data.previousSkillName || '',
+          to: data.name || '',
+          rationale: data.handoffRationale || data.reason || '',
+          taskTitle: data.taskTitle || '',
+          changedAt: new Date().toISOString()
+        });
+        taskPanelState.skillTransitions = taskPanelState.skillTransitions.slice(0, 8);
+        taskPanelState.allowedTools = data.allowedTools || [];
+        renderTaskPanel();
+        break;
+
+      case 'recovery':
+        taskPanelState.recoveryEvents.unshift({
+          taskTitle: data.taskTitle || 'Untitled task',
+          strategyType: data.strategyType || 'retry',
+          currentSkill: data.currentSkill || '',
+          targetSkill: data.targetSkill || '',
+          reason: data.reason || '',
+          attempt: data.attempt || 0
+        });
+        taskPanelState.recoveryEvents = taskPanelState.recoveryEvents.slice(0, 8);
+        if (data.strategyType === 'alternative_skill' && data.currentSkill && data.targetSkill) {
+          taskPanelState.skillTransitions.unshift({
+            from: data.currentSkill,
+            to: data.targetSkill,
+            rationale: 'Recovery switched skills: ' + (data.reason || ''),
+            taskTitle: data.taskTitle || '',
+            changedAt: new Date().toISOString()
+          });
+          taskPanelState.skillTransitions = taskPanelState.skillTransitions.slice(0, 8);
+        }
+        renderTaskPanel();
+        break;
+
+      case 'phase':
+        taskPanelState.phase = data.to || data.from || 'idle';
+        renderTaskPanel();
+        break;
+
+      case 'task_start':
+        upsertTaskPanelTask(data.id, {
+          id: data.id,
+          title: data.title || data.description || 'Untitled task',
+          description: data.description || '',
+          status: data.status || 'running',
+          retryCount: data.retryCount || 0,
+          maxRetries: data.maxRetries || 0,
+          riskLevel: data.riskLevel || ''
+        });
+        break;
+
+      case 'task_end':
+        upsertTaskPanelTask(data.task && data.task.id, {
+          id: data.task && data.task.id,
+          title: data.task && (data.task.title || data.task.description) || 'Untitled task',
+          description: data.task && data.task.description || '',
+          status: data.result && data.result.success ? 'done' : 'failed',
+          output: data.result && data.result.output || '',
+          error: data.result && data.result.error || '',
+          retryCount: data.task && data.task.retryCount || 0,
+          maxRetries: data.task && data.task.maxRetries || 0,
+          riskLevel: data.task && data.task.riskLevel || ''
+        });
+        break;
+
+      case 'verification':
+        taskPanelState.verifications.unshift({
+          taskTitle: data.task && (data.task.title || data.task.description) || 'Untitled task',
+          status: data.status || 'unknown',
+          detail: data.detail || ''
+        });
+        taskPanelState.verifications = taskPanelState.verifications.slice(0, 10);
+        renderTaskPanel();
+        break;
+
+      case 'belief_update':
+        if (typeof data.confidence === 'number' && data.confidence < 0.6 && data.claim) {
+          taskPanelState.beliefs.unshift({
+            claim: data.claim,
+            confidence: data.confidence
+          });
+          taskPanelState.beliefs = taskPanelState.beliefs.slice(0, 6);
+          renderTaskPanel();
+        }
+        break;
+
+      case 'reflection':
+        if (data.summary) {
+          taskPanelState.reflections.unshift(data.summary);
+          taskPanelState.reflections = taskPanelState.reflections.slice(0, 6);
+          renderTaskPanel();
         }
         break;
 
@@ -643,6 +864,196 @@
     return name
       .replace(/_/g, ' ')
       .replace(/\b\w/g, function (c) { return c.toUpperCase(); });
+  }
+
+  function humanizePhaseName(name) {
+    return String(name || '')
+      .replace(/_/g, ' ')
+      .replace(/\b\w/g, function (c) { return c.toUpperCase(); });
+  }
+
+  function appendSystemEvent(textEl, label) {
+    var messagesDiv = textEl && textEl.parentElement;
+    if (!messagesDiv || !label) return;
+    var eventEl = document.createElement('div');
+    eventEl.className = 'chat-tool-pill';
+    eventEl.innerHTML = '<div class="tool-header"><span class="tool-name">' + escapeHtml(label) + '</span></div>';
+    messagesDiv.insertBefore(eventEl, textEl);
+    scrollToBottom();
+  }
+
+  function upsertTaskPanelTask(taskId, taskData) {
+    if (!taskId) return;
+    if (!taskPanelState.tasks[taskId]) {
+      taskPanelState.taskOrder.unshift(taskId);
+    }
+    taskPanelState.tasks[taskId] = Object.assign({}, taskPanelState.tasks[taskId] || {}, taskData);
+    taskPanelState.taskOrder = taskPanelState.taskOrder.slice(0, 12);
+    renderTaskPanel();
+  }
+
+  function renderTaskPanel() {
+    var phaseEl = document.getElementById('chat-status-phase');
+    var taskCountEl = document.getElementById('chat-status-task-count');
+    var checkCountEl = document.getElementById('chat-status-check-count');
+    var summaryEl = document.getElementById('chat-session-summary');
+    var taskListEl = document.getElementById('chat-task-list');
+    var verificationEl = document.getElementById('chat-verification-list');
+    var reflectionEl = document.getElementById('chat-reflection-list');
+    var transitionEl = document.getElementById('chat-skill-transition-list');
+    var recoveryEl = document.getElementById('chat-recovery-list');
+    var policyEl = document.getElementById('chat-skill-policy-list');
+
+    if (phaseEl) phaseEl.textContent = humanizePhaseName(taskPanelState.phase || 'idle');
+    if (taskCountEl) taskCountEl.textContent = String(taskPanelState.taskOrder.length);
+    if (checkCountEl) checkCountEl.textContent = String(taskPanelState.verifications.length);
+
+    if (summaryEl) {
+      var summaryLines = [];
+      if (taskPanelState.selectedSkill && taskPanelState.selectedSkill.name) {
+        summaryLines.push('Skill: ' + taskPanelState.selectedSkill.name);
+        if (taskPanelState.selectedSkill.reason) summaryLines.push('Why: ' + taskPanelState.selectedSkill.reason);
+        if (taskPanelState.skillHandoff && taskPanelState.skillHandoff.previousSkillName) {
+          summaryLines.push('Previous skill: ' + taskPanelState.skillHandoff.previousSkillName);
+        }
+        if (taskPanelState.skillHandoff && taskPanelState.skillHandoff.handoffRationale) {
+          summaryLines.push('Handoff: ' + taskPanelState.skillHandoff.handoffRationale);
+        }
+        if (taskPanelState.skillHandoff && taskPanelState.skillHandoff.taskTitle) {
+          summaryLines.push('Current task: ' + taskPanelState.skillHandoff.taskTitle);
+        }
+        if (taskPanelState.allowedTools && taskPanelState.allowedTools.length > 0) {
+          summaryLines.push('Allowed tools: ' + taskPanelState.allowedTools.slice(0, 10).join(', '));
+        }
+      }
+      if (taskPanelState.sessionSummary) {
+        summaryLines.push(taskPanelState.sessionSummary + (taskPanelState.summaryTurnCount ? ' (' + taskPanelState.summaryTurnCount + ' earlier turns compressed)' : ''));
+      }
+      summaryEl.textContent = summaryLines.length > 0 ? summaryLines.join('\n\n') : 'No compressed session summary yet.';
+    }
+
+    if (taskListEl) {
+      if (taskPanelState.taskOrder.length === 0) {
+        taskListEl.innerHTML = '<div class="chat-panel-empty">No tasks yet.</div>';
+      } else {
+        var taskHtml = '';
+        for (var i = 0; i < taskPanelState.taskOrder.length; i++) {
+          var task = taskPanelState.tasks[taskPanelState.taskOrder[i]];
+          if (!task) continue;
+          taskHtml +=
+            '<div class="chat-task-item ' + escapeHtml(task.status || 'pending') + '">' +
+              '<div class="chat-task-title-row">' +
+                '<div class="chat-task-title">' + escapeHtml(task.title || 'Untitled task') + '</div>' +
+                '<div class="chat-task-status">' + escapeHtml(humanizePhaseName(task.status || 'pending')) + '</div>' +
+              '</div>' +
+              (task.description ? '<div class="chat-task-desc">' + escapeHtml(task.description) + '</div>' : '') +
+              ((task.error || task.output) ? '<div class="chat-task-detail">' + escapeHtml(task.error || task.output) + '</div>' : '') +
+            '</div>';
+        }
+        taskListEl.innerHTML = taskHtml;
+      }
+    }
+
+    if (verificationEl) {
+      if (taskPanelState.verifications.length === 0) {
+        verificationEl.innerHTML = '<div class="chat-panel-empty">No verification results yet.</div>';
+      } else {
+        verificationEl.innerHTML = taskPanelState.verifications.map(function (item) {
+          return '<div class="chat-check-item ' + escapeHtml(item.status || 'unknown') + '">' +
+            '<div class="chat-check-title">' + escapeHtml(item.taskTitle) + '</div>' +
+            '<div class="chat-check-detail">' + escapeHtml(item.detail || item.status) + '</div>' +
+          '</div>';
+        }).join('');
+      }
+    }
+
+    if (reflectionEl) {
+      if (taskPanelState.reflections.length === 0 && taskPanelState.beliefs.length === 0) {
+        reflectionEl.innerHTML = '<div class="chat-panel-empty">No reflections yet.</div>';
+      } else {
+        var reflectionHtml = taskPanelState.reflections.map(function (item) {
+          return '<div class="chat-reflection-item">' + escapeHtml(item) + '</div>';
+        }).join('');
+        if (taskPanelState.beliefs.length > 0) {
+          reflectionHtml += taskPanelState.beliefs.map(function (belief) {
+            return '<div class="chat-reflection-item warning">Low-confidence belief: ' + escapeHtml(belief.claim) + ' (' + Math.round((belief.confidence || 0) * 100) + '%)</div>';
+          }).join('');
+        }
+        reflectionEl.innerHTML = reflectionHtml;
+      }
+    }
+
+    if (transitionEl) {
+      if (!taskPanelState.skillTransitions || taskPanelState.skillTransitions.length === 0) {
+        transitionEl.innerHTML = '<div class="chat-panel-empty">No skill transitions yet.</div>';
+      } else {
+        transitionEl.innerHTML = taskPanelState.skillTransitions.map(function (item) {
+          return '<div class="chat-reflection-item">' +
+            '<div class="chat-check-title">' + escapeHtml((item.from || 'start') + ' -> ' + (item.to || 'unknown')) + '</div>' +
+            (item.taskTitle ? '<div class="chat-check-detail">Task: ' + escapeHtml(item.taskTitle) + '</div>' : '') +
+            (item.rationale ? '<div class="chat-check-detail">' + escapeHtml(item.rationale) + '</div>' : '') +
+          '</div>';
+        }).join('');
+      }
+    }
+
+    if (recoveryEl) {
+      if (!taskPanelState.recoveryEvents || taskPanelState.recoveryEvents.length === 0) {
+        recoveryEl.innerHTML = '<div class="chat-panel-empty">No recovery events yet.</div>';
+      } else {
+        recoveryEl.innerHTML = taskPanelState.recoveryEvents.map(function (item) {
+          var detail = item.strategyType === 'alternative_skill'
+            ? 'Recovery switched from ' + (item.currentSkill || 'unknown') + ' to ' + (item.targetSkill || 'unknown')
+            : (item.reason || item.strategyType);
+          return '<div class="chat-check-item failed">' +
+            '<div class="chat-check-title">' + escapeHtml(item.taskTitle) + '</div>' +
+            '<div class="chat-check-detail">' + escapeHtml(detail) + '</div>' +
+          '</div>';
+        }).join('');
+      }
+    }
+
+    if (policyEl) {
+      if (!taskPanelState.skillPolicyUpdates || taskPanelState.skillPolicyUpdates.length === 0) {
+        policyEl.innerHTML = '<div class="chat-panel-empty">No skill policy updates yet.</div>';
+      } else {
+        policyEl.innerHTML = taskPanelState.skillPolicyUpdates.map(function (item) {
+          return '<div class="chat-task-item" data-skill-policy-id="' + escapeHtml(item.id) + '">' +
+            '<div class="chat-task-title-row">' +
+              '<div class="chat-task-title">' + escapeHtml(item.skillName + ' [' + item.reviewStatus + ']') + '</div>' +
+              '<div class="chat-task-status">' + escapeHtml(item.updateType) + '</div>' +
+            '</div>' +
+            '<div class="chat-task-desc">Pattern</div>' +
+            '<textarea class="chat-policy-input chat-policy-pattern">' + escapeHtml(item.applicabilityPattern || '') + '</textarea>' +
+            '<div class="chat-task-desc">Guidance</div>' +
+            '<textarea class="chat-policy-input chat-policy-guidance">' + escapeHtml(item.guidance || '') + '</textarea>' +
+            '<div class="chat-policy-actions">' +
+              '<button class="chat-policy-btn" data-action="approve">Approve</button>' +
+              '<button class="chat-policy-btn" data-action="reject">Reject</button>' +
+              '<button class="chat-policy-btn" data-action="save">Save</button>' +
+            '</div>' +
+          '</div>';
+        }).join('');
+
+        policyEl.querySelectorAll('.chat-policy-btn').forEach(function (btn) {
+          btn.addEventListener('click', function () {
+            var card = btn.closest('[data-skill-policy-id]');
+            if (!card) return;
+            var updateId = card.getAttribute('data-skill-policy-id');
+            var pattern = card.querySelector('.chat-policy-pattern').value;
+            var guidance = card.querySelector('.chat-policy-guidance').value;
+            var action = btn.getAttribute('data-action');
+            var body = {
+              applicabilityPattern: pattern,
+              guidance: guidance,
+            };
+            if (action === 'approve') body.reviewStatus = 'approved';
+            if (action === 'reject') body.reviewStatus = 'rejected';
+            updateSkillPolicy(updateId, body);
+          });
+        });
+      }
+    }
   }
 
   // ── Graph Panel ────────────────────────────────────────────

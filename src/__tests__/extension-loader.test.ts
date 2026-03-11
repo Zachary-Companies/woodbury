@@ -108,15 +108,20 @@ describe('extension-loader', () => {
       await fs.mkdir(TEST_EXT_DIR, { recursive: true });
     });
 
+    // Helper: filter out bundled extensions (shipped with Woodbury) to isolate test assertions
+    function userOnly(manifests: Awaited<ReturnType<typeof discoverExtensions>>): typeof manifests {
+      return manifests.filter(m => m.source !== 'bundled');
+    }
+
     it('should return empty array when no extensions exist', async () => {
-      const manifests = await discoverExtensions();
+      const manifests = userOnly(await discoverExtensions());
       expect(manifests).toEqual([]);
     });
 
     it('should discover a local extension', async () => {
       await createExtension(join(TEST_EXT_DIR, 'my-ext'), { name: 'my-ext' });
 
-      const manifests = await discoverExtensions();
+      const manifests = userOnly(await discoverExtensions());
       expect(manifests).toHaveLength(1);
       expect(manifests[0].name).toBe('my-ext');
       expect(manifests[0].source).toBe('local');
@@ -126,7 +131,7 @@ describe('extension-loader', () => {
       await createExtension(join(TEST_EXT_DIR, 'ext-a'), { name: 'ext-a' });
       await createExtension(join(TEST_EXT_DIR, 'ext-b'), { name: 'ext-b' });
 
-      const manifests = await discoverExtensions();
+      const manifests = userOnly(await discoverExtensions());
       expect(manifests).toHaveLength(2);
       const names = manifests.map((m) => m.name).sort();
       expect(names).toEqual(['ext-a', 'ext-b']);
@@ -138,7 +143,7 @@ describe('extension-loader', () => {
         name: 'social',
       });
 
-      const manifests = await discoverExtensions();
+      const manifests = userOnly(await discoverExtensions());
       expect(manifests).toHaveLength(1);
       expect(manifests[0].name).toBe('social');
       expect(manifests[0].source).toBe('npm');
@@ -150,7 +155,7 @@ describe('extension-loader', () => {
         name: 'analytics',
       });
 
-      const manifests = await discoverExtensions();
+      const manifests = userOnly(await discoverExtensions());
       expect(manifests).toHaveLength(1);
       expect(manifests[0].name).toBe('analytics');
       expect(manifests[0].source).toBe('npm');
@@ -162,7 +167,7 @@ describe('extension-loader', () => {
         name: 'other',
       });
 
-      const manifests = await discoverExtensions();
+      const manifests = userOnly(await discoverExtensions());
       expect(manifests).toHaveLength(0);
     });
 
@@ -172,7 +177,7 @@ describe('extension-loader', () => {
         noWoodbury: true,
       });
 
-      const manifests = await discoverExtensions();
+      const manifests = userOnly(await discoverExtensions());
       expect(manifests).toHaveLength(0);
     });
 
@@ -182,7 +187,7 @@ describe('extension-loader', () => {
         noEntryFile: true,
       });
 
-      const manifests = await discoverExtensions();
+      const manifests = userOnly(await discoverExtensions());
       expect(manifests).toHaveLength(0);
     });
 
@@ -193,7 +198,7 @@ describe('extension-loader', () => {
       });
       await createExtension(join(TEST_EXT_DIR, 'my-local'), { name: 'my-local' });
 
-      const manifests = await discoverExtensions();
+      const manifests = userOnly(await discoverExtensions());
       // Should find both: 1 local + 1 npm (node_modules not double-scanned as local)
       expect(manifests).toHaveLength(2);
       const sources = manifests.map((m) => m.source).sort();
@@ -208,7 +213,7 @@ describe('extension-loader', () => {
         provides: ['tools', 'commands', 'prompts'],
       });
 
-      const manifests = await discoverExtensions();
+      const manifests = userOnly(await discoverExtensions());
       expect(manifests).toHaveLength(1);
 
       const m = manifests[0];
@@ -228,7 +233,7 @@ describe('extension-loader', () => {
         main: 'dist/main.js',
       });
 
-      const manifests = await discoverExtensions();
+      const manifests = userOnly(await discoverExtensions());
       expect(manifests).toHaveLength(1);
       expect(manifests[0].entryPoint).toContain('dist/main.js');
     });
@@ -308,7 +313,8 @@ describe('extension-loader', () => {
       }));
       await fs.writeFile(join(extDir, 'index.js'), 'module.exports = { async activate() {} };');
 
-      const manifests = await discoverExtensions();
+      const all = await discoverExtensions();
+      const manifests = all.filter(m => m.source !== 'bundled');
       expect(manifests).toHaveLength(1);
       expect(manifests[0].envDeclarations).toEqual({
         MY_KEY: { required: true, description: 'A required key' },
@@ -319,7 +325,8 @@ describe('extension-loader', () => {
     it('should default envDeclarations to empty when no env field', async () => {
       await createExtension(join(TEST_EXT_DIR, 'no-env'), { name: 'no-env' });
 
-      const manifests = await discoverExtensions();
+      const all = await discoverExtensions();
+      const manifests = all.filter(m => m.source !== 'bundled');
       expect(manifests).toHaveLength(1);
       expect(manifests[0].envDeclarations).toEqual({});
     });
@@ -344,7 +351,8 @@ describe('extension-loader', () => {
       }));
       await fs.writeFile(join(extDir, 'index.js'), 'module.exports = { async activate() {} };');
 
-      const manifests = await discoverExtensions();
+      const all = await discoverExtensions();
+      const manifests = all.filter(m => m.source !== 'bundled');
       expect(manifests).toHaveLength(1);
       // Only GOOD_KEY should be parsed
       expect(manifests[0].envDeclarations).toEqual({

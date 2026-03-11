@@ -109,6 +109,19 @@ export class MemoryStore {
     return [...this.memories];
   }
 
+  getByTag(tag: string): MemoryRecord[] {
+    const normalized = tag.toLowerCase();
+    return this.memories.filter(memory => memory.tags.some(entry => entry.toLowerCase() === normalized));
+  }
+
+  getSkillMemories(skillName: string): MemoryRecord[] {
+    const normalized = skillName.toLowerCase();
+    return this.memories.filter(memory =>
+      memory.tags.some(tag => tag.toLowerCase() === 'skill-update') &&
+      memory.tags.some(tag => tag.toLowerCase() === normalized),
+    );
+  }
+
   /**
    * Remove a memory by ID.
    */

@@ -781,7 +781,7 @@ export class WorkflowRecorder {
       let statusTexts: string[] = [];
       try {
         const textResult = await bridgeServer.send('get_page_text', {}, 5000);
-        pageText = typeof textResult === 'string' ? textResult : '';
+        pageText = typeof textResult === 'string' ? textResult : (textResult?.text || '');
 
         // Extract short lines that look like status indicators
         // (e.g., "Generating...", "Processing", "Loading", "50%", "Ready")

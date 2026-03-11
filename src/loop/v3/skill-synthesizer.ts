@@ -18,6 +18,7 @@ import type {
   LearningProduct,
   LearningProductValidator,
   LearningProductHeuristic,
+  LearningProductSkillUpdate,
   LearningProductTaskTemplate,
 } from './types.js';
 import { debugLog } from '../../debug-log.js';
@@ -139,6 +140,21 @@ export class SkillSynthesizer {
         tags: ['learning-product', 'task-template', tp.name],
         confidence: tp.confidence,
         triggerPattern: tp.applicabilityPattern,
+      }));
+    }
+
+    // 4d. Skill applicability and recovery-hint updates
+    const skillUpdates = this.extractSkillUpdates(tasks, failedObs);
+    learningProducts.push(...skillUpdates);
+    for (const update of skillUpdates) {
+      newMemories.push(this.memoryStore.add({
+        type: 'procedural',
+        title: `Skill update for ${update.skillName}`,
+        content: update.guidance,
+        tags: ['skill-update', update.skillName, update.updateType === 'applicability' ? 'applicability' : 'recovery-hint'],
+        confidence: update.confidence,
+        triggerPattern: update.applicabilityPattern,
+        applicabilityConditions: [update.applicabilityPattern],
       }));
     }
 
@@ -280,6 +296,66 @@ export class SkillSynthesizer {
     return products;
   }
 
+  private extractSkillUpdates(
+    tasks: TaskNode[],
+    failedObs: Observation[],
+  ): LearningProductSkillUpdate[] {
+    const updates: LearningProductSkillUpdate[] = [];
+    const completedBySkill = new Map<string, TaskNode[]>();
+
+    for (const task of tasks) {
+      const skill = task.preferredSkill || this.inferSkill(task.description);
+      if (!skill) continue;
+      if (task.status === 'done') {
+        const bucket = completedBySkill.get(skill) || [];
+        bucket.push(task);
+        completedBySkill.set(skill, bucket);
+      }
+    }
+
+    for (const [skillName, completedTasks] of completedBySkill) {
+      const pattern = this.buildApplicabilityPattern(completedTasks.map(task => task.description));
+      if (!pattern) continue;
+      updates.push({
+        kind: 'skill_update',
+        skillName,
+        updateType: 'applicability',
+        applicabilityPattern: pattern,
+        guidance: `Use ${skillName} when requests resemble: ${pattern}`,
+        confidence: Math.min(0.85, 0.55 + completedTasks.length * 0.08),
+      });
+    }
+
+    const failuresBySkill = new Map<string, Observation[]>();
+    for (const obs of failedObs) {
+      const task = tasks.find(candidate => candidate.id === obs.taskId);
+      const skill = task?.preferredSkill || (task ? this.inferSkill(task.description) : 'general_execution');
+      const bucket = failuresBySkill.get(skill) || [];
+      bucket.push(obs);
+      failuresBySkill.set(skill, bucket);
+    }
+
+    for (const [skillName, observations] of failuresBySkill) {
+      const recoveredTasks = tasks.filter(task => {
+        const taskSkill = task.preferredSkill || this.inferSkill(task.description);
+        return taskSkill === skillName && task.status === 'done' && task.retryCount > 0;
+      });
+      if (recoveredTasks.length === 0) continue;
+
+      const frequentError = this.normalizeError(observations[0].result || observations[0].summary || observations[0].toolName);
+      updates.push({
+        kind: 'skill_update',
+        skillName,
+        updateType: 'recovery_hint',
+        applicabilityPattern: frequentError,
+        guidance: `${skillName} recovery hint: when "${frequentError}" appears, re-check assumptions and retry with a narrower plan before switching skills.`,
+        confidence: Math.min(0.8, 0.5 + recoveredTasks.length * 0.1),
+      });
+    }
+
+    return updates;
+  }
+
   // ── Tool pattern extraction ───────────────────────────────
 
   /**
@@ -357,6 +433,34 @@ export class SkillSynthesizer {
     }
 
     return groups;
+  }
+
+  private buildApplicabilityPattern(descriptions: string[]): string {
+    const counts = new Map<string, number>();
+    for (const description of descriptions) {
+      for (const word of description.toLowerCase().split(/[^a-z0-9_]+/)) {
+        if (word.length < 5) continue;
+        counts.set(word, (counts.get(word) || 0) + 1);
+      }
+    }
+    return [...counts.entries()]
+      .sort((left, right) => right[1] - left[1])
+      .slice(0, 4)
+      .map(([word]) => word)
+      .join('|');
+  }
+
+  private inferSkill(description: string): string {
+    const lower = description.toLowerCase();
+    if (/test|verify|validation|build|compile|assert|check/.test(lower)) return 'test_and_verify';
+    if (/explore|inspect|investigate|understand|trace|gather evidence/.test(lower)) return 'repo_explore';
+    if (/pipeline|workflow|compose|automation|orchestrate/.test(lower)) return 'workflow_or_pipeline_build';
+    if (/browser|click|navigate|page|dom|screenshot/.test(lower)) return 'browser_automation';
+    if (/dashboard|ui|frontend|css|panel|layout|chat/.test(lower)) return 'dashboard_or_ui_change';
+    if (/extension|mcp|provider|manifest|integration/.test(lower)) return 'extension_or_mcp_integration';
+    if (/search|research|fetch|crawl|scrape|document/.test(lower)) return 'web_research';
+    if (/implement|fix|refactor|edit|code|update|write/.test(lower)) return 'code_change';
+    return 'general_execution';
   }
 
   /**

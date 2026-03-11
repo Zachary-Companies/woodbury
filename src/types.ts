@@ -59,6 +59,12 @@ export interface WoodburyConfig {
   jobsFile?: string;
   stream?: boolean;
 
+  /** Stable engine session ID for persisted closure-engine state */
+  sessionId?: string;
+
+  /** How persisted closure-engine state should influence future turns */
+  continuationMode?: 'off' | 'summary' | 'resume';
+
   /** Disable all extensions */
   noExtensions?: boolean;
 

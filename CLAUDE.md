@@ -54,7 +54,7 @@ The Woodbury platform spans two repositories. The **ONNX model file** (`encoder.
 | Visual verification (runtime) | woodbury | `src/workflow/visual-verifier.ts` |
 | ONNX inference (Node.js) | woodbury | `src/inference/*.ts` |
 | Snapshot capture during replay | woodbury | `src/workflow/execution-snapshots.ts` |
-| Dashboard + training UI | woodbury | `src/config-dashboard.ts` |
+| Dashboard + training UI | woodbury | `src/dashboard/` (23 route modules) |
 | Chrome extension | woodbury | Chrome extension (content/background scripts) |
 | Electron app shell | woodbury | `electron/main.js` |
 | Data preparation (crops) | woobury-models | `prepare.py` |
@@ -103,14 +103,17 @@ The Node.js inference (`src/inference/image-utils.ts`) must match the Python pre
 | Directory | Purpose |
 |-----------|---------|
 | `src/` | Main application source (CLI, agent, tools, dashboard) |
+| `src/dashboard/` | Dashboard HTTP server (modular — see "Dashboard Module" below) |
 | `src/loop/` | Embedded agentic loop engine (40+ tools) |
 | `src/loop/tools/` | Tool implementations |
 | `src/workflow/` | Workflow recording, execution, visual verification |
 | `src/inference/` | Node.js ONNX inference (replaces Python serve.py) |
-| `src/config-dashboard/` | Dashboard web UI (Config, Workflows, Pipelines, Runs) |
+| `src/social/` | Social media scheduling (storage, posting engine, scripts) |
+| `src/config-dashboard/` | Dashboard web UI (static HTML/JS/CSS served by dashboard) |
 | `electron/` | Electron shell (main.js, preload.js, icons) |
+| `extensions/` | Bundled extensions shipped with Woodbury |
 | `apps/woodbury-web/` | Marketing landing page (Next.js, Firebase) |
-| `docs/` | Extension authoring docs, API reference |
+| `docs/` | Architecture docs, extension authoring, API reference |
 
 ### Key Files — Core
 
@@ -125,7 +128,7 @@ The Node.js inference (`src/inference/image-utils.ts`) must match the Python pre
 | `src/system-prompt.ts` | Dynamic system prompt builder |
 | `src/context-loader.ts` | Walks up directories to find `.woodbury.md` |
 | `src/conversation.ts` | Multi-turn history manager |
-| `src/config-dashboard.ts` | Dashboard HTTP server, training orchestration, worker management |
+| `src/config-dashboard.ts` | Facade: re-exports `startDashboard` from `src/dashboard/` |
 | `src/debug-log.ts` | File-based debug logging to `~/.woodbury/logs/` |
 
 ### Key Files — Inference Module
@@ -182,6 +185,63 @@ Extensions live in `~/.woodbury/extensions/`. Each exports `activate(ctx)` with 
 | `src/extension-loader.ts` | Discovery, manifest validation, env file utilities |
 | `src/extension-manager.ts` | Lifecycle: load, activate, aggregate, deactivate |
 | `src/extension-scaffold.ts` | `woodbury ext create` scaffolding |
+
+### Dashboard Module (`src/dashboard/`)
+
+The dashboard was refactored from a monolithic 14,640-line `config-dashboard.ts` into a modular structure. The old file is now a thin facade that re-exports from `src/dashboard/`.
+
+| File | Purpose |
+|------|---------|
+| `src/dashboard/index.ts` | Barrel export: `startDashboard`, `DashboardHandle`, `maskValue` |
+| `src/dashboard/types.ts` | `DashboardContext` interface, `RouteHandler` type, state interfaces |
+| `src/dashboard/server.ts` | `startDashboard()`: HTTP server creation, scheduler, inference, relay lifecycle |
+| `src/dashboard/context.ts` | `createDashboardContext()` factory function |
+| `src/dashboard/utils.ts` | `sendJson`, `readBody`, `maskValue`, `isValidEnvVarName`, `atomicWriteFile`, `MIME_TYPES` |
+| `src/dashboard/middleware.ts` | CORS handling, static file serving, API request logging |
+| `src/dashboard/routes/index.ts` | Router: chains all 23 route handlers, first `true` return wins |
+
+**Route files** (`src/dashboard/routes/`):
+
+| File | Endpoints |
+|------|-----------|
+| `app.ts` | Bridge status, update check, file serving, directory browse |
+| `bridge.ts` | Screenshot, click-extension-icon, simulate-keystroke |
+| `extensions.ts` | Extension CRUD, env vars, enable/disable |
+| `marketplace.ts` | Registry, install, uninstall, publish |
+| `workflows.ts` | Workflow CRUD |
+| `recording.ts` | Recording start/stop/pause/resume/cancel/status |
+| `workflow-run.ts` | Workflow execution, debug mode, visual verification |
+| `compositions.ts` | Pipeline CRUD, duplicate, cache management |
+| `composition-run.ts` | Pipeline execution engine (topo-sort, node execution, retry, approval gates) |
+| `batch.ts` | Batch execution (variable pools) |
+| `generation.ts` | AI generation (autofill, variable, script, pipeline) |
+| `approvals.ts` | Approval gate list/approve/reject |
+| `schedules.ts` | Schedule CRUD |
+| `runs.ts` | Run history list/get/delete |
+| `training.ts` | Training data, prepare, start, status, models, versions |
+| `workers.ts` | Python worker lifecycle, remote workers |
+| `inference.ts` | Inference server status |
+| `social.ts` | Social posts, stats, config, platforms, scripts |
+| `chat.ts` | SSE chat, sessions, logs |
+| `mcp.ts` | MCP server management |
+| `assets.ts` | Asset library, collections, file browsing |
+| `storyboard.ts` | Storyboard CRUD, generation, rendering, video assembly |
+| `tools.ts` | Extension tools listing, script tool docs |
+
+**Route handler pattern:**
+```typescript
+export const handleFooRoutes: RouteHandler = async (req, res, pathname, url, ctx) => {
+  if (req.method === 'GET' && pathname === '/api/foo') {
+    sendJson(res, 200, { data: ctx.someState });
+    return true;   // handled
+  }
+  return false;     // pass to next handler
+};
+```
+
+**DashboardContext**: All shared mutable state (formerly closure variables) lives on the `ctx` object passed to every route handler. Key fields: `activeRun`, `activeCompRun`, `activeBatchRun`, `extensionManager`, `workDir`, `pendingApprovals`, `chatAgent`, `inferenceServer`.
+
+For the full list of 189 API endpoints, see `docs/dashboard-api.md`.
 
 ## Build & Run
 

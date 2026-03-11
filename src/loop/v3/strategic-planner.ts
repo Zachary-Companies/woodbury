@@ -140,6 +140,10 @@ export class StrategicPlanner {
     return ranked[0];
   }
 
+  applySkillTransitions(taskGraph: TaskGraph, goal: Goal): TaskGraph {
+    return this.annotateSkillTransitions(taskGraph, goal, 'low_risk');
+  }
+
   // ── Plan builders ────────────────────────────────────────
 
   private buildCandidate(
@@ -148,15 +152,16 @@ export class StrategicPlanner {
     goal: Goal,
     rationale: string,
   ): CandidatePlan {
-    const taskCount = taskGraph.nodes.length;
-    const hasValidators = taskGraph.nodes.some(n => n.validators.length > 0);
+    const annotatedGraph = this.annotateSkillTransitions(taskGraph, goal, strategy);
+    const taskCount = annotatedGraph.nodes.length;
+    const hasValidators = annotatedGraph.nodes.some(n => n.validators.length > 0);
     const relevantMemories = this.memoryStore.query(goal.objective);
     const hasFailureMemories = relevantMemories.some(m => m.type === 'failure');
 
     return {
       id: generateId('plan'),
       strategy,
-      taskGraph,
+      taskGraph: annotatedGraph,
       score: 0, // Will be computed by rankPlans
       completionProbability: this.estimateCompletionProbability(strategy, taskCount, hasFailureMemories),
       infoGain: this.estimateInfoGain(strategy),
@@ -230,6 +235,8 @@ export class StrategicPlanner {
           retryCount: 0,
           validators: [],
           createdAt: now,
+          preferredSkill: 'repo_explore',
+          preferredSkillReason: 'Evidence-first strategy begins with repository exploration.',
         },
         {
           id: mainId,
@@ -244,10 +251,74 @@ export class StrategicPlanner {
             .filter(c => c.validator)
             .map(c => c.validator!),
           createdAt: now,
+          preferredSkill: this.inferPreferredSkill(goal.objective),
+          preferredSkillReason: 'Evidence-first strategy hands off from repository exploration to delivery work.',
         },
       ],
       executionOrder: [exploreId, mainId],
     };
+  }
+
+  private annotateSkillTransitions(
+    taskGraph: TaskGraph,
+    goal: Goal,
+    strategy: PlanStrategy,
+  ): TaskGraph {
+    const nodes = taskGraph.nodes.map(node => ({ ...node }));
+    const nodeMap = new Map(nodes.map(node => [node.id, node]));
+
+    for (const node of nodes) {
+      if (!node.preferredSkill) {
+        node.preferredSkill = this.inferPreferredSkill(node.description);
+      }
+      if (!node.preferredSkillReason) {
+        node.preferredSkillReason = `Planner assigned ${node.preferredSkill} during ${strategy} planning.`;
+      }
+    }
+
+    for (const node of nodes) {
+      const dependencySkills = node.dependsOn
+        .map(depId => nodeMap.get(depId)?.preferredSkill)
+        .filter((skill): skill is string => !!skill);
+
+      if (dependencySkills.includes('repo_explore') && node.preferredSkill !== 'repo_explore') {
+        node.preferredSkillReason = `Planner handoff from repo_explore to ${node.preferredSkill} after evidence gathering.`;
+      }
+
+      if (dependencySkills.includes('code_change') && node.preferredSkill === 'test_and_verify') {
+        node.preferredSkillReason = 'Planner handoff from code_change to test_and_verify after implementation.';
+      }
+    }
+
+    if (!nodes.some(node => node.preferredSkill === 'test_and_verify')) {
+      const candidate = [...nodes].reverse().find(node =>
+        node.preferredSkill === 'code_change' &&
+        /build|test|verify|check|validate|compile/.test(node.description.toLowerCase()) &&
+        !/implement|fix|edit|write|refactor/.test(node.description.toLowerCase()),
+      );
+      if (candidate) {
+        candidate.preferredSkill = 'test_and_verify';
+        candidate.preferredSkillReason = 'Planner routed the final implementation step through test_and_verify to enforce verification before completion.';
+      }
+    }
+
+    return {
+      ...taskGraph,
+      nodes,
+    };
+  }
+
+  private inferPreferredSkill(description: string): string {
+    const lower = description.toLowerCase();
+    if (/test|verify|validation|build|compile|assert|check/.test(lower)) return 'test_and_verify';
+    if (/explore|inspect|investigate|understand|gather evidence|trace|analyze existing/.test(lower)) return 'repo_explore';
+    if (/implement|fix|refactor|edit|change|update|write|code/.test(lower)) return 'code_change';
+    if (/browser|click|navigate|screenshot|page|dom/.test(lower)) return 'browser_automation';
+    if (/pipeline|workflow|compose|automation|orchestrate/.test(lower)) return 'workflow_or_pipeline_build';
+    if (/dashboard|ui|frontend|css|panel|layout|render|chat/.test(lower)) return 'dashboard_or_ui_change';
+    if (/extension|mcp|provider|manifest|tool registry|integration/.test(lower)) return 'extension_or_mcp_integration';
+    if (/search|research|fetch|crawl|scrape|document/.test(lower)) return 'web_research';
+    return 'general_execution';
   }
 
   /**

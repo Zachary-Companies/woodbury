@@ -319,7 +319,7 @@ export async function listConnectors(): Promise<PlatformConnector[]> {
   const connectorsDir = getConnectorsDir();
   ensureDir(connectorsDir);
 
-  const files = (await readdir(connectorsDir)).filter(f => f.endsWith('.json'));
+  const files = (await readdir(connectorsDir)).filter(f => f.endsWith('.json') && !f.endsWith('.script.json'));
   const connectors: PlatformConnector[] = [];
 
   for (const f of files) {
@@ -332,6 +332,67 @@ export async function listConnectors(): Promise<PlatformConnector[]> {
   }
 
   return connectors;
+}
+
+/**
+ * Get a single connector by platform name.
+ */
+export async function getConnector(platform: string): Promise<PlatformConnector | null> {
+  const filePath = join(getConnectorsDir(), `${platform}.json`);
+  try {
+    const raw = await readFile(filePath, 'utf-8');
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Save (create or update) a platform connector.
+ */
+export async function saveConnector(connector: PlatformConnector): Promise<void> {
+  const connectorsDir = getConnectorsDir();
+  ensureDir(connectorsDir);
+  await writeFile(
+    join(connectorsDir, `${connector.platform}.json`),
+    JSON.stringify(connector, null, 2)
+  );
+}
+
+/**
+ * Delete a platform connector and its script.
+ */
+export async function deleteConnector(platform: string): Promise<void> {
+  const connectorsDir = getConnectorsDir();
+  const connectorPath = join(connectorsDir, `${platform}.json`);
+  const scriptPath = join(connectorsDir, `${platform}.script.json`);
+  try { await unlink(connectorPath); } catch { /* ignore */ }
+  try { await unlink(scriptPath); } catch { /* ignore */ }
+}
+
+/**
+ * Save a platform posting script to disk.
+ */
+export async function savePlatformScript(platform: string, script: any): Promise<void> {
+  const connectorsDir = getConnectorsDir();
+  ensureDir(connectorsDir);
+  await writeFile(
+    join(connectorsDir, `${platform}.script.json`),
+    JSON.stringify(script, null, 2)
+  );
+}
+
+/**
+ * Load a platform posting script from disk.
+ */
+export async function loadPlatformScript(platform: string): Promise<any | null> {
+  const scriptPath = join(getConnectorsDir(), `${platform}.script.json`);
+  try {
+    const raw = await readFile(scriptPath, 'utf-8');
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
 }
 
 // ── Posting Sessions ─────────────────────────────────────────

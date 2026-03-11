@@ -198,6 +198,19 @@ async function handleAction(action, params) {
     case 'find_by_svg_fingerprint':
       return findBySvgFingerprint(params);
 
+    // ── WCAG Audit ────────────────────────────────────────────
+    case 'audit_wcag_components':
+      return auditWcagComponents(params);
+
+    case 'scroll_and_highlight':
+      return scrollAndHighlight(params);
+
+    case 'start_wcag_inspect':
+      return startWcagInspect(params);
+
+    case 'stop_wcag_inspect':
+      return stopWcagInspect();
+
     default:
       throw new Error(`Unknown action: ${action}`);
   }
@@ -1226,6 +1239,12 @@ function getElementInfo({ selector }) {
       acc[attr.name] = attr.value;
       return acc;
     }, {}),
+    // Resolved DOM properties — these give absolute URLs unlike raw attributes
+    resolvedProperties: {
+      href: el.href || undefined,
+      src: el.src || undefined,
+      action: el.action || undefined,
+    },
     childCount: el.children.length,
     innerHTML: el.innerHTML.substring(0, 500)
   };
@@ -2017,6 +2036,775 @@ async function findBySvgFingerprint({ hash, dimensions, limit = 5 }) {
   return { elements: results };
 }
 
+// ── WCAG Component Audit ────────────────────────────────────────
+//
+// Scans the page DOM and returns all WCAG-relevant components
+// grouped by category, with accessible names and issue detection.
+//
+
+function auditWcagComponents(params) {
+  const MAX_PER_CATEGORY = 500;
+  const MAX_TOTAL = 2000;
+
+  // Category definitions: name, icon, CSS selectors, expected roles
+  const categoryDefs = [
+    {
+      name: 'Landmarks',
+      icon: '\u{1F3D7}',
+      selectors: 'nav, main, header, footer, aside, section[aria-label], section[aria-labelledby], form[aria-label], form[aria-labelledby], [role="banner"], [role="navigation"], [role="main"], [role="contentinfo"], [role="complementary"], [role="region"], [role="search"]',
+      roles: new Set(['navigation', 'main', 'banner', 'contentinfo', 'complementary', 'region', 'search', 'form']),
+    },
+    {
+      name: 'Headings',
+      icon: '\u{1F524}',
+      selectors: 'h1, h2, h3, h4, h5, h6, [role="heading"]',
+      roles: new Set(['heading']),
+    },
+    {
+      name: 'Forms',
+      icon: '\u{1F4DD}',
+      selectors: 'input:not([type="hidden"]):not([type="submit"]):not([type="reset"]):not([type="button"]):not([type="image"]), textarea, select, [role="textbox"], [role="searchbox"], [role="combobox"], [role="listbox"], [role="spinbutton"], [role="slider"], [role="checkbox"], [role="radio"], [role="switch"]',
+      roles: new Set(['textbox', 'searchbox', 'combobox', 'listbox', 'spinbutton', 'slider', 'checkbox', 'radio', 'switch']),
+    },
+    {
+      name: 'Buttons',
+      icon: '\u{1F518}',
+      selectors: 'button, [role="button"], input[type="submit"], input[type="reset"], input[type="button"], input[type="image"], summary',
+      roles: new Set(['button']),
+    },
+    {
+      name: 'Links',
+      icon: '\u{1F517}',
+      selectors: 'a[href], [role="link"]',
+      roles: new Set(['link']),
+    },
+    {
+      name: 'Images',
+      icon: '\u{1F5BC}',
+      selectors: 'img, [role="img"], svg[aria-label], svg[role="img"]',
+      roles: new Set(['img']),
+    },
+    {
+      name: 'Tables',
+      icon: '\u{1F4CA}',
+      selectors: 'table, [role="table"], [role="grid"]',
+      roles: new Set(['table', 'grid']),
+    },
+    {
+      name: 'Other',
+      icon: '\u2699',
+      selectors: '[role="tab"], [role="menuitem"], [role="option"], [role="dialog"], [role="alertdialog"], [role="alert"], [role="status"], [role="progressbar"], [role="tablist"], [role="menu"], [role="menubar"], [role="tree"], [role="treeitem"], dialog, [contenteditable="true"]',
+      roles: new Set(['tab', 'menuitem', 'option', 'dialog', 'alertdialog', 'alert', 'status', 'progressbar', 'tablist', 'menu', 'menubar', 'tree', 'treeitem']),
+    },
+  ];
+
+  const seen = new Set();
+  let totalCount = 0;
+  let issueCount = 0;
+  let lastHeadingLevel = 0;
+  const categorySummary = {};
+
+  // Page-level issues
+  const pageIssues = [];
+  if (!document.documentElement.lang) {
+    pageIssues.push('Missing lang attribute on <html>');
+  }
+
+  const categories = [];
+
+  for (const catDef of categoryDefs) {
+    if (totalCount >= MAX_TOTAL) break;
+
+    const items = [];
+    let els;
+    try {
+      els = document.querySelectorAll(catDef.selectors);
+    } catch (e) {
+      continue;
+    }
+
+    for (const el of els) {
+      if (seen.has(el)) continue;
+      if (items.length >= MAX_PER_CATEGORY) break;
+      if (totalCount >= MAX_TOTAL) break;
+
+      // Skip hidden elements
+      const style = window.getComputedStyle(el);
+      if (style.display === 'none' || style.visibility === 'hidden') continue;
+      if (el.getAttribute('aria-hidden') === 'true') continue;
+
+      // Skip tiny elements
+      const rect = el.getBoundingClientRect();
+      if (rect.width < 2 && rect.height < 2) continue;
+
+      seen.add(el);
+
+      const tag = el.tagName.toLowerCase();
+      const role = getImplicitRole(el) || '';
+      const accessibleName = computeAccessibleName(el);
+
+      // Heading level
+      let level = null;
+      if (catDef.name === 'Headings') {
+        const match = tag.match(/^h([1-6])$/);
+        if (match) {
+          level = parseInt(match[1], 10);
+        } else if (el.getAttribute('aria-level')) {
+          level = parseInt(el.getAttribute('aria-level'), 10);
+        }
+      }
+
+      // Build selector
+      let selector = '';
+      try {
+        const selectorSet = buildSelectorSet(el);
+        selector = selectorSet[0] || buildUniqueSelector(el) || tag;
+      } catch {
+        selector = tag;
+      }
+
+      // Detect issues
+      const issues = detectA11yIssues(el, tag, role, accessibleName, catDef.name, level, lastHeadingLevel);
+
+      if (catDef.name === 'Headings' && level) {
+        lastHeadingLevel = level;
+      }
+
+      if (issues.length > 0) issueCount++;
+      totalCount++;
+
+      items.push({
+        tag,
+        role: role || undefined,
+        accessibleName: accessibleName || '',
+        selector,
+        level,
+        issues,
+        bounds: {
+          left: Math.round(rect.left),
+          top: Math.round(rect.top),
+          width: Math.round(rect.width),
+          height: Math.round(rect.height),
+          visible: rect.width > 0 && rect.height > 0,
+        },
+        attributes: {
+          id: el.id || undefined,
+          ariaLabel: el.getAttribute('aria-label') || undefined,
+          alt: el.getAttribute('alt') !== null ? el.getAttribute('alt') : undefined,
+          href: el.getAttribute('href') ? el.getAttribute('href').substring(0, 100) : undefined,
+          type: el.getAttribute('type') || undefined,
+        },
+      });
+    }
+
+    categorySummary[catDef.name] = items.length;
+    categories.push({
+      name: catDef.name,
+      icon: catDef.icon,
+      items,
+    });
+  }
+
+  return {
+    url: location.href,
+    title: document.title,
+    timestamp: Date.now(),
+    pageIssues,
+    summary: {
+      total: totalCount,
+      withIssues: issueCount,
+      categories: categorySummary,
+    },
+    categories,
+  };
+}
+
+/**
+ * Detect WCAG accessibility issues for a given element.
+ */
+function detectA11yIssues(el, tag, role, accessibleName, categoryName, level, lastHeadingLevel) {
+  const issues = [];
+
+  // Missing accessible name on interactive elements & landmarks
+  const needsName = new Set(['button', 'link', 'navigation', 'main', 'complementary', 'region', 'search', 'form', 'banner', 'contentinfo']);
+  if (needsName.has(role) && !accessibleName) {
+    issues.push('Missing accessible name');
+  }
+
+  // Missing alt on images
+  if (tag === 'img' && !el.hasAttribute('alt')) {
+    issues.push('Missing alt text');
+  }
+
+  // Missing form label
+  const formRoles = new Set(['textbox', 'searchbox', 'combobox', 'listbox', 'spinbutton', 'slider', 'checkbox', 'radio', 'switch']);
+  if (formRoles.has(role) && !accessibleName) {
+    issues.push('Missing form label');
+  }
+
+  // Empty heading
+  if (categoryName === 'Headings' && !accessibleName) {
+    issues.push('Empty heading');
+  }
+
+  // Skipped heading level
+  if (categoryName === 'Headings' && level && lastHeadingLevel > 0) {
+    if (level > lastHeadingLevel + 1) {
+      issues.push('Skipped heading level (h' + lastHeadingLevel + ' \u2192 h' + level + ')');
+    }
+  }
+
+  // Positive tabindex
+  if (el.tabIndex > 0) {
+    issues.push('Positive tabindex (' + el.tabIndex + ')');
+  }
+
+  return issues;
+}
+
+/**
+ * Scroll to an element and highlight it.
+ */
+async function scrollAndHighlight({ selector, duration = 2000, color = 'rgba(59, 130, 246, 0.3)' }) {
+  if (!selector) throw new Error('selector is required');
+  const el = document.querySelector(selector);
+  if (!el) throw new Error('Element not found: ' + selector);
+  el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  // Wait for scroll to settle
+  await new Promise(r => setTimeout(r, 350));
+  return highlightElement({ selector, duration, color });
+}
+
+// ── WCAG Inspect Mode ──────────────────────────────────────────
+//
+// Interactive hover inspection overlay that shows WCAG info for
+// elements under the cursor — role, accessible name, unique
+// identifiers, and any a11y issues.
+
+let _wcagInspectOverlay = null;
+
+// Combined selector for all WCAG-relevant elements
+const WCAG_INSPECT_SELECTOR = [
+  // Landmarks
+  'nav', 'main', 'header', 'footer', 'aside',
+  'section[aria-label]', 'section[aria-labelledby]',
+  'form[aria-label]', 'form[aria-labelledby]',
+  '[role="banner"]', '[role="navigation"]', '[role="main"]',
+  '[role="contentinfo"]', '[role="complementary"]', '[role="region"]', '[role="search"]',
+  // Headings
+  'h1', 'h2', 'h3', 'h4', 'h5', 'h6', '[role="heading"]',
+  // Forms
+  'input:not([type="hidden"])', 'textarea', 'select',
+  '[role="textbox"]', '[role="searchbox"]', '[role="combobox"]',
+  '[role="listbox"]', '[role="spinbutton"]', '[role="slider"]',
+  '[role="checkbox"]', '[role="radio"]', '[role="switch"]',
+  // Buttons
+  'button', '[role="button"]', 'summary',
+  // Links
+  'a[href]', '[role="link"]',
+  // Images
+  'img', '[role="img"]', 'svg[aria-label]', 'svg[role="img"]',
+  // Tables
+  'table', '[role="table"]', '[role="grid"]',
+  // Other interactive/semantic
+  '[role="tab"]', '[role="menuitem"]', '[role="option"]',
+  '[role="dialog"]', '[role="alertdialog"]', '[role="alert"]',
+  '[role="status"]', '[role="progressbar"]', '[role="tablist"]',
+  '[role="menu"]', '[role="menubar"]', '[role="tree"]', '[role="treeitem"]',
+  'dialog', '[contenteditable="true"]',
+].join(', ');
+
+/**
+ * Walk up from el to find the nearest WCAG-relevant ancestor (or el itself).
+ * Returns the element, or null if nothing relevant found.
+ */
+function findNearestWcagElement(el) {
+  let current = el;
+  while (current && current !== document.documentElement && current !== document.body) {
+    try {
+      if (current.matches && current.matches(WCAG_INSPECT_SELECTOR)) {
+        return current;
+      }
+    } catch (e) { /* matches can throw on pseudo selectors */ }
+    current = current.parentElement;
+  }
+  return null;
+}
+
+/**
+ * Determine the best unique identifier for an element.
+ * Returns { type, value } or null.
+ */
+function getBestIdentifier(el) {
+  if (el.id) return { type: 'id', value: '#' + el.id, unique: true };
+
+  const testId = el.getAttribute('data-testid');
+  if (testId) return { type: 'data-testid', value: testId, unique: true };
+
+  const ariaLabel = el.getAttribute('aria-label');
+  if (ariaLabel) {
+    const tag = el.tagName.toLowerCase();
+    const sel = tag + '[aria-label="' + CSS.escape(ariaLabel) + '"]';
+    const isUnique = document.querySelectorAll(sel).length === 1;
+    return { type: 'aria-label', value: ariaLabel, unique: isUnique };
+  }
+
+  const name = el.getAttribute('name');
+  if (name) {
+    const sel = '[name="' + CSS.escape(name) + '"]';
+    const isUnique = document.querySelectorAll(sel).length === 1;
+    return { type: 'name', value: name, unique: isUnique };
+  }
+
+  // Text content — buttons, links, headings, etc. with readable text
+  // Uses findElementByText() to verify whether the text uniquely locates this element
+  const tag = el.tagName.toLowerCase();
+  const textTags = new Set(['button', 'a', 'summary', 'option', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6']);
+  const role = el.getAttribute('role');
+  if (textTags.has(tag) || role === 'button' || role === 'link' || role === 'heading') {
+    const text = getDirectText(el).trim();
+    if (text && text.length > 0 && text.length <= 80) {
+      let isUnique = false;
+      try {
+        const matches = findElementByText({ text, tag, exact: true, limit: 2 });
+        isUnique = matches.length === 1;
+      } catch (e) { /* findElementByText failed, treat as non-unique */ }
+      return { type: 'text', value: text, unique: isUnique };
+    }
+  }
+
+  // Accessible name from label (for form fields)
+  // Also check if the label text can uniquely find this element via findElementByText
+  const accName = computeAccessibleName(el);
+  if (accName && accName.length > 0 && accName.length <= 80) {
+    let isUnique = false;
+    try {
+      // Check if searching by this text among same-tag elements finds exactly one
+      const matches = findElementByText({ text: accName, tag, exact: true, limit: 2 });
+      isUnique = matches.length === 1;
+    } catch (e) { /* treat as non-unique */ }
+    return { type: 'label', value: accName, unique: isUnique };
+  }
+
+  const title = el.getAttribute('title');
+  if (title) {
+    let isUnique = false;
+    try {
+      const matches = findElementsWithText({ selector: tag, text: title, exact: true, limit: 2 });
+      isUnique = matches.length === 1;
+    } catch (e) { /* treat as non-unique */ }
+    return { type: 'title', value: title, unique: isUnique };
+  }
+
+  const placeholder = el.getAttribute('placeholder');
+  if (placeholder) {
+    let isUnique = false;
+    try {
+      const matches = findElementsWithText({ selector: tag, text: placeholder, exact: true, limit: 2 });
+      isUnique = matches.length === 1;
+    } catch (e) { /* treat as non-unique */ }
+    return { type: 'placeholder', value: placeholder, unique: isUnique };
+  }
+
+  const alt = el.getAttribute('alt');
+  if (alt) {
+    let isUnique = false;
+    try {
+      const matches = findElementsWithText({ selector: tag, text: alt, exact: true, limit: 2 });
+      isUnique = matches.length === 1;
+    } catch (e) { /* treat as non-unique */ }
+    return { type: 'alt', value: alt, unique: isUnique };
+  }
+
+  return null;
+}
+
+/**
+ * Get all resolver strategies that could locate this element.
+ * Mirrors the ElementResolver fallback chain in resolver.ts:
+ *   1. placeholder  (CSS selector [placeholder="..."])
+ *   2. selector     (buildUniqueSelector or id-based)
+ *   3. aria-label   (CSS selector [aria-label="..."])
+ *   4. textContent  (findElementByText)
+ *   5. name         (CSS selector [name="..."])
+ *   6. data-testid  (CSS selector [data-testid="..."])
+ *
+ * Returns an array of { method, value, unique, matchCount } objects.
+ */
+function getResolverStrategies(el) {
+  var tag = el.tagName.toLowerCase();
+  var strategies = [];
+
+  // 1. id — always unique
+  if (el.id) {
+    strategies.push({ method: 'id', value: '#' + el.id, unique: true, matchCount: 1 });
+  }
+
+  // 2. data-testid — typically unique
+  var testId = el.getAttribute('data-testid') || el.getAttribute('data-test-id');
+  if (testId) {
+    var cnt = document.querySelectorAll('[data-testid="' + CSS.escape(testId) + '"],[data-test-id="' + CSS.escape(testId) + '"]').length;
+    strategies.push({ method: 'data-testid', value: testId, unique: cnt === 1, matchCount: cnt });
+  }
+
+  // 3. placeholder — stable for form fields
+  var placeholder = el.getAttribute('placeholder');
+  if (placeholder) {
+    var cnt = document.querySelectorAll('[placeholder="' + CSS.escape(placeholder) + '"]').length;
+    strategies.push({ method: 'placeholder', value: placeholder, unique: cnt === 1, matchCount: cnt });
+  }
+
+  // 4. CSS selector from buildUniqueSelector
+  var selector = buildUniqueSelector(el);
+  var selectorCount = 0;
+  try { selectorCount = document.querySelectorAll(selector).length; } catch (e) { selectorCount = 0; }
+  strategies.push({ method: 'selector', value: selector, unique: selectorCount === 1, matchCount: selectorCount });
+
+  // 5. aria-label
+  var ariaLabel = el.getAttribute('aria-label');
+  if (ariaLabel) {
+    var sel = '[aria-label="' + CSS.escape(ariaLabel) + '"]';
+    var cnt = document.querySelectorAll(sel).length;
+    strategies.push({ method: 'aria-label', value: ariaLabel, unique: cnt === 1, matchCount: cnt });
+  }
+
+  // 6. Text content via findElementByText
+  var text = getDirectText(el).trim();
+  if (!text) text = (el.textContent || '').trim();
+  if (text && text.length > 0 && text.length <= 80) {
+    try {
+      var matches = findElementByText({ text: text, tag: tag, exact: true, limit: 5 });
+      strategies.push({ method: 'text', value: text, unique: matches.length === 1, matchCount: matches.length });
+    } catch (e) {
+      strategies.push({ method: 'text', value: text, unique: false, matchCount: -1 });
+    }
+  }
+
+  // 7. name attribute — stable for form fields
+  var name = el.getAttribute('name');
+  if (name) {
+    var sel = '[name="' + CSS.escape(name) + '"]';
+    var cnt = document.querySelectorAll(sel).length;
+    strategies.push({ method: 'name', value: name, unique: cnt === 1, matchCount: cnt });
+  }
+
+  // 8. Accessible name (label association)
+  var accName = computeAccessibleName(el);
+  if (accName && accName.length > 0 && accName.length <= 80) {
+    // Check if accessible name differs from text (avoid duplicate)
+    if (accName !== text) {
+      try {
+        var matches = findElementByText({ text: accName, tag: tag, exact: true, limit: 5 });
+        strategies.push({ method: 'label', value: accName, unique: matches.length === 1, matchCount: matches.length });
+      } catch (e) {
+        strategies.push({ method: 'label', value: accName, unique: false, matchCount: -1 });
+      }
+    }
+  }
+
+  // 9. title attribute
+  var title = el.getAttribute('title');
+  if (title) {
+    try {
+      var matches = findElementsWithText({ selector: tag, text: title, exact: true, limit: 5 });
+      strategies.push({ method: 'title', value: title, unique: matches.length === 1, matchCount: matches.length });
+    } catch (e) {
+      strategies.push({ method: 'title', value: title, unique: false, matchCount: -1 });
+    }
+  }
+
+  return strategies;
+}
+
+/**
+ * Determine the WCAG category for an element.
+ */
+function getWcagCategory(el) {
+  const tag = el.tagName.toLowerCase();
+  const role = getImplicitRole(el) || '';
+
+  if (['nav', 'main', 'aside'].includes(tag) ||
+      (tag === 'header' || tag === 'footer') ||
+      ['navigation', 'main', 'banner', 'contentinfo', 'complementary', 'region', 'search'].includes(role)) {
+    return 'Landmark';
+  }
+  if (/^h[1-6]$/.test(tag) || role === 'heading') return 'Heading';
+  if (['textbox', 'searchbox', 'combobox', 'listbox', 'spinbutton', 'slider', 'checkbox', 'radio', 'switch'].includes(role)) return 'Form';
+  if (tag === 'input' || tag === 'textarea' || tag === 'select') return 'Form';
+  if (role === 'button' || tag === 'button' || tag === 'summary') return 'Button';
+  if (role === 'link' || (tag === 'a' && el.hasAttribute('href'))) return 'Link';
+  if (role === 'img' || tag === 'img') return 'Image';
+  if (['table', 'grid'].includes(role) || tag === 'table') return 'Table';
+  return 'Interactive';
+}
+
+function startWcagInspect(params) {
+  // Remove any existing inspect overlay
+  stopWcagInspect();
+
+  // Create overlay container
+  const overlay = document.createElement('div');
+  overlay.id = 'woodbury-wcag-inspect-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:2147483647;cursor:crosshair;pointer-events:auto;background:transparent;';
+
+  // Highlight box
+  const highlight = document.createElement('div');
+  highlight.style.cssText = 'position:fixed;pointer-events:none;border-radius:3px;display:none;transition:left 0.05s,top 0.05s,width 0.05s,height 0.05s;';
+  overlay.appendChild(highlight);
+
+  // Info tooltip panel (multi-line)
+  const tooltip = document.createElement('div');
+  tooltip.style.cssText = [
+    'position:fixed', 'pointer-events:none',
+    'background:#0f172a', 'color:#e2e8f0',
+    'font-size:11px', 'font-family:system-ui,-apple-system,sans-serif',
+    'padding:8px 12px', 'border-radius:6px',
+    'border:1px solid #334155',
+    'display:none', 'z-index:2147483647',
+    'max-width:420px', 'line-height:1.5',
+    'box-shadow:0 4px 12px rgba(0,0,0,0.4)',
+  ].join(';');
+  overlay.appendChild(tooltip);
+
+  // Bottom hint bar
+  const hint = document.createElement('div');
+  hint.style.cssText = 'position:fixed;bottom:20px;left:50%;transform:translateX(-50%);pointer-events:none;background:#0f172aee;color:#94a3b8;font-size:13px;font-family:system-ui,sans-serif;padding:6px 16px;border-radius:8px;border:1px solid #334155;white-space:nowrap;';
+  hint.textContent = '\u2705 WCAG Inspect Mode \u00b7 Esc to exit';
+  overlay.appendChild(hint);
+
+  let lastWcagEl = null;
+
+  overlay.addEventListener('mousemove', function(e) {
+    // Hide overlay to find real element underneath
+    overlay.style.display = 'none';
+    const rawEl = document.elementFromPoint(e.clientX, e.clientY);
+    overlay.style.display = '';
+
+    if (!rawEl || rawEl === document.documentElement || rawEl === document.body) {
+      highlight.style.display = 'none';
+      tooltip.style.display = 'none';
+      lastWcagEl = null;
+      return;
+    }
+
+    // Find nearest WCAG-relevant element
+    const wcagEl = findNearestWcagElement(rawEl);
+    const targetEl = wcagEl || rawEl;
+
+    // Skip re-rendering if same element
+    if (targetEl === lastWcagEl) {
+      // Still reposition tooltip near cursor
+      positionTooltip(tooltip, targetEl, e.clientX, e.clientY);
+      return;
+    }
+    lastWcagEl = targetEl;
+
+    const rect = targetEl.getBoundingClientRect();
+    const isWcag = !!wcagEl;
+
+    // Update highlight box
+    highlight.style.display = '';
+    highlight.style.left = rect.left + 'px';
+    highlight.style.top = rect.top + 'px';
+    highlight.style.width = rect.width + 'px';
+    highlight.style.height = rect.height + 'px';
+
+    if (isWcag) {
+      highlight.style.border = '2px solid #3b82f6';
+      highlight.style.background = 'rgba(59,130,246,0.08)';
+    } else {
+      highlight.style.border = '2px dashed #64748b';
+      highlight.style.background = 'rgba(100,116,139,0.05)';
+    }
+
+    // Build tooltip content
+    const tag = targetEl.tagName.toLowerCase();
+    const role = getImplicitRole(targetEl) || '';
+    const accName = computeAccessibleName(targetEl);
+    const strategies = getResolverStrategies(targetEl);
+
+    let html = '';
+
+    // Row 1: Tag + Role + Category
+    html += '<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">';
+    html += '<span style="background:#1e293b;color:#94a3b8;padding:1px 6px;border-radius:3px;font-family:monospace;font-size:10px;">&lt;' + escapeHtml(tag) + '&gt;</span>';
+    if (role) {
+      html += '<span style="background:#1e3a5f;color:#60a5fa;padding:1px 6px;border-radius:3px;font-size:10px;">role=' + escapeHtml(role) + '</span>';
+    }
+    if (isWcag) {
+      const cat = getWcagCategory(targetEl);
+      html += '<span style="background:#064e3b;color:#6ee7b7;padding:1px 6px;border-radius:3px;font-size:10px;">' + escapeHtml(cat) + '</span>';
+    } else {
+      html += '<span style="background:#44403c;color:#a8a29e;padding:1px 6px;border-radius:3px;font-size:10px;">Non-WCAG</span>';
+    }
+    html += '</div>';
+
+    // Row 2: Accessible Name
+    if (accName) {
+      html += '<div style="color:#e2e8f0;margin-bottom:3px;">\u{1F3F7}\uFE0F <strong>Name:</strong> "' + escapeHtml(accName.substring(0, 80)) + (accName.length > 80 ? '\u2026' : '') + '"</div>';
+    } else if (isWcag) {
+      html += '<div style="color:#fca5a5;margin-bottom:3px;">\u26a0\uFE0F <strong>No accessible name</strong></div>';
+    }
+
+    // Row 3: Resolver strategies — how workflow steps can find this element
+    if (strategies.length > 0) {
+      html += '<div style="margin-top:2px;margin-bottom:2px;">';
+      html += '<div style="color:#94a3b8;font-size:9px;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:2px;">Findable via</div>';
+      var uniqueStrategies = strategies.filter(function(s) { return s.unique; });
+      var nonUniqueStrategies = strategies.filter(function(s) { return !s.unique; });
+
+      // Show unique strategies first (green)
+      for (var si = 0; si < uniqueStrategies.length; si++) {
+        var s = uniqueStrategies[si];
+        var displayVal = s.value.length > 50 ? s.value.substring(0, 50) + '\u2026' : s.value;
+        html += '<div style="color:#6ee7b7;margin-bottom:1px;font-size:10px;">';
+        html += '\u2705 <strong>' + escapeHtml(s.method) + ':</strong> ';
+        html += '<span style="font-family:monospace;font-size:10px;">' + escapeHtml(displayVal) + '</span>';
+        html += '</div>';
+      }
+
+      // Show non-unique strategies (yellow)
+      for (var si = 0; si < nonUniqueStrategies.length; si++) {
+        var s = nonUniqueStrategies[si];
+        var displayVal = s.value.length > 50 ? s.value.substring(0, 50) + '\u2026' : s.value;
+        var countLabel = s.matchCount > 0 ? ' (' + s.matchCount + ' matches)' : ' (not unique)';
+        html += '<div style="color:#fbbf24;margin-bottom:1px;font-size:10px;">';
+        html += '\u26a0\uFE0F <strong>' + escapeHtml(s.method) + ':</strong> ';
+        html += '<span style="font-family:monospace;font-size:10px;">' + escapeHtml(displayVal) + '</span>';
+        html += '<span style="font-size:9px;color:#a8a29e;">' + escapeHtml(countLabel) + '</span>';
+        html += '</div>';
+      }
+      html += '</div>';
+    } else if (isWcag) {
+      html += '<div style="color:#fca5a5;margin-bottom:3px;">\u274c <strong>No identifier</strong> — element cannot be located by selector, text, or attributes</div>';
+    }
+
+    // Row 4: Issues (only for WCAG elements)
+    if (isWcag) {
+      const issues = detectA11yIssues(targetEl, tag, role, accName, getWcagCategory(targetEl), null, null);
+      if (issues.length > 0) {
+        html += '<div style="margin-top:4px;display:flex;flex-wrap:wrap;gap:3px;">';
+        for (let i = 0; i < issues.length; i++) {
+          html += '<span style="background:#7f1d1d;color:#fca5a5;padding:1px 6px;border-radius:3px;font-size:10px;">' + escapeHtml(issues[i]) + '</span>';
+        }
+        html += '</div>';
+      }
+    }
+
+    tooltip.innerHTML = html;
+    tooltip.style.display = '';
+    positionTooltip(tooltip, targetEl, e.clientX, e.clientY);
+  });
+
+  // Click: pin element info and send to sidepanel
+  overlay.addEventListener('click', function(e) {
+    e.preventDefault();
+    e.stopPropagation();
+
+    if (!lastWcagEl) return;
+
+    var el = lastWcagEl;
+    var tag = el.tagName.toLowerCase();
+    var role = getImplicitRole(el) || '';
+    var accName = computeAccessibleName(el);
+    var isWcag = !!findNearestWcagElement(el);
+    var category = isWcag ? getWcagCategory(el) : null;
+    var strategies = getResolverStrategies(el);
+    var issues = isWcag ? detectA11yIssues(el, tag, role, accName, category, null, null) : [];
+
+    // Gather extra attributes that might be useful
+    var attrs = {};
+    if (el.id) attrs.id = el.id;
+    if (el.className && typeof el.className === 'string') attrs.class = el.className;
+    if (el.getAttribute('name')) attrs.name = el.getAttribute('name');
+    if (el.getAttribute('type')) attrs.type = el.getAttribute('type');
+    if (el.getAttribute('href')) attrs.href = el.getAttribute('href');
+    if (el.getAttribute('src')) attrs.src = el.getAttribute('src');
+    if (el.getAttribute('alt')) attrs.alt = el.getAttribute('alt');
+    if (el.getAttribute('title')) attrs.title = el.getAttribute('title');
+    if (el.getAttribute('placeholder')) attrs.placeholder = el.getAttribute('placeholder');
+    if (el.getAttribute('aria-label')) attrs['aria-label'] = el.getAttribute('aria-label');
+    if (el.getAttribute('data-testid')) attrs['data-testid'] = el.getAttribute('data-testid');
+
+    chrome.runtime.sendMessage({
+      type: 'wcag_inspect_clicked',
+      data: {
+        tag: tag,
+        role: role,
+        accName: accName,
+        isWcag: isWcag,
+        category: category,
+        strategies: strategies,
+        issues: issues,
+        attrs: attrs,
+        outerHtml: el.outerHTML.substring(0, 300)
+      }
+    });
+  });
+
+  // Escape key to exit
+  function onKeyDown(e) {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      stopWcagInspect();
+      chrome.runtime.sendMessage({ type: 'wcag_inspect_stopped' });
+      document.removeEventListener('keydown', onKeyDown, true);
+    }
+  }
+  document.addEventListener('keydown', onKeyDown, true);
+  overlay._keyHandler = onKeyDown;
+
+  document.body.appendChild(overlay);
+  _wcagInspectOverlay = overlay;
+
+  return { inspecting: true };
+}
+
+/**
+ * Position tooltip near the element, preferring above the highlight,
+ * falling back below, and keeping within viewport bounds.
+ */
+function positionTooltip(tooltip, el, mouseX, mouseY) {
+  const rect = el.getBoundingClientRect();
+  const tipRect = tooltip.getBoundingClientRect();
+  const pad = 8;
+
+  // Try above the element
+  let top = rect.top - tipRect.height - pad;
+  let left = Math.max(pad, Math.min(rect.left, window.innerWidth - tipRect.width - pad));
+
+  // If above doesn't fit, put below
+  if (top < pad) {
+    top = rect.bottom + pad;
+  }
+
+  // If still doesn't fit (element fills viewport), follow mouse
+  if (top + tipRect.height > window.innerHeight - pad) {
+    top = mouseY - tipRect.height - 16;
+    if (top < pad) top = mouseY + 16;
+  }
+
+  tooltip.style.left = left + 'px';
+  tooltip.style.top = top + 'px';
+}
+
+function escapeHtml(str) {
+  if (!str) return '';
+  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function stopWcagInspect() {
+  if (_wcagInspectOverlay) {
+    if (_wcagInspectOverlay._keyHandler) {
+      document.removeEventListener('keydown', _wcagInspectOverlay._keyHandler, true);
+    }
+    _wcagInspectOverlay.remove();
+    _wcagInspectOverlay = null;
+  }
+  return { inspecting: false };
+}
+
 // ── Recording Mode ─────────────────────────────────────────────
 //
 // When recording mode is active, DOM events (click, input, keydown,
@@ -2373,8 +3161,7 @@ function onRecordClick(e) {
     (el.closest && el.closest('input[type="file"]'));
   if (isFileInput) {
     const fileInput = el.tagName === 'INPUT' ? el : el.closest('input[type="file"]');
-    // Prevent the native file dialog from opening during recording
-    e.preventDefault();
+    // Let the native file dialog open — don't block it during recording
     sendRecordingEvent('file_dialog', fileInput || el, { similarElements, _originalEvent: e });
     return;
   }

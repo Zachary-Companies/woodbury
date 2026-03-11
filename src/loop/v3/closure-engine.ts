@@ -25,6 +25,8 @@ import { BeliefGraph } from './belief-graph.js';
 import { Reflector } from './reflector.js';
 import { SkillSynthesizer } from './skill-synthesizer.js';
 import { DelegateEngine } from './delegate-engine.js';
+import { SkillRegistry } from './skill-registry.js';
+import { SkillPolicyStore } from './skill-policy-store.js';
 import { ToolDescriptorRegistry } from './tool-descriptor.js';
 import { ConfidenceEngine } from './confidence-engine.js';
 import { StrategicPlanner } from './strategic-planner.js';
@@ -32,7 +34,7 @@ import { Critic } from './critic.js';
 import { SafetyGate } from './safety-gate.js';
 import { ActionSelector } from './action-selector.js';
 import { MetricsCollector } from './metrics.js';
-import { createSingleTaskGraph, decomposeGoal, isSimpleGoal } from './task-graph.js';
+import { createSingleTaskGraph, decomposeGoal, isSimpleGoal, topologicalSort } from './task-graph.js';
 import type {
   ClosureEngineConfig,
   ClosureEngineResult,
@@ -40,6 +42,7 @@ import type {
   EnginePhase,
   Goal,
   SuccessCriterion,
+  TaskGraph,
   TaskNode,
   TaskResult,
   Observation,
@@ -49,15 +52,137 @@ import type {
   ActionSpec,
   ActionType,
   ValidationPlan,
+  SkillSelection,
 } from './types.js';
 import { debugLog } from '../../debug-log.js';
-import { selectTools } from './tool-router.js';
+import { selectSkillExecution } from './tool-router.js';
+import { invalidateCompositionCache } from '../../workflow/loader.js';
 import { writeFileSync, mkdirSync, existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 
 function generateId(prefix: string): string {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+export function hasUnresolvedTasks(taskGraph: TaskGraph | null | undefined): boolean {
+  return !!taskGraph?.nodes?.some((node: TaskNode) => node.status !== 'done' && node.status !== 'skipped');
+}
+
+export function isContinuationRequest(message: string): boolean {
+  const normalized = message.trim().toLowerCase();
+  if (!normalized) return false;
+  return /^(continue|resume|keep going|carry on|pick up|finish|complete (it|this|that)|keep working)/.test(normalized)
+    || /\bcontinue\b|\bresume\b|\bkeep going\b|\bpick up where you left off\b/.test(normalized);
+}
+
+export function resumeTaskGraph(taskGraph: TaskGraph | null | undefined): TaskGraph | null {
+  if (!taskGraph) return null;
+  return {
+    executionOrder: [...taskGraph.executionOrder],
+    nodes: taskGraph.nodes.map((node: TaskNode) => {
+      let status = node.status;
+      if (status === 'running' || status === 'pending') {
+        status = 'ready';
+      } else if (status === 'failed' && node.retryCount < node.maxRetries) {
+        status = 'ready';
+      }
+      return {
+        ...node,
+        status,
+      };
+    }),
+  };
+}
+
+export function shouldResumeSession(
+  continuationMode: 'off' | 'summary' | 'resume' | undefined,
+  taskGraph: TaskGraph | null | undefined,
+  message: string,
+): boolean {
+  return (continuationMode || 'summary') === 'resume'
+    && hasUnresolvedTasks(taskGraph)
+    && isContinuationRequest(message);
+}
+
+export function extractFollowUpInstructions(message: string): string {
+  const normalized = message.trim();
+  if (!normalized) return '';
+
+  const stripped = normalized
+    .replace(/^(continue|resume|keep going|carry on|pick up where you left off|pick up|finish|keep working|complete (?:it|this|that))\b[\s,:-]*/i, '')
+    .replace(/^(?:on|with)\b[\s,:-]*/i, '')
+    .replace(/^(?:and|but|also|plus|then)\b[\s,:-]*/i, '')
+    .trim();
+
+  if (!stripped) return '';
+  if (/^(continue|resume|keep going|carry on|pick up where you left off)$/i.test(stripped)) {
+    return '';
+  }
+
+  return stripped;
+}
+
+export function isSummaryStyleRequest(message: string): boolean {
+  const normalized = message.trim().toLowerCase();
+  if (!normalized) return false;
+  return /\b(summary|summarize|recap|status update|what happened|what did you do|tell me what you accomplished|overview)\b/.test(normalized);
+}
+
+export function selectDirectUserFacingTaskOutput(
+  taskGraph: TaskGraph | null | undefined,
+  originalMessage: string,
+): string | null {
+  if (!taskGraph || taskGraph.nodes.length !== 1 || isSummaryStyleRequest(originalMessage)) {
+    return null;
+  }
+
+  const task = taskGraph.nodes[0];
+  if (task.status !== 'done') return null;
+
+  const output = task.result?.output?.trim();
+  if (!output) return null;
+
+  return output;
+}
+
+export function injectFollowUpTask(taskGraph: TaskGraph, goal: Goal, instructions: string): TaskGraph {
+  const followUpInstructions = extractFollowUpInstructions(instructions);
+  if (!followUpInstructions) return taskGraph;
+
+  const unresolvedTaskIds = taskGraph.nodes
+    .filter(node => node.status !== 'done' && node.status !== 'skipped')
+    .map(node => node.id);
+
+  const taskId = generateId('task');
+  const createdAt = new Date().toISOString();
+  const node: TaskNode = {
+    id: taskId,
+    goalId: goal.id,
+    title: followUpInstructions.length > 72 ? `${followUpInstructions.slice(0, 69)}...` : followUpInstructions,
+    description: `Apply this follow-up instruction to the in-progress work: ${followUpInstructions}`,
+    status: unresolvedTaskIds.length > 0 ? 'pending' : 'ready',
+    dependsOn: unresolvedTaskIds,
+    blocks: [],
+    maxRetries: 3,
+    retryCount: 0,
+    validators: [],
+    createdAt,
+    owner: 'engine',
+  };
+
+  const nodes = [...taskGraph.nodes.map(existing => ({ ...existing })), node];
+  for (const depId of unresolvedTaskIds) {
+    const dependency = nodes.find(existing => existing.id === depId);
+    if (dependency && !dependency.blocks.includes(taskId)) {
+      dependency.blocks.push(taskId);
+    }
+  }
+
+  return {
+    nodes,
+    executionOrder: topologicalSort(nodes),
+  };
 }
 
 /** MCP intelligence tools that return CompositionDocument JSON */
@@ -71,7 +196,7 @@ const COMPOSITION_TOOLS = new Set([
  * Auto-save a CompositionDocument returned by an MCP intelligence tool.
  * Writes to ~/.woodbury/workflows/{id}.composition.json so the dashboard can find it.
  */
-function autoSaveComposition(toolName: string, output: string): void {
+export function autoSaveComposition(toolName: string, output: string): void {
   try {
     const parsed = JSON.parse(output);
     // Validate it looks like a CompositionDocument
@@ -87,6 +212,7 @@ function autoSaveComposition(toolName: string, output: string): void {
     const fileId = parsed.id.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/^-+|-+$/g, '');
     const filePath = join(dir, `${fileId}.composition.json`);
     writeFileSync(filePath, JSON.stringify(parsed, null, 2), 'utf-8');
+    invalidateCompositionCache();
     debugLog.info('closure-engine', `Auto-saved composition: ${filePath}`, { id: parsed.id, name: parsed.name });
   } catch {
     debugLog.warn('closure-engine', 'Failed to auto-save composition from MCP tool result', { toolName });
@@ -264,6 +390,8 @@ export class ClosureEngine {
   private beliefGraph: BeliefGraph;
   private reflector: Reflector;
   private skillSynthesizer: SkillSynthesizer;
+  private skillRegistry: SkillRegistry;
+  private skillPolicyStore: SkillPolicyStore;
   private delegateEngine: DelegateEngine;
   private toolDescriptors: ToolDescriptorRegistry;
   private confidenceEngine: ConfidenceEngine;
@@ -278,6 +406,8 @@ export class ClosureEngine {
   private systemPrompt: string;
   private totalToolCalls: number = 0;
   private currentUserMessage: string = '';
+  private currentCarryoverContext: string = '';
+  private currentSkillSelection: SkillSelection | null = null;
 
   constructor(
     config: ClosureEngineConfig,
@@ -289,16 +419,18 @@ export class ClosureEngine {
     this.systemPrompt = systemPrompt;
     this.callbacks = config.callbacks || {};
     this.adapter = createProviderAdapter();
-    this.sessionId = `ce_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+    this.sessionId = config.sessionId || `ce_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
     this.stateManager = new StateManager(this.sessionId, config.workingDirectory);
     this.memoryStore = new MemoryStore();
+    this.skillPolicyStore = new SkillPolicyStore();
+    this.skillRegistry = new SkillRegistry(this.memoryStore, this.skillPolicyStore);
 
     // Milestone 2: Verification + Recovery
     this.verifier = new Verifier(
       toolRegistry, this.adapter, config.provider, config.model,
       config.workingDirectory, config.toolTimeout,
     );
-    this.recoveryEngine = new RecoveryEngine(this.stateManager, this.memoryStore);
+    this.recoveryEngine = new RecoveryEngine(this.stateManager, this.memoryStore, this.skillRegistry);
 
     // Milestone 3: Belief Graph
     this.beliefGraph = new BeliefGraph(this.stateManager);
@@ -350,57 +482,95 @@ export class ClosureEngine {
    */
   async run(userMessage: string, signal?: AbortSignal): Promise<ClosureEngineResult> {
     const startTime = Date.now();
+    this.stateManager.startNewTurn();
     this.totalToolCalls = 0;
     this.currentUserMessage = userMessage;
+    this.currentCarryoverContext = this.buildCarryoverContext();
+    const goalInput = this.currentCarryoverContext
+      ? `${userMessage}\n\n<prior_session_state>\n${this.currentCarryoverContext}\n</prior_session_state>`
+      : userMessage;
+    const existingState = this.stateManager.getState();
+    const shouldResume = shouldResumeSession(this.config.continuationMode, existingState.taskGraph, userMessage);
 
     debugLog.info('closure-engine', 'Run starting', {
       messageLength: userMessage.length,
       preview: userMessage.slice(0, 200),
+      hasCarryoverContext: !!this.currentCarryoverContext,
     });
 
     try {
       // ── Phase 1: Goal Setting ───────────────────────────
       this.setPhase('goal_setting');
-      const goal = await this.createGoalFromMessage(userMessage);
-      this.stateManager.setGoal(goal);
-      debugLog.info('closure-engine', 'Goal created', { objective: goal.objective });
-
-      // ── Phase 2: Decompose (via Strategic Planner) ──────
-      this.setPhase('decomposing');
-      let taskGraph;
-      if (isSimpleGoal(goal.objective)) {
-        taskGraph = createSingleTaskGraph(goal);
-        debugLog.info('closure-engine', 'Single-task graph (simple goal)');
-      } else {
-        // Use strategic planner for complex goals
-        const plans = await this.strategicPlanner.generatePlans(goal);
-        const bestPlan = this.strategicPlanner.selectBest(plans);
-        taskGraph = bestPlan.taskGraph;
-        debugLog.info('closure-engine', `Strategic plan selected: ${bestPlan.strategy}`, {
-          taskCount: taskGraph.nodes.length,
-          score: bestPlan.score.toFixed(3),
-          planCount: plans.length,
-        });
-
-        // Critique the selected plan
-        try {
-          const critique = await this.critic.critiquePlan(bestPlan, goal);
-          debugLog.info('closure-engine', `Plan critique: ${critique.recommendation}`, {
-            overallRisk: critique.overallRisk,
-            hiddenAssumptions: critique.hiddenAssumptions.length,
+      let goal: Goal;
+      let taskGraph: TaskGraph | null = null;
+      if (shouldResume && existingState.goal && existingState.taskGraph) {
+        goal = {
+          ...existingState.goal,
+          status: 'active' as Goal['status'],
+          updatedAt: new Date().toISOString(),
+          userRequest: [existingState.goal.userRequest, userMessage].filter(Boolean).join('\n\nFollow-up: '),
+        } as Goal;
+        taskGraph = resumeTaskGraph(existingState.taskGraph);
+        const followUpInstructions = extractFollowUpInstructions(userMessage);
+        if (taskGraph && followUpInstructions) {
+          taskGraph = injectFollowUpTask(taskGraph, goal, followUpInstructions);
+          debugLog.info('closure-engine', 'Injected follow-up task into resumed graph', {
+            instructions: followUpInstructions,
+            taskCount: taskGraph.nodes.length,
           });
-          if (critique.recommendation === 'abort') {
-            throw new Error(`Plan aborted by critic: ${critique.hiddenAssumptions[0] || 'unacceptable risk'}`);
-          }
-        } catch (critiqueError) {
-          if (critiqueError instanceof Error && critiqueError.message.startsWith('Plan aborted')) {
-            throw critiqueError;
-          }
-          // Non-fatal — proceed without critique
-          debugLog.debug('closure-engine', 'Plan critique skipped (non-fatal error)');
         }
+        if (taskGraph) {
+          taskGraph = this.strategicPlanner.applySkillTransitions(taskGraph, goal);
+        }
+        this.stateManager.setGoal(goal);
+        if (taskGraph) {
+          this.stateManager.setTaskGraph(taskGraph);
+        }
+        debugLog.info('closure-engine', 'Resuming unresolved task graph', {
+          objective: goal.objective,
+          taskCount: taskGraph?.nodes.length || 0,
+        });
+      } else {
+        goal = await this.createGoalFromMessage(goalInput);
+        this.stateManager.setGoal(goal);
+        debugLog.info('closure-engine', 'Goal created', { objective: goal.objective });
+
+        // ── Phase 2: Decompose (via Strategic Planner) ──────
+        this.setPhase('decomposing');
+        if (isSimpleGoal(goal.objective)) {
+          taskGraph = createSingleTaskGraph(goal);
+          debugLog.info('closure-engine', 'Single-task graph (simple goal)');
+        } else {
+          // Use strategic planner for complex goals
+          const plans = await this.strategicPlanner.generatePlans(goal);
+          const bestPlan = this.strategicPlanner.selectBest(plans);
+          taskGraph = bestPlan.taskGraph;
+          debugLog.info('closure-engine', `Strategic plan selected: ${bestPlan.strategy}`, {
+            taskCount: taskGraph.nodes.length,
+            score: bestPlan.score.toFixed(3),
+            planCount: plans.length,
+          });
+
+          // Critique the selected plan
+          try {
+            const critique = await this.critic.critiquePlan(bestPlan, goal);
+            debugLog.info('closure-engine', `Plan critique: ${critique.recommendation}`, {
+              overallRisk: critique.overallRisk,
+              hiddenAssumptions: critique.hiddenAssumptions.length,
+            });
+            if (critique.recommendation === 'abort') {
+              throw new Error(`Plan aborted by critic: ${critique.hiddenAssumptions[0] || 'unacceptable risk'}`);
+            }
+          } catch (critiqueError) {
+            if (critiqueError instanceof Error && critiqueError.message.startsWith('Plan aborted')) {
+              throw critiqueError;
+            }
+            // Non-fatal — proceed without critique
+            debugLog.debug('closure-engine', 'Plan critique skipped (non-fatal error)');
+          }
+        }
+        this.stateManager.setTaskGraph(taskGraph);
       }
-      this.stateManager.setTaskGraph(taskGraph);
 
       // ── Phase 3: Retrieve memories ──────────────────────
       const relevantMemories = this.memoryStore.query(goal.objective);
@@ -556,9 +726,14 @@ export class ClosureEngine {
 
       // Synthesize skills from this session (cross-session learning)
       const synthesisResult = this.skillSynthesizer.synthesize();
+      const skillUpdates = synthesisResult.learningProducts.filter(
+        (product): product is import('./types.js').LearningProductSkillUpdate => product.kind === 'skill_update',
+      );
+      const persistedSkillUpdates = this.skillPolicyStore.persistSuggestedUpdates(skillUpdates);
       debugLog.info('closure-engine', 'Skill synthesis complete', {
         memories: synthesisResult.memories.length,
         learningProducts: synthesisResult.learningProducts.length,
+        persistedSkillUpdates: persistedSkillUpdates.length,
       });
 
       // Decay old memory confidence (housekeeping)
@@ -597,9 +772,44 @@ export class ClosureEngine {
     // Build task-specific prompt with belief context from BeliefGraph
     const beliefContext = this.beliefGraph.toContextString();
 
+    const allDefs = this.toolRegistry.getAllDefinitions();
+    const previousSelection = this.currentSkillSelection;
+    const skillExecution = this.skillRegistry.select(
+      allDefs,
+      this.currentUserMessage,
+      task.description,
+      task.preferredSkill,
+      previousSelection,
+    );
+    this.currentSkillSelection = {
+      skill: skillExecution.skill,
+      reason: skillExecution.reason,
+      matchedKeywords: skillExecution.matchedKeywords,
+      allowedToolNames: skillExecution.allowedToolNames,
+      hardBannedToolNames: skillExecution.hardBannedToolNames,
+      escalationActive: skillExecution.escalationActive,
+      recoveryHints: skillExecution.recoveryHints,
+      previousSkillName: skillExecution.previousSkillName,
+      previousSkillReason: skillExecution.previousSkillReason,
+      handoffRationale: task.preferredSkillReason || skillExecution.handoffRationale,
+      taskId: task.id,
+      taskTitle: task.title || task.description,
+    };
+    this.callbacks.onSkillSelected?.(this.currentSkillSelection);
+
     const taskPrompt = [
       `## Current Task`,
       `${task.description}`,
+      '',
+      `## Selected Skill`,
+      `Name: ${skillExecution.skill.name}`,
+      `When to use: ${skillExecution.skill.whenToUse}`,
+      `Why it was selected: ${skillExecution.reason}`,
+      `Operating guidance: ${skillExecution.skill.promptGuidance}`,
+      skillExecution.skill.completionContract ? `Completion contract: ${skillExecution.skill.completionContract}` : '',
+      skillExecution.allowedToolNames.length > 0 ? `Allowed tools for this skill: ${skillExecution.allowedToolNames.join(', ')}` : '',
+      skillExecution.recoveryHints.length > 0 ? `Recovery hints: ${skillExecution.recoveryHints.join(' ')}` : '',
+      task.preferredSkillReason ? `Planner handoff: ${task.preferredSkillReason}` : '',
       '',
       task.validators.length > 0 ? `## Completion Criteria\n${task.validators.map(v => {
         switch (v.type) {
@@ -609,10 +819,11 @@ export class ClosureEngine {
           default: return `- ${v.type}`;
         }
       }).join('\n')}` : '',
+      this.currentCarryoverContext ? `## Prior Session State\n${this.currentCarryoverContext}` : '',
       beliefContext || '',
       failureWarnings ? `## Past Failure Warnings\n${failureWarnings}` : '',
       '',
-      'Complete this task using the available tools. When done, respond with a summary of what you accomplished.',
+      'Complete this task using the available tools. When done, provide the actual user-facing result for this task. Do not replace the requested answer with a meta-summary unless the task explicitly asks for a summary, recap, or status update.',
     ].filter(Boolean).join('\n');
 
     // Inner LLM loop for this task
@@ -620,11 +831,11 @@ export class ClosureEngine {
       { role: 'user', content: taskPrompt },
     ];
 
-    // Route tools: select relevant subset based on user message + task description
-    const allDefs = this.toolRegistry.getAllDefinitions();
-    const routingContext = `${this.currentUserMessage}\n${task.description}`;
-    const tools = selectTools(allDefs, routingContext);
-    debugLog.info('closure-engine', 'Tool routing', {
+    const tools = skillExecution.allowedTools;
+    debugLog.info('closure-engine', 'Skill routing', {
+      skill: skillExecution.skill.name,
+      reason: skillExecution.reason,
+      matchedKeywords: skillExecution.matchedKeywords,
       total: allDefs.length,
       selected: tools.length,
       names: tools.map(t => t.name).join(', '),
@@ -757,6 +968,26 @@ export class ClosureEngine {
             type: 'tool_result',
             tool_use_id: tc.id,
             content: `Tool "${tc.name}" is not available for this request. You MUST use one of the available tools: ${tools.map(t => t.name).join(', ')}`,
+            is_error: true,
+          });
+          continue;
+        }
+
+        if (this.currentSkillSelection && this.skillRegistry.isToolHardBanned(
+          this.currentSkillSelection.skill.name,
+          tc.name,
+          `${this.currentUserMessage}\n${task.description}`,
+        )) {
+          const blockedMessage = `Tool "${tc.name}" is hard-banned for skill "${this.currentSkillSelection.skill.name}" unless the user explicitly escalates to direct mutation.`;
+          debugLog.warn('closure-engine', blockedMessage, {
+            taskId: task.id,
+            skill: this.currentSkillSelection.skill.name,
+          });
+          this.callbacks.onToolEnd?.(tc.name, false, blockedMessage, 0);
+          toolResults.push({
+            type: 'tool_result',
+            tool_use_id: tc.id,
+            content: blockedMessage,
             is_error: true,
           });
           continue;
@@ -1044,6 +1275,17 @@ export class ClosureEngine {
       taskId: task.id,
       attempt: task.retryCount,
     });
+    this.callbacks.onRecovery?.({
+      taskId: task.id,
+      taskTitle: task.title || task.description,
+      strategyType: strategy.type,
+      attempt: task.retryCount,
+      currentSkill: task.preferredSkill,
+      targetSkill: strategy.type === 'alternative_skill' ? strategy.fallbackSkill : undefined,
+      reason: strategy.type === 'ask_user'
+        ? strategy.question
+        : ('reason' in strategy ? strategy.reason : strategy.type),
+    });
 
     // Reflect on failure
     if (task.retryCount >= 2) {
@@ -1109,7 +1351,31 @@ export class ClosureEngine {
 
       case 'alternative_tool':
         // Retry — the recovery engine has logged the alternative tool suggestion
+        if (task.preferredSkill && this.skillRegistry.isToolHardBanned(
+          task.preferredSkill,
+          strategy.fallbackTool,
+          `${this.currentUserMessage}\n${task.description}`,
+        )) {
+          this.stateManager.updateTaskStatus(task.id, 'failed', {
+            ...result,
+            error: `Recovery fallback ${strategy.fallbackTool} is hard-banned for skill ${task.preferredSkill} without explicit escalation.`,
+          });
+        } else if (task.retryCount < task.maxRetries) {
+          this.stateManager.updateTaskStatus(task.id, 'ready');
+        } else {
+          this.stateManager.updateTaskStatus(task.id, 'failed', result);
+        }
+        break;
+
+      case 'alternative_skill':
         if (task.retryCount < task.maxRetries) {
+          task.preferredSkill = strategy.fallbackSkill;
+          task.preferredSkillReason = strategy.reason;
+          debugLog.info('closure-engine', 'Switching task to alternate skill', {
+            taskId: task.id,
+            fallbackSkill: strategy.fallbackSkill,
+            reason: strategy.reason,
+          });
           this.stateManager.updateTaskStatus(task.id, 'ready');
         } else {
           this.stateManager.updateTaskStatus(task.id, 'failed', result);
@@ -1187,6 +1453,11 @@ export class ClosureEngine {
       return 'No tasks were executed.';
     }
 
+    const directOutput = selectDirectUserFacingTaskOutput(taskGraph, originalMessage);
+    if (directOutput) {
+      return directOutput;
+    }
+
     const taskSummary = taskGraph.nodes.map(n => {
       const status = n.status === 'done' ? 'completed' : n.status === 'skipped' ? 'skipped' : 'failed';
       const output = n.result?.output ? `: ${n.result.output.slice(0, 200)}` : '';
@@ -1199,10 +1470,15 @@ export class ClosureEngine {
         model: this.config.model,
         messages: [
           { role: 'system', content: this.systemPrompt },
-          { role: 'user', content: originalMessage },
+          {
+            role: 'user',
+            content: this.currentCarryoverContext
+              ? `${originalMessage}\n\n<prior_session_state>\n${this.currentCarryoverContext}\n</prior_session_state>`
+              : originalMessage,
+          },
           {
             role: 'assistant',
-            content: `I've completed the following tasks:\n\n${taskSummary}\n\nLet me summarize what was accomplished.`,
+            content: `I've completed the following tasks:\n\n${taskSummary}\n\nNow answer the user directly using the completed task outputs. Preserve any already-correct user-facing wording from the work above. Do not collapse the answer into a meta-summary unless the user explicitly asked for a summary, recap, or status update.`,
           },
         ],
         maxTokens: 1000,
@@ -1251,6 +1527,60 @@ export class ClosureEngine {
     this.stateManager.setPhase(phase);
     this.callbacks.onPhaseChange?.(from, phase);
     debugLog.debug('closure-engine', `Phase: ${from} → ${phase}`);
+  }
+
+  private buildCarryoverContext(): string {
+    const state = this.stateManager.getState();
+    const hasPriorState = !!(
+      state.goal ||
+      state.taskGraph?.nodes?.length ||
+      state.observations?.length ||
+      state.reflections?.length ||
+      state.beliefs?.length
+    );
+
+    if (!hasPriorState) return '';
+
+    const previousGoal = state.goal
+      ? `Previous goal: ${state.goal.objective} (${state.goal.status})`
+      : '';
+
+    const completedTasks = (state.taskGraph?.nodes || [])
+      .filter(node => node.status === 'done' || node.status === 'skipped')
+      .slice(-5)
+      .map(node => `- ${node.title || node.description} [${node.status}]`)
+      .join('\n');
+
+    const pendingTasks = (state.taskGraph?.nodes || [])
+      .filter(node => node.status !== 'done' && node.status !== 'skipped')
+      .slice(0, 3)
+      .map(node => `- ${node.title || node.description} [${node.status}]`)
+      .join('\n');
+
+    const beliefs = state.beliefs
+      .filter(belief => belief.status === 'active' || belief.status === 'supported' || belief.status === 'verified')
+      .sort((a, b) => b.confidence - a.confidence)
+      .slice(0, 5)
+      .map(belief => `- ${belief.claim} (${Math.round(belief.confidence * 100)}% confidence)`)
+      .join('\n');
+
+    const recentObservations = state.observations
+      .slice(-4)
+      .map(obs => `- ${obs.toolName}: ${obs.result.slice(0, 160)}`)
+      .join('\n');
+
+    const reflection = state.reflections.length > 0
+      ? state.reflections[state.reflections.length - 1].assessment
+      : '';
+
+    return [
+      previousGoal,
+      completedTasks ? `Completed tasks:\n${completedTasks}` : '',
+      pendingTasks ? `Open or failed tasks:\n${pendingTasks}` : '',
+      beliefs ? `Working beliefs:\n${beliefs}` : '',
+      recentObservations ? `Recent observations:\n${recentObservations}` : '',
+      reflection ? `Latest reflection: ${reflection}` : '',
+    ].filter(Boolean).join('\n\n');
   }
 
   /**

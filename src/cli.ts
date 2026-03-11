@@ -11,7 +11,7 @@ import path from 'path';
 import { existsSync, promises as fs } from 'fs';
 import { homedir } from 'os';
 import { ExtensionManager } from './extension-manager.js';
-import { EXTENSIONS_DIR, discoverExtensions, parseEnvFile } from './extension-loader.js';
+import { EXTENSIONS_DIR, discoverExtensions, parseEnvFile, ExtensionRegistry, migrateToRegistry, syncBundledExtensions } from './extension-loader.js';
 import { scaffoldExtension, initGitRepo, ensureGhInstalled, isToolInstalled } from './extension-scaffold.js';
 import { startDashboard, type DashboardHandle } from './config-dashboard.js';
 import { startGoLinks, addRoute, removeRoute, getRoutes, setupHosts, teardownSetup, isHostsConfigured, GO_HOSTNAME, type GoLinksHandle } from './go-links.js';
@@ -78,20 +78,37 @@ program
       if (!config.noExtensions) {
         debugLog.section('EXTENSIONS');
         const doneExt = debugLog.time('extensions', 'Loading extensions');
+
+        // Load the registry (instant JSON read)
+        const registry = new ExtensionRegistry();
+        await registry.load();
+
+        // First run after upgrade: migrate from disk discovery
+        if (registry.isEmpty) {
+          await migrateToRegistry(registry);
+        }
+
+        // Sync bundled extensions (fast — only checks bundled dir)
+        await syncBundledExtensions(registry);
+
         extensionManager = new ExtensionManager(
+          registry,
           config.workingDirectory || process.cwd(),
           config.verbose || false
         );
-        const { loaded, errors } = await extensionManager.loadAll();
-        doneExt();
-        debugLog.info('extensions', 'Extension load complete', { loaded, errorCount: errors.length });
-        if (loaded.length > 0 && config.verbose) {
-          console.log(`  ${icons.success}  Extensions: ${loaded.join(', ')}`);
-        }
-        for (const e of errors) {
-          debugLog.error('extensions', `Extension "${e.name}" failed to load`, { error: e.error });
-          console.warn(`  ${icons.warning}  Extension "${e.name}" failed: ${e.error}`);
-        }
+
+        // Non-blocking: fire and forget, log results when done
+        extensionManager.loadAll().then(({ loaded, errors }) => {
+          doneExt();
+          debugLog.info('extensions', 'Extension load complete', { loaded, errorCount: errors.length });
+          if (loaded.length > 0 && config.verbose) {
+            console.log(`  ${icons.success}  Extensions: ${loaded.join(', ')}`);
+          }
+          for (const e of errors) {
+            debugLog.error('extensions', `Extension "${e.name}" failed to load`, { error: e.error });
+            console.warn(`  ${icons.warning}  Extension "${e.name}" failed: ${e.error}`);
+          }
+        });
       } else {
         debugLog.info('startup', 'Extensions disabled via --no-extensions');
       }
@@ -247,23 +264,29 @@ ext
   .command('list')
   .description('List installed extensions')
   .action(async () => {
-    const manifests = await discoverExtensions();
-    if (manifests.length === 0) {
+    const registry = new ExtensionRegistry();
+    await registry.load();
+    if (registry.isEmpty) {
+      await migrateToRegistry(registry);
+    }
+    const entries = registry.getAll();
+    if (entries.length === 0) {
       console.log(colors.muted('No extensions installed.'));
       console.log(colors.muted(`  Install from npm:  woodbury ext install <package-name>`));
       console.log(colors.muted(`  Create new:        woodbury ext create <name>`));
       console.log(colors.muted(`  Local directory:   ${EXTENSIONS_DIR}/<name>/`));
       return;
     }
-    console.log(colors.primary.bold(`Extensions (${manifests.length}):`));
+    console.log(colors.primary.bold(`Extensions (${entries.length}):`));
     console.log();
-    for (const m of manifests) {
-      console.log(`  ${colors.secondary(m.name)} ${colors.muted(`v${m.version}`)} ${colors.muted(`[${m.source}]`)}`);
-      if (m.description) {
-        console.log(`    ${colors.muted(m.description)}`);
+    for (const e of entries) {
+      const enabledLabel = e.enabled ? '' : colors.warning(' [disabled]');
+      console.log(`  ${colors.secondary(e.name)} ${colors.muted(`v${e.version}`)} ${colors.muted(`[${e.source}]`)}${enabledLabel}`);
+      if (e.description) {
+        console.log(`    ${colors.muted(e.description)}`);
       }
-      if (m.provides.length > 0) {
-        console.log(`    ${colors.muted('Provides: ' + m.provides.join(', '))}`);
+      if (e.provides.length > 0) {
+        console.log(`    ${colors.muted('Provides: ' + e.provides.join(', '))}`);
       }
     }
   });
@@ -375,13 +398,17 @@ ext
   .command('configure <name>')
   .description('View and configure extension environment variables')
   .action(async (name: string) => {
-    const manifests = await discoverExtensions();
-    const manifest = manifests.find((m) => m.name === name);
+    const reg = new ExtensionRegistry();
+    await reg.load();
+    if (reg.isEmpty) await migrateToRegistry(reg);
+    const entry = reg.get(name);
+    const manifest = entry ? ExtensionRegistry.toManifest(entry) : undefined;
     if (!manifest) {
       console.error(`${icons.error}  Extension "${name}" not found.`);
-      if (manifests.length > 0) {
+      const allEntries = reg.getAll();
+      if (allEntries.length > 0) {
         console.log(colors.muted('  Available extensions:'));
-        for (const m of manifests) {
+        for (const m of allEntries) {
           console.log(colors.muted(`    ${m.name}`));
         }
       }

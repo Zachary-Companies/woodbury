@@ -47,10 +47,10 @@ async function startBackend() {
   const distDir = path.join(__dirname, '..', 'dist');
   console.log('[electron] distDir:', distDir);
 
-  console.log('[electron] Requiring config-dashboard...');
+  console.log('[electron] Requiring modules...');
   const { startDashboard } = require(path.join(distDir, 'config-dashboard'));
-  console.log('[electron] Requiring extension-manager...');
   const { ExtensionManager } = require(path.join(distDir, 'extension-manager'));
+  const { ExtensionRegistry, migrateToRegistry, syncBundledExtensions } = require(path.join(distDir, 'extension-loader'));
   console.log('[electron] Modules loaded.');
 
   // Use home directory as a stable working directory for the Electron app.
@@ -58,8 +58,22 @@ async function startBackend() {
   // which causes workflow/composition discovery to fail when looking in project-local dirs.
   const workDir = os.homedir();
 
-  // Create extension manager but start dashboard immediately (don't wait for extensions)
-  const extensionManager = new ExtensionManager(workDir, false);
+  // Load extension registry (instant JSON read — no disk scanning)
+  console.log('[electron] Loading extension registry...');
+  const registry = new ExtensionRegistry();
+  await registry.load();
+
+  // One-time migration: if registry is empty, populate from existing extensions on disk
+  if (registry.isEmpty) {
+    console.log('[electron] Registry empty — running one-time migration...');
+    await migrateToRegistry(registry);
+  }
+
+  // Sync bundled extensions (fast — only checks 2-3 items)
+  await syncBundledExtensions(registry);
+
+  // Create extension manager with registry
+  const extensionManager = new ExtensionManager(registry, workDir, false);
 
   // Start the dashboard HTTP server right away
   console.log('[electron] Starting dashboard on port 9001...');

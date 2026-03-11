@@ -292,7 +292,9 @@ describe('Dashboard API', () => {
         `${dashboard.url}/api/extensions`
       );
       expect(status).toBe(200);
-      expect(body.extensions).toEqual([]);
+      // Filter out bundled extensions (shipped with Woodbury) — we only test user-installed ones
+      const userExtensions = body.extensions.filter((e: any) => e.source !== 'bundled');
+      expect(userExtensions).toEqual([]);
     });
 
     it('should return extensions with env var status', async () => {
@@ -308,9 +310,11 @@ describe('Dashboard API', () => {
         `${dashboard.url}/api/extensions`
       );
       expect(status).toBe(200);
-      expect(body.extensions).toHaveLength(1);
+      // Filter to just user-installed extensions for test assertions
+      const userExtensions = body.extensions.filter((e: any) => e.source !== 'bundled');
+      expect(userExtensions).toHaveLength(1);
 
-      const ext = body.extensions[0];
+      const ext = userExtensions[0];
       expect(ext.name).toBe('social');
       expect(ext.vars).toHaveLength(2);
 

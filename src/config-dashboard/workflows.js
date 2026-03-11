@@ -17,6 +17,10 @@ let workflowTrainingPolls = {}; // workflowId -> intervalId
 // { workflowId: { varName: value, ... } }
 var runVarValues = {};
 
+// Batch step selection state
+var selectedStepPaths = new Set();
+var lastCheckedStepPath = null; // for shift-click range select
+
 function saveRunVarValues(wfId) {
   if (!wfId) return;
   var vals = {};
@@ -75,6 +79,56 @@ function extractStepVariables(step) {
     if (names.indexOf(name) === -1) names.push(name);
   }
   return names;
+}
+
+/**
+ * Collect ALL variable names referenced across every step (recursively).
+ * Checks both {{varName}} template patterns and outputVariable fields.
+ */
+function collectAllReferencedVariables(steps) {
+  var names = [];
+  var pattern = /\{\{([^}]+)\}\}/g;
+
+  function walkSteps(arr) {
+    if (!arr) return;
+    for (var i = 0; i < arr.length; i++) {
+      var step = arr[i];
+      // Extract {{var}} references from entire step JSON
+      var json = JSON.stringify(step);
+      var match;
+      while ((match = pattern.exec(json)) !== null) {
+        var name = match[1].trim().split('.')[0].split('[')[0];
+        if (names.indexOf(name) === -1) names.push(name);
+      }
+      // Also check outputVariable (capture_download, file_dialog, etc.)
+      if (step.outputVariable && names.indexOf(step.outputVariable) === -1) {
+        names.push(step.outputVariable);
+      }
+      // Recurse into nested sub-steps
+      if (step.thenSteps) walkSteps(step.thenSteps);
+      if (step.elseSteps) walkSteps(step.elseSteps);
+      if (step.steps) walkSteps(step.steps);
+      if (step.trySteps) walkSteps(step.trySteps);
+      if (step.catchSteps) walkSteps(step.catchSteps);
+    }
+  }
+
+  walkSteps(steps);
+  return names;
+}
+
+/**
+ * Remove variables from wf.variables that are no longer referenced
+ * by any step. Returns the number of variables removed.
+ */
+function removeOrphanedVariables(wf) {
+  if (!wf.variables || wf.variables.length === 0) return 0;
+  var referenced = collectAllReferencedVariables(wf.steps || []);
+  var before = wf.variables.length;
+  wf.variables = wf.variables.filter(function(v) {
+    return referenced.indexOf(v.name) !== -1;
+  });
+  return before - wf.variables.length;
 }
 
 /**
@@ -955,6 +1009,16 @@ function renderStepEditor(step, idx, totalSteps) {
       html += '<span class="wf-se-label">Wait ms</span>';
       html += '<input class="wf-se-input wf-se-wait-ms" type="number" value="' + escAttr(String(step.waitMs || '')) + '" placeholder="2000" style="max-width:100px;">';
       html += '</div>';
+      var navSS = step.selectorSource || {};
+      html += '<div class="wf-se-row">';
+      html += '<span class="wf-se-label">Selector</span>';
+      html += '<input class="wf-se-input wf-se-nav-selector" type="text" value="' + escAttr(navSS.selector || '') + '" placeholder="CSS selector to extract URL from">';
+      html += '</div>';
+      html += '<div class="wf-se-row">';
+      html += '<span class="wf-se-label">Attribute</span>';
+      html += '<input class="wf-se-input wf-se-nav-attribute" type="text" value="' + escAttr(navSS.attribute || '') + '" placeholder="href" style="max-width:140px;">';
+      html += '<span style="font-size:0.65rem;color:#64748b;margin-left:6px;">When set, extracts URL from element attribute</span>';
+      html += '</div>';
       break;
 
     case 'click':
@@ -1357,6 +1421,15 @@ function collectStepEditorValues(editor, step) {
       var waitInput = editor.querySelector('.wf-se-wait-ms');
       if (urlInput) updated.url = urlInput.value;
       if (waitInput) updated.waitMs = parseInt(waitInput.value) || 0;
+      var navSelInput = editor.querySelector('.wf-se-nav-selector');
+      var navAttrInput = editor.querySelector('.wf-se-nav-attribute');
+      var navSelVal = navSelInput ? navSelInput.value.trim() : '';
+      var navAttrVal = navAttrInput ? navAttrInput.value.trim() : '';
+      if (navSelVal) {
+        updated.selectorSource = { selector: navSelVal, attribute: navAttrVal || 'href' };
+      } else {
+        delete updated.selectorSource;
+      }
       break;
     }
     case 'click': {
@@ -2135,7 +2208,12 @@ async function pollRecordingStatus() {
 
 function buildStepLabel(step, idx) {
   switch (step.type) {
-    case 'navigate': return 'Navigate to ' + (step.url || 'URL');
+    case 'navigate':
+      if (step.selectorSource && step.selectorSource.selector) {
+        var selShort = step.selectorSource.selector.length > 30 ? step.selectorSource.selector.slice(0, 30) + '...' : step.selectorSource.selector;
+        return 'Navigate to [' + selShort + '].' + (step.selectorSource.attribute || 'href');
+      }
+      return 'Navigate to ' + (step.url || 'URL');
     case 'click': return 'Click ' + ((step.target && step.target.textContent) || (step.target && step.target.selector) || 'element');
     case 'type': return 'Type "' + truncate(step.value || '', 30) + '"';
     case 'wait': return step.condition && step.condition.type === 'delay' ? 'Wait ' + (step.condition.ms || 0) + 'ms' : 'Wait for element';
@@ -2337,6 +2415,10 @@ function renderWorkflowDetail(wf, filePath, source) {
   // Save any in-progress variable values before re-rendering
   saveRunVarValues(wf.id);
 
+  // Clear batch selection on re-render
+  selectedStepPaths.clear();
+  lastCheckedStepPath = null;
+
   // Store context for delegated handlers
   _wfCurrentDetail = { wf: wf, filePath: filePath, source: source };
 
@@ -2427,7 +2509,9 @@ function renderStepList(steps, pathPrefix) {
     var icon = STEP_ICONS[step.type] || '&#x25cf;';
     var isSmart = step.type === 'wait' && step.condition && step.condition.type !== 'delay';
 
-    html += '<div class="wf-step" data-step-idx="' + dataPath + '">';
+    var isSelected = selectedStepPaths.has(dataPath);
+    html += '<div class="wf-step' + (isSelected ? ' wf-step-selected' : '') + '" data-step-idx="' + dataPath + '">';
+    html += '<input type="checkbox" class="wf-step-check" data-step-path="' + dataPath + '"' + (isSelected ? ' checked' : '') + ' />';
     html += '<span class="wf-step-num">' + (i + 1) + '</span>';
     html += '<span class="wf-step-icon">' + icon + '</span>';
     html += '<span class="wf-step-label">' + escHtml(step.label || step.id) + '</span>';
@@ -2936,6 +3020,11 @@ function renderVisualView(wf, source) {
   html += '<div class="wf-section-header" style="display:flex;align-items:center;gap:0.5rem;">Steps (' + wf.steps.length + ')' + helpIcon('workflows-steps');
   html += '<button class="wf-collapse-nav-btn" id="wf-btn-collapse-nav" style="margin-left:auto;font-size:0.68rem;padding:0.2rem 0.55rem;background:#1e293b;color:#94a3b8;border:1px solid #334155;border-radius:4px;cursor:pointer;" title="Collapse consecutive keyboard steps into keyboard_nav steps">&#x1f9ed; Collapse Nav</button>';
   html += '<button id="wf-btn-rerecord" style="font-size:0.68rem;padding:0.2rem 0.55rem;background:#1e293b;color:#f87171;border:1px solid #7f1d1d;border-radius:4px;cursor:pointer;" title="Re-record all steps for this workflow">&#x23fa; Re-record</button>';
+  html += '<div class="wf-batch-bar" id="wf-batch-bar" style="display:none;">';
+  html += '<span class="wf-batch-count" id="wf-batch-count">0 selected</span>';
+  html += '<button class="wf-batch-delete" id="wf-batch-delete">&#x1f5d1; Delete Selected</button>';
+  html += '<button class="wf-batch-clear" id="wf-batch-clear">Clear</button>';
+  html += '</div>';
   html += '</div>';
   html += '<div id="wf-rerecord-controls" style="display:none;margin-bottom:0.75rem;"></div>';
   // Re-record element mode selector (shown during re-recording setup)
@@ -3992,10 +4081,72 @@ function wireUpHandlers(wf, filePath, source) {
   // ── Step editor expand/collapse + actions ─────────────────
   var container = document.querySelector('#wf-detail-content') || document;
 
+  // ── Batch selection helpers ───────────────────────────────
+
+  function getAllStepPaths() {
+    var paths = [];
+    container.querySelectorAll('.wf-step[data-step-idx]').forEach(function(row) {
+      paths.push(row.getAttribute('data-step-idx'));
+    });
+    return paths;
+  }
+
+  function updateBatchBar() {
+    var bar = document.getElementById('wf-batch-bar');
+    var count = document.getElementById('wf-batch-count');
+    if (!bar) return;
+    if (selectedStepPaths.size > 0) {
+      bar.style.display = 'flex';
+      count.textContent = selectedStepPaths.size + ' selected';
+    } else {
+      bar.style.display = 'none';
+    }
+  }
+
+  function toggleStepSelection(path, checked) {
+    if (checked) {
+      selectedStepPaths.add(path);
+    } else {
+      selectedStepPaths.delete(path);
+    }
+    var row = container.querySelector('.wf-step[data-step-idx="' + path + '"]');
+    if (row) {
+      row.classList.toggle('wf-step-selected', checked);
+      var cb = row.querySelector('.wf-step-check');
+      if (cb) cb.checked = checked;
+    }
+    updateBatchBar();
+  }
+
   container.querySelectorAll('.wf-step[data-step-idx]').forEach(function(row) {
     row.addEventListener('click', function(e) {
       // Don't toggle if clicking inside an editor
       if (e.target.closest('.wf-step-editor')) return;
+
+      // Handle checkbox clicks — toggle selection, don't expand/collapse
+      if (e.target.classList.contains('wf-step-check')) {
+        var path = e.target.getAttribute('data-step-path');
+        var checked = e.target.checked;
+
+        // Shift-click range select
+        if (e.shiftKey && lastCheckedStepPath !== null) {
+          var allPaths = getAllStepPaths();
+          var startIdx = allPaths.indexOf(lastCheckedStepPath);
+          var endIdx = allPaths.indexOf(path);
+          if (startIdx !== -1 && endIdx !== -1) {
+            var lo = Math.min(startIdx, endIdx);
+            var hi = Math.max(startIdx, endIdx);
+            for (var si = lo; si <= hi; si++) {
+              toggleStepSelection(allPaths[si], true);
+            }
+          }
+        } else {
+          toggleStepSelection(path, checked);
+        }
+        lastCheckedStepPath = path;
+        return; // Don't expand/collapse
+      }
+
       var pathStr = row.getAttribute('data-step-idx');
       var editor = container.querySelector('.wf-step-editor[data-step-idx="' + pathStr + '"]');
       if (!editor) return;
@@ -4009,6 +4160,73 @@ function wireUpHandlers(wf, filePath, source) {
       }
     });
   });
+
+  // ── Batch action handlers ──────────────────────────────────
+
+  var batchDeleteBtn = document.getElementById('wf-batch-delete');
+  if (batchDeleteBtn) {
+    batchDeleteBtn.addEventListener('click', async function() {
+      var count = selectedStepPaths.size;
+      if (count === 0) return;
+      if (!confirm('Delete ' + count + ' step' + (count > 1 ? 's' : '') + '? This cannot be undone.')) return;
+
+      // Sort paths descending so splicing doesn't shift subsequent indices.
+      // Group by parent array to handle nested paths correctly.
+      var paths = Array.from(selectedStepPaths);
+
+      // Sort descending: for paths at same nesting level, higher indices first.
+      // For different nesting levels, deeper paths first, then shallower.
+      paths.sort(function(a, b) {
+        var aParts = a.split('.');
+        var bParts = b.split('.');
+        // Compare by depth first (deeper = process first), then by index descending
+        if (aParts.length !== bParts.length) return bParts.length - aParts.length;
+        // Same depth — compare rightmost index descending
+        var aIdx = parseInt(aParts[aParts.length - 1]);
+        var bIdx = parseInt(bParts[bParts.length - 1]);
+        return bIdx - aIdx;
+      });
+
+      for (var di = 0; di < paths.length; di++) {
+        var r = resolveStepPath(wf.steps, paths[di]);
+        if (r) {
+          r.array.splice(r.index, 1);
+        }
+      }
+
+      var varsRemoved = removeOrphanedVariables(wf);
+      batchDeleteBtn.disabled = true;
+      batchDeleteBtn.textContent = 'Deleting...';
+      try {
+        await saveWorkflow(wf.id, wf);
+        var msg = 'Deleted ' + count + ' step' + (count > 1 ? 's' : '');
+        if (varsRemoved > 0) msg += ', removed ' + varsRemoved + ' unused variable' + (varsRemoved > 1 ? 's' : '');
+        toast(msg, 'success');
+        selectedStepPaths.clear();
+        lastCheckedStepPath = null;
+        renderWorkflowDetail(wf, filePath, source);
+      } catch (err) {
+        toast('Batch delete failed: ' + err.message, 'error');
+        batchDeleteBtn.disabled = false;
+        batchDeleteBtn.textContent = '🗑 Delete Selected';
+      }
+    });
+  }
+
+  var batchClearBtn = document.getElementById('wf-batch-clear');
+  if (batchClearBtn) {
+    batchClearBtn.addEventListener('click', function() {
+      selectedStepPaths.clear();
+      lastCheckedStepPath = null;
+      container.querySelectorAll('.wf-step-selected').forEach(function(r) {
+        r.classList.remove('wf-step-selected');
+      });
+      container.querySelectorAll('.wf-step-check').forEach(function(cb) {
+        cb.checked = false;
+      });
+      updateBatchBar();
+    });
+  }
 
   // Wire step editor action buttons
   container.querySelectorAll('.wf-step-editor[data-step-idx]').forEach(function(editor) {
@@ -4069,10 +4287,13 @@ function wireUpHandlers(wf, filePath, source) {
         var label = r.step ? (r.step.label || r.step.id || 'this step') : 'this step';
         if (!confirm('Delete step "' + label + '"? This cannot be undone.')) return;
         r.array.splice(r.index, 1);
+        var varsRemoved = removeOrphanedVariables(wf);
         deleteBtn.disabled = true;
         try {
           await saveWorkflow(wf.id, wf);
-          toast('Step deleted', 'success');
+          var msg = 'Step deleted';
+          if (varsRemoved > 0) msg += ', removed ' + varsRemoved + ' unused variable' + (varsRemoved > 1 ? 's' : '');
+          toast(msg, 'success');
           renderWorkflowDetail(wf, filePath, source);
         } catch (err) {
           toast('Delete failed: ' + err.message, 'error');

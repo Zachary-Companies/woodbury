@@ -2,7 +2,7 @@ import chalk from 'chalk';
 import { SlashCommand, SlashCommandContext } from './types';
 import { promises as fs } from 'fs';
 import path from 'path';
-import { discoverExtensions, parseEnvFile } from './extension-loader.js';
+import { discoverExtensions, parseEnvFile, ExtensionRegistry } from './extension-loader.js';
 import { debugLog } from './debug-log.js';
 import { discoverWorkflows } from './workflow/loader.js';
 import { WorkflowRecorder } from './workflow/recorder.js';
@@ -155,8 +155,12 @@ export const slashCommands: SlashCommand[] = [
         ctx.print(chalk.green.bold('Extensions'));
         
         try {
-          const manifests = await discoverExtensions();
-          
+          // Use registry if available, fall back to disk discovery
+          const entries = ctx.extensionManager?.registryInstance?.getAll();
+          const manifests = entries && entries.length > 0
+            ? entries.map((e: any) => ExtensionRegistry.toManifest(e))
+            : await discoverExtensions();
+
           if (manifests.length === 0) {
             ctx.print(chalk.gray('  No extensions installed.'));
             ctx.print(chalk.gray('  Install: woodbury ext install <package-name>'));

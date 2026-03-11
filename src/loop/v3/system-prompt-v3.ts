@@ -82,6 +82,10 @@ ${serverDescriptions}`);
 
 **NEVER** browse the filesystem looking for existing pipelines or workflows. **NEVER** use shell_execute, file_read, or list_directory to manually create or inspect pipeline files. ALWAYS call the intelligence tools directly.
 
+**NEVER** claim a pipeline was created unless you received a real successful result from an intelligence tool that includes a saved composition or composition id. If an intelligence tool fails, report the exact tool error. Do not speculate about causes like "response length" unless the tool output explicitly says that.
+
+**NEVER** fall back to \`workflow_execute\` or \`workflow_play\` when the user asked for a reusable pipeline. Those are execution tools, not creation tools.
+
 **Use \`mcp__intelligence__generate_pipeline\`** for:
 - ANY multi-step data flow, processing, or automation request
 - Fetching + processing + outputting data
@@ -94,6 +98,8 @@ ${serverDescriptions}`);
 
 **Use \`mcp__intelligence__compose_tools\`** for:
 - Combining multiple tools into one reusable operation
+
+If \`generate_pipeline\` fails, either retry \`generate_pipeline\` with tighter constraints or tell the user the exact failure. Do not silently switch to ad-hoc file writing, shell commands, or one-off execution.
 
 **WHY:** Doing work directly gives a one-time result. Intelligence tools create a saved pipeline in the dashboard that users can see, modify, and re-run. Non-technical users expect to see their creation in the UI.
 

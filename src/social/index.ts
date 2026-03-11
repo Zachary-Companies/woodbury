@@ -7,6 +7,7 @@
 // Types
 export type {
   PostStatus,
+  BuiltInPlatform,
   PlatformName,
   PostImage,
   PostContent,
@@ -43,6 +44,11 @@ export {
   getConfig,
   updateConfig,
   listConnectors,
+  getConnector,
+  saveConnector,
+  deleteConnector,
+  savePlatformScript,
+  loadPlatformScript,
   savePostingSession,
   loadPostingSession,
   deletePostingSession,
@@ -52,13 +58,15 @@ export {
 // Scripts
 export {
   getScript,
+  getScriptSync,
   getAllScripts,
   getScriptMeta,
+  getScriptMetaSync,
   instagramScript,
   twitterScript,
   youtubeScript,
 } from './scripts/index.js';
 
 // Posting Engine
-export { PostingEngine, SESSION_TIMEOUT_MS } from './posting-engine.js';
-export type { BridgeServer } from './posting-engine.js';
+export { PostingEngine, SESSION_TIMEOUT_MS, getPostingMethod } from './posting-engine.js';
+export type { BridgeServer, PostingMethod } from './posting-engine.js';

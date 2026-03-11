@@ -19,6 +19,8 @@
 
 Woodbury is a desktop automation platform that lets you record browser and desktop interactions and replay them as intelligent workflows. It combines a visual pipeline builder, an AI coding assistant, and a Chrome extension into one app.
 
+For the current status of the dashboard chat harness and v3 skills-first agent architecture, see [docs/chat-skills-status.md](docs/chat-skills-status.md).
+
 **Record** → Click record, do your task in the browser. Woodbury watches and learns.
 
 **Replay** → Run your recorded workflow anytime. Woodbury handles it automatically.
@@ -35,7 +37,7 @@ Woodbury is a desktop automation platform that lets you record browser and deskt
 - **Visual Pipelines** — Chain workflows together in a node-based graph editor
 - **Workflow Recording** — Chrome extension captures interactions as structured JSON with CSS selectors, fallback strategies, and variable substitution
 - **Extension System** — Add custom tools, slash commands, system prompts, and web UIs
-- **Interactive CLI (REPL)** — Multi-turn AI coding assistant with 40+ built-in tools
+- **Interactive CLI (REPL)** — Multi-turn AI assistant with 34 built-in tools, plus extension and MCP tools at runtime
 - **Scheduling** — Run automations on a schedule
 - **No Code** — Point and click, no programming needed
 
@@ -106,7 +108,8 @@ woodbury --safe "task"                      # Disable dangerous tools
 │  Backend (Node.js)                                       │
 │  ┌──────────────┐  ┌───────────────┐  ┌──────────────┐  │
 │  │  Agentic Loop │  │  Workflow     │  │  Extension   │  │
-│  │  (40+ tools)  │  │  Engine       │  │  Manager     │  │
+│  │  (34 built-in │  │  Engine       │  │  Manager     │  │
+│  │   tools)      │  │               │  │              │  │
 │  └──────────────┘  └───────────────┘  └──────────────┘  │
 ├──────────────────────────────────────────────────────────┤
 │  Chrome Extension          │  Visual AI (ONNX)           │
@@ -121,7 +124,7 @@ woodbury --safe "task"                      # Disable dangerous tools
 |-----------|---------|
 | `src/` | Main application source (CLI, agent, tools, dashboard) |
 | `src/loop/` | Embedded agentic loop engine |
-| `src/loop/tools/` | 40+ tool implementations |
+| `src/loop/tools/` | 34 built-in default tools, plus dynamic extension and MCP tools at runtime |
 | `src/workflow/` | Workflow recording, execution, and visual verification |
 | `src/config-dashboard/` | Dashboard web UI (Config, Workflows, Pipelines, Runs) |
 | `electron/` | Electron shell (main process, preload, icons) |
@@ -173,7 +176,7 @@ The visual pipeline builder lets you chain workflows into directed graphs:
 
 ## CLI Tools
 
-All 40+ tools from the embedded agentic loop:
+The embedded agentic loop exposes 34 built-in default tools. Extension tools and MCP tools can add more at runtime.
 
 | Category | Tools |
 |----------|-------|
