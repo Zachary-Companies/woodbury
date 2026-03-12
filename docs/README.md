@@ -1,6 +1,6 @@
 # Woodbury Docs Map
 
-Last updated: 2026-03-11
+Last updated: 2026-03-12
 
 This directory contains the working documentation set for Woodbury.
 
@@ -66,6 +66,11 @@ The goal is not to document every file. The goal is to document the contracts, b
 
 - [releasing.md](releasing.md)
   Release and packaging workflow.
+
+## Retrospectives
+
+- [change-log-2026-03-05-to-2026-03-12.md](change-log-2026-03-05-to-2026-03-12.md)
+  Commit-grounded retrospective covering all changes landed from March 5 through March 12, 2026, with rationale and architectural analysis.
 
 ## What Deserves Documentation In This Repo
 
