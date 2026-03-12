@@ -13,6 +13,10 @@
   <a href="https://github.com/Zachary-Companies/woodbury/releases/latest"><strong>Releases</strong></a> · <a href="https://woobury-ai.web.app">Website</a> · <a href="docs/README.md">Docs Map</a>
 </p>
 
+<p align="center">
+  <img src="images/unnamed.png" alt="Woodbury dashboard preview" width="1100" />
+</p>
+
 ---
 
 ## What This Repo Contains
