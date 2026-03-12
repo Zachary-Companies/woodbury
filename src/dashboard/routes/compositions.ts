@@ -24,34 +24,129 @@ import { debugLog } from '../../debug-log.js';
  * An input is any node input port that is NOT connected via an incoming edge,
  * excluding output node ports (those are internal collectors).
  */
-function inferCompositionInputs(
+export function inferCompositionInputs(
   comp: any,
-  wfMap: Record<string, any>
-): Array<{ name: string; type: string; description: string; nodeId: string; portName: string }> {
+  wfMap: Record<string, any>,
+  compMap: Record<string, any> = {},
+  visited: Set<string> = new Set()
+): Array<{
+  name: string;
+  label: string;
+  type: string;
+  description: string;
+  nodeId: string;
+  nodeLabel: string;
+  workflowId: string;
+  workflowName: string;
+  portName: string;
+  required: boolean;
+  default?: unknown;
+  generationPrompt?: string;
+}> {
   const connectedInputs = new Set<string>();
   for (const edge of comp.edges) {
     connectedInputs.add(`${edge.targetNodeId}:${edge.targetPort}`);
   }
 
-  const result: Array<{ name: string; type: string; description: string; nodeId: string; portName: string }> = [];
+  const result: Array<{
+    name: string;
+    label: string;
+    type: string;
+    description: string;
+    nodeId: string;
+    nodeLabel: string;
+    workflowId: string;
+    workflowName: string;
+    portName: string;
+    required: boolean;
+    default?: unknown;
+    generationPrompt?: string;
+  }> = [];
+
+  const parseVariableDefault = (node: any): unknown => {
+    const cfg = node?.variableNode;
+    if (!cfg) return undefined;
+    if (cfg.type === 'boolean') return cfg.initialValue === 'true';
+    if (cfg.type === 'number') {
+      const parsedNum = Number(cfg.initialValue);
+      return Number.isFinite(parsedNum) ? parsedNum : undefined;
+    }
+    if (cfg.type === 'array') {
+      try {
+        const parsed = JSON.parse(cfg.initialValue || '[]');
+        return Array.isArray(parsed) ? parsed : undefined;
+      } catch {
+        return undefined;
+      }
+    }
+    return cfg.initialValue ?? '';
+  };
 
   for (const node of comp.nodes) {
     // Skip output node — its ports are internal collectors
     if (node.workflowId === '__output__') continue;
 
-    let ports: Array<{ name: string; type?: string; description?: string }> = [];
+    let ports: Array<{
+      name: string;
+      label?: string;
+      type?: string;
+      description?: string;
+      required?: boolean;
+      default?: unknown;
+      generationPrompt?: string;
+    }> = [];
+    const nodeLabel = String(node.label || '').trim();
+    const workflowName = node.workflowId === '__script__'
+      ? (nodeLabel || 'Script')
+      : (wfMap[node.id]?.name || nodeLabel || node.workflowId);
 
     if (node.workflowId === '__approval_gate__') {
       // Gates have no external inputs
       continue;
+    } else if (node.workflowId === '__variable__' && node.variableNode?.exposeAsInput) {
+      const inputName = String(node.variableNode.inputName || '').trim();
+      if (!inputName) continue;
+      result.push({
+        name: inputName,
+        label: String(node.label || inputName).trim() || inputName,
+        type: node.variableNode.type === 'array' ? 'string[]' : node.variableNode.type || 'string',
+        description: String(node.variableNode.description || '').trim(),
+        nodeId: node.id,
+        nodeLabel,
+        workflowId: node.workflowId,
+        workflowName: workflowName || 'Variable',
+        portName: inputName,
+        required: node.variableNode.required === true,
+        default: parseVariableDefault(node),
+        generationPrompt: node.variableNode.generationPrompt,
+      });
+      continue;
+    } else if (node.workflowId === '__junction__' && node.junctionNode) {
+      ports = Array.isArray(node.junctionNode.ports) ? node.junctionNode.ports : [];
     } else if (node.workflowId === '__branch__' || node.workflowId === '__delay__' || node.workflowId === '__gate__' || node.workflowId === '__for_each__' || node.workflowId === '__switch__') {
       // Flow control nodes have fixed ports — not external composition inputs
       continue;
     } else if (node.workflowId === '__script__' && node.script) {
       ports = node.script.inputs || [];
     } else if (node.workflowId.startsWith('comp:') && node.compositionRef) {
-      // Sub-pipeline inputs would be resolved recursively — skip for now
-      continue;
+      const childId = String(node.compositionRef.compositionId || '').trim();
+      const childComp = childId ? compMap[childId] : undefined;
+      if (!childComp) continue;
+      const childVisited = new Set(visited);
+      const cycleKey = String(childComp.id || childId || node.id || '').trim();
+      if (cycleKey) {
+        if (childVisited.has(cycleKey)) continue;
+        childVisited.add(cycleKey);
+      }
+      ports = inferCompositionInputs(childComp, wfMap, compMap, childVisited).map((input) => ({
+        name: input.name,
+        label: input.label,
+        type: input.type,
+        description: input.description,
+        required: input.required,
+        default: input.default,
+        generationPrompt: input.generationPrompt,
+      }));
     } else {
       const wf = wfMap[node.id];
       if (wf && wf.variables) {
@@ -63,12 +158,20 @@ function inferCompositionInputs(
       const key = `${node.id}:${port.name}`;
       if (!connectedInputs.has(key)) {
         const alias = node.portAliases && node.portAliases[port.name];
+        const portLabel = String(port.label || port.name || '').trim();
         result.push({
           name: alias || port.name,
+          label: alias || portLabel || port.name,
           type: port.type || 'string',
           description: port.description || '',
           nodeId: node.id,
+          nodeLabel,
+          workflowId: node.workflowId,
+          workflowName,
           portName: port.name,
+          required: port.required === true,
+          default: port.default,
+          generationPrompt: port.generationPrompt,
         });
       }
     }
@@ -199,8 +302,14 @@ export const handleCompositionsRoutes: RouteHandler = async (req, res, pathname,
       // Build wfMap for input inference
       const wfDiscovered = await discoverWorkflows(workDir);
       const wfMap: Record<string, any> = {};
+      const compMap: Record<string, any> = {};
+      for (const discoveredComp of discovered) {
+        if (discoveredComp?.composition?.id) {
+          compMap[discoveredComp.composition.id] = discoveredComp.composition;
+        }
+      }
       for (const node of comp.nodes) {
-        if (node.workflowId === '__approval_gate__' || node.workflowId === '__script__' || node.workflowId === '__output__' || node.workflowId === '__image_viewer__' || node.workflowId === '__media__' || node.workflowId === '__branch__' || node.workflowId === '__delay__' || node.workflowId === '__gate__' || node.workflowId === '__for_each__' || node.workflowId === '__switch__' || node.workflowId === '__asset__' || node.workflowId === '__text__' || node.workflowId === '__file_op__' || node.workflowId === '__json_keys__' || node.workflowId === '__variable__' || node.workflowId === '__get_variable__') continue;
+        if (node.workflowId === '__approval_gate__' || node.workflowId === '__script__' || node.workflowId === '__output__' || node.workflowId === '__image_viewer__' || node.workflowId === '__media__' || node.workflowId === '__branch__' || node.workflowId === '__delay__' || node.workflowId === '__gate__' || node.workflowId === '__for_each__' || node.workflowId === '__switch__' || node.workflowId === '__asset__' || node.workflowId === '__text__' || node.workflowId === '__file_op__' || node.workflowId === '__json_keys__' || node.workflowId === '__junction__' || node.workflowId === '__variable__' || node.workflowId === '__get_variable__') continue;
         if (node.workflowId.startsWith('comp:')) continue;
         const wfFound = wfDiscovered.find((d: any) => d.workflow.id === node.workflowId);
         if (wfFound) {
@@ -208,7 +317,7 @@ export const handleCompositionsRoutes: RouteHandler = async (req, res, pathname,
         }
       }
 
-      const inputs = inferCompositionInputs(comp, wfMap);
+      const inputs = inferCompositionInputs(comp, wfMap, compMap, new Set([String(comp.id || id)]));
       const outputs = inferCompositionOutputs(comp);
 
       sendJson(res, 200, { inputs, outputs, compositionId: id, compositionName: comp.name });

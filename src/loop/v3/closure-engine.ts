@@ -237,6 +237,7 @@ export function validateComposition(composition: any, availableWorkflowIds: Set<
   const builtInTypes = new Set([
     '__script__', '__output__', '__for_each__',
     '__approval_gate__', '__branch__', '__delay__',
+    '__variable__', '__get_variable__',
   ]);
 
   const nodeIds = new Set(nodes.map((n: any) => n.id));
@@ -251,12 +252,29 @@ export function validateComposition(composition: any, availableWorkflowIds: Set<
       : [],
   );
 
+  const normalizeExternalInputName = (value: unknown): string => String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '');
+
   for (const node of nodes) {
     const wfId = node.workflowId;
 
     // Check for fake/non-existent workflow references
     if (wfId && !builtInTypes.has(wfId) && !availableWorkflowIds.has(wfId)) {
       issues.push(`Node "${node.label || node.id}" references workflow "${wfId}" which does not exist. It should use "__script__" instead and implement the logic in code.`);
+    }
+
+    if (wfId === '__variable__') {
+      const config = node.variableNode;
+      if (!config || typeof config !== 'object') {
+        issues.push(`Variable node "${node.label || node.id}" is missing variableNode configuration.`);
+      } else if (config.exposeAsInput === true) {
+        const inputName = typeof config.inputName === 'string' ? config.inputName.trim() : '';
+        if (!inputName) {
+          issues.push(`Variable node "${node.label || node.id}" is exposed as a pipeline input but is missing variableNode.inputName.`);
+        }
+      }
     }
 
     // Check __script__ nodes have code
@@ -321,6 +339,44 @@ export function validateComposition(composition: any, availableWorkflowIds: Set<
     if (!hasIncoming && !hasOutgoing && nodes.length > 1) {
       issues.push(`Node "${node.label || node.id}" is completely disconnected (no edges in or out).`);
     }
+  }
+
+  const incomingPorts = new Set(
+    edges
+      .filter((edge: any) => typeof edge.targetNodeId === 'string' && typeof edge.targetPort === 'string')
+      .map((edge: any) => `${edge.targetNodeId}:${edge.targetPort}`),
+  );
+  const exposedInputNames = new Set(
+    nodes
+      .filter((node: any) => node.workflowId === '__variable__' && node.variableNode?.exposeAsInput)
+      .map((node: any) => normalizeExternalInputName(node.variableNode?.inputName || node.label || node.id))
+      .filter(Boolean),
+  );
+  const duplicateExternalInputs = new Map<string, { displayName: string; nodeLabels: Set<string> }>();
+
+  for (const node of nodes) {
+    if (node.workflowId !== '__script__' || !Array.isArray(node.script?.inputs)) continue;
+    for (const input of node.script.inputs) {
+      const portName = typeof input?.name === 'string' ? input.name.trim() : '';
+      if (!portName) continue;
+      if (incomingPorts.has(`${node.id}:${portName}`)) continue;
+      const normalizedName = normalizeExternalInputName(portName);
+      if (!normalizedName || exposedInputNames.has(normalizedName)) continue;
+      const existing = duplicateExternalInputs.get(normalizedName);
+      if (existing) {
+        existing.nodeLabels.add(node.label || node.id);
+      } else {
+        duplicateExternalInputs.set(normalizedName, {
+          displayName: portName,
+          nodeLabels: new Set([node.label || node.id]),
+        });
+      }
+    }
+  }
+
+  for (const entry of duplicateExternalInputs.values()) {
+    if (entry.nodeLabels.size < 3) continue;
+    issues.push(`External input "${entry.displayName}" is repeated across ${entry.nodeLabels.size} nodes (${[...entry.nodeLabels].slice(0, 4).join(', ')}). Expose it once through a __variable__ node with variableNode.exposeAsInput=true and connect that variable value to each consumer instead of repeating the same unconnected input.`);
   }
 
   return issues;
@@ -410,6 +466,8 @@ function getAvailableWorkflows(workingDirectory: string, intent?: string): strin
     { id: '__approval_gate__', name: 'Approval Gate', description: 'Pauses execution until user approves.', variables: [] },
     { id: '__branch__', name: 'Branch', description: 'Conditional branching.', variables: [] },
     { id: '__delay__', name: 'Delay', description: 'Waits before continuing.', variables: [] },
+    { id: '__variable__', name: 'Variable', description: 'Stores a shared value for the pipeline. Use this to centralize one user-provided input and fan it out to multiple downstream nodes. When it should appear in the pipeline form, set variableNode.exposeAsInput=true and provide a stable inputName.', variables: [] },
+    { id: '__get_variable__', name: 'Get Variable', description: 'Reads the value from an existing Variable node when you need to access shared state later in the graph.', variables: [] },
   ];
 
   // Add relevant real workflows (if any match)

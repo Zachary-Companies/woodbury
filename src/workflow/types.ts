@@ -1029,6 +1029,16 @@ export interface VariableNodeConfig {
   type: 'string' | 'number' | 'array' | 'boolean';
   /** Initial value as JSON string (parsed at execution time) */
   initialValue: string;
+  /** Whether this variable should appear as a top-level pipeline form input */
+  exposeAsInput?: boolean;
+  /** Stable external input key used in pipeline forms and run payloads */
+  inputName?: string;
+  /** Optional helper text for the generated pipeline form */
+  description?: string;
+  /** Whether the generated pipeline form should require this value */
+  required?: boolean;
+  /** Optional AI generation prompt for the generated pipeline form */
+  generationPrompt?: string;
 }
 
 /** Configuration for a Get Variable node — reads a Variable node's value by reference */

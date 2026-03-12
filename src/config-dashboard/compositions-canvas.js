@@ -91,9 +91,12 @@ function renderGraphEditor() {
   html += '<button class="comp-tb-btn comp-tb-btn-danger" id="comp-delete-selected" title="Remove selected" style="display:none;">&#x1f5d1; Remove</button>';
   html += '<button class="comp-tb-btn" id="comp-auto-layout" title="Tidy up layout">&#x2195; Layout</button>';
   html += '<button class="comp-tb-btn" id="comp-snap-toggle" title="Snap to grid">Grid</button>';
+  html += '<button class="comp-tb-btn" id="comp-open-form-btn" title="Open this pipeline as a full-page form inside the app">Form View</button>';
+  html += '<button class="comp-tb-btn" id="comp-share-form-btn" title="Copy a link that opens this pipeline as a form">&#x1f517; Share Form</button>';
   html += '<button class="comp-tb-btn comp-tb-btn-run" id="comp-run-btn" title="Run this pipeline">&#x25b6; Run</button>';
   html += '<button class="comp-tb-btn comp-tb-btn-batch" id="comp-batch-btn" title="Run with different variable sets">&#x1f4e6; Batch</button>';
   html += '<button class="comp-tb-btn comp-tb-btn-schedule" id="comp-schedule-btn" title="Schedule this pipeline">&#x23f0; Schedule</button>';
+  html += '<button class="comp-tb-btn comp-tb-btn-danger" id="comp-delete-pipeline-btn" title="Delete this pipeline">&#x1f5d1; Delete</button>';
   html += '<button class="comp-tb-btn comp-tb-btn-cancel" id="comp-cancel-btn" title="Stop running" style="display:none;">&#x25a0; Stop</button>';
   html += '<button class="comp-tb-btn" id="comp-zoom-fit" title="Fit to view">Fit</button>';
   html += '<span class="comp-zoom-label" id="comp-zoom-label">' + Math.round(canvasState.zoom * 100) + '%</span>';
@@ -950,7 +953,7 @@ function renderNodes() {
       html += '</div>';
 
     } else if (isVariable) {
-      var varCfg = node.variableNode || { type: 'string', initialValue: '' };
+      var varCfg = node.variableNode || { type: 'string', initialValue: '', exposeAsInput: false, inputName: '', description: '', required: false, generationPrompt: '' };
       html += '<div class="comp-node-body">';
       // Input ports
       html += '<div class="comp-node-ports comp-node-inputs">';
@@ -984,6 +987,9 @@ function renderNodes() {
       var varPreview = varCfg.initialValue || '(empty)';
       if (varPreview.length > 20) varPreview = varPreview.substring(0, 20) + '...';
       html += '<span class="comp-node-variable-badge">' + compEscHtml(varCfg.type.toUpperCase()) + '</span>';
+      if (varCfg.exposeAsInput && varCfg.inputName) {
+        html += ' <span class="comp-node-variable-input-badge">INPUT: ' + compEscHtml(varCfg.inputName) + '</span>';
+      }
       html += ' <span style="font-size:0.55rem;color:#64748b;">' + compEscHtml(varPreview) + '</span>';
       html += '</div>';
 
@@ -1687,12 +1693,24 @@ function wireUpToolbar() {
   }
 
   // Run/Cancel buttons
+  var openFormBtn = document.querySelector('#comp-open-form-btn');
+  if (openFormBtn) {
+    openFormBtn.addEventListener('click', function() {
+      if (!compData) return;
+      if (typeof updateHash === 'function') updateHash('compositions', compData.id, 'form');
+      selectComposition(compData.id, 'form');
+    });
+  }
+  var shareFormBtn = document.querySelector('#comp-share-form-btn');
+  if (shareFormBtn) { shareFormBtn.addEventListener('click', function() { copyCompositionFormShareLink(); }); }
   var runBtn = document.querySelector('#comp-run-btn');
-  if (runBtn) { runBtn.addEventListener('click', function() { startCompositionRun(); }); }
+  if (runBtn) { runBtn.addEventListener('click', function() { showCompositionRunForm(); }); }
   var batchBtn = document.querySelector('#comp-batch-btn');
   if (batchBtn) { batchBtn.addEventListener('click', function() { showBatchConfigModal(); }); }
   var scheduleBtn = document.querySelector('#comp-schedule-btn');
   if (scheduleBtn) { scheduleBtn.addEventListener('click', function() { showScheduleModal(); }); }
+  var deletePipelineBtn = document.querySelector('#comp-delete-pipeline-btn');
+  if (deletePipelineBtn) { deletePipelineBtn.addEventListener('click', function() { deletePipeline(); }); }
   var cancelBtn = document.querySelector('#comp-cancel-btn');
   if (cancelBtn) { cancelBtn.addEventListener('click', function() { cancelCompositionRun(); }); }
 
@@ -2000,6 +2018,56 @@ function addWorkflowNode(workflowId) {
 
 var compositionInterfaceCache = {};
 
+function reconcileCompositionNodePorts(compositionId, iface) {
+  if (!compData || !iface) return false;
+
+  var inputNames = (iface.inputs || []).map(function(input) { return String(input.name || '').trim(); }).filter(Boolean);
+  var outputNames = (iface.outputs || []).map(function(output) { return String(output.name || '').trim(); }).filter(Boolean);
+  var inputSet = {};
+  var outputSet = {};
+  var inputLowerMap = {};
+  var outputLowerMap = {};
+
+  inputNames.forEach(function(name) {
+    inputSet[name] = true;
+    var lower = name.toLowerCase();
+    if (!inputLowerMap[lower]) inputLowerMap[lower] = [];
+    inputLowerMap[lower].push(name);
+  });
+  outputNames.forEach(function(name) {
+    outputSet[name] = true;
+    var lower = name.toLowerCase();
+    if (!outputLowerMap[lower]) outputLowerMap[lower] = [];
+    outputLowerMap[lower].push(name);
+  });
+
+  var changed = false;
+  compData.nodes.forEach(function(node) {
+    if (!node || !node.workflowId || !node.workflowId.startsWith('comp:')) return;
+    var refId = (node.compositionRef && node.compositionRef.compositionId) || node.workflowId.slice(5);
+    if (refId !== compositionId) return;
+
+    compData.edges.forEach(function(edge) {
+      if (edge.targetNodeId === node.id && typeof edge.targetPort === 'string' && !inputSet[edge.targetPort]) {
+        var targetMatches = inputLowerMap[edge.targetPort.toLowerCase()] || [];
+        if (targetMatches.length === 1) {
+          edge.targetPort = targetMatches[0];
+          changed = true;
+        }
+      }
+      if (edge.sourceNodeId === node.id && typeof edge.sourcePort === 'string' && !outputSet[edge.sourcePort]) {
+        var sourceMatches = outputLowerMap[edge.sourcePort.toLowerCase()] || [];
+        if (sourceMatches.length === 1) {
+          edge.sourcePort = sourceMatches[0];
+          changed = true;
+        }
+      }
+    });
+  });
+
+  return changed;
+}
+
 async function fetchCompositionInterface(compositionId) {
   // Check cache first (invalidated every 30 seconds)
   var cached = compositionInterfaceCache[compositionId];
@@ -2010,6 +2078,12 @@ async function fetchCompositionInterface(compositionId) {
     var resp = await fetch('/api/compositions/' + encodeURIComponent(compositionId) + '/interface');
     var data = await resp.json();
     compositionInterfaceCache[compositionId] = { data: data, ts: Date.now() };
+    if (reconcileCompositionNodePorts(compositionId, data)) {
+      renderNodes();
+      renderEdges();
+      wireUpCanvas();
+      debouncedSave();
+    }
     return data;
   } catch (e) {
     return { inputs: [], outputs: [] };
@@ -2803,6 +2877,11 @@ function addVariableNode() {
     variableNode: {
       type: 'string',
       initialValue: '',
+      exposeAsInput: false,
+      inputName: '',
+      description: '',
+      required: false,
+      generationPrompt: '',
     },
   };
   compData.nodes.push(node);

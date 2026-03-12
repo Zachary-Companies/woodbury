@@ -5,275 +5,207 @@
 <h1 align="center">Woodbury</h1>
 
 <p align="center">
-  <strong>Automate your browser. No code required.</strong><br/>
-  Record your actions, replay them with AI. Woodbury turns your clicks into automated workflows — built for everyone, not just developers.
+  <strong>Desktop automation, workflow replay, visual AI, and an embedded coding agent.</strong><br/>
+  Woodbury is an Electron app and CLI for recording browser interactions, replaying them as workflows, composing multi-step pipelines, and running an agentic tool loop against your local workspace.
 </p>
 
 <p align="center">
-  <a href="https://github.com/Zachary-Companies/woodbury/releases/latest"><strong>Download</strong></a> · <a href="https://woobury-ai.web.app">Website</a> · <a href="docs/extensions.md">Extension Docs</a>
+  <a href="https://github.com/Zachary-Companies/woodbury/releases/latest"><strong>Releases</strong></a> · <a href="https://woobury-ai.web.app">Website</a> · <a href="docs/README.md">Docs Map</a>
 </p>
 
 ---
 
-## What is Woodbury?
+## What This Repo Contains
 
-Woodbury is a desktop automation platform that lets you record browser and desktop interactions and replay them as intelligent workflows. It combines a visual pipeline builder, an AI coding assistant, and a Chrome extension into one app.
+This repository is the main Woodbury application. It includes:
 
-For the current status of the dashboard chat harness and v3 skills-first agent architecture, see [docs/chat-skills-status.md](docs/chat-skills-status.md).
+- An Electron desktop app
+- A Node.js/TypeScript CLI and REPL
+- A dashboard server and browser-based dashboard UI
+- A workflow recorder and executor for browser and desktop automation
+- A visual pipeline/composition system
+- A Node.js ONNX inference server for UI element matching
+- An extension system and MCP integration surface
+- Social scheduling and media workflow modules
 
-**Record** → Click record, do your task in the browser. Woodbury watches and learns.
+The separate training repo for visual models lives at [woobury-models](https://github.com/Zachary-Companies/woobury-models). This repo runs ONNX inference at runtime; it does not contain the Python training pipeline itself.
 
-**Replay** → Run your recorded workflow anytime. Woodbury handles it automatically.
+## What Woodbury Does
 
-**Scale** → Chain workflows into visual pipelines, schedule them, and run them across sites.
+Woodbury is a desktop automation platform centered around four connected pieces:
+
+- Record browser actions through the Chrome extension and save them as workflow documents.
+- Replay those workflows with selector fallback logic and visual verification.
+- Build larger automations as graph-based compositions in the dashboard.
+- Use the embedded AI assistant in the CLI or dashboard chat to inspect code, generate assets, and operate against the current workspace.
+
+For the current status of the dashboard chat harness and v3 skills-first loop, see [docs/chat-skills-status.md](docs/chat-skills-status.md).
 
 ![Woodbury Dashboard — Visual Pipeline Builder](apps/woodbury-web/public/screenshots/dashboard-pipelines.png)
 
-## Features
+## Major Subsystems
 
-- **Browser Automation** — Record clicks, form fills, and navigation as replayable workflows
-- **Desktop Automation** — Control any application, not just browsers
-- **Visual AI** — Siamese neural network recognizes UI elements even when pages change (theme, hover states, layout shifts)
-- **Visual Pipelines** — Chain workflows together in a node-based graph editor
-- **Workflow Recording** — Chrome extension captures interactions as structured JSON with CSS selectors, fallback strategies, and variable substitution
-- **Extension System** — Add custom tools, slash commands, system prompts, and web UIs
-- **Interactive CLI (REPL)** — Multi-turn AI assistant with 34 built-in tools, plus extension and MCP tools at runtime
-- **Scheduling** — Run automations on a schedule
-- **No Code** — Point and click, no programming needed
+- **Electron app**: desktop shell, tray/menu integration, auto-update plumbing, dashboard launcher
+- **Dashboard**: local HTTP server plus browser UI for workflows, compositions, runs, extensions, training, chat, assets, schedules, and social features
+- **Workflow engine**: recording, replay, variable substitution, validation, and execution snapshots
+- **Visual AI**: ONNX Runtime plus Sharp-based preprocessing for element embedding and comparison
+- **Agentic loop**: built-in tools plus dynamically loaded extension and MCP tools
+- **Extension system**: local extensions can register tools, commands, system prompt guidance, and web UI
 
-## Download
+## Repository Layout
 
-| Platform | Link |
-|----------|------|
-| macOS (Apple Silicon) | [Latest Release](https://github.com/Zachary-Companies/woodbury/releases/latest) |
-| Windows (x64) | [Latest Release](https://github.com/Zachary-Companies/woodbury/releases/latest) |
+| Path | Purpose |
+|------|---------|
+| `src/` | Main TypeScript application code |
+| `src/dashboard/` | Dashboard server and route handlers |
+| `src/config-dashboard/` | Browser-side dashboard assets |
+| `src/workflow/` | Workflow recording, replay, validation, and visual verification |
+| `src/inference/` | Node.js ONNX inference server and image preprocessing |
+| `src/loop/` | Embedded agent runtime and built-in tools |
+| `electron/` | Electron main process and preload code |
+| `chrome-extension/` | Browser extension used for recording and browser bridge behavior |
+| `extensions/` | Bundled Woodbury extensions copied into builds |
+| `apps/woodbury-web/` | Marketing site |
+| `docs/` | Architecture, API, contracts, and runbooks |
 
-## Getting Started
+## Requirements
 
-### Desktop App (recommended)
+- Node.js 22+
+- npm
+- At least one supported LLM provider key for AI features:
+  - `ANTHROPIC_API_KEY`
+  - `OPENAI_API_KEY`
+  - `GROQ_API_KEY`
 
-**macOS:**
-1. Download the `.dmg` from the [latest release](https://github.com/Zachary-Companies/woodbury/releases/latest)
-2. Drag **Woodbury** into your Applications folder
-3. Open Woodbury — the dashboard launches automatically
-4. Add your API key (Anthropic, OpenAI, or Groq) in the Config tab
+Visual model training is not required to run the app. Training is handled by the separate Python repo when needed.
 
-**Windows:**
-1. Download the `.exe` installer from the [latest release](https://github.com/Zachary-Companies/woodbury/releases/latest)
-2. Run the installer and follow the prompts
-3. Open Woodbury — the dashboard launches automatically
-4. Add your API key (Anthropic, OpenAI, or Groq) in the Config tab
+## Getting Started From Source
 
-### From Source
-
-Requires Node.js 22+ and an [Anthropic API key](https://console.anthropic.com/) (or OpenAI/Groq).
+Install dependencies and build:
 
 ```bash
-git clone https://github.com/Zachary-Companies/woodbury.git
-cd woodbury
-npm run setup
+npm install
+npm run build
 ```
 
-Add your API keys to `~/.agentic-loop/.env`:
+If you want the global CLI command:
 
-```
-ANTHROPIC_API_KEY=sk-ant-...
-OPENAI_API_KEY=sk-...
-GROQ_API_KEY=gsk_...
+```bash
+npm link
 ```
 
-**Run the desktop app in dev mode:**
+There is also a convenience setup script that does the same sequence:
+
+```bash
+./setup.sh
+```
+
+Set provider credentials in your shell environment before using AI features:
+
+```bash
+export ANTHROPIC_API_KEY=your-key
+export OPENAI_API_KEY=your-key
+export GROQ_API_KEY=your-key
+```
+
+## Running Woodbury
+
+Run the Electron desktop app in development:
+
 ```bash
 npm run electron:dev
 ```
 
-**Or use the CLI:**
-```bash
-woodbury                                    # Interactive REPL
-woodbury "read package.json"                # One-shot mode
-woodbury -m claude-opus-4-20250514 "task"   # Specify model
-woodbury --safe "task"                      # Disable dangerous tools
-```
-
-## Architecture
-
-```
-┌──────────────────────────────────────────────────────────┐
-│  Electron Desktop App                                    │
-│  ┌──────────────┐  ┌───────────────┐  ┌──────────────┐  │
-│  │  Config       │  │  Workflows    │  │  Pipelines   │  │
-│  │  Dashboard    │  │  (Record/Run) │  │  (Node Graph)│  │
-│  └──────────────┘  └───────────────┘  └──────────────┘  │
-├──────────────────────────────────────────────────────────┤
-│  Backend (Node.js)                                       │
-│  ┌──────────────┐  ┌───────────────┐  ┌──────────────┐  │
-│  │  Agentic Loop │  │  Workflow     │  │  Extension   │  │
-│  │  (34 built-in │  │  Engine       │  │  Manager     │  │
-│  │   tools)      │  │               │  │              │  │
-│  └──────────────┘  └───────────────┘  └──────────────┘  │
-├──────────────────────────────────────────────────────────┤
-│  Chrome Extension          │  Visual AI (ONNX)           │
-│  Records browser actions   │  Element matching via        │
-│  Injects automation        │  Siamese embeddings          │
-└──────────────────────────────────────────────────────────┘
-```
-
-### Key Directories
-
-| Directory | Purpose |
-|-----------|---------|
-| `src/` | Main application source (CLI, agent, tools, dashboard) |
-| `src/loop/` | Embedded agentic loop engine |
-| `src/loop/tools/` | 34 built-in default tools, plus dynamic extension and MCP tools at runtime |
-| `src/workflow/` | Workflow recording, execution, and visual verification |
-| `src/config-dashboard/` | Dashboard web UI (Config, Workflows, Pipelines, Runs) |
-| `electron/` | Electron shell (main process, preload, icons) |
-| `apps/woodbury-web/` | Marketing website (Next.js, deployed to Firebase) |
-| `apps/remote/` | Remote relay application |
-| `docs/` | Extension authoring docs, API reference |
-
-## Workflows
-
-Woodbury workflows are structured JSON documents (`.workflow.json`) that capture browser and desktop interactions:
-
-- **Browser steps** — navigate, click, type, keyboard shortcuts, wait conditions
-- **Desktop steps** — launch apps, click at coordinates, type text, keyboard input
-- **Element targeting** — CSS selectors with fallback strategies (aria labels, text content, position)
-- **Variable substitution** — Parameterize workflows with runtime variables
-- **Visual verification** — AI-powered element matching via trained Siamese models
-- **Expectations** — Assert conditions after workflow execution
-- **Retry logic** — Automatic retry on step or expectation failure
-
-### Recording
+Restart the Electron dev app after changes:
 
 ```bash
-# Via CLI
+npm run electron:restart-dev
+```
+
+Run the compiled CLI directly:
+
+```bash
+node dist/index.js --help
+```
+
+If you linked the package globally, use:
+
+```bash
 woodbury
-> /record my-workflow suno.com
-
-# Or use the dashboard: Workflows tab → New Recording
+woodbury "read package.json"
+woodbury --safe "inspect this repo"
 ```
 
-The Chrome extension captures every interaction and converts it into a `WorkflowDocument` with full metadata.
+## Key Scripts
 
-### Visual AI
+| Command | Purpose |
+|---------|---------|
+| `npm run build` | Compile TypeScript into `dist/` |
+| `npm test` | Run Jest tests |
+| `npm run lint` | Run ESLint over `src/` |
+| `npm run electron:dev` | Build and launch the Electron app |
+| `npm run electron:build` | Build the macOS Electron package |
+| `npm run electron:build:win` | Build the Windows Electron package |
+| `npm run deploy:web` | Build and deploy the marketing site |
 
-Woodbury trains site-specific Siamese neural networks to verify UI elements across visual variations. See [woobury-models](https://github.com/Zachary-Companies/woobury-models) for the training system.
+## Workflow And Visual AI Overview
 
-- **Input**: 224×224 letterboxed element crops
-- **Output**: 64-dim L2-normalized embeddings
-- **Matching**: Cosine similarity with configurable threshold
-- **Inference**: ONNX Runtime (<2ms per element on CPU)
+Woodbury workflows are stored as JSON documents and can combine browser automation, desktop input, variables, expectations, and retry behavior.
 
-## Pipelines
+At runtime, visual verification uses the local inference module in `src/inference/`:
 
-The visual pipeline builder lets you chain workflows into directed graphs:
+- Preprocess screenshots and crops with Sharp
+- Run embeddings with `onnxruntime-node`
+- Compare reference elements against current UI state
+- Support region search and weighted ranking for element relocation
 
-- Drag-and-drop node editor
-- Connect workflow outputs to inputs
-- Script nodes for custom logic
-- Run pipelines end-to-end from the dashboard
+The runtime inference server matches the Python training pipeline's preprocessing contract. If you change preprocessing in the model repo, the Node.js inference path must stay in sync.
 
-## CLI Tools
+## Dashboard And Compositions
 
-The embedded agentic loop exposes 34 built-in default tools. Extension tools and MCP tools can add more at runtime.
+The dashboard is the operational center of the app. It serves a local UI for:
 
-| Category | Tools |
-|----------|-------|
-| **File** | `file_read`, `file_write`, `list_directory`, `file_search`, `grep` |
-| **Shell** | `shell_execute`, `code_execute`, `test_runner` |
-| **Git** | `git` |
-| **Web** | `web_fetch`, `web_crawl`, `web_crawl_rendered` |
-| **Search** | `google_search`, `duckduckgo_search`, `searxng_search`, `api_search` |
-| **Database** | `database_query` |
-| **PDF** | `pdf_read` |
-| **Browser** | `browser_query`, `ff_browser`, `ff_mouse`, `ff_keyboard`, `ff_screenshot`, `ff_file_dialog` |
-| **AI/Vision** | `ff_vision`, `ff_prompt_chain`, `ff_prompt_optimize`, `nanobanana` |
-| **Workflow** | `ff_workflow_execute` |
-| **Memory** | `memory_save`, `memory_recall` |
-| **Task** | `task_create`, `task_get`, `task_list`, `task_update` |
-| **Queue** | `queue_init`, `queue_add_items`, `queue_next`, `queue_done`, `queue_status` |
-| **Utility** | `ff_json_extract`, `ff_web_scrape`, `ff_image_utils`, `ff_pdf_extract` |
-| **Meta** | `reflect`, `delegate`, `goal_contract`, `preflight_check` |
+- Workflow recording and replay
+- Pipeline/composition editing and execution
+- Batch runs and schedules
+- Extension and MCP management
+- Training data preparation and model selection
+- Chat sessions backed by the embedded agent loop
+- Assets, storyboard, and social media tooling
 
-Use `--safe` to disable tools that can modify your system.
-
-## Slash Commands
-
-| Command | Aliases | Description |
-|---------|---------|-------------|
-| `/help` | `/h`, `/?` | Show commands |
-| `/exit` | `/quit`, `/q` | Exit |
-| `/clear` | `/reset` | Clear conversation history |
-| `/model [name]` | `/m` | View/change model |
-| `/tools` | `/t` | List available tools |
-| `/compact` | `/verbose`, `/v` | Toggle verbose mode |
-| `/history` | `/turns` | Show conversation summary |
-| `/providers` | `/keys` | Show configured API providers |
-| `/extensions` | | List loaded extensions |
+The dashboard server lives in `src/dashboard/`. The browser assets it serves live in `src/config-dashboard/`.
 
 ## Extensions
 
-Extensions add new capabilities — tools, slash commands, system prompt guidance, and web dashboards — without modifying core code.
+Woodbury supports local extensions that can add:
 
-```bash
-# Scaffold a new extension
-woodbury ext create social-media
+- AI-callable tools
+- Slash commands
+- Additional system prompt guidance
+- Dashboard web UI
 
-# Install from npm
-woodbury ext install woodbury-ext-analytics
+See:
 
-# List installed extensions
-woodbury ext list
+- [docs/extensions.md](docs/extensions.md)
+- [docs/extension-api-reference.md](docs/extension-api-reference.md)
+- [docs/extension-development.md](docs/extension-development.md)
+- [docs/extension-testing.md](docs/extension-testing.md)
 
-# Start without extensions
-woodbury --no-extensions
-```
+## Documentation
 
-Extensions live in `~/.woodbury/extensions/`. Each exports an `activate(ctx)` function:
+Start with the docs map:
 
-```javascript
-module.exports = {
-  async activate(ctx) {
-    ctx.registerTool(definition, handler);     // AI-callable tool
-    ctx.registerCommand(slashCommand);          // REPL command
-    ctx.addSystemPrompt('Instructions...');     // Agent guidance
-    await ctx.serveWebUI({ staticDir: 'web' }); // Local dashboard
-  }
-};
-```
+- [docs/README.md](docs/README.md)
 
-See [docs/extensions.md](docs/extensions.md) for the full authoring guide, [docs/extension-api-reference.md](docs/extension-api-reference.md) for the API reference, and [docs/extension-testing.md](docs/extension-testing.md) for testing patterns.
+Useful entry points:
 
-## Building
-
-```bash
-# Build TypeScript
-npm run build
-
-# Run tests
-npm test
-
-# Build Electron .dmg (macOS)
-npm run electron:build
-
-# Build Electron .exe installer (Windows)
-npm run electron:build:win
-
-# Dev mode (Electron)
-npm run electron:dev
-```
-
-## Project Context
-
-Create a `.woodbury.md` file in your project root to provide project-specific instructions. Woodbury walks up from the working directory to find it and includes its contents in the system prompt.
-
-## Links
-
-- **Website**: [woobury-ai.web.app](https://woobury-ai.web.app)
-- **Visual AI Models**: [woobury-models](https://github.com/Zachary-Companies/woobury-models)
-- **Releases**: [GitHub Releases](https://github.com/Zachary-Companies/woodbury/releases)
+- [docs/architecture.md](docs/architecture.md)
+- [docs/dashboard-api.md](docs/dashboard-api.md)
+- [docs/chat-api-and-sse-contract.md](docs/chat-api-and-sse-contract.md)
+- [docs/pipeline-lifecycle-contract.md](docs/pipeline-lifecycle-contract.md)
+- [docs/composition-schema-and-validation.md](docs/composition-schema-and-validation.md)
+- [docs/mcp-integration-guide.md](docs/mcp-integration-guide.md)
 
 ## License
 
-MIT — [Zachary Companies](https://github.com/Zachary-Companies)
+MIT

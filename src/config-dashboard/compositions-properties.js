@@ -1609,7 +1609,7 @@ function renderForEachProperties(body, node, nodeId) {
 // ── Variable Node Properties ──────────────────────────────────
 
 function renderVariableProperties(body, node, nodeId) {
-  if (!node.variableNode) node.variableNode = { type: 'string', initialValue: '' };
+  if (!node.variableNode) node.variableNode = { type: 'string', initialValue: '', exposeAsInput: false, inputName: '', description: '', required: false, generationPrompt: '' };
   var cfg = node.variableNode;
   var html = '';
 
@@ -1631,9 +1631,43 @@ function renderVariableProperties(body, node, nodeId) {
   html += '</select>';
   html += '</div>';
 
-  // Initial value
+  // Expose as pipeline input
   html += '<div class="comp-props-section">';
-  html += '<div class="comp-props-label">Initial Value</div>';
+  html += '<label style="display:flex;align-items:center;gap:0.5rem;font-size:12px;color:#cbd5e1;cursor:pointer;">';
+  html += '<input type="checkbox" id="comp-props-var-expose"' + (cfg.exposeAsInput ? ' checked' : '') + '>';
+  html += '<span>Expose as pipeline input</span>';
+  html += '</label>';
+  html += '<div style="font-size:0.65rem;color:#64748b;margin-top:4px;line-height:1.35;">Declare this variable once in the generated run form, then wire its value to any number of downstream nodes.</div>';
+  html += '</div>';
+
+  if (cfg.exposeAsInput) {
+    html += '<div class="comp-props-section">';
+    html += '<div class="comp-props-label">Input Name</div>';
+    html += '<input type="text" class="comp-props-input" id="comp-props-var-input-name" value="' + compEscAttr(cfg.inputName || '') + '" placeholder="formatType">';
+    html += '<div style="font-size:0.6rem;color:#64748b;margin-top:2px;">Stable key used by the pipeline form and run payload.</div>';
+    html += '</div>';
+
+    html += '<div class="comp-props-section">';
+    html += '<label style="display:flex;align-items:center;gap:0.5rem;font-size:12px;color:#cbd5e1;cursor:pointer;">';
+    html += '<input type="checkbox" id="comp-props-var-required"' + (cfg.required ? ' checked' : '') + '>';
+    html += '<span>Required in pipeline form</span>';
+    html += '</label>';
+    html += '</div>';
+
+    html += '<div class="comp-props-section">';
+    html += '<div class="comp-props-label">Input Description</div>';
+    html += '<textarea id="comp-props-var-description" style="width:100%;min-height:60px;padding:8px;border-radius:6px;border:1px solid rgba(255,255,255,0.1);background:rgba(0,0,0,0.2);color:#fff;font-size:13px;outline:none;resize:vertical;">' + compEscHtml(cfg.description || '') + '</textarea>';
+    html += '</div>';
+
+    html += '<div class="comp-props-section">';
+    html += '<div class="comp-props-label">AI Generation Prompt</div>';
+    html += '<textarea id="comp-props-var-gen-prompt" style="width:100%;min-height:70px;padding:8px;border-radius:6px;border:1px solid rgba(255,255,255,0.1);background:rgba(0,0,0,0.2);color:#fff;font-size:13px;outline:none;resize:vertical;" placeholder="Describe how AI should generate this field for the run form...">' + compEscHtml(cfg.generationPrompt || '') + '</textarea>';
+    html += '</div>';
+  }
+
+  // Initial/default value
+  html += '<div class="comp-props-section">';
+  html += '<div class="comp-props-label">' + (cfg.exposeAsInput ? 'Default Value' : 'Initial Value') + '</div>';
   if (cfg.type === 'array') {
     html += '<textarea id="comp-props-var-init" style="width:100%;min-height:80px;padding:8px;border-radius:6px;border:1px solid rgba(255,255,255,0.1);background:rgba(0,0,0,0.2);color:#fff;font-size:13px;font-family:monospace;outline:none;resize:vertical;">' + compEscHtml(cfg.initialValue) + '</textarea>';
     html += '<div style="font-size:0.6rem;color:#64748b;margin-top:2px;">JSON array, e.g. [] or ["a","b"]</div>';
@@ -1684,6 +1718,56 @@ function renderVariableProperties(body, node, nodeId) {
       immediateSave();
       renderNodes(); renderEdges(); wireUpCanvas();
       renderVariableProperties(body, node, nodeId);
+    });
+  }
+
+  var exposeInput = document.querySelector('#comp-props-var-expose');
+  if (exposeInput) {
+    exposeInput.addEventListener('change', function() {
+      cfg.exposeAsInput = !!exposeInput.checked;
+      if (cfg.exposeAsInput && !String(cfg.inputName || '').trim()) {
+        cfg.inputName = String(node.label || 'value')
+          .trim()
+          .replace(/[^a-zA-Z0-9]+(.)/g, function(_m, chr) { return String(chr || '').toUpperCase(); })
+          .replace(/^[^a-zA-Z_]+/, '')
+          .replace(/[^a-zA-Z0-9_]/g, '') || 'inputValue';
+      }
+      immediateSave();
+      renderNodes(); renderEdges(); wireUpCanvas();
+      renderVariableProperties(body, node, nodeId);
+    });
+  }
+
+  var inputNameInput = document.querySelector('#comp-props-var-input-name');
+  if (inputNameInput) {
+    inputNameInput.addEventListener('input', function() {
+      cfg.inputName = inputNameInput.value;
+      immediateSave();
+      renderNodes(); renderEdges(); wireUpCanvas();
+    });
+  }
+
+  var requiredInput = document.querySelector('#comp-props-var-required');
+  if (requiredInput) {
+    requiredInput.addEventListener('change', function() {
+      cfg.required = !!requiredInput.checked;
+      immediateSave();
+    });
+  }
+
+  var descriptionInput = document.querySelector('#comp-props-var-description');
+  if (descriptionInput) {
+    descriptionInput.addEventListener('input', function() {
+      cfg.description = descriptionInput.value;
+      immediateSave();
+    });
+  }
+
+  var genPromptInput = document.querySelector('#comp-props-var-gen-prompt');
+  if (genPromptInput) {
+    genPromptInput.addEventListener('input', function() {
+      cfg.generationPrompt = genPromptInput.value;
+      immediateSave();
     });
   }
 

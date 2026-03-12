@@ -32,6 +32,11 @@ import { checkExpectations } from '../../workflow/executor.js';
 import { bridgeServer, ensureBridgeServer } from '../../bridge-server.js';
 import { debugLog } from '../../debug-log.js';
 import type { ToolDefinition } from '../../loop/types.js';
+import {
+  buildScriptAutoFixGraphContext,
+  summarizeAutoFixValue,
+} from '../script-autofix-context.js';
+import { proposeScriptNodeEdgeRepairs } from '../script-edge-repair.js';
 
 // ────────────────────────────────────────────────────────────────
 //  Constants
@@ -203,6 +208,22 @@ function gatherInputVariables(
     }
   }
   return inputs;
+}
+
+function getInputValueByPortName(
+  inputs: Record<string, unknown>,
+  portName: string,
+): unknown {
+  if (portName in inputs) return inputs[portName];
+
+  const normalizedPort = String(portName || '').trim().toLowerCase();
+  if (!normalizedPort) return undefined;
+
+  const matches = Object.keys(inputs).filter((key) => String(key).trim().toLowerCase() === normalizedPort);
+  if (matches.length === 1) {
+    return inputs[matches[0]];
+  }
+  return undefined;
 }
 
 function getDownstreamNodes(
@@ -512,6 +533,358 @@ function extractScriptFnBody(code: string): string {
     fnBody = fnMatch[1];
   }
   return fnBody;
+}
+
+function normalizeScriptCode(code: string): string {
+  const trimmed = String(code || '').trim();
+  const fenceMatch = trimmed.match(/^```(?:javascript|js)?\s*\n([\s\S]*?)\n```$/i);
+  return fenceMatch ? fenceMatch[1].trim() : trimmed;
+}
+
+async function executeScriptCode(
+  code: string,
+  inputs: Record<string, unknown>,
+  context: any,
+): Promise<Record<string, unknown>> {
+  const normalizedCode = normalizeScriptCode(code);
+  const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor as new (...args: string[]) => (...runtimeArgs: any[]) => Promise<any>;
+
+  if (/(?:async\s+function\s+execute|function\s+execute)\s*\(/.test(normalizedCode)) {
+    const runner = new AsyncFunction(
+      'inputs',
+      'context',
+      'require',
+      `${normalizedCode}\nif (typeof execute !== 'function') { throw new Error('Script does not define execute()'); }\nreturn await execute(inputs, context);`,
+    );
+    return (await runner(inputs, context, require)) || {};
+  }
+
+  const fnBody = extractScriptFnBody(normalizedCode);
+  const fn = new AsyncFunction('inputs', 'context', 'require', fnBody);
+  return (await fn(inputs, context, require)) || {};
+}
+
+class ScriptNodeExecutionError extends Error {
+  logs: string[];
+  originalError: string;
+  attemptedAutoFix: boolean;
+  externalError: boolean;
+
+  constructor(message: string, details: {
+    logs: string[];
+    originalError: string;
+    attemptedAutoFix: boolean;
+    externalError: boolean;
+  }) {
+    super(message);
+    this.name = 'ScriptNodeExecutionError';
+    this.logs = details.logs;
+    this.originalError = details.originalError;
+    this.attemptedAutoFix = details.attemptedAutoFix;
+    this.externalError = details.externalError;
+  }
+}
+
+function parseJsonModelResponse(content: string): any {
+  const trimmed = String(content || '').trim();
+  const fencedMatch = trimmed.match(/```(?:json)?\s*\n([\s\S]*?)\n```/i);
+  const candidate = fencedMatch ? fencedMatch[1].trim() : trimmed;
+  return JSON.parse(candidate);
+}
+
+function formatRuntimeValueMap(values: Record<string, unknown>, maxEntries = 20): string {
+  const entries = Object.entries(values).slice(0, maxEntries);
+  if (entries.length === 0) return '  (none)';
+  return entries
+    .map(([key, value]) => `  ${key}: ${summarizeAutoFixValue(value, 260)}`)
+    .join('\n');
+}
+
+async function persistCompositionDocument(
+  composition: any,
+  compositionPath: string | undefined,
+  scriptLogs: string[],
+): Promise<void> {
+  if (!compositionPath) return;
+
+  try {
+    composition.metadata = composition.metadata || { createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+    composition.metadata.updatedAt = new Date().toISOString();
+    await writeFile(compositionPath, JSON.stringify(composition, null, 2), 'utf-8');
+  } catch (saveErr) {
+    scriptLogs.push(`[auto-fix] Warning: changes applied in memory but failed to save to disk: ${saveErr}`);
+  }
+}
+
+async function persistFixedScriptCode(
+  composition: any,
+  compositionPath: string | undefined,
+  node: any,
+  fixedCode: string,
+  originalError: string,
+  scriptLogs: string[],
+): Promise<void> {
+  node.script.code = fixedCode;
+  if (!node.script.chatHistory) node.script.chatHistory = [];
+  node.script.chatHistory.push(
+    { role: 'user', content: `[Auto-fix] The script failed with: ${originalError}` },
+    { role: 'assistant', content: `\`\`\`javascript\n${fixedCode}\n\`\`\`` },
+  );
+
+  if (!compositionPath) return;
+
+  await persistCompositionDocument(composition, compositionPath, scriptLogs);
+}
+
+async function runScriptNodeWithAutoFix(options: {
+  ctx: DashboardContext;
+  node: any;
+  nodeId: string;
+  mergedInputs: Record<string, unknown>;
+  composition: any;
+  compositionPath?: string;
+  nodes: any[];
+  edges: Array<{ id: string; sourceNodeId: string; sourcePort: string; targetNodeId: string; targetPort: string }>;
+  nodeOutputs: Record<string, Record<string, unknown>>;
+  wfMap: Record<string, any>;
+  locationLabel: string;
+  updateCurrentStep?: (step: string) => void;
+  recomputeInputs?: () => Record<string, unknown>;
+}): Promise<{
+  outputs: Record<string, unknown>;
+  logs: string[];
+  autoFixed?: boolean;
+  originalError?: string;
+  repairedInputs?: Record<string, unknown>;
+  graphRepaired?: boolean;
+}> {
+  const {
+    ctx,
+    node,
+    nodeId,
+    mergedInputs,
+    composition,
+    compositionPath,
+    nodes,
+    edges,
+    nodeOutputs,
+    wfMap,
+    locationLabel,
+    updateCurrentStep,
+    recomputeInputs,
+  } = options;
+
+  const { scriptRunPrompt, scriptModel, scriptTools } = await buildScriptContext(ctx);
+  const scriptLogs: string[] = [];
+  const context = makeScriptExecutionContext(scriptRunPrompt, scriptModel, scriptTools, scriptLogs);
+  let runtimeInputs = recomputeInputs ? recomputeInputs() : mergedInputs;
+
+  try {
+    const outputs = await executeScriptCode(node.script.code, runtimeInputs, context);
+    return { outputs: outputs || {}, logs: scriptLogs, repairedInputs: runtimeInputs };
+  } catch (scriptErr: any) {
+    const originalError = scriptErr?.message || String(scriptErr);
+
+    if (!isCodeBug(scriptErr)) {
+      scriptLogs.push(`[auto-fix] Skipped: error appears to be external/infrastructure (${scriptErr?.name || 'Error'})`);
+      throw new ScriptNodeExecutionError(`Script error: ${originalError}`, {
+        logs: scriptLogs,
+        originalError,
+        attemptedAutoFix: false,
+        externalError: true,
+      });
+    }
+
+    scriptLogs.push(`[auto-fix] Original error: ${originalError}`);
+    updateCurrentStep?.('Script failed - analyzing graph context...');
+    debugLog.info('comp-run', `Script node "${nodeId}" failed with code bug, starting graph-aware auto-fix`, {
+      locationLabel,
+      error: originalError,
+    });
+
+    try {
+      const fixToolDocs = await generateScriptToolDocs(ctx);
+      let graphContext = buildScriptAutoFixGraphContext({ nodeId, nodes, edges, nodeOutputs, wfMap });
+      let inputSummary = formatRuntimeValueMap(runtimeInputs);
+      const recentLogs = scriptLogs.slice(-10).map((entry) => `  ${entry}`).join('\n');
+
+      let analysisSummary = 'Unavailable';
+      let analysisResult: any = null;
+      try {
+        const analysisSystemPrompt = `You are analyzing a failing pipeline script node inside a graph execution engine.
+
+Use the runtime inputs, neighboring node contracts, and local graph context to identify the most likely root cause.
+Return JSON only with these keys:
+- likelyRootCause
+- wiringMismatchLikely
+- evidence
+- suspectInputs
+- suspectContractMismatch
+- fixStrategy
+
+Keep the analysis concise and grounded in the provided data.`;
+
+        const analysisUserMessage = `A pipeline script failed.
+
+Location: ${locationLabel}
+Error: ${scriptErr?.name || 'Error'}: ${originalError}
+${scriptErr?.stack ? `Stack trace:\n${scriptErr.stack.split('\n').slice(0, 6).join('\n')}` : ''}
+
+Runtime inputs:
+${inputSummary}
+
+${graphContext}
+
+Script code:
+\`\`\`javascript
+${node.script.code}
+\`\`\`
+
+${recentLogs ? `Logs before failure:\n${recentLogs}\n` : ''}
+Return JSON only.`;
+
+        const analysisResponse = await scriptRunPrompt(
+          [
+            { role: 'system', content: analysisSystemPrompt },
+            { role: 'user', content: analysisUserMessage },
+          ],
+          scriptModel,
+          { maxTokens: 1400, temperature: 0.2 },
+        );
+        analysisResult = parseJsonModelResponse(analysisResponse.content);
+        analysisSummary = JSON.stringify(analysisResult, null, 2);
+        scriptLogs.push(`[auto-fix] Analysis summary: ${analysisSummary.replace(/\s+/g, ' ').slice(0, 220)}`);
+      } catch (analysisErr: any) {
+        scriptLogs.push(`[auto-fix] Analysis step failed, continuing without structured summary: ${analysisErr?.message || String(analysisErr)}`);
+      }
+
+      const repairCandidates = proposeScriptNodeEdgeRepairs({ nodeId, nodes, edges, nodeOutputs });
+      const analysisSuggestsWiringMismatch = !!(
+        analysisResult?.wiringMismatchLikely
+        || analysisResult?.suspectContractMismatch
+        || /mismatch|wire|port|connection/i.test(String(analysisResult?.likelyRootCause || ''))
+        || /mismatch|wire|port|connection/i.test(String(analysisResult?.fixStrategy || ''))
+      );
+      const repairsAffectInputs = repairCandidates.some((candidate) => candidate.field === 'targetPort' || candidate.field === 'sourcePort');
+
+      if (repairCandidates.length > 0 && (analysisSuggestsWiringMismatch || repairsAffectInputs)) {
+        updateCurrentStep?.('Script failed - repairing graph edges...');
+        let changed = false;
+        for (const candidate of repairCandidates) {
+          const edge = edges.find((item) => item.id === candidate.edgeId);
+          if (!edge) continue;
+          const currentValue = candidate.field === 'sourcePort' ? edge.sourcePort : edge.targetPort;
+          if (currentValue !== candidate.fromPort) continue;
+          if (candidate.field === 'sourcePort') edge.sourcePort = candidate.toPort;
+          else edge.targetPort = candidate.toPort;
+          changed = true;
+          scriptLogs.push(`[auto-fix] Rewired edge ${candidate.edgeId}: ${candidate.field} ${candidate.fromPort} -> ${candidate.toPort} (${candidate.reason})`);
+        }
+
+        if (changed) {
+          await persistCompositionDocument(composition, compositionPath, scriptLogs);
+          runtimeInputs = recomputeInputs ? recomputeInputs() : runtimeInputs;
+          inputSummary = formatRuntimeValueMap(runtimeInputs);
+          graphContext = buildScriptAutoFixGraphContext({ nodeId, nodes, edges, nodeOutputs, wfMap });
+
+          try {
+            const repairedOutputs = await executeScriptCode(node.script.code, runtimeInputs, context);
+            scriptLogs.push('[auto-fix] Graph edge repair resolved the script failure without changing code');
+            return {
+              outputs: repairedOutputs || {},
+              logs: scriptLogs,
+              originalError,
+              repairedInputs: runtimeInputs,
+              graphRepaired: true,
+            };
+          } catch (repairRetryErr: any) {
+            scriptLogs.push(`[auto-fix] Graph edge repair applied but script still failed: ${repairRetryErr?.message || String(repairRetryErr)}`);
+          }
+        }
+      }
+
+      updateCurrentStep?.('Script failed - generating targeted fix...');
+
+      const fixSystemPrompt = `You are a code debugger for pipeline script nodes. A script failed during execution and you need to fix the bug.
+
+The script format:
+1. JSDoc comment with @input and @output annotations
+2. async function execute(inputs, context)
+3. Available: context.llm.generate(prompt), context.llm.generateJSON(prompt), context.log(message)${fixToolDocs ? '\n' + fixToolDocs : ''}
+4. Must return an object with all declared outputs
+
+CRITICAL RULES:
+- Do NOT change @input or @output annotations - ports are connected to other nodes
+- Do NOT change the function signature
+- Fix only the failing script node
+- Keep the same overall logic and intent unless the runtime evidence proves the contract handling is wrong
+- You may add defensive validation or normalize access to a clearly corresponding runtime key when the graph context shows a unique mismatch
+- Respond with ONLY the corrected code block - no explanation before or after`;
+
+      const fixUserMessage = `The following script node failed with an error.
+
+Location: ${locationLabel}
+Error: ${scriptErr?.name || 'Error'}: ${originalError}
+${scriptErr?.stack ? `Stack trace:\n${scriptErr.stack.split('\n').slice(0, 6).join('\n')}` : ''}
+
+Runtime inputs at time of failure:
+${inputSummary}
+
+${graphContext}
+
+Structured analysis:
+\`\`\`json
+${analysisSummary}
+\`\`\`
+
+Script code:
+\`\`\`javascript
+${node.script.code}
+\`\`\`
+
+${recentLogs ? `Logs before failure:\n${recentLogs}\n` : ''}
+Fix the bug and return the corrected code. Do not change the @input/@output annotations.`;
+
+      const fixResponse = await scriptRunPrompt(
+        [
+          { role: 'system', content: fixSystemPrompt },
+          { role: 'user', content: fixUserMessage },
+        ],
+        scriptModel,
+        { maxTokens: 4096, temperature: 0.3 },
+      );
+
+      const fixedCode = normalizeScriptCode(fixResponse.content);
+      if (!fixedCode) throw new Error('Auto-fix returned empty code');
+      scriptLogs.push(`[auto-fix] LLM produced fixed code (${fixedCode.length} chars)`);
+
+      updateCurrentStep?.('Re-running fixed script...');
+      const fixedOutputs = await executeScriptCode(fixedCode, runtimeInputs, context);
+      scriptLogs.push('[auto-fix] Fixed script executed successfully');
+
+      await persistFixedScriptCode(composition, compositionPath, node, fixedCode, originalError, scriptLogs);
+
+      return {
+        outputs: fixedOutputs || {},
+        logs: scriptLogs,
+        autoFixed: true,
+        originalError,
+        repairedInputs: runtimeInputs,
+      };
+    } catch (fixErr: any) {
+      const fixError = fixErr?.message || String(fixErr);
+      scriptLogs.push(`[auto-fix] Fix attempt also failed: ${fixError}`);
+      throw new ScriptNodeExecutionError(
+        `Script error: ${originalError}\nAuto-fix attempted but also failed: ${fixError}`,
+        {
+          logs: scriptLogs,
+          originalError,
+          attemptedAutoFix: true,
+          externalError: false,
+        },
+      );
+    }
+  }
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -861,11 +1234,21 @@ async function executeToolNode(
 function executeVariableNode(
   node: any,
   edgeInputs: Record<string, unknown>,
+  initialVariables: Record<string, unknown>,
   existingOutputs: Record<string, unknown> | undefined,
 ): Record<string, unknown> {
   const cfg = node.variableNode;
 
   let currentValue: unknown = existingOutputs?.value;
+  const exposedInputName = typeof cfg?.inputName === 'string' ? cfg.inputName.trim() : '';
+  if (
+    currentValue === undefined
+    && cfg?.exposeAsInput
+    && exposedInputName
+    && Object.prototype.hasOwnProperty.call(initialVariables, exposedInputName)
+  ) {
+    currentValue = initialVariables[exposedInputName];
+  }
   if (currentValue === undefined) {
     try { currentValue = JSON.parse(cfg.initialValue); }
     catch { currentValue = cfg.initialValue; }
@@ -993,24 +1376,38 @@ async function executeForEachBodyNode(
   forEachBodyNodes: Set<string>,
   compId: string,
   iterIndex: number,
+  compPath?: string,
 ): Promise<void> {
   const bodyNodeId = bodyNode.id;
 
   if (bodyNode.workflowId === '__script__' && bodyNode.script) {
-    const scriptCode = bodyNode.script.code || '';
-    const bodyScriptLogs: string[] = [];
-    const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
-    const { scriptRunPrompt, scriptModel, scriptTools } = await buildScriptContext(ctx);
-    const bodyContext = makeScriptExecutionContext(scriptRunPrompt, scriptModel, scriptTools, bodyScriptLogs);
+    bodyNs.inputVariables = { ...bodyMergedInputs };
+    const scriptResult = await runScriptNodeWithAutoFix({
+      ctx,
+      node: bodyNode,
+      nodeId: bodyNodeId,
+      mergedInputs: bodyMergedInputs,
+      composition: comp,
+      compositionPath: compPath,
+      nodes: comp.nodes,
+      edges: comp.edges,
+      nodeOutputs,
+      wfMap,
+      locationLabel: `${bodyNode.label || bodyNodeId} (ForEach iteration ${iterIndex + 1})`,
+      updateCurrentStep: (step) => {
+        bodyNs.currentStep = `${step} (iter ${iterIndex + 1})`;
+      },
+      recomputeInputs: () => ({
+        ...initialVariables,
+        ...gatherInputVariables(bodyNodeId, comp.edges, nodeOutputs),
+      }),
+    });
 
-    const bodyFnBody = extractScriptFnBody(scriptCode);
-    const bodyFn = new AsyncFunction('inputs', 'context', 'require', bodyFnBody);
-    const scriptResult = await bodyFn(bodyMergedInputs, bodyContext, require);
-
-    const scriptOutputs: Record<string, unknown> = scriptResult || {};
+    const scriptOutputs: Record<string, unknown> = scriptResult.outputs || {};
     bodyNs.status = 'completed';
     bodyNs.stepsCompleted = 1;
-    bodyNs.logs = bodyScriptLogs;
+    bodyNs.logs = scriptResult.logs;
+    bodyNs.inputVariables = { ...(scriptResult.repairedInputs || bodyMergedInputs) };
     bodyNs.outputVariables = scriptOutputs;
     nodeOutputs[bodyNodeId] = scriptOutputs;
 
@@ -1024,7 +1421,7 @@ async function executeForEachBodyNode(
   } else if (bodyNode.workflowId === '__variable__' && bodyNode.variableNode) {
     const bodyVarInputs = gatherInputVariables(bodyNodeId, comp.edges, nodeOutputs);
     bodyNs.inputVariables = { ...bodyVarInputs };
-    const outputs = executeVariableNode(bodyNode, bodyVarInputs, nodeOutputs[bodyNodeId]);
+    const outputs = executeVariableNode(bodyNode, bodyVarInputs, initialVariables, nodeOutputs[bodyNodeId]);
     bodyNs.status = 'completed';
     bodyNs.stepsCompleted = 1;
     bodyNs.outputVariables = outputs;
@@ -1083,7 +1480,7 @@ async function executeForEachBodyNode(
 
   } else if (bodyNode.workflowId === '__for_each__' && bodyNode.forEachNode) {
     // Nested ForEach — recursive execution
-    await executeNestedForEach(ctx, bodyNode, bodyNs, bodyEdgeInputs, initialVariables, nodeOutputs, comp, wfMap, abort, run, forEachBodyNodes, compId);
+    await executeNestedForEach(ctx, bodyNode, bodyNs, bodyEdgeInputs, initialVariables, nodeOutputs, comp, wfMap, abort, run, forEachBodyNodes, compId, compPath);
 
   } else if (bodyNode.workflowId === '__tool__' && bodyNode.toolNode) {
     const outputs = await executeToolNode(ctx, bodyNode, bodyEdgeInputs);
@@ -1130,7 +1527,8 @@ async function executeForEachBodyNode(
     const bodyJuncInputs = gatherInputVariables(bodyNodeId, comp.edges, nodeOutputs);
     const juncOut: Record<string, unknown> = {};
     for (const port of bodyNode.junctionNode.ports) {
-      if (port.name in bodyJuncInputs) juncOut[port.name] = bodyJuncInputs[port.name];
+      const portValue = getInputValueByPortName(bodyJuncInputs, port.name);
+      if (portValue !== undefined) juncOut[port.name] = portValue;
     }
     juncOut['__done__'] = true;
     bodyNs.status = 'completed';
@@ -1199,6 +1597,7 @@ async function executeNestedForEach(
   run: any,
   forEachBodyNodes: Set<string>,
   compId: string,
+  compPath?: string,
 ): Promise<void> {
   const bodyNodeId = bodyNode.id;
 
@@ -1275,7 +1674,7 @@ async function executeNestedForEach(
         await executeForEachBodyNode(
           ctx, innerNode, innerNs, innerEdgeIn, innerMerged,
           initialVariables, nodeOutputs, comp, wfMap, abort, run,
-          forEachBodyNodes, compId, ii,
+          forEachBodyNodes, compId, ii, compPath,
         );
       } catch (err: any) {
         // For inner workflow nodes, try direct execution
@@ -1617,148 +2016,52 @@ export const handleCompositionRunRoutes: RouteHandler = async (req, res, pathnam
               const mergedInputs: Record<string, unknown> = { ...initialVariables, ...edgeInputs };
               ns.inputVariables = { ...mergedInputs };
 
-              const { scriptRunPrompt, scriptModel, scriptTools } = await buildScriptContext(ctx);
-              const scriptLogs: string[] = ns.logs || [];
-              const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
-              const context = makeScriptExecutionContext(scriptRunPrompt, scriptModel, scriptTools, scriptLogs);
-
               try {
-                const fnBody = extractScriptFnBody(node.script.code);
-                const fn = new AsyncFunction('inputs', 'context', 'require', fnBody);
-                const outputs = await fn(mergedInputs, context, require);
+                const result = await runScriptNodeWithAutoFix({
+                  ctx,
+                  node,
+                  nodeId,
+                  mergedInputs,
+                  composition: comp,
+                  compositionPath: compFound.path,
+                  nodes: comp.nodes,
+                  edges: comp.edges,
+                  nodeOutputs,
+                  wfMap,
+                  locationLabel: `${comp.name} / ${node.label || nodeId}`,
+                  updateCurrentStep: (step) => {
+                    ns.currentStep = step;
+                  },
+                  recomputeInputs: () => ({
+                    ...initialVariables,
+                    ...gatherInputVariables(nodeId, comp.edges, nodeOutputs),
+                  }),
+                });
 
                 ns.durationMs = Date.now() - scriptStart;
                 ns.status = 'completed';
                 ns.stepsCompleted = 1;
-                ns.logs = scriptLogs;
-                ns.outputVariables = outputs || {};
+                ns.logs = result.logs;
+                ns.inputVariables = { ...(result.repairedInputs || mergedInputs) };
+                ns.outputVariables = result.outputs || {};
                 run.nodesCompleted++;
-                nodeOutputs[nodeId] = outputs || {};
+                nodeOutputs[nodeId] = result.outputs || {};
 
                 debugLog.info('comp-run', `Script node "${nodeId}" completed`, {
-                  outputKeys: Object.keys(outputs || {}),
+                  outputKeys: Object.keys(result.outputs || {}),
                   durationMs: ns.durationMs,
+                  autoFixed: !!result.autoFixed,
                 });
               } catch (scriptErr: any) {
-                const originalError = scriptErr?.message || String(scriptErr);
-
-                // ── Auto-fix attempt for code bugs ──
-                if (node.script && isCodeBug(scriptErr)) {
-                  ns.currentStep = 'Script failed — attempting auto-fix...';
-                  scriptLogs.push(`[auto-fix] Original error: ${originalError}`);
-                  debugLog.info('comp-run', `Script node "${nodeId}" failed with code bug, attempting auto-fix`, { error: originalError });
-
-                  try {
-                    const fixToolDocs = await generateScriptToolDocs(ctx);
-                    const fixSystemPrompt = `You are a code debugger for pipeline script nodes. A script failed during execution and you need to fix the bug.
-
-The script format:
-1. JSDoc comment with @input and @output annotations
-2. async function execute(inputs, context)
-3. Available: context.llm.generate(prompt), context.llm.generateJSON(prompt), context.log(message)${fixToolDocs ? '\n' + fixToolDocs : ''}
-4. Must return an object with all declared outputs
-
-CRITICAL RULES:
-- Do NOT change @input or @output annotations — ports are connected to other nodes
-- Do NOT change the function signature
-- Fix ONLY the bug described in the error
-- Keep the same overall logic and intent
-- Respond with ONLY the corrected code block — no explanation before or after`;
-
-                    const inputSummary = Object.entries(mergedInputs)
-                      .map(([k, v]) => {
-                        const val = typeof v === 'string' ? JSON.stringify(v.slice(0, 200)) : JSON.stringify(v);
-                        return `  ${k}: ${val}`;
-                      })
-                      .join('\n');
-
-                    const fixUserMessage = `The following script node failed with an error.
-
-**Error**: ${scriptErr?.name || 'Error'}: ${originalError}
-${scriptErr?.stack ? `**Stack trace**:\n${scriptErr.stack.split('\n').slice(0, 6).join('\n')}` : ''}
-
-**Script code**:
-\`\`\`javascript
-${node.script.code}
-\`\`\`
-
-**Inputs at time of failure**:
-${inputSummary || '  (none)'}
-
-${scriptLogs.length > 0 ? `**Logs before failure**:\n${scriptLogs.slice(-10).map((l: string) => `  ${l}`).join('\n')}` : ''}
-
-Fix the bug and return the corrected code. Do not change the @input/@output annotations.`;
-
-                    const fixMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
-                      { role: 'system', content: fixSystemPrompt },
-                      { role: 'user', content: fixUserMessage },
-                    ];
-
-                    const fixResponse = await scriptRunPrompt(fixMessages, scriptModel, { maxTokens: 4096, temperature: 0.3 });
-                    let fixedCode = fixResponse.content.trim();
-
-                    const codeBlockMatch = fixedCode.match(/```(?:javascript|js)?\s*\n([\s\S]*?)\n```/);
-                    if (codeBlockMatch) fixedCode = codeBlockMatch[1].trim();
-
-                    scriptLogs.push(`[auto-fix] LLM produced fixed code (${fixedCode.length} chars)`);
-
-                    ns.currentStep = 'Re-running fixed script...';
-                    const fixedFnBody = extractScriptFnBody(fixedCode);
-                    const fixedFn = new AsyncFunction('inputs', 'context', 'require', fixedFnBody);
-                    const fixedOutputs = await fixedFn(mergedInputs, context, require);
-
-                    // SUCCESS — persist the fix
-                    ns.durationMs = Date.now() - scriptStart;
-                    ns.status = 'completed';
-                    ns.stepsCompleted = 1;
-                    ns.logs = scriptLogs;
-                    ns.outputVariables = fixedOutputs || {};
-                    run.nodesCompleted++;
-                    nodeOutputs[nodeId] = fixedOutputs || {};
-
-                    scriptLogs.push('[auto-fix] Fixed script executed successfully');
-
-                    node.script.code = fixedCode;
-                    if (!node.script.chatHistory) node.script.chatHistory = [];
-                    node.script.chatHistory.push(
-                      { role: 'user', content: `[Auto-fix] The script failed with: ${originalError}` },
-                      { role: 'assistant', content: `\`\`\`javascript\n${fixedCode}\n\`\`\`` }
-                    );
-
-                    try {
-                      comp.metadata = comp.metadata || { createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
-                      comp.metadata.updatedAt = new Date().toISOString();
-                      await writeFile(compFound.path, JSON.stringify(comp, null, 2), 'utf-8');
-                    } catch (saveErr) {
-                      scriptLogs.push(`[auto-fix] Warning: fix applied in memory but failed to save to disk: ${saveErr}`);
-                    }
-
-                    debugLog.info('comp-run', `Script node "${nodeId}" auto-fixed and completed`, {
-                      originalError,
-                      outputKeys: Object.keys(fixedOutputs || {}),
-                      durationMs: ns.durationMs,
-                    });
-                    if (isIdempotent && ns.status === 'completed') await saveIdempotencyCache(id, idempotencyHash, nodeOutputs[nodeId]);
-                    continue;
-
-                  } catch (fixErr: any) {
-                    const fixError = fixErr?.message || String(fixErr);
-                    scriptLogs.push(`[auto-fix] Fix attempt also failed: ${fixError}`);
-                    debugLog.error('comp-run', `Script node "${nodeId}" auto-fix failed`, { originalError, fixError });
-
-                    ns.durationMs = Date.now() - scriptStart;
-                    ns.status = 'failed';
-                    ns.error = `Script error: ${originalError}\nAuto-fix attempted but also failed: ${fixError}`;
-                    ns.logs = scriptLogs;
-                  }
-                } else {
-                  ns.durationMs = Date.now() - scriptStart;
-                  ns.status = 'failed';
-                  ns.error = `Script error: ${originalError}`;
-                  ns.logs = scriptLogs;
-                  scriptLogs.push(`[auto-fix] Skipped: error appears to be external/infrastructure (${scriptErr?.name || 'Error'})`);
-                  debugLog.error('comp-run', `Script node "${nodeId}" failed (external error, no auto-fix)`, { error: originalError });
-                }
+                ns.durationMs = Date.now() - scriptStart;
+                ns.status = 'failed';
+                ns.error = scriptErr?.message || String(scriptErr);
+                ns.logs = Array.isArray(scriptErr?.logs) ? scriptErr.logs : [];
+                debugLog.error('comp-run', `Script node "${nodeId}" failed`, {
+                  error: ns.error,
+                  originalError: scriptErr?.originalError,
+                  attemptedAutoFix: !!scriptErr?.attemptedAutoFix,
+                });
 
                 // Apply failure policy (stop or skip)
                 const scriptPolicy = node.onFailure || { action: 'stop' as const };
@@ -2099,7 +2402,7 @@ Fix the bug and return the corrected code. Do not change the @input/@output anno
                     await executeForEachBodyNode(
                       ctx, bodyNode, bodyNs, bodyEdgeInputs, bodyMergedInputs,
                       initialVariables, nodeOutputs, comp, wfMap, abort, run,
-                      forEachBodyNodes, id, i,
+                      forEachBodyNodes, id, i, compFound.path,
                     );
 
                     if (bodyIsIdempotent && (bodyNs.status as string) === 'completed') await saveIdempotencyCache(id, bodyIdempotencyHash, nodeOutputs[bodyNodeId]);
@@ -2206,9 +2509,14 @@ Fix the bug and return the corrected code. Do not change the @input/@output anno
               run.currentNodeId = nodeId;
 
               const edgeInputs = gatherInputVariables(nodeId, comp.edges, nodeOutputs);
-              ns.inputVariables = { ...edgeInputs };
+              ns.inputVariables = {
+                ...(node.variableNode.exposeAsInput && node.variableNode.inputName && Object.prototype.hasOwnProperty.call(initialVariables, node.variableNode.inputName)
+                  ? { [node.variableNode.inputName]: initialVariables[node.variableNode.inputName] }
+                  : {}),
+                ...edgeInputs,
+              };
 
-              const outputs = executeVariableNode(node, edgeInputs, nodeOutputs[nodeId]);
+              const outputs = executeVariableNode(node, edgeInputs, initialVariables, nodeOutputs[nodeId]);
               ns.status = 'completed';
               ns.stepsCompleted = 1;
               ns.outputVariables = outputs;
@@ -2393,7 +2701,8 @@ Fix the bug and return the corrected code. Do not change the @input/@output anno
 
               const junctionOutputs: Record<string, unknown> = {};
               for (const port of node.junctionNode.ports) {
-                if (port.name in mergedInputs) junctionOutputs[port.name] = mergedInputs[port.name];
+                const portValue = getInputValueByPortName(mergedInputs, port.name);
+                if (portValue !== undefined) junctionOutputs[port.name] = portValue;
               }
               junctionOutputs['__done__'] = true;
 
@@ -2500,11 +2809,27 @@ Fix the bug and return the corrected code. Do not change the @input/@output anno
                 const subOrder = topoSort(subComp.nodes, subComp.edges);
                 const subNodeOutputs: Record<string, Record<string, unknown>> = {};
                 let subPipelineOutputs: Record<string, unknown> = {};
+                const subNodeStates = initNodeStates(subComp.nodes, subWfMap);
+                ns.subExecutionOrder = subOrder;
+                ns.subNodeStates = subNodeStates;
+                ns.stepsTotal = subOrder.length;
+                ns.stepsCompleted = 0;
 
                 for (const subNodeId of subOrder) {
                   if (abort.signal.aborted) break;
                   const subNode = subComp.nodes.find((n: any) => n.id === subNodeId);
                   if (!subNode) continue;
+                  const subNs = subNodeStates[subNodeId] || (subNodeStates[subNodeId] = {
+                    status: 'pending',
+                    workflowId: subNode.workflowId,
+                    workflowName: subNode.label || subNodeId,
+                    stepsTotal: 1,
+                    stepsCompleted: 0,
+                    currentStep: '',
+                  });
+                  subNs.status = 'running';
+                  subNs.currentStep = 'Running';
+                  ns.currentStep = `Sub-pipeline: ${subNs.workflowName}`;
 
                   if (subNode.workflowId === '__output__' && subNode.outputNode) {
                     const subEdgeInputs = gatherInputVariables(subNodeId, subComp.edges, subNodeOutputs);
@@ -2513,29 +2838,92 @@ Fix the bug and return the corrected code. Do not change the @input/@output anno
                       subPipelineOutputs[port.name] = subMerged[port.name];
                     }
                     subNodeOutputs[subNodeId] = subPipelineOutputs;
+                    subNs.status = 'completed';
+                    subNs.stepsCompleted = subNs.stepsTotal || 1;
+                    subNs.currentStep = 'Done';
+                    subNs.outputVariables = subPipelineOutputs;
+                    ns.stepsCompleted = Math.min(subOrder.length, (ns.stepsCompleted || 0) + 1);
                     continue;
                   }
 
                   if (subNode.workflowId === '__approval_gate__') {
                     const gateEdgeInputs = gatherInputVariables(subNodeId, subComp.edges, subNodeOutputs);
                     subNodeOutputs[subNodeId] = { ...subInputs, ...gateEdgeInputs };
+                    subNs.status = 'completed';
+                    subNs.stepsCompleted = subNs.stepsTotal || 1;
+                    subNs.currentStep = 'Done';
+                    subNs.outputVariables = subNodeOutputs[subNodeId];
+                    ns.stepsCompleted = Math.min(subOrder.length, (ns.stepsCompleted || 0) + 1);
+                    continue;
+                  }
+
+                  if (subNode.workflowId === '__junction__' && subNode.junctionNode) {
+                    const subEdgeInputs = gatherInputVariables(subNodeId, subComp.edges, subNodeOutputs);
+                    const subMerged: Record<string, unknown> = { ...subInputs, ...subEdgeInputs };
+                    const junctionOutputs: Record<string, unknown> = {};
+                    for (const port of subNode.junctionNode.ports || []) {
+                      if (port && typeof port.name === 'string') {
+                        const portValue = getInputValueByPortName(subMerged, port.name);
+                        if (portValue !== undefined) {
+                          junctionOutputs[port.name] = portValue;
+                        }
+                      }
+                    }
+                    junctionOutputs.__done__ = true;
+                    subNodeOutputs[subNodeId] = junctionOutputs;
+                    subNs.inputVariables = { ...subMerged };
+                    subNs.status = 'completed';
+                    subNs.stepsCompleted = subNs.stepsTotal || 1;
+                    subNs.currentStep = 'Done';
+                    subNs.outputVariables = junctionOutputs;
+                    ns.stepsCompleted = Math.min(subOrder.length, (ns.stepsCompleted || 0) + 1);
                     continue;
                   }
 
                   if (subNode.workflowId === '__script__' && subNode.script) {
                     const subEdgeInputs = gatherInputVariables(subNodeId, subComp.edges, subNodeOutputs);
                     const subMerged: Record<string, unknown> = { ...subInputs, ...subEdgeInputs };
+                    subNs.inputVariables = { ...subMerged };
 
-                    const subFnBody = extractScriptFnBody(subNode.script.code);
-                    const { scriptRunPrompt: subRunPrompt, scriptModel: subModel, scriptTools: subScriptTools } = await buildScriptContext(ctx);
-                    const subScriptLogs: string[] = [];
-                    const subContext = makeScriptExecutionContext(subRunPrompt, subModel, subScriptTools, subScriptLogs);
+                    try {
+                      const subResult = await runScriptNodeWithAutoFix({
+                        ctx,
+                        node: subNode,
+                        nodeId: subNodeId,
+                        mergedInputs: subMerged,
+                        composition: subComp,
+                        compositionPath: subFound.path,
+                        nodes: subComp.nodes,
+                        edges: subComp.edges,
+                        nodeOutputs: subNodeOutputs,
+                        wfMap: subWfMap,
+                        locationLabel: `${comp.name} / ${node.label || nodeId} / ${subComp.name} / ${subNode.label || subNodeId}`,
+                        updateCurrentStep: (step) => {
+                          subNs.currentStep = step;
+                          ns.currentStep = `Sub-pipeline: ${subNs.workflowName} - ${step}`;
+                        },
+                        recomputeInputs: () => ({
+                          ...subInputs,
+                          ...gatherInputVariables(subNodeId, subComp.edges, subNodeOutputs),
+                        }),
+                      });
 
-                    const SubAsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
-                    const subFn = new SubAsyncFunction('inputs', 'context', 'require', subFnBody);
-                    const subOutputs = await subFn(subMerged, subContext, require);
-                    subNodeOutputs[subNodeId] = subOutputs || {};
-                    continue;
+                      subNodeOutputs[subNodeId] = subResult.outputs || {};
+                      subNs.logs = subResult.logs;
+                      subNs.inputVariables = { ...(subResult.repairedInputs || subMerged) };
+                      subNs.status = 'completed';
+                      subNs.stepsCompleted = subNs.stepsTotal || 1;
+                      subNs.currentStep = 'Done';
+                      subNs.outputVariables = subNodeOutputs[subNodeId];
+                      ns.stepsCompleted = Math.min(subOrder.length, (ns.stepsCompleted || 0) + 1);
+                      continue;
+                    } catch (subScriptErr: any) {
+                      subNs.logs = Array.isArray(subScriptErr?.logs) ? subScriptErr.logs : [];
+                      subNs.status = 'failed';
+                      subNs.error = subScriptErr?.message || String(subScriptErr);
+                      subNs.currentStep = 'Failed';
+                      throw new Error(`Script node "${subNs.workflowName}" failed: ${subNs.error}`);
+                    }
                   }
 
                   if (subNode.workflowId === '__image_viewer__' && subNode.imageViewer) {
@@ -2543,6 +2931,11 @@ Fix the bug and return the corrected code. Do not change the @input/@output anno
                     const subMerged: Record<string, unknown> = { ...subInputs, ...subEdgeInputs };
                     const imgPath = subMerged['file_path'] ?? subNode.imageViewer.filePath;
                     subNodeOutputs[subNodeId] = { file_path: imgPath };
+                    subNs.status = 'completed';
+                    subNs.stepsCompleted = subNs.stepsTotal || 1;
+                    subNs.currentStep = 'Done';
+                    subNs.outputVariables = subNodeOutputs[subNodeId];
+                    ns.stepsCompleted = Math.min(subOrder.length, (ns.stepsCompleted || 0) + 1);
                     continue;
                   }
 
@@ -2560,6 +2953,11 @@ Fix the bug and return the corrected code. Do not change the @input/@output anno
                       else mType = 'text';
                     }
                     subNodeOutputs[subNodeId] = { file_path: mediaPath, media_type: mType };
+                    subNs.status = 'completed';
+                    subNs.stepsCompleted = subNs.stepsTotal || 1;
+                    subNs.currentStep = 'Done';
+                    subNs.outputVariables = subNodeOutputs[subNodeId];
+                    ns.stepsCompleted = Math.min(subOrder.length, (ns.stepsCompleted || 0) + 1);
                     continue;
                   }
 
@@ -2579,21 +2977,30 @@ Fix the bug and return the corrected code. Do not change the @input/@output anno
                   }
 
                   ns.currentStep = `Sub-pipeline: ${subWf.name}`;
+                  subNs.currentStep = subWf.name;
 
                   const subResult = await executeWorkflow(bridgeServer, subWf, subMergedVars, {
                     log: (msg: string) => {
                       debugLog.info('comp-run', `[sub:${subWf.name}] ${msg}`);
                       if (!ns.logs) ns.logs = [];
                       if (ns.logs.length < 200) ns.logs.push(msg);
+                      if (!subNs.logs) subNs.logs = [];
+                      if (subNs.logs.length < 200) subNs.logs.push(msg);
                     },
                     signal: abort.signal,
                   });
                   subNodeOutputs[subNodeId] = subResult.variables || {};
+                  subNs.status = 'completed';
+                  subNs.stepsCompleted = subNs.stepsTotal || 1;
+                  subNs.currentStep = 'Done';
+                  subNs.outputVariables = subNodeOutputs[subNodeId];
+                  ns.stepsCompleted = Math.min(subOrder.length, (ns.stepsCompleted || 0) + 1);
                 }
 
                 ns.durationMs = Date.now() - subStart;
                 ns.status = 'completed';
-                ns.stepsCompleted = 1;
+                ns.stepsCompleted = subOrder.length;
+                ns.currentStep = 'Done';
                 ns.outputVariables = subPipelineOutputs;
                 run.nodesCompleted++;
                 nodeOutputs[nodeId] = subPipelineOutputs;

@@ -105,4 +105,102 @@ describe('autoSaveComposition', () => {
     expect(issues.some(issue => issue.includes('missing source port'))).toBe(true);
     expect(issues.some(issue => issue.includes('missing target port'))).toBe(true);
   });
+
+  it('treats variable nodes as built-ins and flags repeated dangling external inputs', async () => {
+    const { validateComposition } = await import('../loop/v3/closure-engine.js');
+
+    const issues = validateComposition({
+      version: '1.0',
+      id: 'shared-input-comp',
+      name: 'Shared Input Comp',
+      nodes: [
+        {
+          id: 'var1',
+          workflowId: '__variable__',
+          label: 'Shared Brief',
+          variableNode: {
+            type: 'string',
+            initialValue: '',
+            exposeAsInput: true,
+            inputName: 'projectBrief',
+          },
+        },
+        {
+          id: 'n1',
+          workflowId: '__script__',
+          label: 'Writer A',
+          script: {
+            code: 'async function execute(inputs) { return { done: inputs.projectBrief }; }',
+            inputs: [{ name: 'projectBrief' }],
+            outputs: [{ name: 'done' }],
+          },
+        },
+        {
+          id: 'n2',
+          workflowId: '__script__',
+          label: 'Writer B',
+          script: {
+            code: 'async function execute(inputs) { return { done: inputs.projectBrief }; }',
+            inputs: [{ name: 'projectBrief' }],
+            outputs: [{ name: 'done' }],
+          },
+        },
+        {
+          id: 'n3',
+          workflowId: '__script__',
+          label: 'Writer C',
+          script: {
+            code: 'async function execute(inputs) { return { done: inputs.projectBrief }; }',
+            inputs: [{ name: 'projectBrief' }],
+            outputs: [{ name: 'done' }],
+          },
+        },
+      ],
+      edges: [],
+    }, new Set<string>());
+
+    expect(issues.some(issue => issue.includes('references workflow "__variable__"'))).toBe(false);
+    expect(issues.some(issue => issue.includes('repeated across 3 nodes'))).toBe(false);
+
+    const repeatedIssues = validateComposition({
+      version: '1.0',
+      id: 'repeated-inputs-comp',
+      name: 'Repeated Inputs Comp',
+      nodes: [
+        {
+          id: 'n1',
+          workflowId: '__script__',
+          label: 'Writer A',
+          script: {
+            code: 'async function execute(inputs) { return { done: inputs.projectBrief }; }',
+            inputs: [{ name: 'projectBrief' }],
+            outputs: [{ name: 'done' }],
+          },
+        },
+        {
+          id: 'n2',
+          workflowId: '__script__',
+          label: 'Writer B',
+          script: {
+            code: 'async function execute(inputs) { return { done: inputs.projectBrief }; }',
+            inputs: [{ name: 'projectBrief' }],
+            outputs: [{ name: 'done' }],
+          },
+        },
+        {
+          id: 'n3',
+          workflowId: '__script__',
+          label: 'Writer C',
+          script: {
+            code: 'async function execute(inputs) { return { done: inputs.projectBrief }; }',
+            inputs: [{ name: 'projectBrief' }],
+            outputs: [{ name: 'done' }],
+          },
+        },
+      ],
+      edges: [],
+    }, new Set<string>());
+
+    expect(repeatedIssues.some(issue => issue.includes('Expose it once through a __variable__ node'))).toBe(true);
+  });
 });

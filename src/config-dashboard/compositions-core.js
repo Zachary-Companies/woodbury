@@ -267,6 +267,11 @@ async function saveComposition(comp) {
   return data;
 }
 
+function clearCompositionInterfaceCache() {
+  if (typeof compositionInterfaceCache === 'undefined') return;
+  compositionInterfaceCache = {};
+}
+
 async function createComposition(name, description, folder) {
   var body = { name: name, description: description };
   if (folder) body.folder = folder;
@@ -365,6 +370,7 @@ function debouncedSave() {
     };
     try {
       await saveComposition(compData);
+      clearCompositionInterfaceCache();
     } catch (err) {
       if (typeof toast === 'function') toast('Auto-save failed: ' + err.message, 'error');
     }
@@ -383,6 +389,7 @@ function immediateSave() {
   saveComposition(compData).catch(function(err) {
     if (typeof toast === 'function') toast('Save failed: ' + err.message, 'error');
   });
+  clearCompositionInterfaceCache();
 }
 
 // ── Undo / Redo ──────────────────────────────────────────────
@@ -1131,12 +1138,15 @@ function showCreateForm() {
 
 // ── Select & Load Composition ────────────────────────────────
 
-async function selectComposition(id) {
+async function selectComposition(id, viewOverride) {
   selectedComposition = id;
+  clearCompositionInterfaceCache();
+  var compView = viewOverride || (typeof parseHash === 'function' ? parseHash().view : null);
+  document.body.classList.toggle('composition-form-mode', compView === 'form');
 
   // Update URL hash for deep linking
   if (typeof updateHash === 'function') {
-    updateHash('compositions', id);
+    updateHash('compositions', id, compView);
   }
 
   // Update sidebar active state
@@ -1172,7 +1182,11 @@ async function selectComposition(id) {
     undoStack = [];
     redoStack = [];
 
-    renderGraphEditor();
+    if (compView === 'form' && typeof renderCompositionFormPage === 'function') {
+      renderCompositionFormPage();
+    } else {
+      renderGraphEditor();
+    }
   } catch (err) {
     main.innerHTML =
       '<div class="empty-state"><div class="empty-state-icon">&#x26a0;&#xfe0f;</div>' +

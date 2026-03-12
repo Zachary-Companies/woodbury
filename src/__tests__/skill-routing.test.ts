@@ -154,6 +154,14 @@ describe('skill routing', () => {
     expect(escalated.allowedToolNames).toContain('file_write');
   });
 
+  it('teaches staged pipeline skills to centralize shared inputs through exposed variable nodes', () => {
+    const registry = new SkillRegistry();
+
+    expect(registry.getByName('pipeline_design')?.promptGuidance).toContain('__variable__ node');
+    expect(registry.getByName('pipeline_generate')?.promptGuidance).toContain('variableNode.exposeAsInput=true');
+    expect(registry.getByName('pipeline_validate_and_repair')?.promptGuidance).toContain('Normalize repeated external inputs');
+  });
+
   it('applies learned recovery hints to skill guidance', () => {
     const learnedMemories: MemoryRecord[] = [
       {

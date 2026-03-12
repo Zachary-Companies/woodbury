@@ -94,6 +94,8 @@ export interface CompNodeState {
   retryMax?: number;
   expectationResults?: Array<{ description: string; passed: boolean; detail: string }>;
   logs?: string[];
+  subExecutionOrder?: string[];
+  subNodeStates?: Record<string, CompNodeState>;
 }
 
 /** Debug mode state (visual step-through) */

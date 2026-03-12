@@ -277,7 +277,876 @@ function clientTopoSort() {
   return result;
 }
 
-function startCompositionRun() {
+var compRunFormValues = {};
+var compFormPreviewCache = {};
+var compFormPreviewInflight = {};
+
+function getCompositionRunValue(compId, key, fallback) {
+  if (compRunFormValues[compId] && compRunFormValues[compId][key] !== undefined) {
+    return compRunFormValues[compId][key];
+  }
+  return fallback;
+}
+
+function saveCompositionRunValues(compId, values) {
+  if (!compId || !values) return;
+  compRunFormValues[compId] = Object.assign({}, compRunFormValues[compId] || {}, values);
+}
+
+function getCompositionCurrentView() {
+  return typeof parseHash === 'function' ? (parseHash().view || null) : null;
+}
+
+function getCompositionFormShareUrl() {
+  if (!compData) return window.location.href;
+  var url = new URL(window.location.href);
+  url.hash = '#compositions/' + encodeURIComponent(compData.id) + '/form';
+  return url.toString();
+}
+
+function copyCompositionFormShareLink() {
+  if (!compData || !navigator.clipboard) {
+    toast('Clipboard access is not available here', 'error');
+    return;
+  }
+  navigator.clipboard.writeText(getCompositionFormShareUrl())
+    .then(function() { toast('Form link copied to clipboard', 'success'); })
+    .catch(function(err) { toast('Failed to copy link: ' + err.message, 'error'); });
+}
+
+function getCompositionDefaultText(input) {
+  if (input.type === 'string[]' && Array.isArray(input.default)) {
+    return input.default.join('\n');
+  }
+  if (input.default !== undefined && input.default !== null) {
+    return String(input.default);
+  }
+  return '';
+}
+
+function getCompositionInputControl(input) {
+  var key = String(input.portName || input.name || '');
+  var type = String(input.type || 'string');
+  var label = String(input.label || input.name || key);
+  var lower = (label || key).toLowerCase();
+  var defaultValue = input.default;
+  var config = {
+    inputType: 'text',
+    isTextarea: false,
+    isBoolean: false,
+    placeholder: defaultValue !== undefined && defaultValue !== null ? String(defaultValue) : 'Enter value...',
+  };
+
+  if (type === 'boolean') {
+    config.isBoolean = true;
+    return config;
+  }
+  if (type === 'string[]') {
+    config.isTextarea = true;
+    config.placeholder = Array.isArray(defaultValue) ? defaultValue.join('\n') : 'One value per line';
+    return config;
+  }
+  if (type === 'number') {
+    config.inputType = 'number';
+    config.placeholder = defaultValue !== undefined && defaultValue !== null ? String(defaultValue) : '0';
+    return config;
+  }
+  if (lower.includes('text') || lower.includes('caption') || lower.includes('content') || lower.includes('lyrics') || lower.includes('description') || lower.includes('prompt') || lower.includes('message')) {
+    config.isTextarea = true;
+  } else if (lower.includes('url') || lower.includes('link')) {
+    config.inputType = 'url';
+    config.placeholder = defaultValue !== undefined && defaultValue !== null ? String(defaultValue) : 'https://...';
+  } else if (lower.includes('path') || lower.includes('file') || lower.includes('dir') || lower.includes('folder')) {
+    config.placeholder = defaultValue !== undefined && defaultValue !== null ? String(defaultValue) : '/path/to/file';
+  }
+  return config;
+}
+
+function normalizeCompositionRunInputs(inputs) {
+  var groups = {};
+  (inputs || []).forEach(function(input) {
+    var key = String(input.portName || input.name || '').trim();
+    if (!key) return;
+    if (!groups[key]) {
+      groups[key] = {
+        key: key,
+        label: input.label || input.name || key,
+        type: input.type || 'string',
+        description: input.description || '',
+        required: input.required === true,
+        default: input.default,
+        generationPrompt: input.generationPrompt,
+        sources: [],
+      };
+    }
+    if (!groups[key].description && input.description) groups[key].description = input.description;
+    if (!groups[key].generationPrompt && input.generationPrompt) groups[key].generationPrompt = input.generationPrompt;
+    if (groups[key].default === undefined && input.default !== undefined) groups[key].default = input.default;
+    if (input.required === true) groups[key].required = true;
+
+    var displayLabel = String(input.label || input.name || key).trim();
+    if (displayLabel && groups[key].label === key && displayLabel !== key) {
+      groups[key].label = displayLabel;
+    }
+
+    var sourceLabel = String(input.nodeLabel || input.workflowName || '').trim();
+    if (sourceLabel && groups[key].sources.indexOf(sourceLabel) === -1) {
+      groups[key].sources.push(sourceLabel);
+    }
+  });
+
+  return Object.keys(groups).sort().map(function(key) { return groups[key]; });
+}
+
+function renderCompositionRunFields(inputs) {
+  var html = '<div class="comp-run-input-list">';
+
+  inputs.forEach(function(input) {
+    var control = getCompositionInputControl(input);
+    var savedVal = getCompositionRunValue(compData.id, input.key, getCompositionDefaultText(input));
+    var sources = input.sources.length > 0 ? input.sources.join(', ') : '';
+
+    html += '<div class="comp-run-field">';
+    html += '<div class="comp-run-field-header">';
+    html += '<label class="comp-run-field-label" for="comp-run-input-' + compEscAttr(input.key) + '">' + compEscHtml(input.label || humanizeVarName(input.key)) + '</label>';
+    html += input.required
+      ? '<span class="badge badge-missing comp-run-badge">required</span>'
+      : '<span class="badge badge-partial comp-run-badge">optional</span>';
+    html += '</div>';
+    if (input.description) {
+      html += '<div class="comp-run-field-help">' + compEscHtml(input.description) + '</div>';
+    }
+    if (sources) {
+      html += '<div class="comp-run-field-source">Used by ' + compEscHtml(sources) + '</div>';
+    }
+
+    if (control.isBoolean) {
+      var boolVal = savedVal === true || savedVal === 'true' ? 'true' : (savedVal === false || savedVal === 'false' ? 'false' : '');
+      html += '<select class="comp-props-input comp-run-input" id="comp-run-input-' + compEscAttr(input.key) + '" data-comp-run-key="' + compEscAttr(input.key) + '">';
+      html += '<option value="">Choose...</option>';
+      html += '<option value="true"' + (boolVal === 'true' ? ' selected' : '') + '>True</option>';
+      html += '<option value="false"' + (boolVal === 'false' ? ' selected' : '') + '>False</option>';
+      html += '</select>';
+    } else if (control.isTextarea) {
+      html += '<textarea class="comp-props-input comp-run-input comp-run-textarea" id="comp-run-input-' + compEscAttr(input.key) + '" data-comp-run-key="' + compEscAttr(input.key) + '" placeholder="' + compEscAttr(control.placeholder) + '">' + compEscHtml(savedVal) + '</textarea>';
+    } else {
+      html += '<input class="comp-props-input comp-run-input" type="' + compEscAttr(control.inputType) + '" id="comp-run-input-' + compEscAttr(input.key) + '" data-comp-run-key="' + compEscAttr(input.key) + '" value="' + compEscAttr(savedVal) + '" placeholder="' + compEscAttr(control.placeholder) + '">';
+    }
+
+    if (input.generationPrompt) {
+      html += '<div class="comp-run-field-actions">';
+      html += '<button class="comp-run-ai-btn" data-comp-run-generate="' + compEscAttr(input.key) + '" title="' + compEscAttr(input.generationPrompt) + '">&#x2728; Generate</button>';
+      html += '</div>';
+    }
+    html += '</div>';
+  });
+
+  html += '</div>';
+  return html;
+}
+
+function collectCompositionRunValues(root, inputs) {
+  var variables = {};
+  var rawValues = {};
+  var missing = [];
+
+  for (var i = 0; i < inputs.length; i++) {
+    var input = inputs[i];
+    var el = root.querySelector('[data-comp-run-key="' + input.key + '"]');
+    if (!el) continue;
+    var rawValue = el.value;
+    rawValues[input.key] = rawValue;
+    var parsed = parseCompositionRunInput(input, rawValue);
+    if (parsed.error) {
+      return { error: parsed.error, errorElement: el };
+    }
+    if (parsed.isEmpty) {
+      if (input.default !== undefined) {
+        variables[input.key] = input.default;
+        continue;
+      }
+      if (input.required) missing.push(input.label || humanizeVarName(input.key));
+      continue;
+    }
+    variables[input.key] = parsed.value;
+  }
+
+  return { variables: variables, rawValues: rawValues, missing: missing };
+}
+
+function generateCompositionInputValue(input, root, triggerBtn) {
+  if (!input || !input.generationPrompt) return Promise.resolve();
+  var field = root.querySelector('[data-comp-run-key="' + input.key + '"]');
+  if (!field) return Promise.resolve();
+
+  var originalText = triggerBtn ? triggerBtn.innerHTML : '';
+  if (triggerBtn) {
+    triggerBtn.disabled = true;
+    triggerBtn.innerHTML = '&#x23f3; Generating...';
+  }
+
+  return fetch('/api/generate-variable', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      variableName: input.key,
+      generationPrompt: input.generationPrompt,
+      workflowName: compData ? compData.name : 'Untitled Pipeline',
+      site: 'pipeline',
+      variableType: input.type || 'string',
+    }),
+  })
+    .then(function(resp) { return resp.json(); })
+    .then(function(data) {
+      if (!data.success || data.value === undefined || data.value === null) {
+        throw new Error(data.error || 'Generation failed');
+      }
+
+      if (field.tagName === 'SELECT') {
+        field.value = String(data.value).trim().toLowerCase();
+      } else if (Array.isArray(data.value)) {
+        field.value = data.value.join('\n');
+      } else {
+        field.value = String(data.value);
+      }
+      field.dispatchEvent(new Event('input', { bubbles: true }));
+      toast('Generated ' + (input.label || humanizeVarName(input.key)), 'success');
+    })
+    .catch(function(err) {
+      toast('Generation failed: ' + err.message, 'error');
+    })
+    .finally(function() {
+      if (triggerBtn) {
+        triggerBtn.disabled = false;
+        triggerBtn.innerHTML = originalText;
+      }
+    });
+}
+
+function wireCompositionRunInputActions(root, inputs) {
+  var inputMap = {};
+  inputs.forEach(function(input) { inputMap[input.key] = input; });
+  root.querySelectorAll('[data-comp-run-generate]').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      var input = inputMap[btn.getAttribute('data-comp-run-generate')];
+      generateCompositionInputValue(input, root, btn);
+    });
+  });
+}
+
+function isCompositionLikelyUrl(value) {
+  return typeof value === 'string' && /^https?:\/\//i.test(value.trim());
+}
+
+function isCompositionLikelyFilePath(value) {
+  return typeof value === 'string' && /^(\/|~\/|[A-Za-z]:\\)/.test(value.trim());
+}
+
+function serializeCompositionResult(value) {
+  if (value === undefined) return 'undefined';
+  if (value === null) return 'null';
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch (err) {
+    return String(value);
+  }
+}
+
+function getCompositionArtifactKind(value) {
+  if (!value || typeof value !== 'string') return 'other';
+  var lower = value.toLowerCase();
+  if (/\.(md|markdown)$/i.test(lower)) return 'markdown';
+  if (/\.(txt|log|text)$/i.test(lower)) return 'text';
+  if (/\.(json)$/i.test(lower)) return 'json';
+  if (/\.(png|jpg|jpeg|gif|webp|svg|bmp|ico|avif)$/i.test(lower)) return 'image';
+  if (/\.(mp4|mov|avi|webm|mkv)$/i.test(lower)) return 'video';
+  if (/\.(mp3|wav|ogg|aac|flac|m4a)$/i.test(lower)) return 'audio';
+  if (/\.(pdf)$/i.test(lower)) return 'pdf';
+  return 'other';
+}
+
+function looksLikeMarkdown(text) {
+  if (typeof text !== 'string') return false;
+  return /^#\s|^##\s|\*\*.+\*\*|^-\s|^\d+\.\s|```/m.test(text);
+}
+
+function getCompositionOutputKind(value) {
+  if (value === null || value === undefined) return 'scalar';
+  if (typeof value === 'string' && looksLikeMarkdown(value)) return 'markdown';
+  return 'scalar';
+}
+
+function copyCompositionText(value, label) {
+  if (!navigator.clipboard) {
+    toast('Clipboard access is not available here', 'error');
+    return;
+  }
+  navigator.clipboard.writeText(String(value || ''))
+    .then(function() { toast((label || 'Content') + ' copied to clipboard', 'success'); })
+    .catch(function(err) { toast('Failed to copy: ' + err.message, 'error'); });
+}
+
+function fetchCompositionPreviewText(filePath) {
+  if (compFormPreviewCache[filePath] !== undefined) {
+    return Promise.resolve(compFormPreviewCache[filePath]);
+  }
+  if (compFormPreviewInflight[filePath]) return compFormPreviewInflight[filePath];
+
+  compFormPreviewInflight[filePath] = fetch('/api/file?path=' + encodeURIComponent(filePath))
+    .then(function(res) {
+      if (!res.ok) throw new Error('Failed to load preview');
+      return res.text();
+    })
+    .then(function(text) {
+      compFormPreviewCache[filePath] = text;
+      delete compFormPreviewInflight[filePath];
+      return text;
+    })
+    .catch(function(err) {
+      delete compFormPreviewInflight[filePath];
+      throw err;
+    });
+
+  return compFormPreviewInflight[filePath];
+}
+
+function hydrateCompositionArtifactPreviews(root) {
+  root.querySelectorAll('[data-comp-preview-path]').forEach(function(el) {
+    var filePath = el.getAttribute('data-comp-preview-path');
+    var kind = el.getAttribute('data-comp-preview-kind');
+    if (!filePath || !kind || el.getAttribute('data-comp-preview-loaded') === 'true') return;
+    if (kind !== 'markdown' && kind !== 'text' && kind !== 'json') return;
+
+    fetchCompositionPreviewText(filePath)
+      .then(function(text) {
+        el.setAttribute('data-comp-preview-loaded', 'true');
+        if (kind === 'markdown' && typeof marked !== 'undefined') {
+          el.innerHTML = marked.parse(text);
+        } else if (kind === 'json') {
+          try {
+            el.textContent = JSON.stringify(JSON.parse(text), null, 2);
+          } catch (err) {
+            el.textContent = text;
+          }
+        } else {
+          el.textContent = text;
+        }
+      })
+      .catch(function(err) {
+        el.setAttribute('data-comp-preview-loaded', 'true');
+        el.textContent = 'Preview unavailable: ' + err.message;
+      });
+  });
+}
+
+function wireCompositionResultActions(root) {
+  root.querySelectorAll('[data-comp-copy-text]').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      var value = btn.getAttribute('data-comp-copy-text') || '';
+      var label = btn.getAttribute('data-comp-copy-label') || 'Content';
+      copyCompositionText(value, label);
+    });
+  });
+  root.querySelectorAll('[data-comp-copy-file]').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      var filePath = btn.getAttribute('data-comp-copy-file');
+      var label = btn.getAttribute('data-comp-copy-label') || 'File content';
+      if (!filePath) return;
+      fetchCompositionPreviewText(filePath)
+        .then(function(text) { copyCompositionText(text, label); })
+        .catch(function(err) { toast('Failed to copy file content: ' + err.message, 'error'); });
+    });
+  });
+}
+
+function collectCompositionArtifactsFromValue(value, sourceLabel, results, seen) {
+  if (value === undefined || value === null) return;
+
+  if (typeof value === 'string') {
+    var trimmed = value.trim();
+    if (!trimmed) return;
+    if (isCompositionLikelyUrl(trimmed)) {
+      var urlKey = 'url:' + trimmed;
+      if (!seen[urlKey]) {
+        seen[urlKey] = true;
+        results.push({ type: 'link', value: trimmed, source: sourceLabel });
+      }
+      return;
+    }
+    if (isCompositionLikelyFilePath(trimmed)) {
+      var fileKey = 'file:' + trimmed;
+      if (!seen[fileKey]) {
+        seen[fileKey] = true;
+        results.push({ type: 'file', value: trimmed, source: sourceLabel });
+      }
+    }
+    return;
+  }
+
+  if (Array.isArray(value)) {
+    value.forEach(function(item) {
+      collectCompositionArtifactsFromValue(item, sourceLabel, results, seen);
+    });
+    return;
+  }
+
+  if (typeof value === 'object') {
+    Object.keys(value).forEach(function(key) {
+      collectCompositionArtifactsFromValue(value[key], sourceLabel, results, seen);
+    });
+  }
+}
+
+function collectCompositionArtifacts(data) {
+  var results = [];
+  var seen = {};
+
+  if (data && data.pipelineOutputs) {
+    collectCompositionArtifactsFromValue(data.pipelineOutputs, 'Final outputs', results, seen);
+  }
+
+  var nodeStates = (data && data.nodeStates) || {};
+  Object.keys(nodeStates).forEach(function(nodeId) {
+    var ns = nodeStates[nodeId];
+    var sourceLabel = ns.workflowName || nodeId;
+    collectCompositionArtifactsFromValue(ns.outputVariables, sourceLabel, results, seen);
+  });
+
+  return results;
+}
+
+function renderCompositionOutputs(outputs) {
+  if (!outputs || Object.keys(outputs).length === 0) {
+    return '<div class="comp-form-results-empty">No final outputs were produced by the pipeline output node.</div>';
+  }
+
+  var html = '<div class="comp-form-output-list">';
+  Object.keys(outputs).forEach(function(key) {
+    var serialized = serializeCompositionResult(outputs[key]);
+    var kind = getCompositionOutputKind(outputs[key]);
+    html += '<div class="comp-form-output-item">';
+    html += '<div class="comp-form-output-head">';
+    html += '<div class="comp-form-output-name">' + compEscHtml(humanizeVarName(key)) + '</div>';
+    html += '<button class="comp-form-copy-btn" data-comp-copy-text="' + compEscAttr(serialized) + '" data-comp-copy-label="' + compEscAttr(humanizeVarName(key)) + '">Copy</button>';
+    html += '</div>';
+    if (kind === 'markdown' && typeof outputs[key] === 'string' && typeof marked !== 'undefined') {
+      html += '<div class="comp-form-markdown-viewer">' + marked.parse(outputs[key]) + '</div>';
+    } else {
+      html += '<pre class="comp-form-output-value">' + compEscHtml(serialized) + '</pre>';
+    }
+    html += '</div>';
+  });
+  html += '</div>';
+  return html;
+}
+
+function renderCompositionArtifacts(artifacts) {
+  if (!artifacts || artifacts.length === 0) {
+    return '<div class="comp-form-results-empty">No generated files or links were detected in the run outputs.</div>';
+  }
+
+  var html = '<div class="comp-form-artifact-list">';
+  artifacts.forEach(function(artifact) {
+    var kind = getCompositionArtifactKind(artifact.value);
+    var fileUrl = '/api/file?path=' + encodeURIComponent(artifact.value);
+    html += '<div class="comp-form-artifact-item">';
+    html += '<div class="comp-form-artifact-head">';
+    html += '<div class="comp-form-artifact-meta">' + compEscHtml(artifact.source || 'Output') + '</div>';
+    if (kind === 'markdown' || kind === 'text' || kind === 'json') {
+      html += '<button class="comp-form-copy-btn" data-comp-copy-text="' + compEscAttr(artifact.value) + '" data-comp-copy-label="File path">Copy Path</button>';
+    }
+    html += '</div>';
+    if (artifact.type === 'link') {
+      html += '<a class="comp-form-artifact-link" href="' + compEscAttr(artifact.value) + '" target="_blank" rel="noreferrer">' + compEscHtml(artifact.value) + '</a>';
+    } else {
+      html += '<a class="comp-form-artifact-link" href="' + fileUrl + '" target="_blank" rel="noreferrer">' + compEscHtml(artifact.value) + '</a>';
+      if (kind === 'image') {
+        html += '<img class="comp-form-artifact-image" src="' + fileUrl + '" alt="Preview">';
+      } else if (kind === 'video') {
+        html += '<video class="comp-form-artifact-video" src="' + fileUrl + '" controls preload="metadata"></video>';
+      } else if (kind === 'audio') {
+        html += '<audio class="comp-form-artifact-audio" src="' + fileUrl + '" controls preload="metadata"></audio>';
+      } else if (kind === 'pdf') {
+        html += '<iframe class="comp-form-artifact-pdf" src="' + fileUrl + '"></iframe>';
+      } else if (kind === 'markdown') {
+        html += '<div class="comp-form-artifact-actions"><button class="comp-form-copy-btn" data-comp-copy-file="' + compEscAttr(artifact.value) + '" data-comp-copy-label="Markdown">Copy Markdown</button></div>';
+        html += '<div class="comp-form-artifact-preview comp-form-markdown-viewer" data-comp-preview-path="' + compEscAttr(artifact.value) + '" data-comp-preview-kind="markdown">Loading markdown preview...</div>';
+      } else if (kind === 'text' || kind === 'json') {
+        html += '<div class="comp-form-artifact-actions"><button class="comp-form-copy-btn" data-comp-copy-file="' + compEscAttr(artifact.value) + '" data-comp-copy-label="Text">Copy Text</button></div>';
+        html += '<pre class="comp-form-artifact-preview comp-form-text-viewer" data-comp-preview-path="' + compEscAttr(artifact.value) + '" data-comp-preview-kind="' + compEscAttr(kind) + '">Loading text preview...</pre>';
+      }
+    }
+    html += '</div>';
+  });
+  html += '</div>';
+  return html;
+}
+
+function getRenderableStepOutputs(outputVariables) {
+  var filtered = {};
+  if (!outputVariables || typeof outputVariables !== 'object') return filtered;
+  Object.keys(outputVariables).forEach(function(key) {
+    if (key === '__done__') return;
+    if (outputVariables[key] === undefined) return;
+    filtered[key] = outputVariables[key];
+  });
+  return filtered;
+}
+
+function collectCompositionArtifactsForOutputs(outputs, sourceLabel) {
+  var results = [];
+  var seen = {};
+  collectCompositionArtifactsFromValue(outputs, sourceLabel, results, seen);
+  return results;
+}
+
+function renderCompositionStepOutputs(ns, depth) {
+  var outputs = getRenderableStepOutputs(ns && ns.outputVariables);
+  var outputKeys = Object.keys(outputs);
+  if (outputKeys.length === 0) return '';
+
+  var artifacts = collectCompositionArtifactsForOutputs(outputs, ns.workflowName || 'Step output');
+  var html = '<details class="comp-form-step-output-block"' + ((depth || 0) === 0 ? '' : ' open') + '>';
+  html += '<summary>Outputs (' + compEscHtml(String(outputKeys.length)) + ')</summary>';
+  html += '<div class="comp-form-step-output-inner">';
+  html += renderCompositionOutputs(outputs);
+  if (artifacts.length > 0) {
+    html += '<div class="comp-form-step-output-artifacts">';
+    html += '<div class="comp-form-results-section-title">Formatted Previews</div>';
+    html += renderCompositionArtifacts(artifacts);
+    html += '</div>';
+  }
+  html += '</div>';
+  html += '</details>';
+  return html;
+}
+
+function renderCompositionStepResults(data) {
+  var order = (data && data.executionOrder) || [];
+  var nodeStates = (data && data.nodeStates) || {};
+  if (order.length === 0) {
+    return '<div class="comp-form-results-empty">No step data available yet.</div>';
+  }
+
+  function renderStepList(stepOrder, states, depth) {
+    var html = '<div class="comp-form-step-list' + (depth > 0 ? ' comp-form-step-list-nested' : '') + '">';
+    stepOrder.forEach(function(nodeId, index) {
+      var ns = states[nodeId] || {};
+      var status = ns.status || 'pending';
+      var statusClass = status === 'completed' ? 'ok' : status === 'failed' ? 'fail' : status === 'skipped' ? 'skip' : 'run';
+      html += '<div class="comp-form-step-item comp-form-step-' + compEscAttr(statusClass) + (depth > 0 ? ' comp-form-step-item-nested' : '') + '">';
+      html += '<div class="comp-form-step-head">';
+      html += '<span class="comp-form-step-index">' + (index + 1) + '</span>';
+      html += '<span class="comp-form-step-name">' + compEscHtml(ns.workflowName || nodeId) + '</span>';
+      html += '<span class="comp-form-step-status">' + compEscHtml(status) + '</span>';
+      html += '</div>';
+      if (ns.stepsTotal) {
+        html += '<div class="comp-form-step-meta">' + compEscHtml(String(ns.stepsCompleted || 0)) + '/' + compEscHtml(String(ns.stepsTotal)) + ' steps';
+        if (ns.durationMs) html += ' • ' + compEscHtml((ns.durationMs / 1000).toFixed(1)) + 's';
+        html += '</div>';
+      } else if (ns.durationMs) {
+        html += '<div class="comp-form-step-meta">' + compEscHtml((ns.durationMs / 1000).toFixed(1)) + 's</div>';
+      }
+      if (ns.error) {
+        html += '<div class="comp-form-step-error">' + compEscHtml(ns.error) + '</div>';
+      }
+      if (ns.currentStep) {
+        html += '<div class="comp-form-step-meta">Current: ' + compEscHtml(ns.currentStep) + '</div>';
+      }
+      if (ns.expectationResults && ns.expectationResults.length > 0) {
+        var failedChecks = ns.expectationResults.filter(function(r) { return r && r.passed === false; });
+        if (failedChecks.length > 0) {
+          html += '<div class="comp-form-step-error">' + failedChecks.map(function(r) { return compEscHtml(r.detail || r.description || 'Expectation failed'); }).join('<br>') + '</div>';
+        }
+      }
+      if (ns.logs && ns.logs.length > 0) {
+        html += '<details class="comp-form-step-logs">';
+        html += '<summary>Logs (' + ns.logs.length + ')</summary>';
+        html += '<pre class="comp-form-step-log-body">' + compEscHtml(ns.logs.join('\n')) + '</pre>';
+        html += '</details>';
+      }
+      html += renderCompositionStepOutputs(ns, depth);
+      if (ns.subExecutionOrder && ns.subExecutionOrder.length > 0 && ns.subNodeStates) {
+        html += '<details class="comp-form-step-children"' + ((status === 'running' || status === 'failed') ? ' open' : '') + '>';
+        html += '<summary>Sub-steps (' + compEscHtml(String(ns.stepsCompleted || 0)) + '/' + compEscHtml(String(ns.stepsTotal || ns.subExecutionOrder.length)) + ')</summary>';
+        html += renderStepList(ns.subExecutionOrder, ns.subNodeStates, depth + 1);
+        html += '</details>';
+      }
+      html += '</div>';
+    });
+    html += '</div>';
+    return html;
+  }
+
+  return renderStepList(order, nodeStates, 0);
+}
+
+function updateCompositionFormResults(data) {
+  var wrap = document.querySelector('#comp-form-results');
+  if (!wrap) return;
+
+  var statusTone = data.done ? (data.success ? 'ok' : 'fail') : 'run';
+  var statusText = data.done
+    ? (data.success ? 'Completed successfully' : 'Finished with errors')
+    : 'Running';
+  var outputs = data.pipelineOutputs || {};
+  var artifacts = collectCompositionArtifacts(data);
+
+  var html = '<div class="comp-form-results-card">';
+  html += '<div class="comp-form-results-header">';
+  html += '<div>';
+  html += '<div class="comp-form-results-kicker">Run Results</div>';
+  html += '<div class="comp-form-results-title">' + compEscHtml(statusText) + '</div>';
+  html += '</div>';
+  html += '<div class="comp-form-results-pill comp-form-results-pill-' + compEscAttr(statusTone) + '">' + compEscHtml(statusText) + '</div>';
+  html += '</div>';
+  if (data.error) {
+    html += '<div class="comp-form-run-error">' + compEscHtml(data.error) + '</div>';
+  }
+  html += '<div class="comp-form-results-section">';
+  html += '<div class="comp-form-results-section-title">Final Outputs</div>';
+  html += renderCompositionOutputs(outputs);
+  html += '</div>';
+  html += '<div class="comp-form-results-section">';
+  html += '<div class="comp-form-results-section-title">Generated Files and Links</div>';
+  html += renderCompositionArtifacts(artifacts);
+  html += '</div>';
+  html += '<div class="comp-form-results-section">';
+  html += '<div class="comp-form-results-section-title">Per-Step Status</div>';
+  html += renderCompositionStepResults(data);
+  html += '</div>';
+  html += '</div>';
+
+  wrap.innerHTML = html;
+  wireCompositionResultActions(wrap);
+  hydrateCompositionArtifactPreviews(wrap);
+}
+
+function parseCompositionRunInput(input, rawValue) {
+  if (input.type === 'boolean') {
+    if (rawValue === '' || rawValue === null || rawValue === undefined) {
+      return { isEmpty: true, value: undefined };
+    }
+    return { isEmpty: false, value: rawValue === 'true' };
+  }
+
+  var stringValue = typeof rawValue === 'string' ? rawValue : '';
+  var trimmed = stringValue.trim();
+  if (trimmed === '') {
+    return { isEmpty: true, value: undefined };
+  }
+
+  if (input.type === 'number') {
+    var parsed = Number(trimmed);
+    if (Number.isNaN(parsed)) {
+      return { isEmpty: false, error: 'Enter a valid number for ' + humanizeVarName(input.key) };
+    }
+    return { isEmpty: false, value: parsed };
+  }
+
+  if (input.type === 'string[]') {
+    return {
+      isEmpty: false,
+      value: stringValue.split('\n').map(function(line) { return line.trim(); }).filter(function(line) { return line; }),
+    };
+  }
+
+  return { isEmpty: false, value: stringValue };
+}
+
+function closeCompositionRunForm() {
+  var modal = document.querySelector('#comp-run-modal');
+  if (modal) modal.remove();
+}
+
+async function showCompositionRunForm() {
+  if (!compData) return;
+
+  delete compositionInterfaceCache[compData.id];
+  var iface = await fetchCompositionInterface(compData.id);
+  if (iface && iface.error) {
+    toast(iface.error || 'Unable to load pipeline inputs', 'error');
+    return;
+  }
+
+  var inputs = normalizeCompositionRunInputs((iface && iface.inputs) || []);
+  if (inputs.length === 0) {
+    startCompositionRun({});
+    return;
+  }
+
+  closeCompositionRunForm();
+
+  var overlay = document.createElement('div');
+  overlay.id = 'comp-run-modal';
+  overlay.className = 'comp-modal-overlay';
+
+  var html = '<div class="comp-modal comp-run-modal">';
+  html += '<div class="comp-modal-header">';
+  html += '<span>&#x25b6; Run Pipeline</span>';
+  html += '<button class="comp-modal-close" id="comp-run-modal-close">&times;</button>';
+  html += '</div>';
+  html += '<div class="comp-modal-body">';
+  html += '<div class="comp-run-modal-desc">These fields are generated from the pipeline\'s exposed inputs so someone can run it without editing the graph.</div>';
+  html += renderCompositionRunFields(inputs);
+  html += '<div class="comp-run-modal-actions">';
+  html += '<button class="comp-approval-btn comp-approval-btn-approve" id="comp-run-submit">Run Pipeline</button>';
+  html += '<button class="comp-approval-btn comp-approval-btn-reject" id="comp-run-cancel">Cancel</button>';
+  html += '</div>';
+  html += '</div>';
+  html += '</div>';
+
+  overlay.innerHTML = html;
+  document.body.appendChild(overlay);
+  wireCompositionRunInputActions(overlay, inputs);
+
+  function submit() {
+    var collected = collectCompositionRunValues(overlay, inputs);
+    if (collected.error) {
+      toast(collected.error, 'error');
+      if (collected.errorElement) collected.errorElement.focus();
+      return;
+    }
+    if (collected.missing.length > 0) {
+      toast('Missing required inputs: ' + collected.missing.join(', '), 'error');
+      return;
+    }
+
+    saveCompositionRunValues(compData.id, collected.rawValues);
+    closeCompositionRunForm();
+    startCompositionRun(collected.variables);
+  }
+
+  var closeBtn = overlay.querySelector('#comp-run-modal-close');
+  var cancelBtn = overlay.querySelector('#comp-run-cancel');
+  var submitBtn = overlay.querySelector('#comp-run-submit');
+  if (closeBtn) closeBtn.addEventListener('click', closeCompositionRunForm);
+  if (cancelBtn) cancelBtn.addEventListener('click', closeCompositionRunForm);
+  if (submitBtn) submitBtn.addEventListener('click', submit);
+  overlay.addEventListener('click', function(e) {
+    if (e.target === overlay) closeCompositionRunForm();
+  });
+  overlay.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') closeCompositionRunForm();
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) submit();
+  });
+
+  var firstInput = overlay.querySelector('.comp-run-input');
+  if (firstInput) firstInput.focus();
+}
+
+async function renderCompositionFormPage() {
+  if (!compData) return;
+
+  delete compositionInterfaceCache[compData.id];
+  var iface = await fetchCompositionInterface(compData.id);
+  if (iface && iface.error) {
+    toast(iface.error || 'Unable to load pipeline inputs', 'error');
+    renderGraphEditor();
+    return;
+  }
+
+  var inputs = normalizeCompositionRunInputs((iface && iface.inputs) || []);
+  var main = document.querySelector('#main');
+  if (!main) return;
+
+  var html = '<div class="comp-form-page">';
+  html += '<div class="comp-form-shell">';
+  html += '<div class="comp-form-hero">';
+  html += '<div class="comp-form-kicker">Pipeline Form</div>';
+  html += '<h1 class="comp-form-title">' + compEscHtml(compData.name) + '</h1>';
+  html += '<p class="comp-form-subtitle">' + compEscHtml(compData.description || 'Run this pipeline by filling in the fields below.') + '</p>';
+  html += '<div class="comp-form-hero-actions">';
+  html += '<button class="comp-tb-btn" id="comp-form-share-link">&#x1f517; Copy Form Link</button>';
+  html += '<button class="comp-tb-btn" id="comp-form-open-editor">Open Editor</button>';
+  html += '</div>';
+  html += '</div>';
+
+  html += '<div class="comp-progress-bar-wrap comp-form-progress" id="comp-progress-wrap" style="display:none;">';
+  html += '<div class="comp-progress-bar" id="comp-progress-bar" style="width:0%"></div>';
+  html += '<span class="comp-progress-text" id="comp-progress-text"></span>';
+  html += '</div>';
+
+  html += '<div class="comp-form-card">';
+  if (inputs.length === 0) {
+    html += '<div class="comp-form-empty">This pipeline has no external inputs. You can run it directly.</div>';
+  } else {
+    html += '<div class="comp-run-modal-desc">These inputs are generated from the pipeline interface and are safe to share with non-technical users.</div>';
+    html += renderCompositionRunFields(inputs);
+  }
+  html += '<div class="comp-run-modal-actions">';
+  html += '<button class="comp-approval-btn comp-approval-btn-approve" id="comp-run-btn">Run Pipeline</button>';
+  html += '<button class="comp-approval-btn comp-approval-btn-reject" id="comp-cancel-btn" style="display:none;">Stop</button>';
+  html += '</div>';
+  html += '</div>';
+  html += '<div id="comp-form-results"></div>';
+  html += '</div>';
+  html += '</div>';
+
+  main.innerHTML = html;
+  wireCompositionRunInputActions(main, inputs);
+
+  var shareBtn = document.querySelector('#comp-form-share-link');
+  if (shareBtn) shareBtn.addEventListener('click', copyCompositionFormShareLink);
+
+  var openEditorBtn = document.querySelector('#comp-form-open-editor');
+  if (openEditorBtn) {
+    openEditorBtn.addEventListener('click', function() {
+      if (typeof updateHash === 'function') updateHash('compositions', compData.id);
+      selectComposition(compData.id, null);
+    });
+  }
+
+  var runBtn = document.querySelector('#comp-run-btn');
+  if (runBtn) {
+    runBtn.addEventListener('click', function() {
+      if (inputs.length === 0) {
+        startCompositionRun({});
+        return;
+      }
+
+      var collected = collectCompositionRunValues(main, inputs);
+      if (collected.error) {
+        toast(collected.error, 'error');
+        if (collected.errorElement) collected.errorElement.focus();
+        return;
+      }
+      if (collected.missing.length > 0) {
+        toast('Missing required inputs: ' + collected.missing.join(', '), 'error');
+        return;
+      }
+
+      saveCompositionRunValues(compData.id, collected.rawValues);
+      startCompositionRun(collected.variables);
+    });
+  }
+
+  var cancelBtn = document.querySelector('#comp-cancel-btn');
+  if (cancelBtn) cancelBtn.addEventListener('click', function() { cancelCompositionRun(); });
+
+  fetch('/api/compositions/run/status')
+    .then(function(res) { return res.json(); })
+    .then(function(data) {
+      if (!data || data.compositionId !== compData.id) return;
+      updateCompositionFormResults(data);
+      if (data.active) startCompRunPolling();
+
+      var progressWrap = document.querySelector('#comp-progress-wrap');
+      var cancelButton = document.querySelector('#comp-cancel-btn');
+      var runButton = document.querySelector('#comp-run-btn');
+      if (progressWrap && (data.active || data.done)) progressWrap.style.display = '';
+      if (cancelButton) cancelButton.style.display = data.active ? '' : 'none';
+      if (runButton) runButton.style.display = data.active ? 'none' : '';
+    })
+    .catch(function() { /* ignore initial status fetch errors */ });
+
+  var firstInput = main.querySelector('.comp-run-input');
+  if (firstInput) firstInput.focus();
+}
+
+function startCompositionRun(variables) {
   if (!compData) return;
 
   // Client-side cycle detection
@@ -291,10 +1160,12 @@ function startCompositionRun() {
     return;
   }
 
+  var runVariables = variables || {};
+
   fetch('/api/compositions/' + encodeURIComponent(compData.id) + '/run', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({}),
+    body: JSON.stringify({ variables: runVariables }),
   })
     .then(function(res) { return res.json(); })
     .then(function(data) {
@@ -343,6 +1214,7 @@ function pollCompRunStatus() {
       var text = document.querySelector('#comp-progress-text');
       if (bar) bar.style.width = pct + '%';
       if (text) text.textContent = data.nodesCompleted + '/' + data.nodesTotal + ' steps';
+      updateCompositionFormResults(data);
 
       // Update per-node states
       if (data.nodeStates) {

@@ -109,6 +109,8 @@ Generation alone is not completion. Do not declare success until the saved compo
 
 **Pipeline architecture:** Most steps should use \`__script__\` nodes (custom JavaScript). Only use a real workflow node when the request involves a platform with a dedicated workflow (e.g., "post to Instagram"). The system auto-provides available workflows — you do NOT need to find or list them yourself.
 
+When the same user-provided value should feed multiple nodes, centralize it. Prefer a single \`__variable__\` node with \`variableNode.exposeAsInput=true\` and a stable \`inputName\`, then wire that variable's \`value\` output into each consumer instead of leaving duplicate unconnected inputs on multiple nodes.
+
 **Examples — ALL of these MUST use intelligence tools:**
 - "Summarize the top stories from Hacker News" → generate_pipeline
 - "Create a pipeline to turn photos into cartoons" → generate_pipeline

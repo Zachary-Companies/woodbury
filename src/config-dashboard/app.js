@@ -430,6 +430,7 @@ let currentTab = 'home';
 function switchTab(tab, opts) {
   opts = opts || {};
   currentTab = tab;
+  document.body.classList.toggle('composition-form-mode', tab === 'compositions' && opts.view === 'form' && !!opts.workflowId);
 
   // Update tab buttons
   document.querySelectorAll('.nav-tab').forEach(btn => {
@@ -559,8 +560,8 @@ function handleHash() {
 
   // If compositions tab with a composition ID, select it
   if (tab === 'compositions' && state.workflowId) {
-    if (typeof selectComposition === 'function' && selectedComposition !== state.workflowId) {
-      selectComposition(state.workflowId);
+    if (typeof selectComposition === 'function' && (selectedComposition !== state.workflowId || state.view === 'form' || document.body.classList.contains('composition-form-mode'))) {
+      selectComposition(state.workflowId, state.view || null);
     }
   }
 }
@@ -629,7 +630,7 @@ document.addEventListener('DOMContentLoaded', () => {
     detailView = state.view;
   }
 
-  switchTab(initialTab, { _fromHash: true });
+  switchTab(initialTab, { _fromHash: true, view: state.view || null, workflowId: state.workflowId || null });
 
   // After switchTab inits workflows and fetches the list, select the workflow
   if (initialTab === 'workflows' && state.workflowId) {
@@ -649,7 +650,7 @@ document.addEventListener('DOMContentLoaded', () => {
     var checkCompReady = setInterval(function() {
       if (typeof compositions !== 'undefined' && compositions.length > 0) {
         clearInterval(checkCompReady);
-        selectComposition(state.workflowId);
+        selectComposition(state.workflowId, state.view || null);
       }
     }, 100);
     setTimeout(function() { clearInterval(checkCompReady); }, 5000);
