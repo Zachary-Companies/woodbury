@@ -3052,6 +3052,7 @@ function renderCompositionNodeProperties(body, node, nodeId) {
 
   // Refresh interface button
   html += '<div class="comp-props-section">';
+  html += '<button class="comp-tb-btn" id="comp-props-open-subpipeline" style="width:100%;font-size:0.72rem;margin-bottom:0.4rem;">&#x1f517; Open Pipeline</button>';
   html += '<button class="comp-tb-btn" id="comp-props-refresh-interface" style="width:100%;font-size:0.72rem;">&#x1f504; Refresh Ports</button>';
   html += '</div>';
 
@@ -3077,6 +3078,13 @@ function renderCompositionNodeProperties(body, node, nodeId) {
       node.onFailure = node.onFailure || {};
       node.onFailure.action = policySelect.value;
       debouncedSave();
+    });
+  }
+
+  var openBtn = body.querySelector('#comp-props-open-subpipeline');
+  if (openBtn) {
+    openBtn.addEventListener('click', function() {
+      openNestedComposition(compRefId, nodeId);
     });
   }
 
@@ -3447,8 +3455,55 @@ function wireIdempotencyToggle(node, nodeId) {
 
 // ── Script Node Properties ──────────────────────────────────
 
+function parseWoodburyScriptPorts(code) {
+  var inputs = [];
+  var outputs = [];
+  var regex = /@(input|output)\s+(\w+)\s+(string|number|boolean|object|string\[\]|number\[\]|object\[\])\s*(?:"([^"]*)")?/g;
+  var match;
+  while ((match = regex.exec(String(code || ''))) !== null) {
+    var decl = {
+      name: match[2],
+      type: match[3],
+      description: match[4] || '',
+    };
+    if (match[1] === 'input') inputs.push(decl);
+    else outputs.push(decl);
+  }
+  return { inputs: inputs, outputs: outputs };
+}
+
+function validateWoodburyScriptCode(code) {
+  var source = String(code || '');
+  var issues = [];
+  if (!/\/\*\*[\s\S]*?\*\//.test(source)) {
+    issues.push('Add a JSDoc block with @input and @output annotations.');
+  }
+  if (!/@input\s+/m.test(source)) {
+    issues.push('Add at least one @input annotation.');
+  }
+  if (!/@output\s+/m.test(source)) {
+    issues.push('Add at least one @output annotation.');
+  }
+  if (!/async\s+function\s+execute\s*\(\s*inputs\s*,\s*context\s*\)/.test(source)) {
+    issues.push('Use the required async function execute(inputs, context) signature.');
+  }
+  if (!/return\s*\{[\s\S]*\}/.test(source)) {
+    issues.push('Return an object containing the declared outputs.');
+  }
+  try {
+    new Function(source + '\nreturn typeof execute === "function";');
+  } catch (err) {
+    issues.push('Fix the JavaScript syntax error: ' + err.message);
+  }
+  return {
+    ok: issues.length === 0,
+    issues: issues,
+    ports: parseWoodburyScriptPorts(source),
+  };
+}
+
 function renderScriptProperties(body, node, nodeId) {
-  var scriptCfg = node.script || { description: '', code: '', inputs: [], outputs: [], chatHistory: [] };
+  var scriptCfg = node.script || { description: '', code: '', inputs: [], outputs: [], chatHistory: [], contextNodeIds: [] };
   var html = '';
 
   // Error display (if node has a failed state)
@@ -3480,6 +3535,32 @@ function renderScriptProperties(body, node, nodeId) {
   html += '<div class="comp-props-value" style="font-size:0.68rem;color:#64748b;">AI-generated code that transforms data in the pipeline.</div>';
   html += '</div>';
 
+  html += '<div class="comp-props-section">';
+  html += '<div class="comp-props-label">Generation Context</div>';
+  var availableContextNodes = (compData && compData.nodes ? compData.nodes : []).filter(function(candidate) {
+    return candidate.id !== nodeId;
+  });
+  if (availableContextNodes.length === 0) {
+    html += '<div class="comp-props-value" style="font-size:0.68rem;color:#64748b;">No other nodes available yet.</div>';
+  } else {
+    html += '<div class="comp-props-value" style="font-size:0.64rem;color:#64748b;margin-bottom:0.45rem;">Select the nodes the generator should consider while writing or refining this script.</div>';
+    html += '<div style="display:flex;flex-direction:column;gap:0.45rem;max-height:180px;overflow:auto;padding:0.15rem 0;">';
+    for (var ctxIndex = 0; ctxIndex < availableContextNodes.length; ctxIndex++) {
+      var ctxNode = availableContextNodes[ctxIndex];
+      var checked = (scriptCfg.contextNodeIds || []).indexOf(ctxNode.id) !== -1;
+      html += '<label style="display:flex;align-items:flex-start;gap:8px;padding:0.45rem 0.55rem;border-radius:8px;background:rgba(15,23,42,0.45);border:1px solid rgba(255,255,255,0.06);cursor:pointer;">';
+      html += '<input type="checkbox" class="comp-script-context-checkbox" data-node-id="' + compEscAttr(ctxNode.id) + '"' + (checked ? ' checked' : '') + ' style="margin-top:2px;accent-color:#818cf8;">';
+      html += '<span style="display:flex;flex-direction:column;gap:2px;min-width:0;">';
+      html += '<span style="color:#e2e8f0;font-size:0.72rem;">' + compEscHtml(getCompositionNodeDisplayName(ctxNode)) + '</span>';
+      html += '<span style="color:#64748b;font-size:0.64rem;line-height:1.35;">' + compEscHtml(describeScriptGenerationNode(ctxNode)) + '</span>';
+      html += '</span>';
+      html += '</label>';
+    }
+    html += '</div>';
+    html += '<div class="comp-props-value" style="font-size:0.64rem;color:#64748b;margin-top:0.35rem;">This uses the same explicit context selection model as the new-script generation modal.</div>';
+  }
+  html += '</div>';
+
   // Agent Chat
   html += '<div class="comp-props-section">';
   html += '<div class="comp-props-label">Agent Chat</div>';
@@ -3509,7 +3590,11 @@ function renderScriptProperties(body, node, nodeId) {
 
   // Code Preview
   html += '<div class="comp-props-section">';
+  html += '<div class="comp-script-code-header">';
   html += '<div class="comp-props-label">Generated Code</div>';
+  html += '<button class="comp-script-open-editor-btn" id="comp-script-open-editor">Open in Monaco</button>';
+  html += '</div>';
+  html += '<div class="comp-props-value comp-script-code-meta">Woodbury-aware editor with execute signature, @input/@output snippets, and context.tools hints.</div>';
   if (scriptCfg.code) {
     html += '<pre class="comp-script-code-preview" id="comp-script-code-preview">' + compEscHtml(scriptCfg.code) + '</pre>';
   } else {
@@ -3658,6 +3743,48 @@ function renderScriptProperties(body, node, nodeId) {
     });
   }
 
+  var openEditorBtn = body.querySelector('#comp-script-open-editor');
+  if (openEditorBtn) {
+    openEditorBtn.addEventListener('click', async function() {
+      if (!window.WoodburyMonaco || typeof window.WoodburyMonaco.openScriptEditor !== 'function') {
+        toast('Monaco editor is not available yet.', 'error');
+        return;
+      }
+
+      var nextCode = await window.WoodburyMonaco.openScriptEditor({
+        title: (node.label || 'Script Node') + ' Code',
+        description: (node.script && node.script.description) || '',
+        code: (node.script && node.script.code) || '',
+        beforeSave: function(candidateCode) {
+          var verdict = validateWoodburyScriptCode(candidateCode);
+          return verdict.ok ? true : verdict.issues[0];
+        },
+      });
+
+      if (typeof nextCode !== 'string') return;
+
+      var validation = validateWoodburyScriptCode(nextCode);
+      if (!validation.ok) {
+        toast(validation.issues[0], 'error');
+        return;
+      }
+
+      pushUndoSnapshot();
+      node.script = node.script || {};
+      node.script.code = nextCode;
+      node.script.inputs = validation.ports.inputs;
+      node.script.outputs = validation.ports.outputs;
+
+      renderNodes();
+      renderEdges();
+      wireUpCanvas();
+      updateNodeSelection();
+      debouncedSave();
+      renderScriptProperties(body, node, nodeId);
+      toast('Script code updated', 'success');
+    });
+  }
+
   // Wire up port alias editing (script node)
   body.querySelectorAll('.comp-props-alias-input').forEach(function(input) {
     input.addEventListener('change', function() {
@@ -3671,6 +3798,18 @@ function renderScriptProperties(body, node, nodeId) {
         delete node.portAliases[portName];
         if (Object.keys(node.portAliases).length === 0) delete node.portAliases;
       }
+      debouncedSave();
+    });
+  });
+
+  body.querySelectorAll('.comp-script-context-checkbox').forEach(function(input) {
+    input.addEventListener('change', function() {
+      node.script = node.script || {};
+      node.script.contextNodeIds = [];
+      body.querySelectorAll('.comp-script-context-checkbox:checked').forEach(function(checkedInput) {
+        var selectedNodeId = checkedInput.getAttribute('data-node-id');
+        if (selectedNodeId) node.script.contextNodeIds.push(selectedNodeId);
+      });
       debouncedSave();
     });
   });
@@ -3699,6 +3838,7 @@ function renderScriptProperties(body, node, nodeId) {
         description: message,
         chatHistory: history.slice(0, -1), // Send prior history, description is current message
         currentCode: node.script.code || undefined,
+        graphContext: buildScriptGenerationContext(nodeId, node.script.contextNodeIds || []),
       }),
     })
       .then(function(res) { return res.json().then(function(d) { return { ok: res.ok, data: d }; }); })

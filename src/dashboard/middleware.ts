@@ -6,7 +6,7 @@
  */
 
 import { readFile } from 'node:fs/promises';
-import { join, extname } from 'node:path';
+import { join, extname, resolve, sep } from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { MIME_TYPES, sendCorsOptions } from './utils.js';
 import { debugLog } from '../debug-log.js';
@@ -33,9 +33,17 @@ export async function serveStaticFiles(
   pathname: string,
   staticDir: string,
 ): Promise<boolean> {
-  const filePath =
-    pathname === '/' ? '/index.html' : pathname.split('?')[0];
-  const fullPath = join(staticDir, filePath);
+  const filePath = pathname === '/' ? '/index.html' : pathname.split('?')[0];
+  let fullPath = join(staticDir, filePath);
+
+  if (filePath.startsWith('/vendor/monaco/')) {
+    const monacoRoot = resolve(staticDir, '..', '..', 'node_modules', 'monaco-editor', 'min');
+    const relativePath = filePath.slice('/vendor/monaco/'.length);
+    const candidatePath = resolve(monacoRoot, relativePath);
+    if (candidatePath === monacoRoot || candidatePath.startsWith(monacoRoot + sep)) {
+      fullPath = candidatePath;
+    }
+  }
 
   try {
     const content = await readFile(fullPath);

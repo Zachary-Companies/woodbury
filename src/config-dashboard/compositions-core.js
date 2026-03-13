@@ -45,6 +45,8 @@ var selectedNodes = new Set(); // Set of node IDs (multi-select)
 var saveTimer = null; // Debounced save
 var compRunPollTimer = null; // Composition run polling
 var lastNodeStates = null; // Cached node states from last run (for port value tooltips)
+var compositionNavigationStack = []; // Parent pipeline stack for nested composition navigation
+var pendingCompositionFocusNodeId = null; // Node to reselect after navigating back to a parent pipeline
 
 // Undo/Redo
 var undoStack = [];
@@ -211,6 +213,265 @@ function describeExpectation(exp) {
     default:
       return exp.description || 'Custom expectation';
   }
+}
+
+function getCompositionNodeDisplayName(node) {
+  if (!node) return 'Unknown Node';
+  if (node.label) return node.label;
+  if (node.workflowId === '__script__') return 'Script';
+  if (node.workflowId === '__output__') return 'Pipeline Output';
+  if (node.workflowId === '__approval_gate__') return 'Approval Gate';
+  if (node.workflowId === '__image_viewer__') return 'Image Viewer';
+  if (node.workflowId === '__media__') return 'Media Player';
+  if (node.workflowId === '__branch__') return 'Branch';
+  if (node.workflowId === '__delay__') return 'Delay';
+  if (node.workflowId === '__gate__') return 'Gate';
+  if (node.workflowId === '__for_each__') return 'ForEach Loop';
+  if (node.workflowId === '__switch__') return 'Switch';
+  if (node.workflowId === '__asset__') return 'Asset';
+  if (node.workflowId === '__text__') return 'Text';
+  if (node.workflowId === '__variable__') return 'Variable';
+  if (node.workflowId === '__get_variable__') return 'Get Variable';
+  if (node.workflowId === '__file_op__') return 'File Op';
+  if (node.workflowId === '__json_keys__') return 'JSON Extract';
+  if (node.workflowId === '__tool__') return (node.toolNode && node.toolNode.selectedTool) || 'Tool';
+  if (node.workflowId === '__file_write__') return 'Write File';
+  if (node.workflowId === '__file_read__') return 'Read File';
+  if (node.workflowId === '__junction__') return 'Junction';
+  if (node.workflowId && node.workflowId.indexOf('comp:') === 0) return 'Pipeline';
+  var workflow = workflowCache.find(function(entry) { return entry.id === node.workflowId; });
+  return workflow ? workflow.name : node.workflowId;
+}
+
+function describeScriptGenerationNode(node) {
+  if (!node) return 'unknown node';
+  if (node.workflowId === '__script__') {
+    var scriptInputs = (node.script && node.script.inputs) || [];
+    var scriptOutputs = (node.script && node.script.outputs) || [];
+    return 'script node; inputs: ' +
+      (scriptInputs.length ? scriptInputs.map(function(port) { return port.name; }).join(', ') : 'none') +
+      '; outputs: ' +
+      (scriptOutputs.length ? scriptOutputs.map(function(port) { return port.name; }).join(', ') : 'none');
+  }
+  if (node.workflowId === '__text__') {
+    return 'text node; value present';
+  }
+  if (node.workflowId === '__output__') {
+    var outputPorts = (node.outputNode && node.outputNode.ports) || [];
+    return 'output node; ports: ' + (outputPorts.length ? outputPorts.map(function(port) { return port.name; }).join(', ') : 'none');
+  }
+  if (node.workflowId === '__junction__') {
+    var junctionPorts = (node.junctionNode && node.junctionNode.ports) || [];
+    return 'junction node; ports: ' + (junctionPorts.length ? junctionPorts.map(function(port) { return port.name; }).join(', ') : 'none');
+  }
+  if (node.workflowId === '__variable__') {
+    var variableCfg = node.variableNode || {};
+    var variableParts = ['variable node'];
+    if (variableCfg.exposeAsInput && variableCfg.inputName) variableParts.push('exposed input: ' + variableCfg.inputName);
+    if (variableCfg.initialValue !== undefined && variableCfg.initialValue !== '') variableParts.push('initial value present');
+    return variableParts.join('; ');
+  }
+  if (node.workflowId === '__get_variable__') {
+    return 'get-variable node; target: ' + (((node.getVariableNode && node.getVariableNode.targetNodeId) || 'unset'));
+  }
+  if (node.workflowId === '__asset__') {
+    return 'asset node; mode: ' + (((node.asset && node.asset.mode) || 'pick'));
+  }
+  if (node.workflowId && node.workflowId.indexOf('comp:') === 0) {
+    return 'sub-pipeline node; composition: ' + (((node.compositionRef && node.compositionRef.compositionId) || node.workflowId.slice(5)));
+  }
+  var workflow = workflowCache.find(function(entry) { return entry.id === node.workflowId; });
+  if (workflow) {
+    var workflowInputs = (workflow.variables || []).map(function(variable) { return variable.name; });
+    var workflowOutputs = workflow.outputVariables || [];
+    return 'workflow node; workflow: ' + workflow.name + '; inputs: ' + (workflowInputs.length ? workflowInputs.join(', ') : 'none') + '; outputs: ' + (workflowOutputs.length ? workflowOutputs.join(', ') : 'none');
+  }
+  return 'node type: ' + node.workflowId;
+}
+
+function getNodePortContracts(node, direction) {
+  if (!node) return [];
+
+  if (node.workflowId === '__script__') {
+    return ((node.script && (direction === 'in' ? node.script.inputs : node.script.outputs)) || []).map(function(port) {
+      return {
+        name: port.name,
+        type: port.type || 'unknown',
+        description: port.description || '',
+      };
+    });
+  }
+
+  if (node.workflowId === '__output__' && direction === 'in') {
+    return ((node.outputNode && node.outputNode.ports) || []).map(function(port) {
+      return {
+        name: port.name,
+        type: port.type || 'unknown',
+        description: port.description || '',
+      };
+    });
+  }
+
+  if (node.workflowId === '__junction__') {
+    return ((node.junctionNode && node.junctionNode.ports) || []).map(function(port) {
+      return {
+        name: port.name,
+        type: port.type || 'unknown',
+        description: port.description || '',
+      };
+    });
+  }
+
+  if (node.workflowId === '__variable__') {
+    if (direction === 'in') {
+      return [
+        { name: 'set', type: 'any', description: 'Replace the variable value' },
+        { name: 'push', type: 'any', description: 'Append to the variable when it is an array' },
+      ];
+    }
+    return [
+      { name: 'value', type: (node.variableNode && node.variableNode.type) || 'any', description: 'Current variable value' },
+      { name: 'length', type: 'number', description: 'Length of the current value when applicable' },
+    ];
+  }
+
+  if (node.workflowId === '__get_variable__' && direction === 'out') {
+    return [
+      { name: 'value', type: 'any', description: 'Current variable value' },
+      { name: 'length', type: 'number', description: 'Length of the current value when applicable' },
+    ];
+  }
+
+  if (node.workflowId === '__text__' && direction === 'out') {
+    return [
+      { name: 'text', type: 'string', description: 'Configured text value' },
+    ];
+  }
+
+  var workflow = workflowCache.find(function(entry) { return entry.id === node.workflowId; });
+  if (workflow) {
+    if (direction === 'in') {
+      return (workflow.variables || []).map(function(variable) {
+        return {
+          name: variable.name,
+          type: variable.type || 'string',
+          description: variable.description || variable.label || '',
+        };
+      });
+    }
+    return (workflow.outputVariables || []).map(function(name) {
+      return {
+        name: name,
+        type: 'unknown',
+        description: '',
+      };
+    });
+  }
+
+  return [];
+}
+
+function findNodePortContract(node, portName, direction) {
+  var contracts = getNodePortContracts(node, direction);
+  for (var i = 0; i < contracts.length; i++) {
+    if (contracts[i].name === portName) return contracts[i];
+  }
+  return null;
+}
+
+function formatNodePortExpectation(node, portName, direction) {
+  var contract = findNodePortContract(node, portName, direction);
+  if (!contract) return portName;
+
+  var parts = [contract.name];
+  if (contract.type && contract.type !== 'unknown') parts.push('type=' + contract.type);
+  if (contract.description) parts.push('desc=' + contract.description);
+  return parts.join(' | ');
+}
+
+function buildScriptGenerationContext(currentNodeId, contextNodeIds) {
+  if (!compData || !contextNodeIds || contextNodeIds.length === 0) return '';
+
+  var nodeById = {};
+  compData.nodes.forEach(function(node) { nodeById[node.id] = node; });
+
+  var selectedIds = [];
+  var seen = {};
+  contextNodeIds.forEach(function(nodeId) {
+    if (!nodeId || seen[nodeId] || nodeId === currentNodeId || !nodeById[nodeId]) return;
+    seen[nodeId] = true;
+    selectedIds.push(nodeId);
+  });
+
+  if (selectedIds.length === 0) return '';
+
+  var lines = ['Selected pipeline context nodes:'];
+  selectedIds.forEach(function(nodeId) {
+    var node = nodeById[nodeId];
+    lines.push('- ' + getCompositionNodeDisplayName(node) + ' (' + describeScriptGenerationNode(node) + ')');
+    var runtime = lastNodeStates && lastNodeStates[nodeId];
+    if (runtime && runtime.outputVariables) {
+      var keys = Object.keys(runtime.outputVariables).filter(function(key) {
+        return key !== '__done__' && runtime.outputVariables[key] !== undefined;
+      }).slice(0, 4);
+      if (keys.length > 0) {
+        lines.push('  Latest outputs: ' + keys.map(function(key) {
+          return key + '=' + truncateForContext(runtime.outputVariables[key], 140);
+        }).join('; '));
+      }
+    }
+  });
+
+  var relevantIds = {};
+  selectedIds.forEach(function(nodeId) { relevantIds[nodeId] = true; });
+  if (currentNodeId) relevantIds[currentNodeId] = true;
+
+  var relevantEdges = (compData.edges || []).filter(function(edge) {
+    return relevantIds[edge.sourceNodeId] && relevantIds[edge.targetNodeId];
+  });
+  if (relevantEdges.length > 0) {
+    lines.push('Relevant connections:');
+    relevantEdges.slice(0, 12).forEach(function(edge) {
+      var sourceNode = nodeById[edge.sourceNodeId];
+      var targetNode = nodeById[edge.targetNodeId];
+      lines.push('  - ' +
+        getCompositionNodeDisplayName(sourceNode) + '.' + edge.sourcePort +
+        ' -> ' +
+        getCompositionNodeDisplayName(targetNode) + '.' + edge.targetPort);
+      lines.push('    Expected contract: source {' + formatNodePortExpectation(sourceNode, edge.sourcePort, 'out') + '} -> target {' + formatNodePortExpectation(targetNode, edge.targetPort, 'in') + '}');
+
+      var sourceRuntime = lastNodeStates && lastNodeStates[edge.sourceNodeId];
+      if (sourceRuntime && sourceRuntime.outputVariables && sourceRuntime.outputVariables[edge.sourcePort] !== undefined) {
+        lines.push('    Latest source value: ' + truncateForContext(sourceRuntime.outputVariables[edge.sourcePort], 180));
+      }
+    });
+  }
+
+  if (currentNodeId && nodeById[currentNodeId]) {
+    var currentNode = nodeById[currentNodeId];
+    var incomingEdges = (compData.edges || []).filter(function(edge) {
+      return edge.targetNodeId === currentNodeId && relevantIds[edge.sourceNodeId];
+    });
+    var outgoingEdges = (compData.edges || []).filter(function(edge) {
+      return edge.sourceNodeId === currentNodeId && relevantIds[edge.targetNodeId];
+    });
+
+    if (incomingEdges.length > 0) {
+      lines.push('What the current node is expected to receive:');
+      incomingEdges.slice(0, 8).forEach(function(edge) {
+        lines.push('  - ' + edge.targetPort + ' expects {' + formatNodePortExpectation(currentNode, edge.targetPort, 'in') + '} from ' + getCompositionNodeDisplayName(nodeById[edge.sourceNodeId]) + '.' + edge.sourcePort);
+      });
+    }
+
+    if (outgoingEdges.length > 0) {
+      lines.push('What downstream nodes expect from the current node:');
+      outgoingEdges.slice(0, 8).forEach(function(edge) {
+        lines.push('  - ' + getCompositionNodeDisplayName(nodeById[edge.targetNodeId]) + '.' + edge.targetPort + ' expects {' + formatNodePortExpectation(nodeById[edge.targetNodeId], edge.targetPort, 'in') + '} from current output ' + edge.sourcePort + ' {' + formatNodePortExpectation(currentNode, edge.sourcePort, 'out') + '}');
+      });
+    }
+  }
+
+  return lines.join('\n');
 }
 
 // ── API ──────────────────────────────────────────────────────
@@ -1139,8 +1400,13 @@ function showCreateForm() {
 // ── Select & Load Composition ────────────────────────────────
 
 async function selectComposition(id, viewOverride) {
+  var options = arguments[2] || {};
   selectedComposition = id;
   clearCompositionInterfaceCache();
+  if (!options.preserveNavigation) {
+    compositionNavigationStack = [];
+  }
+  pendingCompositionFocusNodeId = options.restoreNodeId || null;
   var compView = viewOverride || (typeof parseHash === 'function' ? parseHash().view : null);
   document.body.classList.toggle('composition-form-mode', compView === 'form');
 
@@ -1186,10 +1452,44 @@ async function selectComposition(id, viewOverride) {
       renderCompositionFormPage();
     } else {
       renderGraphEditor();
+      if (typeof pollCompRunStatus === 'function') {
+        setTimeout(function() {
+          pollCompRunStatus();
+        }, 0);
+      }
+      if (pendingCompositionFocusNodeId && typeof selectNodeById === 'function') {
+        var focusNodeId = pendingCompositionFocusNodeId;
+        pendingCompositionFocusNodeId = null;
+        requestAnimationFrame(function() {
+          if (compData && compData.nodes && compData.nodes.some(function(node) { return node.id === focusNodeId; })) {
+            selectNodeById(focusNodeId);
+          }
+        });
+      }
     }
   } catch (err) {
+    pendingCompositionFocusNodeId = null;
     main.innerHTML =
       '<div class="empty-state"><div class="empty-state-icon">&#x26a0;&#xfe0f;</div>' +
       '<h2>Error</h2><p>' + compEscHtml(err.message) + '</p></div>';
   }
+}
+
+function openNestedComposition(targetCompId, sourceNodeId) {
+  if (!targetCompId || !compData || compData.id === targetCompId) return;
+  var currentEntry = { id: compData.id, name: compData.name || compData.id, focusNodeId: sourceNodeId || null };
+  var lastEntry = compositionNavigationStack[compositionNavigationStack.length - 1];
+  if (!lastEntry || lastEntry.id !== currentEntry.id || lastEntry.focusNodeId !== currentEntry.focusNodeId) {
+    compositionNavigationStack.push(currentEntry);
+  }
+  selectComposition(targetCompId, null, { preserveNavigation: true });
+}
+
+function navigateToParentComposition() {
+  if (!compositionNavigationStack.length) return;
+  var parentEntry = compositionNavigationStack.pop();
+  selectComposition(parentEntry.id, null, {
+    preserveNavigation: true,
+    restoreNodeId: parentEntry.focusNodeId || null,
+  });
 }

@@ -297,6 +297,108 @@ function getCompositionCurrentView() {
   return typeof parseHash === 'function' ? (parseHash().view || null) : null;
 }
 
+function findActiveNestedNodeId(nodeStates, executionOrder) {
+  var order = executionOrder || Object.keys(nodeStates || {});
+  for (var i = 0; i < order.length; i++) {
+    var state = nodeStates && nodeStates[order[i]];
+    if (state && (state.status === 'running' || state.status === 'retrying')) {
+      return order[i];
+    }
+  }
+  return null;
+}
+
+function countCompletedNestedNodes(nodeStates) {
+  var count = 0;
+  Object.keys(nodeStates || {}).forEach(function(nodeId) {
+    var status = nodeStates[nodeId] && nodeStates[nodeId].status;
+    if (status === 'completed' || status === 'failed' || status === 'skipped') {
+      count++;
+    }
+  });
+  return count;
+}
+
+function projectNestedCompositionRunStatus(runStatus) {
+  if (!runStatus || !compData) return null;
+  if (runStatus.compositionId === compData.id) return runStatus;
+  if (!compositionNavigationStack || compositionNavigationStack.length === 0) return null;
+  if (compositionNavigationStack[0].id !== runStatus.compositionId) return null;
+
+  var cursor = {
+    compositionId: runStatus.compositionId,
+    compositionName: runStatus.compositionName,
+    executionOrder: runStatus.executionOrder || [],
+    nodeStates: runStatus.nodeStates || {},
+    active: runStatus.active,
+    done: runStatus.done,
+    success: runStatus.success,
+    error: runStatus.error,
+    runId: runStatus.runId,
+    pendingApprovals: runStatus.pendingApprovals || [],
+    durationMs: runStatus.durationMs,
+    pipelineOutputs: runStatus.pipelineOutputs || {},
+  };
+
+  for (var i = 0; i < compositionNavigationStack.length; i++) {
+    var entry = compositionNavigationStack[i];
+    if (entry.id !== cursor.compositionId) return null;
+
+    var parentNodeState = cursor.nodeStates && cursor.nodeStates[entry.focusNodeId];
+    if (!parentNodeState || !parentNodeState.subNodeStates) return null;
+
+    var nextCompositionId = i + 1 < compositionNavigationStack.length
+      ? compositionNavigationStack[i + 1].id
+      : compData.id;
+    var childNodeStates = parentNodeState.subNodeStates || {};
+    var childExecutionOrder = parentNodeState.subExecutionOrder || Object.keys(childNodeStates);
+    var childCurrentNodeId = findActiveNestedNodeId(childNodeStates, childExecutionOrder);
+    var childDone = parentNodeState.status === 'completed' || parentNodeState.status === 'failed' || parentNodeState.status === 'skipped';
+    var childSuccess = parentNodeState.status === 'completed';
+
+    cursor = {
+      compositionId: nextCompositionId,
+      compositionName: nextCompositionId === compData.id ? (compData.name || parentNodeState.workflowName || nextCompositionId) : nextCompositionId,
+      executionOrder: childExecutionOrder,
+      nodeStates: childNodeStates,
+      active: runStatus.active && !childDone,
+      done: childDone,
+      success: childSuccess,
+      error: parentNodeState.error,
+      runId: runStatus.runId,
+      pendingApprovals: runStatus.pendingApprovals || [],
+      durationMs: childDone ? parentNodeState.durationMs : runStatus.durationMs,
+      pipelineOutputs: parentNodeState.outputVariables || {},
+      nodesTotal: parentNodeState.stepsTotal || childExecutionOrder.length,
+      nodesCompleted: parentNodeState.stepsCompleted != null ? parentNodeState.stepsCompleted : countCompletedNestedNodes(childNodeStates),
+      currentNodeId: childCurrentNodeId,
+    };
+  }
+
+  return cursor.compositionId === compData.id ? cursor : null;
+}
+
+function applyCompositionRunUiState(globalRunData, viewData) {
+  var progressWrap = document.querySelector('#comp-progress-wrap');
+  var runButton = document.querySelector('#comp-run-btn');
+  var cancelButton = document.querySelector('#comp-cancel-btn');
+  var batchButton = document.querySelector('#comp-batch-btn');
+
+  if (!viewData) {
+    if (progressWrap) progressWrap.style.display = 'none';
+    if (runButton) runButton.style.display = '';
+    if (cancelButton) cancelButton.style.display = 'none';
+    if (batchButton) batchButton.style.display = '';
+    return;
+  }
+
+  var isActive = !!(globalRunData && globalRunData.active);
+  if (progressWrap && (isActive || viewData.done)) progressWrap.style.display = '';
+  if (runButton) runButton.style.display = isActive ? 'none' : '';
+  if (cancelButton) cancelButton.style.display = isActive ? '' : 'none';
+  if (batchButton) batchButton.style.display = isActive ? 'none' : '';
+}
+
 function getCompositionFormShareUrl() {
   if (!compData) return window.location.href;
   var url = new URL(window.location.href);
@@ -1129,16 +1231,11 @@ async function renderCompositionFormPage() {
   fetch('/api/compositions/run/status')
     .then(function(res) { return res.json(); })
     .then(function(data) {
-      if (!data || data.compositionId !== compData.id) return;
-      updateCompositionFormResults(data);
-      if (data.active) startCompRunPolling();
-
-      var progressWrap = document.querySelector('#comp-progress-wrap');
-      var cancelButton = document.querySelector('#comp-cancel-btn');
-      var runButton = document.querySelector('#comp-run-btn');
-      if (progressWrap && (data.active || data.done)) progressWrap.style.display = '';
-      if (cancelButton) cancelButton.style.display = data.active ? '' : 'none';
-      if (runButton) runButton.style.display = data.active ? 'none' : '';
+      var viewData = projectNestedCompositionRunStatus(data);
+      if (!viewData) return;
+      updateCompositionFormResults(viewData);
+      if (data && data.active) startCompRunPolling();
+      applyCompositionRunUiState(data, viewData);
     })
     .catch(function() { /* ignore initial status fetch errors */ });
 
@@ -1208,19 +1305,27 @@ function pollCompRunStatus() {
         return;
       }
 
+      var viewData = projectNestedCompositionRunStatus(data);
+      if (!viewData) {
+        applyCompositionRunUiState(null, null);
+        return;
+      }
+
+      applyCompositionRunUiState(data, viewData);
+
       // Update overall progress bar
-      var pct = data.nodesTotal > 0 ? Math.round((data.nodesCompleted / data.nodesTotal) * 100) : 0;
+      var pct = viewData.nodesTotal > 0 ? Math.round((viewData.nodesCompleted / viewData.nodesTotal) * 100) : 0;
       var bar = document.querySelector('#comp-progress-bar');
       var text = document.querySelector('#comp-progress-text');
       if (bar) bar.style.width = pct + '%';
-      if (text) text.textContent = data.nodesCompleted + '/' + data.nodesTotal + ' steps';
-      updateCompositionFormResults(data);
+      if (text) text.textContent = viewData.nodesCompleted + '/' + viewData.nodesTotal + ' steps';
+      updateCompositionFormResults(viewData);
 
       // Update per-node states
-      if (data.nodeStates) {
-        lastNodeStates = data.nodeStates;
-        for (var nodeId in data.nodeStates) {
-          var ns = data.nodeStates[nodeId];
+      if (viewData.nodeStates) {
+        lastNodeStates = viewData.nodeStates;
+        for (var nodeId in viewData.nodeStates) {
+          var ns = viewData.nodeStates[nodeId];
           updateNodeExecutionState(nodeId, ns.status);
           if (ns.status === 'running' || ns.status === 'retrying' || ns.status === 'completed') {
             updateNodeStepProgress(nodeId, ns.stepsCompleted, ns.stepsTotal);
@@ -1357,11 +1462,11 @@ function pollCompRunStatus() {
         if (cancelBtn) cancelBtn.style.display = 'none';
 
         var progressBar = document.querySelector('#comp-progress-bar');
-        if (data.success) {
-          toast('Pipeline finished! (' + (data.durationMs / 1000).toFixed(1) + 's)', 'success');
+        if (viewData.success) {
+          toast('Pipeline finished! (' + (viewData.durationMs / 1000).toFixed(1) + 's)', 'success');
           if (progressBar) progressBar.style.background = '#22c55e';
         } else {
-          toast('Pipeline failed: ' + (data.error || 'Something went wrong'), 'error');
+          toast('Pipeline failed: ' + (viewData.error || 'Something went wrong'), 'error');
           if (progressBar) progressBar.style.background = '#ef4444';
         }
 
@@ -1370,9 +1475,9 @@ function pollCompRunStatus() {
         renderEdges();
         wireUpCanvas();
         // Re-apply execution state overlays after re-render
-        if (data.nodeStates) {
-          for (var doneNodeId in data.nodeStates) {
-            var doneNs = data.nodeStates[doneNodeId];
+        if (viewData.nodeStates) {
+          for (var doneNodeId in viewData.nodeStates) {
+            var doneNs = viewData.nodeStates[doneNodeId];
             updateNodeExecutionState(doneNodeId, doneNs.status);
           }
         }
@@ -1382,7 +1487,7 @@ function pollCompRunStatus() {
         setTimeout(function() {
           var wrap = document.querySelector('#comp-progress-wrap');
           if (wrap) wrap.style.display = 'none';
-          if (data.success) {
+          if (viewData.success) {
             clearNodeExecutionStates();
           } else {
             clearNonErrorExecutionStates();

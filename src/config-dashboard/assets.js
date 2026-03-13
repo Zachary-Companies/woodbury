@@ -638,6 +638,33 @@
       return;
     }
 
+    function normalizeAssetDescriptionValue(description) {
+      if (description == null) return '';
+      if (typeof description === 'string') return description;
+      try {
+        return JSON.stringify(description, null, 2);
+      } catch (err) {
+        return String(description);
+      }
+    }
+
+    function parseAssetDescriptionJson(description) {
+      if (description == null) return null;
+      if (typeof description === 'object') return description;
+      if (typeof description !== 'string') return null;
+      var trimmed = description.trim();
+      if (!trimmed) return null;
+      if (trimmed[0] !== '{' && trimmed[0] !== '[') return null;
+      try {
+        return JSON.parse(trimmed);
+      } catch (err) {
+        return null;
+      }
+    }
+
+    var descriptionValue = normalizeAssetDescriptionValue(asset.description);
+    var descriptionJson = parseAssetDescriptionJson(asset.description);
+
     var html = '<div style="padding:24px;">';
 
     // Back button
@@ -701,7 +728,16 @@
     // Description
     html += '<div style="margin-top:12px;">';
     html += '<label style="font-size:12px;color:#64748b;font-weight:600;text-transform:uppercase;display:block;margin-bottom:4px;">Description</label>';
-    html += '<textarea id="asset-description" rows="3" style="width:100%;padding:8px 12px;border-radius:6px;border:1px solid rgba(255,255,255,0.1);background:rgba(0,0,0,0.2);color:#fff;font-size:13px;outline:none;resize:vertical;">' + escHtml(asset.description || '') + '</textarea>';
+    html += '<textarea id="asset-description" rows="3" style="width:100%;padding:8px 12px;border-radius:6px;border:1px solid rgba(255,255,255,0.1);background:rgba(0,0,0,0.2);color:#fff;font-size:13px;outline:none;resize:vertical;">' + escHtml(descriptionValue) + '</textarea>';
+    if (descriptionJson !== null) {
+      html += '<div style="margin-top:10px;padding:12px;border-radius:8px;border:1px solid rgba(59,130,246,0.25);background:rgba(15,23,42,0.9);">';
+      html += '<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px;">';
+      html += '<div style="font-size:11px;color:#93c5fd;font-weight:600;text-transform:uppercase;letter-spacing:0.04em;">Pretty JSON View</div>';
+      html += '<div style="font-size:11px;color:#64748b;">Read-only formatted preview</div>';
+      html += '</div>';
+      html += '<pre style="margin:0;max-height:260px;overflow:auto;padding:12px;border-radius:6px;background:rgba(2,6,23,0.85);border:1px solid rgba(255,255,255,0.06);color:#dbeafe;font-family:\'SF Mono\',\'Fira Code\',monospace;font-size:12px;line-height:1.55;white-space:pre-wrap;word-break:break-word;">' + escHtml(JSON.stringify(descriptionJson, null, 2)) + '</pre>';
+      html += '</div>';
+    }
     html += '</div>';
 
     // Info row

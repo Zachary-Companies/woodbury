@@ -160,6 +160,39 @@ const DEFAULT_SKILLS: SkillDescriptor[] = [
     },
   },
   {
+    name: 'script_node_generation',
+    description: 'Generates, validates, and repairs JavaScript for Woodbury script nodes using a constrained toolset.',
+    whenToUse: 'Use for script-node code generation, prompt-to-code conversion, JSDoc port contracts, execute(inputs, context) implementations, or repairing generated script-node code.',
+    promptGuidance: 'Treat the task as constrained script generation, not general repository editing. Use graph context and sample data when provided. Produce valid, deterministic, unit-testable script-node JavaScript with @input/@output annotations and async function execute(inputs, context). Prefer reasoning and in-memory validation tools like code_execute, goal_contract, and reflect. Keep side effects isolated and do not inspect the filesystem, write files, or use shell commands.',
+    preferredSubagent: 'execute',
+    completionContract: 'Return valid script-node code, its inferred input/output contract, and any validation or repair notes needed to trust the result.',
+    keywords: ['script node', 'generate script', 'script generation', 'pipeline script', '@input', '@output', 'execute(inputs, context)', 'jsdoc ports', 'repair generated code'],
+    exactTools: ['memory_recall', 'goal_contract', 'reflect', 'code_execute'],
+    fallbackTools: ['test_run'],
+    maxTools: 6,
+    policy: {
+      hardBannedTools: ['file_write', 'shell_execute', 'git', 'workflow_execute', 'workflow_play'],
+      defaultRecoveryHints: ['If the generated script is malformed, validate the code contract and repair the code instead of editing unrelated files.'],
+    },
+  },
+  {
+    name: 'woodbury_builtin_concepts',
+    description: 'Explains and traces Woodbury-native concepts like assets, collections, storyboards, built-in pipeline nodes, and their CRUD/runtime contracts.',
+    whenToUse: 'Use when the task is about how Woodbury built-ins behave: asset and collection CRUD, storyboard media import/export, built-in node semantics, composition storage, or dashboard API contracts.',
+    promptGuidance: 'Treat Woodbury built-ins as product contracts, not generic code. Trace the relevant route handlers, dashboard UI modules, workflow/composition storage, and runtime node executors before proposing changes. Prefer explaining where data is stored, which APIs own it, and how built-in node config maps to runtime behavior.',
+    preferredSubagent: 'explore',
+    completionContract: 'Return the concrete Woodbury concept behavior, the owning files and APIs, and any contract mismatch or next handoff needed for implementation.',
+    keywords: ['woodbury asset', 'asset crud', 'asset collection', 'collections crud', 'collection slug', 'creator-assets', 'assets.json', 'collections.json', 'storyboard asset', 'built-in node', '__asset__', '__text__', '__file_op__', '__json_keys__', 'composition storage', 'dashboard api contract'],
+    exactTools: ['memory_recall', 'goal_contract', 'reflect', 'file_read', 'file_search', 'grep', 'list_directory', 'code_execute'],
+    fallbackTools: ['web_fetch', 'delegate'],
+    maxTools: 12,
+    policy: {
+      hardBannedTools: ['file_write'],
+      escalationPhrases: ['escalate', 'override', 'switch to editing'],
+      defaultRecoveryHints: ['If the issue involves built-in Woodbury behavior, trace the owning route/UI/runtime contract before changing code.'],
+    },
+  },
+  {
     name: 'code_change',
     description: 'Explores and modifies source code, scripts, and tests.',
     whenToUse: 'Use for implementation, refactoring, debugging, code review follow-up, or repository-local engineering work.',
@@ -335,6 +368,12 @@ export class SkillRegistry {
 
     if (skillName === 'repo_explore') {
       suggestions.add(/test|verify|build|compile|check/.test(lower) ? 'test_and_verify' : 'code_change');
+    } else if (skillName === 'woodbury_builtin_concepts') {
+      suggestions.add(/fix|implement|update|patch|change/.test(lower) ? 'code_change' : 'repo_explore');
+      suggestions.add('test_and_verify');
+    } else if (skillName === 'script_node_generation') {
+      suggestions.add('test_and_verify');
+      suggestions.add('code_change');
     } else if (skillName === 'code_change') {
       suggestions.add(/test|verify|build|compile|check/.test(lower) ? 'test_and_verify' : 'repo_explore');
     } else if (skillName === 'test_and_verify') {
@@ -406,6 +445,8 @@ export class SkillRegistry {
     score += learned.applicabilityBoost;
 
     if (skill.name === 'workflow_or_pipeline_build' && /pipeline|workflow|automation|compose|orchestrate/.test(normalize(context))) score += 5;
+    if (skill.name === 'woodbury_builtin_concepts' && /asset|collection|storyboard|creator-assets|assets\.json|collections\.json|__asset__|built-in node|dashboard api|composition storage/.test(normalize(context))) score += 7;
+    if (skill.name === 'script_node_generation' && /script node|generate script|pipeline script|@input|@output|execute\(inputs, context\)|jsdoc/.test(normalize(context))) score += 6;
     if (skill.name === 'browser_automation' && /browser|click|dom|page|screenshot|screen/.test(normalize(context))) score += 5;
     if (skill.name === 'dashboard_or_ui_change' && /dashboard|ui|frontend|css|panel|layout|chat/.test(normalize(context))) score += 5;
     if (skill.name === 'extension_or_mcp_integration' && /\bmcp\b|extension|provider|tool registry|manifest/.test(normalize(context))) score += 5;

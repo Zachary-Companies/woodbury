@@ -70,11 +70,63 @@ const resolveAssetPath = (asset: any, dataDir: string, collections: any[]): stri
 const assetSlugify = (str: string): string =>
   str.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 
+const humanizeSlug = (slug: string): string =>
+  slug
+    .replace(/[-_]+/g, ' ')
+    .replace(/\b\w/g, (char) => char.toUpperCase())
+    .trim();
+
 const generateAssetId = (): string => {
   const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
   let id = 'ast_';
   for (let i = 0; i < 8; i++) id += chars[Math.floor(Math.random() * chars.length)];
   return id;
+};
+
+const createCollectionRecord = (slug: string, name?: string): any => ({
+  id: generateAssetId().replace('ast_', 'col_'),
+  name: name?.trim() || humanizeSlug(slug) || slug,
+  slug,
+  description: '',
+  tags: [],
+  rootPath: null,
+  created_at: new Date().toISOString(),
+});
+
+const mergeCollectionsWithAssetRefs = (collections: any[], assets: any[]): any[] => {
+  const merged = Array.isArray(collections) ? [...collections] : [];
+  const seen = new Set(merged.map((collection: any) => String(collection.slug || '')));
+  for (const asset of assets || []) {
+    for (const rawSlug of asset?.collections || []) {
+      const slug = typeof rawSlug === 'string' ? rawSlug.trim() : '';
+      if (!slug || seen.has(slug)) continue;
+      merged.push({
+        ...createCollectionRecord(slug),
+        inferred: true,
+      });
+      seen.add(slug);
+    }
+  }
+  return merged;
+};
+
+const ensureCollectionRecords = async (dataDir: string, requestedCollections: unknown): Promise<any[]> => {
+  const slugs = Array.isArray(requestedCollections)
+    ? requestedCollections.map((value) => typeof value === 'string' ? value.trim() : '').filter(Boolean)
+    : [];
+  const collections = await readCollectionsJson(dataDir);
+  let mutated = false;
+  const seen = new Set(collections.map((collection: any) => String(collection.slug || '')));
+  for (const slug of slugs) {
+    if (seen.has(slug)) continue;
+    collections.push(createCollectionRecord(slug));
+    seen.add(slug);
+    mutated = true;
+  }
+  if (mutated) {
+    await writeCollectionsJson(dataDir, collections);
+  }
+  return collections;
 };
 
 const ASSET_MIME_MAP: Record<string, string> = {
@@ -148,8 +200,8 @@ export const handleAssetRoutes: RouteHandler = async (req, res, pathname, url, c
   if (req.method === 'GET' && pathname === '/api/assets/collections') {
     try {
       const dataDir = await getAssetsDataDir();
-      const collections = await readCollectionsJson(dataDir);
       const assets = await readAssetsJson(dataDir);
+      const collections = mergeCollectionsWithAssetRefs(await readCollectionsJson(dataDir), assets);
 
       const result = collections.map((c: any) => ({
         ...c,
@@ -335,7 +387,8 @@ export const handleAssetRoutes: RouteHandler = async (req, res, pathname, url, c
       const ext = extname(body.file_path);
       const slug = assetSlugify(body.name);
       const mimeType = ASSET_MIME_MAP[ext.toLowerCase()] || 'application/octet-stream';
-      const collections = await readCollectionsJson(dataDir);
+      const requestedCollections = body.collection ? [body.collection] : [];
+      const collections = await ensureCollectionRecords(dataDir, requestedCollections);
 
       let storedFilePath: string;
       let pathMode = 'relative';
@@ -371,7 +424,7 @@ export const handleAssetRoutes: RouteHandler = async (req, res, pathname, url, c
         file_size: srcStat.size,
         category: detectAssetCategory(mimeType),
         tags: body.tags || [],
-        collections: body.collection ? [body.collection] : [],
+        collections: requestedCollections,
         version: 1,
         versions: [{
           version: 1,
@@ -554,7 +607,11 @@ export const handleAssetRoutes: RouteHandler = async (req, res, pathname, url, c
         if (body.name !== undefined) asset.name = body.name;
         if (body.description !== undefined) asset.description = body.description;
         if (body.tags !== undefined) asset.tags = body.tags;
-        if (body.collections !== undefined) asset.collections = body.collections;
+        if (body.collections !== undefined) {
+          asset.collections = Array.isArray(body.collections)
+            ? body.collections.filter((value: unknown): value is string => typeof value === 'string' && value.trim().length > 0)
+            : [];
+        }
         if (body.is_default_for !== undefined) {
           if (body.is_default_for) {
             for (const a of assets) {
@@ -571,9 +628,10 @@ export const handleAssetRoutes: RouteHandler = async (req, res, pathname, url, c
 
         asset.updated_at = new Date().toISOString();
         assets[idx] = asset;
+        await ensureCollectionRecords(dataDir, asset.collections);
         await writeAssetsJson(dataDir, assets);
 
-        const collections = await readCollectionsJson(dataDir);
+        const collections = mergeCollectionsWithAssetRefs(await readCollectionsJson(dataDir), assets);
         sendJson(res, 200, {
           asset: { ...asset, file_path_absolute: resolveAssetPath(asset, dataDir, collections) },
         });

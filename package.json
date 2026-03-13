@@ -34,6 +34,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.77.0",
+    "@modelcontextprotocol/sdk": "^1.12.1",
     "@types/ws": "^8.18.1",
     "chalk": "^4.1.2",
     "cheerio": "^1.2.0",
@@ -44,6 +45,7 @@
     "groq-sdk": "^0.37.0",
     "marked": "^15.0.12",
     "marked-terminal": "^7.3.0",
+    "monaco-editor": "^0.55.1",
     "onnxruntime-node": "^1.24.2",
     "openai": "^6.22.0",
     "ora": "^9.1.0",
@@ -51,8 +53,7 @@
     "puppeteer": "^24.37.4",
     "sharp": "^0.33.5",
     "uiohook-napi": "^1.5.4",
-    "ws": "^8.19.0",
-    "@modelcontextprotocol/sdk": "^1.12.1"
+    "ws": "^8.19.0"
   },
   "devDependencies": {
     "@types/jest": "^29.5.14",

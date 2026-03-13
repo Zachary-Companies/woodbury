@@ -344,6 +344,8 @@ export class StrategicPlanner {
     if (/(validate|repair|parse-check|parse check|ports|edges|malformed|regenerate|bad nodes)/.test(lower) && /(pipeline|workflow|composition)/.test(lower)) return 'pipeline_validate_and_repair';
     if (/(generate|initial saved|saved pipeline|saved workflow|compose tools)/.test(lower) && /(pipeline|workflow|composition)/.test(lower)) return 'pipeline_generate';
     if (/(design|graph plan|node responsibilities|interface contract|data flow|inputs|outputs)/.test(lower) && /(pipeline|workflow|composition|automation)/.test(lower)) return 'pipeline_design';
+    if (/(asset|collection|storyboard|creator-assets|assets\.json|collections\.json|__asset__|built-in node|woodbury collection|woodbury asset)/.test(lower)) return 'woodbury_builtin_concepts';
+    if (/(script node|generate script|pipeline script|@input|@output|execute\(inputs, context\)|jsdoc ports?)/.test(lower)) return 'script_node_generation';
     if (/test|verify|validation|build|compile|assert|check/.test(lower)) return 'test_and_verify';
     if (/explore|inspect|investigate|understand|gather evidence|trace|analyze existing/.test(lower)) return 'repo_explore';
     if (/implement|fix|refactor|edit|change|update|write|code/.test(lower)) return 'code_change';

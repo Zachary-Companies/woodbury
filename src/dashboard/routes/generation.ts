@@ -15,6 +15,10 @@ import type { DashboardContext, RouteHandler, ScriptToolDoc } from '../types.js'
 import { sendJson, readBody } from '../utils.js';
 import type { ToolDefinition } from '../../loop/types.js';
 import { debugLog } from '../../debug-log.js';
+import {
+  runGeneratedScriptUnitTests,
+  type ScriptGenerationTestCase,
+} from '../script-generation-tests.js';
 
 // ── Constants ────────────────────────────────────────────────
 const SCRIPT_TOOL_DOCS_PATH = join(homedir(), '.woodbury', 'data', 'script-tool-docs.json');
@@ -108,6 +112,460 @@ function parseScriptPorts(code: string): { inputs: Array<{ name: string; type: s
   }
   return { inputs, outputs };
 }
+
+function extractCodeBlock(content: string): string {
+  const codeBlockMatch = content.match(/```(?:javascript|js)?\s*\n([\s\S]*?)\n```/);
+  return codeBlockMatch ? codeBlockMatch[1].trim() : content.trim();
+}
+
+function requiresWoodburyCollectionToolUsage(userMessage: string): boolean {
+  const lower = String(userMessage || '').toLowerCase();
+  return /(woodbury collection|collection tools|creator assets|asset_collection|asset library)/.test(lower);
+}
+
+function validateGeneratedScriptCode(
+  code: string,
+  options?: { userMessage?: string },
+): { ok: boolean; issues: string[]; ports: { inputs: Array<{ name: string; type: string; description: string }>; outputs: Array<{ name: string; type: string; description: string }> } } {
+  const issues: string[] = [];
+  const ports = parseScriptPorts(code);
+
+  if (!/\/\*\*[\s\S]*?\*\//.test(code)) {
+    issues.push('Missing JSDoc block with @input/@output annotations.');
+  }
+  if (!/@input\s+/m.test(code)) {
+    issues.push('Missing at least one @input annotation.');
+  }
+  if (!/@output\s+/m.test(code)) {
+    issues.push('Missing at least one @output annotation.');
+  }
+  if (!/async\s+function\s+execute\s*\(\s*inputs\s*,\s*context\s*\)/.test(code)) {
+    issues.push('Missing required async function execute(inputs, context) signature.');
+  }
+  if (!/return\s*\{[\s\S]*\}/.test(code)) {
+    issues.push('Missing object return statement for declared outputs.');
+  }
+
+  try {
+    // Parse only; this does not execute the generated code.
+    // Wrapping in parentheses avoids top-level declaration parsing edge cases.
+    // eslint-disable-next-line no-new, no-new-func
+    new Function(`${code}\nreturn typeof execute === 'function';`);
+  } catch (err) {
+    issues.push(`JavaScript syntax error: ${(err as Error).message}`);
+  }
+
+  if (requiresWoodburyCollectionToolUsage(options?.userMessage || '')) {
+    const usesWoodburyCollectionTool = /asset_collection_create|asset_collection_list|asset_collection_get|asset_save/.test(code);
+    if (!usesWoodburyCollectionTool) {
+      issues.push('Missing required Woodbury asset/collection tool usage. Use context.tools.asset_collection_create, context.tools.asset_collection_list/get, or context.tools.asset_save when the request explicitly asks for Woodbury collection tools.');
+    }
+  }
+
+  return { ok: issues.length === 0, issues, ports };
+}
+
+function buildScriptRequestMessage(
+  description: unknown,
+  dataContext: unknown,
+  graphContext: unknown,
+  currentCode: unknown,
+): string {
+  let userMessage = typeof description === 'string' ? description : '';
+  if (dataContext) {
+    userMessage += `\n\nThe input data for this script looks like this (sample from a previous pipeline run):\n\`\`\`json\n${typeof dataContext === 'string' ? dataContext : JSON.stringify(dataContext, null, 2)}\n\`\`\`\nUse this to understand the exact data structure and write code that handles it correctly. Make sure the first @input annotation matches the type of this data (it will be auto-connected to the source port). IMPORTANT: If the user's description references any other dynamic values (like keys, indices, filters, thresholds, etc.), create ADDITIONAL @input ports for each one. Every variable parameter should be its own input port so it can be wired from other nodes in the pipeline.`;
+  }
+  if (graphContext) {
+    userMessage += `\n\nRelevant pipeline graph context:\n${typeof graphContext === 'string' ? graphContext : JSON.stringify(graphContext, null, 2)}\nUse this to understand what upstream or related nodes already provide, what values are available, and how this script should fit into the surrounding pipeline.`;
+  }
+  if (currentCode) {
+    userMessage += `\n\nCurrent code:\n\`\`\`javascript\n${typeof currentCode === 'string' ? currentCode : JSON.stringify(currentCode, null, 2)}\n\`\`\``;
+  }
+  return userMessage.trim();
+}
+
+function buildWoodburyBuiltinToolingGuidance(userMessage: string): string {
+  const lower = String(userMessage || '').toLowerCase();
+  if (!/(asset|collection|storyboard|woodbury collection|woodbury asset|save assets|asset library)/.test(lower)) {
+    return '';
+  }
+
+  return [
+    'This request involves Woodbury-native asset or collection behavior.',
+    'Prefer Woodbury runtime collection and asset functions over ad-hoc object creation, local JSON persistence, or invented helper APIs.',
+    'Use the real Creator Assets tool names exposed through context.tools when available.',
+    'For collection creation or lookup, prefer context.tools.asset_collection_create, context.tools.asset_collection_list, or context.tools.asset_collection_get.',
+    'For saving files into the library, use context.tools.asset_save and pass the Woodbury collection slug or name via the collection field.',
+    'Do not simulate Woodbury collections by returning plain arrays or detached objects when the user explicitly asked to use Woodbury collection tools.',
+  ].join(' ');
+}
+
+const SCRIPT_GENERATION_ALLOWED_TOOLS = [
+  'memory_recall',
+  'goal_contract',
+  'reflect',
+  'code_execute',
+  'test_run',
+];
+
+function getScriptGenerationProviderAndModel(): { provider: 'openai' | 'anthropic' | 'groq'; model: string } {
+  if (process.env.ANTHROPIC_API_KEY) return { provider: 'anthropic', model: 'claude-sonnet-4-20250514' };
+  if (process.env.OPENAI_API_KEY) return { provider: 'openai', model: 'gpt-4o-mini' };
+  if (process.env.GROQ_API_KEY) return { provider: 'groq', model: 'llama-3.1-70b-versatile' };
+  return { provider: 'anthropic', model: 'claude-sonnet-4-20250514' };
+}
+
+async function generateScriptUnitTestCases(
+  userMessage: string,
+  code: string,
+  inputs: Array<{ name: string; type: string; description: string }>,
+  outputs: Array<{ name: string; type: string; description: string }>,
+): Promise<ScriptGenerationTestCase[]> {
+  const { runPrompt } = await import('../../loop/llm-service.js');
+  const providerAndModel = getScriptGenerationProviderAndModel();
+  const response = await runPrompt([
+    {
+      role: 'system',
+      content: 'You create deterministic unit test cases for Woodbury script-node code. Return ONLY a JSON array. Each item must use this shape: { "name": string, "inputs": object, "llmGenerate"?: string, "llmGenerateJSON"?: object, "expectedOutputSubset"?: object, "requiredOutputKeys"?: string[] }. Prefer 1-3 tests. Avoid filesystem, network, or nondeterministic assertions. Only include assertions you can predict with confidence. Do NOT assert exact large arrays, exact parsed natural-language structures, or exact nested object payloads unless they are trivially derivable from literal inputs. Prefer requiredOutputKeys and small scalar subsets.',
+    },
+    {
+      role: 'user',
+      content: `Request:\n${userMessage}\n\nDeclared inputs:\n${JSON.stringify(inputs, null, 2)}\n\nDeclared outputs:\n${JSON.stringify(outputs, null, 2)}\n\nCode:\n\`\`\`javascript\n${code}\n\`\`\``,
+    },
+  ], providerAndModel.model, { maxTokens: 1200, temperature: 0.1 });
+
+  const raw = response.content.trim();
+  const match = raw.match(/```(?:json)?\s*([\s\S]*?)```/) || [null, raw];
+  const parsed = JSON.parse((match[1] || raw).trim());
+  if (!Array.isArray(parsed)) return [];
+  return sanitizeScriptGenerationTestCases(parsed, outputs).slice(0, 3);
+}
+
+function isSafeExpectedSubsetValue(value: unknown, depth = 0): boolean {
+  if (value == null) return true;
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return true;
+  if (Array.isArray(value)) return false;
+  if (typeof value !== 'object') return false;
+  if (depth >= 2) return false;
+  return Object.values(value as Record<string, unknown>).every(child => isSafeExpectedSubsetValue(child, depth + 1));
+}
+
+function sanitizeScriptGenerationTestCases(
+  rawCases: unknown[],
+  outputs: Array<{ name: string; type: string; description: string }>,
+): ScriptGenerationTestCase[] {
+  const declaredOutputNames = outputs.map(output => output.name).filter(Boolean);
+  const sanitized: ScriptGenerationTestCase[] = [];
+
+  for (const rawCase of rawCases) {
+    if (!rawCase || typeof rawCase !== 'object' || Array.isArray(rawCase)) continue;
+    const candidate = rawCase as Record<string, unknown>;
+    const name = typeof candidate.name === 'string' && candidate.name.trim()
+      ? candidate.name.trim()
+      : `generated_test_${sanitized.length + 1}`;
+    const inputs = candidate.inputs && typeof candidate.inputs === 'object' && !Array.isArray(candidate.inputs)
+      ? candidate.inputs as Record<string, unknown>
+      : {};
+    const requiredOutputKeys = Array.isArray(candidate.requiredOutputKeys)
+      ? candidate.requiredOutputKeys.filter((key): key is string => typeof key === 'string' && declaredOutputNames.includes(key))
+      : [];
+    const expectedOutputSubset = isSafeExpectedSubsetValue(candidate.expectedOutputSubset)
+      ? candidate.expectedOutputSubset as Record<string, unknown> | undefined
+      : undefined;
+
+    if (requiredOutputKeys.length === 0 && declaredOutputNames.length > 0 && !expectedOutputSubset) {
+      requiredOutputKeys.push(...declaredOutputNames);
+    }
+
+    sanitized.push({
+      name,
+      inputs,
+      llmGenerate: typeof candidate.llmGenerate === 'string' ? candidate.llmGenerate : undefined,
+      llmGenerateJSON: candidate.llmGenerateJSON,
+      expectedOutputSubset,
+      requiredOutputKeys: requiredOutputKeys.length > 0 ? Array.from(new Set(requiredOutputKeys)) : undefined,
+    });
+  }
+
+  return sanitized;
+}
+
+async function runScopedScriptGenerationPass(
+  ctx: DashboardContext,
+  objective: string,
+  options?: { chatHistory?: Array<{ role: 'user' | 'assistant'; content: string }>; sessionSuffix?: string },
+): Promise<{ content: string; selectedSkills: string[]; toolNames: string[] }> {
+  const [{ createDefaultToolRegistry }, { convertAllTools }, { ToolRegistryV2 }, { buildV3SystemPrompt }, { ClosureEngine }] = await Promise.all([
+    import('../../loop/index.js'),
+    import('../../loop/v2/tools/native-converter.js'),
+    import('../../loop/v2/tools/registry-v2.js'),
+    import('../../loop/v3/system-prompt-v3.js'),
+    import('../../loop/v3/closure-engine.js'),
+  ]);
+
+  const baseRegistry = createDefaultToolRegistry();
+  const nativeTools = convertAllTools(baseRegistry.getAll?.() || []);
+  const allowed = new Set(SCRIPT_GENERATION_ALLOWED_TOOLS);
+  const scopedRegistry = new ToolRegistryV2({ debug: () => {}, info: () => {}, warn: () => {}, error: () => {} });
+  for (const tool of nativeTools) {
+    if (allowed.has(tool.definition.name)) {
+      scopedRegistry.register(tool.definition, tool.handler, { dangerous: tool.dangerous });
+    }
+  }
+
+  const basePrompt = await buildV3SystemPrompt(
+    ctx.workDir,
+    undefined,
+    ctx.extensionManager?.getAllPromptSections(),
+    scopedRegistry.getAllDefinitions(),
+  );
+  const systemPrompt = `${basePrompt}\n\n## Script Node Generation\nYou are generating or repairing code for a Woodbury __script__ node. This is not a repository editing task. Use only the scoped tools available for planning, reasoning, validation, and repair. The final answer must be a single JavaScript code block and nothing else.`;
+  const providerAndModel = getScriptGenerationProviderAndModel();
+  const selectedSkills: string[] = [];
+  const toolNames: string[] = [];
+  const engine = new ClosureEngine({
+    provider: providerAndModel.provider,
+    model: providerAndModel.model,
+    sessionId: `dashboard-script-generation-${Date.now()}-${options?.sessionSuffix || 'run'}`,
+    continuationMode: 'off',
+    maxIterations: 18,
+    maxTaskRetries: 2,
+    timeout: 120000,
+    toolTimeout: 15000,
+    temperature: 0.1,
+    workingDirectory: ctx.workDir,
+    allowDangerousTools: false,
+    streaming: false,
+    reflectionInterval: 4,
+    callbacks: {
+      onSkillSelected(selection) {
+        if (selection?.skill?.name && selectedSkills.indexOf(selection.skill.name) === -1) {
+          selectedSkills.push(selection.skill.name);
+        }
+      },
+      onToolStart(name) {
+        if (name && toolNames.indexOf(name) === -1) {
+          toolNames.push(name);
+        }
+      },
+    },
+  }, scopedRegistry, systemPrompt);
+
+  const historyText = options?.chatHistory && options.chatHistory.length > 0
+    ? `\n\nPrior script conversation:\n${options.chatHistory.map(msg => `${msg.role.toUpperCase()}: ${msg.content}`).join('\n\n')}`
+    : '';
+
+  const result = await engine.run(`${objective}${historyText}`);
+  if (!result.success) {
+    throw new Error(result.error || result.content || 'Scoped script generation failed');
+  }
+
+  return { content: result.content.trim(), selectedSkills, toolNames };
+}
+
+async function runStrictScriptGenerationFallback(
+  userMessage: string,
+  toolDocs: string,
+  options?: {
+    chatHistory?: Array<{ role: 'user' | 'assistant'; content: string }>;
+    currentCode?: string;
+    issues?: string[];
+  },
+): Promise<string> {
+  const { runPrompt } = await import('../../loop/llm-service.js');
+  const providerAndModel = getScriptGenerationProviderAndModel();
+  const historyText = options?.chatHistory && options.chatHistory.length > 0
+    ? `Prior script conversation:\n${options.chatHistory.map(msg => `${msg.role.toUpperCase()}: ${msg.content}`).join('\n\n')}`
+    : '';
+  const builtinGuidance = buildWoodburyBuiltinToolingGuidance(userMessage);
+  const codeText = options?.currentCode
+    ? `Current code candidate:\n\`\`\`javascript\n${options.currentCode}\n\`\`\``
+    : '';
+  const issuesText = options?.issues && options.issues.length > 0
+    ? `Known problems to fix:\n- ${options.issues.join('\n- ')}`
+    : '';
+
+  const response = await runPrompt([
+    {
+      role: 'system',
+      content: [
+        'You generate JavaScript for a Woodbury pipeline script node.',
+        'Return ONLY a single fenced ```javascript code block. Do not include any prose before or after the block.',
+        'The code must include a JSDoc block with at least one @input and at least one @output annotation.',
+        'The code must define async function execute(inputs, context).',
+        'The execute function must return an object containing all declared outputs.',
+        'Preserve the requested behavior while fixing any structural validation errors.',
+        builtinGuidance,
+      ].join(' '),
+    },
+    {
+      role: 'user',
+      content: [
+        'Repair or regenerate the Woodbury script node so it satisfies the required output format.',
+        `Task request:\n${userMessage}`,
+        issuesText,
+        codeText,
+        historyText,
+        toolDocs ? `Runtime tool documentation for generated code:\n${toolDocs}` : '',
+      ].filter(Boolean).join('\n\n'),
+    },
+  ], providerAndModel.model, { maxTokens: 2600, temperature: 0.1 });
+
+  return response.content.trim();
+}
+
+async function runScriptGenerationWithClosureEngine(
+  ctx: DashboardContext,
+  userMessage: string,
+  toolDocs: string,
+  chatHistory: Array<{ role: 'user' | 'assistant'; content: string }> | undefined,
+): Promise<{ code: string; assistantMessage: string; inputs: Array<{ name: string; type: string; description: string }>; outputs: Array<{ name: string; type: string; description: string }>; lifecycle: { designedPlan: string; validationIssues: string[]; repaired: boolean; verificationSummary: string; selectedSkills: string[]; toolNames: string[] } }> {
+  const builtinGuidance = buildWoodburyBuiltinToolingGuidance(userMessage);
+  const generationObjective = [
+    'Generate JavaScript for a Woodbury pipeline script node.',
+    'Use the dedicated script-node generation skill and validate the result before finishing.',
+    'Final answer format: return ONLY a single JavaScript code block.',
+    'The code must include a JSDoc block with @input and @output annotations.',
+    'The code must define async function execute(inputs, context).',
+    'The function must return an object containing all declared outputs.',
+    builtinGuidance,
+    toolDocs ? `Runtime tool documentation for generated code:\n${toolDocs}` : '',
+    `Task request:\n${userMessage}`,
+  ].filter(Boolean).join('\n\n');
+
+  const generationPass = await runScopedScriptGenerationPass(ctx, generationObjective, {
+    chatHistory,
+    sessionSuffix: 'generate',
+  });
+  let assistantMessage = generationPass.content;
+  let code = extractCodeBlock(assistantMessage);
+  let validation = validateGeneratedScriptCode(code, { userMessage });
+  let repaired = false;
+  let strictFallbackUsed = false;
+  const selectedSkills = generationPass.selectedSkills.slice();
+  const toolNames = generationPass.toolNames.slice();
+
+  if (!validation.ok) {
+    repaired = true;
+    const repairObjective = [
+      'Repair malformed Woodbury script-node JavaScript.',
+      'Use the dedicated script-node generation skill and return ONLY a single repaired JavaScript code block.',
+      `Original request:\n${userMessage}`,
+      `Current code:\n\`\`\`javascript\n${code}\n\`\`\``,
+      `Validation issues:\n- ${validation.issues.join('\n- ')}`,
+      builtinGuidance,
+      toolDocs ? `Runtime tool documentation for generated code:\n${toolDocs}` : '',
+    ].filter(Boolean).join('\n\n');
+
+    const repairPass = await runScopedScriptGenerationPass(ctx, repairObjective, {
+      chatHistory,
+      sessionSuffix: 'repair',
+    });
+    assistantMessage = repairPass.content;
+    code = extractCodeBlock(assistantMessage);
+    validation = validateGeneratedScriptCode(code, { userMessage });
+    for (const skill of repairPass.selectedSkills) {
+      if (selectedSkills.indexOf(skill) === -1) selectedSkills.push(skill);
+    }
+    for (const toolName of repairPass.toolNames) {
+      if (toolNames.indexOf(toolName) === -1) toolNames.push(toolName);
+    }
+  }
+
+  if (!validation.ok) {
+    strictFallbackUsed = true;
+    assistantMessage = await runStrictScriptGenerationFallback(userMessage, toolDocs, {
+      chatHistory,
+      currentCode: code,
+      issues: validation.issues,
+    });
+    code = extractCodeBlock(assistantMessage);
+    validation = validateGeneratedScriptCode(code, { userMessage });
+  }
+
+  if (!validation.ok) {
+    throw new Error(`Generated code did not pass validation after repair: ${validation.issues.join(' ')}`);
+  }
+
+  let generatedTests: ScriptGenerationTestCase[] = [];
+  let testResults: Awaited<ReturnType<typeof runGeneratedScriptUnitTests>> = [];
+  try {
+    generatedTests = await generateScriptUnitTestCases(userMessage, code, validation.ports.inputs, validation.ports.outputs);
+  } catch (err) {
+    debugLog.info('dashboard', 'Failed to generate script unit tests', { error: String(err) });
+  }
+
+  if (generatedTests.length > 0) {
+    testResults = await runGeneratedScriptUnitTests(code, generatedTests);
+    const failingTests = testResults.filter(result => !result.passed);
+    if (failingTests.length > 0) {
+      repaired = true;
+      const repairObjective = [
+        'Repair Woodbury script-node JavaScript so it passes deterministic unit tests.',
+        'Return ONLY a single repaired JavaScript code block.',
+        `Original request:\n${userMessage}`,
+        `Current code:\n\`\`\`javascript\n${code}\n\`\`\``,
+        `Failing unit tests:\n${failingTests.map(result => `- ${result.name}: ${result.failures.join('; ')}`).join('\n')}`,
+        builtinGuidance,
+        toolDocs ? `Runtime tool documentation for generated code:\n${toolDocs}` : '',
+      ].filter(Boolean).join('\n\n');
+      const repairPass = await runScopedScriptGenerationPass(ctx, repairObjective, {
+        chatHistory,
+        sessionSuffix: 'unit-test-repair',
+      });
+      assistantMessage = repairPass.content;
+      code = extractCodeBlock(assistantMessage);
+      validation = validateGeneratedScriptCode(code, { userMessage });
+      if (!validation.ok) {
+        strictFallbackUsed = true;
+        assistantMessage = await runStrictScriptGenerationFallback(userMessage, toolDocs, {
+          chatHistory,
+          currentCode: code,
+          issues: validation.issues.concat(failingTests.map(result => `${result.name}: ${result.failures.join('; ')}`)),
+        });
+        code = extractCodeBlock(assistantMessage);
+        validation = validateGeneratedScriptCode(code, { userMessage });
+      }
+      if (!validation.ok) {
+        throw new Error(`Generated code failed structural validation after unit-test repair: ${validation.issues.join(' ')}`);
+      }
+      generatedTests = await generateScriptUnitTestCases(userMessage, code, validation.ports.inputs, validation.ports.outputs);
+      testResults = generatedTests.length > 0 ? await runGeneratedScriptUnitTests(code, generatedTests) : [];
+      const remainingFailures = testResults.filter(result => !result.passed);
+      if (remainingFailures.length > 0) {
+        throw new Error(`Generated code failed unit tests after repair: ${remainingFailures.map(result => `${result.name}: ${result.failures.join('; ')}`).join(' | ')}`);
+      }
+      for (const skill of repairPass.selectedSkills) {
+        if (selectedSkills.indexOf(skill) === -1) selectedSkills.push(skill);
+      }
+      for (const toolName of repairPass.toolNames) {
+        if (toolNames.indexOf(toolName) === -1) toolNames.push(toolName);
+      }
+    }
+  }
+  return {
+    code,
+    assistantMessage,
+    inputs: validation.ports.inputs,
+    outputs: validation.ports.outputs,
+    lifecycle: {
+      designedPlan: `Closure engine routed this through ${selectedSkills[0] || 'script generation'} and kept the tool scope constrained for validation-oriented problem solving.${strictFallbackUsed ? ' A strict output-format fallback was used to force valid script-node code when the model answered in the wrong shape.' : ''}`,
+      validationIssues: validation.issues,
+      repaired,
+      verificationSummary: `Selected skills: ${selectedSkills.length > 0 ? selectedSkills.join(', ') : 'none recorded'}. Scoped tools used: ${toolNames.length > 0 ? toolNames.join(', ') : 'none'}.${strictFallbackUsed ? ' A strict output-format fallback was used after the closure-engine response failed validation.' : ''} Structural validation passed for JSDoc annotations, execute(inputs, context), return object, and JavaScript parsing.${generatedTests.length > 0 ? ` Executed ${testResults.length} deterministic unit test(s) and all passed.` : ' No deterministic unit tests were generated.'}`,
+      selectedSkills,
+      toolNames,
+    },
+  };
+}
+
+export const __testOnly = {
+  buildWoodburyBuiltinToolingGuidance,
+  extractCodeBlock,
+  validateGeneratedScriptCode,
+  runStrictScriptGenerationFallback,
+  sanitizeScriptGenerationTestCases,
+};
 
 // ── Route handler ────────────────────────────────────────────
 
@@ -239,8 +697,6 @@ Rules:
 - If the type is boolean, return just "true" or "false"
 - For multi-line content (lyrics, paragraphs), use actual newlines`;
 
-      const { runPrompt } = await import('../../loop/llm-service.js');
-
       const model = process.env.ANTHROPIC_API_KEY
         ? 'claude-sonnet-4-20250514'
         : process.env.OPENAI_API_KEY
@@ -248,6 +704,8 @@ Rules:
           : process.env.GROQ_API_KEY
             ? 'llama-3.1-70b-versatile'
             : 'claude-sonnet-4-20250514';
+
+      const { runPrompt } = await import('../../loop/llm-service.js');
 
       const llmResponse = await runPrompt(
         [{ role: 'user', content: prompt }],
@@ -275,7 +733,7 @@ Rules:
   if (req.method === 'POST' && pathname === '/api/compositions/generate-script') {
     try {
       const body = await readBody(req);
-      const { description, chatHistory, currentCode, dataContext } = body || {};
+      const { description, chatHistory, currentCode, dataContext, graphContext } = body || {};
 
       if (!description && (!chatHistory || chatHistory.length === 0)) {
         sendJson(res, 400, { error: 'description or chatHistory is required' });
@@ -283,116 +741,28 @@ Rules:
       }
 
       const toolDocs = await generateScriptToolDocs(ctx);
-      const systemPrompt = `You are a code generator for pipeline script nodes. The user describes what they want a node to do, and you generate JavaScript code.
-
-IMPORTANT: You MUST generate code that follows this EXACT format:
-
-1. Start with a JSDoc comment block containing @input and @output annotations
-2. Then an async function called execute(inputs, context)
-3. The function destructures inputs and uses context.llm.generate() for LLM calls
-4. The function returns an object with all declared outputs
-
-Port annotation format (one per line in the JSDoc):
-  @input <name> <type> "<description>"
-  @output <name> <type> "<description>"
-Types: string, number, boolean, object, string[], number[], object[]
-
-Available context methods:
-- context.llm.generate(prompt) — Call an LLM, returns a string
-- context.llm.generate(prompt, { temperature, maxTokens }) — With options
-- context.llm.generateJSON(prompt) — Call LLM and parse JSON response
-- context.log(message) — Log a message
-${toolDocs}
-Example:
-\`\`\`javascript
-/**
- * @input theme string "The theme to write about"
- * @output poem string "A generated poem"
- * @output wordCount number "Number of words in the poem"
- */
-async function execute(inputs, context) {
-  const { theme } = inputs;
-  const { llm } = context;
-
-  const poem = await llm.generate(
-    \\\`Write a short poem about "\${theme}". Return only the poem.\\\`
-  );
-
-  const wordCount = poem.split(/\\s+/).length;
-
-  return { poem, wordCount };
-}
-\`\`\`
-
-Rules:
-- Always include the JSDoc block with @input/@output annotations
-- Always use the execute(inputs, context) function signature
-- Keep code simple and readable — non-technical users will see it
-- Use template literals for LLM prompts
-- Return ALL declared outputs
-- Include clear prompt instructions when calling llm.generate()
-- Respond with ONLY the code block — no explanation before or after`;
-
-      const { runPrompt } = await import('../../loop/llm-service.js');
-
-      const model = process.env.ANTHROPIC_API_KEY
-        ? 'claude-sonnet-4-20250514'
-        : process.env.OPENAI_API_KEY
-          ? 'gpt-4o-mini'
-          : process.env.GROQ_API_KEY
-            ? 'llama-3.1-70b-versatile'
-            : 'claude-sonnet-4-20250514';
-
-      // Build messages
-      const messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
-        { role: 'system', content: systemPrompt },
-      ];
-
-      // Add chat history if present
-      if (chatHistory && Array.isArray(chatHistory)) {
-        for (const msg of chatHistory) {
-          messages.push({ role: msg.role, content: msg.content });
-        }
-      }
-
-      // Add the current request
-      let userMessage = description || '';
-      if (dataContext) {
-        userMessage += `\n\nThe input data for this script looks like this (sample from a previous pipeline run):\n\`\`\`json\n${dataContext}\n\`\`\`\nUse this to understand the exact data structure and write code that handles it correctly. Make sure the first @input annotation matches the type of this data (it will be auto-connected to the source port). IMPORTANT: If the user's description references any other dynamic values (like keys, indices, filters, thresholds, etc.), create ADDITIONAL @input ports for each one. Every variable parameter should be its own input port so it can be wired from other nodes in the pipeline.`;
-      }
-      if (currentCode) {
-        userMessage += `\n\nCurrent code:\n\`\`\`javascript\n${currentCode}\n\`\`\``;
-      }
-      if (userMessage.trim()) {
-        messages.push({ role: 'user', content: userMessage.trim() });
-      }
-
-      const llmResponse = await runPrompt(messages, model, { maxTokens: 4096, temperature: 0.7 });
-      const assistantMessage = llmResponse.content.trim();
-
-      // Extract code block from response
-      let code = assistantMessage;
-      const codeBlockMatch = assistantMessage.match(/```(?:javascript|js)?\s*\n([\s\S]*?)\n```/);
-      if (codeBlockMatch) {
-        code = codeBlockMatch[1].trim();
-      }
-
-      // Parse @input/@output annotations
-      const ports = parseScriptPorts(code);
+      const userMessage = buildScriptRequestMessage(description, dataContext, graphContext, currentCode);
+      const lifecycleResult = await runScriptGenerationWithClosureEngine(
+        ctx,
+        userMessage,
+        toolDocs,
+        chatHistory,
+      );
 
       debugLog.info('dashboard', 'Script generated', {
-        model,
-        inputCount: ports.inputs.length,
-        outputCount: ports.outputs.length,
-        codeLength: code.length,
+        engine: 'closure-engine',
+        inputCount: lifecycleResult.inputs.length,
+        outputCount: lifecycleResult.outputs.length,
+        codeLength: lifecycleResult.code.length,
+        repaired: lifecycleResult.lifecycle.repaired,
       });
 
       sendJson(res, 200, {
-        success: true,
-        code,
-        inputs: ports.inputs,
-        outputs: ports.outputs,
-        assistantMessage,
+        code: lifecycleResult.code,
+        inputs: lifecycleResult.inputs,
+        outputs: lifecycleResult.outputs,
+        assistantMessage: lifecycleResult.assistantMessage,
+        lifecycle: lifecycleResult.lifecycle,
       });
     } catch (err) {
       debugLog.error('dashboard', 'Script generation failed', { error: String(err) });
@@ -401,13 +771,12 @@ Rules:
     return true;
   }
 
-  // POST /api/compositions/generate-pipeline — AI-powered pipeline decomposition
   if (req.method === 'POST' && pathname === '/api/compositions/generate-pipeline') {
     try {
       const body = await readBody(req);
-      const { description } = body || {};
+      const { description, graphContext } = body || {};
 
-      if (!description || typeof description !== 'string' || !description.trim()) {
+      if (!description || !String(description).trim()) {
         sendJson(res, 400, { error: 'description is required' });
         return true;
       }
@@ -452,6 +821,12 @@ NODE TYPES:
   - context.log(message) — Log a message
   - require('fs'), require('path'), require('os') — Node.js modules
 ${toolDocs}
+
+${graphContext ? `EXISTING PIPELINE CONTEXT:
+${typeof graphContext === 'string' ? graphContext : JSON.stringify(graphContext, null, 2)}
+
+If this context is provided, treat it as existing graph structure that should inform how you extend, reuse, or connect the generated nodes. Avoid duplicating responsibilities that already exist in the selected context unless the user explicitly asks for replacement.
+` : ''}
 
 RESPONSE FORMAT — respond with ONLY a JSON object (no explanation, no markdown fences):
 

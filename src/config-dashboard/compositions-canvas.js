@@ -48,6 +48,12 @@ function renderGraphEditor() {
   // Toolbar
   html += '<div class="comp-toolbar">';
   html += '<div class="comp-toolbar-left">';
+  if (compositionNavigationStack.length > 0) {
+    html += '<button class="comp-tb-btn" id="comp-nav-back-btn" title="Back to parent pipeline">&#x2190; Back</button>';
+    html += '<span style="color:#64748b;font-size:0.72rem;max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' +
+      compEscHtml(compositionNavigationStack.map(function(entry) { return entry.name || entry.id; }).join(' / ')) +
+      '</span>';
+  }
   html += '<h2 id="comp-pipeline-title" title="Double-click to rename" style="margin:0;font-size:1rem;cursor:pointer;">' + compEscHtml(compData.name) + '</h2>' + helpIcon('pipelines-connecting');
   if (compData.description) {
     html += '<span style="color:#64748b;font-size:0.75rem;margin-left:0.5rem;">' + compEscHtml(compData.description) + '</span>';
@@ -1668,6 +1674,13 @@ function wireUpToolbar() {
     pipelineTitleEl.addEventListener('dblclick', function() { startPipelineRename(); });
   }
 
+  var navBackBtn = document.querySelector('#comp-nav-back-btn');
+  if (navBackBtn) {
+    navBackBtn.addEventListener('click', function() {
+      navigateToParentComposition();
+    });
+  }
+
   // Undo/Redo buttons
   var undoBtn = document.querySelector('#comp-undo-btn');
   if (undoBtn) { undoBtn.addEventListener('click', function() { undo(); }); }
@@ -2201,6 +2214,30 @@ function showAddScriptModal() {
   var existing = document.querySelector('#comp-script-overlay');
   if (existing) existing.remove();
 
+  var availableContextNodes = (compData && compData.nodes ? compData.nodes : []).slice();
+  var selectedContextNodeIds = Array.from(selectedNodes || []).filter(function(id) {
+    return availableContextNodes.some(function(node) { return node.id === id; });
+  });
+  var contextSectionHtml = '';
+  if (availableContextNodes.length > 0) {
+    var contextItemsHtml = availableContextNodes.map(function(node) {
+      var checked = selectedContextNodeIds.indexOf(node.id) !== -1;
+      return '<label style="display:flex;align-items:flex-start;gap:8px;padding:0.45rem 0.55rem;border-radius:8px;background:rgba(15,23,42,0.45);border:1px solid rgba(255,255,255,0.06);cursor:pointer;">' +
+        '<input type="checkbox" class="comp-script-context-picker" data-node-id="' + compEscAttr(node.id) + '"' + (checked ? ' checked' : '') + ' style="margin-top:2px;accent-color:#818cf8;">' +
+        '<span style="display:flex;flex-direction:column;gap:2px;min-width:0;">' +
+          '<span style="color:#e2e8f0;font-size:0.72rem;">' + compEscHtml(getCompositionNodeDisplayName(node)) + '</span>' +
+          '<span style="color:#64748b;font-size:0.64rem;line-height:1.35;">' + compEscHtml(describeScriptGenerationNode(node)) + '</span>' +
+        '</span>' +
+      '</label>';
+    }).join('');
+    contextSectionHtml =
+      '<div style="margin-top:0.75rem;padding:0.75rem;border-radius:8px;background:rgba(15,23,42,0.65);border:1px solid rgba(129,140,248,0.18);">' +
+        '<div style="color:#cbd5e1;font-size:0.74rem;font-weight:600;margin-bottom:0.5rem;">Generation Context</div>' +
+        '<div style="color:#64748b;font-size:0.68rem;margin-bottom:0.55rem;">Select the nodes the generator should consider while writing this script.</div>' +
+        '<div style="display:flex;flex-direction:column;gap:0.45rem;max-height:180px;overflow:auto;">' + contextItemsHtml + '</div>' +
+      '</div>';
+  }
+
   var overlay = document.createElement('div');
   overlay.id = 'comp-script-overlay';
   overlay.className = 'comp-modal-overlay';
@@ -2213,6 +2250,7 @@ function showAddScriptModal() {
       '<div class="comp-modal-body">' +
         '<p style="color:#94a3b8;font-size:0.78rem;margin:0 0 0.75rem 0;">Describe what this script should do in plain English. An AI agent will generate the code and define inputs/outputs automatically.</p>' +
         '<textarea id="comp-script-desc" class="comp-props-input comp-gate-textarea" style="min-height:80px;" placeholder="e.g. Generate lo-fi hip hop lyrics based on a theme and mood. Output the lyrics and a song title."></textarea>' +
+        contextSectionHtml +
         '<div style="display:flex;gap:0.5rem;margin-top:1rem;">' +
           '<button class="comp-tb-btn comp-tb-btn-run" id="comp-script-generate" style="flex:1;">Generate Script</button>' +
           '<button class="comp-tb-btn" id="comp-script-cancel" style="flex:0;">Cancel</button>' +
@@ -2242,10 +2280,18 @@ function showAddScriptModal() {
     statusEl.style.display = '';
 
     try {
+      var chosenContextNodeIds = Array.from(overlay.querySelectorAll('.comp-script-context-picker:checked')).map(function(input) {
+        return input.getAttribute('data-node-id');
+      }).filter(Boolean);
       var res = await fetch('/api/compositions/generate-script', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ description: desc }),
+        body: JSON.stringify({
+          description: desc,
+          graphContext: chosenContextNodeIds.length > 0
+            ? buildScriptGenerationContext(null, chosenContextNodeIds)
+            : undefined,
+        }),
       });
       var data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Generation failed');
@@ -2254,7 +2300,7 @@ function showAddScriptModal() {
       addScriptNode(desc, data.code, data.inputs, data.outputs, [
         { role: 'user', content: desc },
         { role: 'assistant', content: data.assistantMessage },
-      ]);
+      ], chosenContextNodeIds);
 
       overlay.remove();
       toast('Script node created!', 'success');
@@ -2279,6 +2325,11 @@ function showDataAwareScriptModal(srcNodeId, srcPortName, portValue, dropX, drop
 
   var truncated = truncateForContext(portValue, 2000);
   var hasData = truncated !== null;
+  var availableContextNodes = (compData && compData.nodes ? compData.nodes : []).slice();
+  var selectedContextNodeIds = Array.from(selectedNodes || []).filter(function(id) {
+    return availableContextNodes.some(function(node) { return node.id === id; });
+  });
+  if (selectedContextNodeIds.indexOf(srcNodeId) === -1) selectedContextNodeIds.unshift(srcNodeId);
 
   // Build data preview HTML
   var dataPreviewHtml = '';
@@ -2299,6 +2350,24 @@ function showDataAwareScriptModal(srcNodeId, srcPortName, portValue, dropX, drop
           '<span style="color:#64748b;">&#x24D8;</span> Run the pipeline first to include data context. ' +
           'You can still generate a script without data.' +
         '</div>' +
+      '</div>';
+  }
+  if (availableContextNodes.length > 0) {
+    var dataContextItemsHtml = availableContextNodes.map(function(node) {
+      var checked = selectedContextNodeIds.indexOf(node.id) !== -1;
+      return '<label style="display:flex;align-items:flex-start;gap:8px;padding:0.45rem 0.55rem;border-radius:8px;background:rgba(15,23,42,0.45);border:1px solid rgba(255,255,255,0.06);cursor:pointer;">' +
+        '<input type="checkbox" class="comp-data-script-context-picker" data-node-id="' + compEscAttr(node.id) + '"' + (checked ? ' checked' : '') + ' style="margin-top:2px;accent-color:#818cf8;">' +
+        '<span style="display:flex;flex-direction:column;gap:2px;min-width:0;">' +
+          '<span style="color:#e2e8f0;font-size:0.72rem;">' + compEscHtml(getCompositionNodeDisplayName(node)) + '</span>' +
+          '<span style="color:#64748b;font-size:0.64rem;line-height:1.35;">' + compEscHtml(describeScriptGenerationNode(node)) + '</span>' +
+        '</span>' +
+      '</label>';
+    }).join('');
+    dataPreviewHtml +=
+      '<div style="margin-top:0.75rem;padding:0.75rem;border-radius:8px;background:rgba(15,23,42,0.65);border:1px solid rgba(129,140,248,0.18);">' +
+        '<div style="color:#cbd5e1;font-size:0.74rem;font-weight:600;margin-bottom:0.5rem;">Generation Context</div>' +
+        '<div style="color:#64748b;font-size:0.68rem;margin-bottom:0.55rem;">The source node is preselected. Add or remove other nodes to shape the generated script.</div>' +
+        '<div style="display:flex;flex-direction:column;gap:0.45rem;max-height:180px;overflow:auto;">' + dataContextItemsHtml + '</div>' +
       '</div>';
   }
 
@@ -2348,6 +2417,12 @@ function showDataAwareScriptModal(srcNodeId, srcPortName, portValue, dropX, drop
       if (hasData) {
         payload.dataContext = truncated;
       }
+      var chosenContextNodeIds = Array.from(overlay.querySelectorAll('.comp-data-script-context-picker:checked')).map(function(input) {
+        return input.getAttribute('data-node-id');
+      }).filter(Boolean);
+      if (chosenContextNodeIds.length > 0) {
+        payload.graphContext = buildScriptGenerationContext(null, chosenContextNodeIds);
+      }
 
       var res = await fetch('/api/compositions/generate-script', {
         method: 'POST',
@@ -2361,7 +2436,7 @@ function showDataAwareScriptModal(srcNodeId, srcPortName, portValue, dropX, drop
       addScriptNodeAt(desc, data.code, data.inputs, data.outputs, [
         { role: 'user', content: desc },
         { role: 'assistant', content: data.assistantMessage },
-      ], dropX, dropY);
+      ], dropX, dropY, chosenContextNodeIds);
 
       // Auto-connect: find the first input port of the new node and create an edge
       var newNode = compData.nodes[compData.nodes.length - 1];
@@ -2407,7 +2482,7 @@ function getViewportCenter() {
   return { x: Math.round(cx + jx), y: Math.round(cy + jy) };
 }
 
-function addScriptNodeAt(description, code, inputs, outputs, chatHistory, posX, posY) {
+function addScriptNodeAt(description, code, inputs, outputs, chatHistory, posX, posY, contextNodeIds) {
   if (!compData) return;
   pushUndoSnapshot();
 
@@ -2424,6 +2499,7 @@ function addScriptNodeAt(description, code, inputs, outputs, chatHistory, posX, 
       inputs: inputs || [],
       outputs: outputs || [],
       chatHistory: chatHistory || [],
+      contextNodeIds: Array.isArray(contextNodeIds) ? contextNodeIds.slice() : [],
     },
   };
 
@@ -2444,7 +2520,7 @@ function addScriptNodeAt(description, code, inputs, outputs, chatHistory, posX, 
   fetchCompositions();
 }
 
-function addScriptNode(description, code, inputs, outputs, chatHistory) {
+function addScriptNode(description, code, inputs, outputs, chatHistory, contextNodeIds) {
   if (!compData) return;
   pushUndoSnapshot();
 
@@ -2463,6 +2539,7 @@ function addScriptNode(description, code, inputs, outputs, chatHistory) {
       inputs: inputs || [],
       outputs: outputs || [],
       chatHistory: chatHistory || [],
+      contextNodeIds: Array.isArray(contextNodeIds) ? contextNodeIds.slice() : [],
     },
   };
 
@@ -2487,6 +2564,30 @@ function showGeneratePipelineModal() {
   var existing = document.querySelector('#comp-pipeline-gen-overlay');
   if (existing) existing.remove();
 
+  var availableContextNodes = (compData && compData.nodes ? compData.nodes : []).slice();
+  var selectedContextNodeIds = Array.from(selectedNodes || []).filter(function(id) {
+    return availableContextNodes.some(function(node) { return node.id === id; });
+  });
+  var contextSectionHtml = '';
+  if (availableContextNodes.length > 0) {
+    var contextItemsHtml = availableContextNodes.map(function(node) {
+      var checked = selectedContextNodeIds.indexOf(node.id) !== -1;
+      return '<label style="display:flex;align-items:flex-start;gap:8px;padding:0.45rem 0.55rem;border-radius:8px;background:rgba(15,23,42,0.45);border:1px solid rgba(255,255,255,0.06);cursor:pointer;">' +
+        '<input type="checkbox" class="comp-pipeline-context-picker" data-node-id="' + compEscAttr(node.id) + '"' + (checked ? ' checked' : '') + ' style="margin-top:2px;accent-color:#818cf8;">' +
+        '<span style="display:flex;flex-direction:column;gap:2px;min-width:0;">' +
+          '<span style="color:#e2e8f0;font-size:0.72rem;">' + compEscHtml(getCompositionNodeDisplayName(node)) + '</span>' +
+          '<span style="color:#64748b;font-size:0.64rem;line-height:1.35;">' + compEscHtml(describeScriptGenerationNode(node)) + '</span>' +
+        '</span>' +
+      '</label>';
+    }).join('');
+    contextSectionHtml =
+      '<div style="margin-top:0.75rem;padding:0.75rem;border-radius:8px;background:rgba(15,23,42,0.65);border:1px solid rgba(129,140,248,0.18);">' +
+        '<div style="color:#cbd5e1;font-size:0.74rem;font-weight:600;margin-bottom:0.5rem;">Generation Context</div>' +
+        '<div style="color:#64748b;font-size:0.68rem;margin-bottom:0.55rem;">Select the existing nodes the generator should consider while extending or reworking this pipeline.</div>' +
+        '<div style="display:flex;flex-direction:column;gap:0.45rem;max-height:180px;overflow:auto;">' + contextItemsHtml + '</div>' +
+      '</div>';
+  }
+
   var overlay = document.createElement('div');
   overlay.id = 'comp-pipeline-gen-overlay';
   overlay.className = 'comp-modal-overlay';
@@ -2502,6 +2603,7 @@ function showGeneratePipelineModal() {
         '</p>' +
         '<textarea id="comp-pipeline-gen-desc" class="comp-props-input comp-gate-textarea" style="min-height:100px;" ' +
           'placeholder="e.g. Take a photo from the asset library, generate a cartoon version with nanobanana, then copy the result to ~/Gallery/cartoons"></textarea>' +
+        contextSectionHtml +
         '<div style="display:flex;gap:0.5rem;margin-top:1rem;">' +
           '<button class="comp-tb-btn comp-tb-btn-run" id="comp-pipeline-gen-go" style="flex:1;">Generate Pipeline</button>' +
           '<button class="comp-tb-btn" id="comp-pipeline-gen-cancel" style="flex:0;">Cancel</button>' +
@@ -2529,10 +2631,18 @@ function showGeneratePipelineModal() {
     statusEl.style.display = '';
 
     try {
+      var chosenContextNodeIds = Array.from(overlay.querySelectorAll('.comp-pipeline-context-picker:checked')).map(function(input) {
+        return input.getAttribute('data-node-id');
+      }).filter(Boolean);
       var res = await fetch('/api/compositions/generate-pipeline', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ description: desc }),
+        body: JSON.stringify({
+          description: desc,
+          graphContext: chosenContextNodeIds.length > 0
+            ? buildScriptGenerationContext(null, chosenContextNodeIds)
+            : undefined,
+        }),
       });
       var data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Pipeline generation failed');
@@ -3264,12 +3374,12 @@ function wireUpCanvas() {
       var navNodeEl = target.closest('.comp-node');
       if (navNodeEl) {
         var navNodeId = navNodeEl.dataset.nodeId;
-        var navNode = currentComposition && currentComposition.nodes.find(function(n) { return n.id === navNodeId; });
+        var navNode = compData && compData.nodes.find(function(n) { return n.id === navNodeId; });
         if (navNode && navNode.workflowId && navNode.workflowId.startsWith('comp:')) {
           var targetCompId = (navNode.compositionRef && navNode.compositionRef.compositionId) || navNode.workflowId.replace('comp:', '');
           e.preventDefault();
           e.stopPropagation();
-          selectComposition(targetCompId);
+          openNestedComposition(targetCompId, navNodeId);
           return;
         }
       }

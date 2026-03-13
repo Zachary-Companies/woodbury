@@ -40,6 +40,8 @@ const TOOLSET: NativeToolDefinition[] = [
   makeTool('mcp__claude-code__plan', 'Plan code changes'),
   makeTool('delegate', 'Delegate to subagent'),
   makeTool('memory_recall', 'Recall memories'),
+  makeTool('goal_contract', 'Refine task contracts'),
+  makeTool('reflect', 'Reflect on progress and failures'),
 ];
 
 describe('skill routing', () => {
@@ -80,6 +82,38 @@ describe('skill routing', () => {
     expect(selection.skill.name).toBe('dashboard_or_ui_change');
     expect(selection.allowedToolNames).toContain('file_write');
     expect(selection.allowedToolNames).toContain('shell_execute');
+  });
+
+  it('selects the dedicated script-node generation skill and keeps the tool scope read-only plus validation', () => {
+    const selection = selectSkillExecution(
+      TOOLSET,
+      'Generate a script node that uses @input and @output annotations to transform pipeline data',
+      'Create script node code with execute(inputs, context) and validate it',
+    );
+
+    expect(selection.skill.name).toBe('script_node_generation');
+    expect(selection.allowedToolNames).toContain('code_execute');
+    expect(selection.allowedToolNames).toContain('reflect');
+    expect(selection.allowedToolNames).not.toContain('file_read');
+    expect(selection.allowedToolNames).not.toContain('file_search');
+    expect(selection.allowedToolNames).not.toContain('grep');
+    expect(selection.allowedToolNames).not.toContain('list_directory');
+    expect(selection.allowedToolNames).not.toContain('file_write');
+    expect(selection.allowedToolNames).not.toContain('shell_execute');
+  });
+
+  it('selects the Woodbury built-in concepts skill for asset and collection CRUD questions', () => {
+    const selection = selectSkillExecution(
+      TOOLSET,
+      'Trace how Woodbury assets and collections CRUD works and why a collection slug is not showing up in the Assets tab',
+      'Inspect the built-in asset and collection contracts before editing anything',
+    );
+
+    expect(selection.skill.name).toBe('woodbury_builtin_concepts');
+    expect(selection.allowedToolNames).toContain('file_read');
+    expect(selection.allowedToolNames).toContain('grep');
+    expect(selection.allowedToolNames).toContain('code_execute');
+    expect(selection.allowedToolNames).not.toContain('file_write');
   });
 
   it('legacy selectTools returns the selected skill tool scope', () => {
@@ -160,6 +194,7 @@ describe('skill routing', () => {
     expect(registry.getByName('pipeline_design')?.promptGuidance).toContain('__variable__ node');
     expect(registry.getByName('pipeline_generate')?.promptGuidance).toContain('variableNode.exposeAsInput=true');
     expect(registry.getByName('pipeline_validate_and_repair')?.promptGuidance).toContain('Normalize repeated external inputs');
+    expect(registry.getByName('woodbury_builtin_concepts')?.promptGuidance).toContain('Woodbury built-ins as product contracts');
   });
 
   it('applies learned recovery hints to skill guidance', () => {
@@ -295,5 +330,38 @@ describe('skill routing', () => {
       'pipeline_validate_and_repair',
       'pipeline_verify',
     ]);
+  });
+
+  it('planner routes Woodbury asset and collection requests to built-in concepts', () => {
+    const planner = new StrategicPlanner(
+      {} as any,
+      { query: () => [] } as any,
+      {} as any,
+      'anthropic',
+      'test-model',
+      'system',
+    );
+    const goal: Goal = {
+      id: 'g3',
+      objective: 'The collection is a Woodbury collection and should be created using the Woodbury collection tools',
+      successCriteria: [],
+      constraints: [],
+      forbiddenActions: [],
+      priority: 'normal',
+      status: 'active',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    const graph: TaskGraph = {
+      executionOrder: ['t1'],
+      nodes: [
+        {
+          id: 't1', goalId: 'g3', description: goal.objective, status: 'ready', dependsOn: [], blocks: [], maxRetries: 2, retryCount: 0, validators: [], createdAt: new Date().toISOString(),
+        },
+      ],
+    };
+
+    const annotated = planner.applySkillTransitions(graph, goal);
+    expect(annotated.nodes[0].preferredSkill).toBe('woodbury_builtin_concepts');
   });
 });
