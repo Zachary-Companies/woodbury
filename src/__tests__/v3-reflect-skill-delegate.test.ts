@@ -11,6 +11,7 @@ import { MemoryStore } from '../loop/v3/memory-store.js';
 import { SkillSynthesizer } from '../loop/v3/skill-synthesizer.js';
 import { Reflector } from '../loop/v3/reflector.js';
 import type { Observation, TaskNode, TaskGraph } from '../loop/v3/types.js';
+import { resetSQLiteMemoryStoreCache } from '../sqlite-memory-store.js';
 
 // ── SkillSynthesizer ─────────────────────────────────────────
 
@@ -24,6 +25,8 @@ describe('SkillSynthesizer', () => {
 
   beforeEach(async () => {
     tmpDir = await mkdtemp(join(tmpdir(), 'woodbury-v3-ss-'));
+    process.env.WOODBURY_MEMORY_DB_PATH = join(tmpDir, 'memory.db');
+    resetSQLiteMemoryStoreCache();
     sessionId = `test_ss_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
     stateDir = join(homedir(), '.woodbury', 'data', 'closure-engine', 'sessions', sessionId);
     stateManager = new StateManager(sessionId, tmpDir);
@@ -32,6 +35,8 @@ describe('SkillSynthesizer', () => {
   });
 
   afterEach(async () => {
+    resetSQLiteMemoryStoreCache();
+    delete process.env.WOODBURY_MEMORY_DB_PATH;
     try { rmSync(stateDir, { recursive: true, force: true }); } catch {}
     await rm(tmpDir, { recursive: true, force: true });
   });
@@ -153,6 +158,13 @@ describe('Reflector', () => {
         assessment: 'Good progress on tasks',
         lessons: ['Learned to check files first'],
         adjustments: ['Consider running tests more frequently'],
+        memories: [{
+          content: 'Always read the relevant file before editing it.',
+          type: 'procedural',
+          title: 'Read Before Edit',
+          tags: ['workflow', 'editing'],
+          confidence: 0.9,
+        }],
       }),
       toolCalls: [],
       stopReason: 'stop',
@@ -162,6 +174,8 @@ describe('Reflector', () => {
 
   beforeEach(async () => {
     tmpDir = await mkdtemp(join(tmpdir(), 'woodbury-v3-ref-'));
+    process.env.WOODBURY_MEMORY_DB_PATH = join(tmpDir, 'memory.db');
+    resetSQLiteMemoryStoreCache();
     sessionId = `test_ref_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
     stateDir = join(homedir(), '.woodbury', 'data', 'closure-engine', 'sessions', sessionId);
     stateManager = new StateManager(sessionId, tmpDir);
@@ -170,6 +184,8 @@ describe('Reflector', () => {
   });
 
   afterEach(async () => {
+    resetSQLiteMemoryStoreCache();
+    delete process.env.WOODBURY_MEMORY_DB_PATH;
     try { rmSync(stateDir, { recursive: true, force: true }); } catch {}
     await rm(tmpDir, { recursive: true, force: true });
   });
@@ -195,6 +211,8 @@ describe('Reflector', () => {
     expect(reflection.lessonsLearned).toHaveLength(1);
     expect(reflection.planAdjustments).toHaveLength(1);
     expect(reflection.newMemories).toHaveLength(1);
+    expect(reflection.newMemories[0].type).toBe('procedural');
+    expect(reflection.newMemories[0].title).toBe('Read Before Edit');
 
     // Memory should be created from the lesson
     expect(stateManager.getState().reflections).toHaveLength(1);
@@ -266,6 +284,52 @@ describe('Reflector', () => {
     const reflection = await reflector.reflect('failure');
     // The LLM mock returns lessons, those should be tagged as failure type
     expect(reflection.newMemories.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('filters out generic low-signal memories from reflection output', async () => {
+    const lowSignalAdapter = {
+      createCompletion: async () => ({
+        content: JSON.stringify({
+          assessment: 'Progress update',
+          lessons: ['Good progress overall'],
+          adjustments: ['Consider running tests more frequently'],
+          memories: [
+            {
+              content: 'Good progress overall',
+              type: 'semantic',
+              confidence: 0.9,
+            },
+            {
+              content: 'Always verify package.json scripts before changing the build workflow.',
+              type: 'procedural',
+              tags: ['build', 'workflow'],
+              confidence: 0.95,
+            },
+          ],
+        }),
+        toolCalls: [],
+        stopReason: 'stop',
+        usage: { inputTokens: 100, outputTokens: 50 },
+      }),
+    };
+
+    const focusedReflector = new Reflector(stateManager, memoryStore, lowSignalAdapter as any, 'openai', 'gpt-4');
+
+    const graph: TaskGraph = {
+      nodes: [{
+        id: 't1', goalId: 'g1', description: 'Inspect build scripts',
+        status: 'done', dependsOn: [], blocks: [],
+        maxRetries: 3, retryCount: 0, validators: [],
+        createdAt: new Date().toISOString(),
+        result: { success: true, output: 'done', observations: [], toolCallCount: 1, durationMs: 50 },
+      }],
+      executionOrder: ['t1'],
+    };
+    stateManager.setTaskGraph(graph);
+
+    const reflection = await focusedReflector.reflect('periodic');
+    expect(reflection.newMemories).toHaveLength(1);
+    expect(reflection.newMemories[0].content).toContain('package.json scripts');
   });
 });
 

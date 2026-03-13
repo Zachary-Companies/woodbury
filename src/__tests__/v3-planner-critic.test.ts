@@ -11,6 +11,7 @@ import { MemoryStore } from '../loop/v3/memory-store.js';
 import { StrategicPlanner } from '../loop/v3/strategic-planner.js';
 import { Critic } from '../loop/v3/critic.js';
 import type { Goal, Evidence, Belief } from '../loop/v3/types.js';
+import { resetSQLiteMemoryStoreCache } from '../sqlite-memory-store.js';
 
 // Mock adapter for LLM calls
 const mockAdapter = {
@@ -71,6 +72,8 @@ describe('StrategicPlanner', () => {
 
   beforeEach(async () => {
     tmpDir = await mkdtemp(join(tmpdir(), 'woodbury-v3-sp-'));
+    process.env.WOODBURY_MEMORY_DB_PATH = join(tmpDir, 'memory.db');
+    resetSQLiteMemoryStoreCache();
     sessionId = `test_sp_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
     stateDir = join(homedir(), '.woodbury', 'data', 'closure-engine', 'sessions', sessionId);
     stateManager = new StateManager(sessionId, tmpDir);
@@ -82,6 +85,8 @@ describe('StrategicPlanner', () => {
   });
 
   afterEach(async () => {
+    resetSQLiteMemoryStoreCache();
+    delete process.env.WOODBURY_MEMORY_DB_PATH;
     try { rmSync(stateDir, { recursive: true, force: true }); } catch {}
     await rm(tmpDir, { recursive: true, force: true });
   });

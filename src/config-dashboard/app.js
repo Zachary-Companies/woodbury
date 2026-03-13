@@ -142,7 +142,8 @@ document.addEventListener('DOMContentLoaded', () => {
     '4': 'training',
     '5': 'marketplace',
     '6': 'social',
-    '7': 'mcp',
+    '7': 'memory',
+    '8': 'mcp',
   };
 
   document.addEventListener('keydown', (e) => {
@@ -497,6 +498,11 @@ function switchTab(tab, opts) {
     if (typeof initAssets === 'function') {
       initAssets();
     }
+  } else if (tab === 'memory') {
+    selectedExtension = null;
+    if (typeof initMemories === 'function') {
+      initMemories();
+    }
   } else if (tab === 'storyboard') {
     selectedExtension = null;
     if (typeof initStoryboard === 'function') {
@@ -539,7 +545,7 @@ function parseHash() {
 
 function handleHash() {
   var state = parseHash();
-  var validTabs = ['home', 'chat', 'workflows', 'compositions', 'runs', 'training', 'marketplace', 'social', 'assets', 'storyboard', 'mcp'];
+  var validTabs = ['home', 'chat', 'workflows', 'compositions', 'runs', 'training', 'marketplace', 'social', 'assets', 'memory', 'storyboard', 'mcp'];
   var tab = validTabs.indexOf(state.tab) !== -1 ? state.tab : 'home';
 
   // Only switch tab if it changed
@@ -622,7 +628,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Restore state from hash on initial load
   var state = parseHash();
-  var validTabs = ['home', 'chat', 'workflows', 'compositions', 'runs', 'training', 'marketplace', 'social', 'assets', 'storyboard', 'mcp'];
+  var validTabs = ['home', 'chat', 'workflows', 'compositions', 'runs', 'training', 'marketplace', 'social', 'assets', 'memory', 'storyboard', 'mcp'];
   var initialTab = validTabs.indexOf(state.tab) !== -1 ? state.tab : 'home';
 
   // Set detailView early so workflow render picks it up

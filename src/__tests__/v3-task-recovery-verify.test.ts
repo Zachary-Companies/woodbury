@@ -12,6 +12,7 @@ import { SkillRegistry } from '../loop/v3/skill-registry.js';
 import { StateManager } from '../loop/v3/state-manager.js';
 import { MemoryStore } from '../loop/v3/memory-store.js';
 import type { Goal, TaskNode, TaskResult, Observation } from '../loop/v3/types.js';
+import { resetSQLiteMemoryStoreCache } from '../sqlite-memory-store.js';
 
 // ── createSingleTaskGraph ────────────────────────────────────
 
@@ -133,6 +134,8 @@ describe('RecoveryEngine', () => {
 
   beforeEach(async () => {
     tmpDir = await mkdtemp(join(tmpdir(), 'woodbury-v3-re-'));
+    process.env.WOODBURY_MEMORY_DB_PATH = join(tmpDir, 'memory.db');
+    resetSQLiteMemoryStoreCache();
     sessionId = `test_re_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
     stateDir = join(homedir(), '.woodbury', 'data', 'closure-engine', 'sessions', sessionId);
     stateManager = new StateManager(sessionId, tmpDir);
@@ -141,6 +144,8 @@ describe('RecoveryEngine', () => {
   });
 
   afterEach(async () => {
+    resetSQLiteMemoryStoreCache();
+    delete process.env.WOODBURY_MEMORY_DB_PATH;
     try { rmSync(stateDir, { recursive: true, force: true }); } catch {}
     await rm(tmpDir, { recursive: true, force: true });
   });

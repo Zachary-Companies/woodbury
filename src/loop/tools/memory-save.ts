@@ -1,19 +1,11 @@
 import { ToolDefinition, ToolHandler, ToolContext } from '../types.js';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
-import { homedir } from 'node:os';
-import { randomUUID } from 'node:crypto';
+import { GENERAL_MEMORY_CATEGORIES, getSQLiteMemoryStore } from '../../sqlite-memory-store.js';
 
-const MEMORY_DIR = join(homedir(), '.woodbury', 'memory');
-
-const VALID_CATEGORIES = [
-  'convention', 'discovery', 'decision', 'gotcha',
-  'file_location', 'endpoint', 'web_procedure', 'web_task_notes'
-] as const;
+const MEMORY_DB_PATH = process.env.WOODBURY_MEMORY_DB_PATH || '~/.woodbury/data/memory/memory.db';
 
 export const definition: ToolDefinition = {
   name: 'memory_save',
-  description: `Save information to long-term memory for later retrieval. Persists to ~/.woodbury/memory/ as JSON files organized by category.
+  description: `Save information to long-term memory for later retrieval. Persists to a SQLite database at ${MEMORY_DB_PATH}.
 
 Categories:
 - convention — Project conventions and patterns
@@ -35,7 +27,7 @@ Categories:
       category: {
         type: 'string',
         description: 'Category for the memory.',
-        enum: [...VALID_CATEGORIES]
+        enum: [...GENERAL_MEMORY_CATEGORIES]
       },
       tags: {
         type: 'array',
@@ -55,48 +47,27 @@ export const handler: ToolHandler = async (params: any, context?: ToolContext): 
   const { content, category, tags = [], site } = params;
 
   // Validate category
-  if (!VALID_CATEGORIES.includes(category)) {
+  if (!GENERAL_MEMORY_CATEGORIES.includes(category)) {
     return JSON.stringify({
       success: false,
-      error: `Invalid category "${category}". Valid: ${VALID_CATEGORIES.join(', ')}`
+      error: `Invalid category "${category}". Valid: ${GENERAL_MEMORY_CATEGORIES.join(', ')}`
     });
   }
 
-  // Ensure directory exists
-  await mkdir(MEMORY_DIR, { recursive: true });
-
-  const filePath = join(MEMORY_DIR, `${category}.json`);
-
-  // Load existing entries
-  let entries: any[] = [];
-  try {
-    const existing = await readFile(filePath, 'utf-8');
-    entries = JSON.parse(existing);
-    if (!Array.isArray(entries)) entries = [];
-  } catch {
-    // File doesn't exist or is invalid — start fresh
-  }
-
-  // Create new entry
-  const entry: Record<string, any> = {
-    id: randomUUID(),
+  const store = getSQLiteMemoryStore();
+  const entry = store.saveGeneralMemory({
     content,
     category,
     tags,
-    timestamp: new Date().toISOString(),
-  };
-
-  if (site) entry.site = site;
-  if (context?.workingDirectory) entry.project = context.workingDirectory;
-
-  entries.push(entry);
-
-  // Write back
-  await writeFile(filePath, JSON.stringify(entries, null, 2));
+    site,
+    project: context?.workingDirectory || undefined,
+    source: 'tool:memory_save',
+    importance: category === 'web_procedure' || category === 'web_task_notes' ? 0.9 : 0.7,
+  });
 
   return JSON.stringify({
     success: true,
-    message: `Memory saved to ${category} (${entries.length} entries total)`,
+    message: `Memory saved to ${category} (${store.countGeneralMemories(category)} entries total)`,
     id: entry.id
   });
 };

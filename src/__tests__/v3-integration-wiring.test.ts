@@ -4,12 +4,15 @@
  * Tests that Critic, SafetyGate, ActionSpec, and DelegateEngine are
  * properly wired into the engine execution flow.
  */
-import { describe, it, expect, beforeEach } from '@jest/globals';
+import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { SafetyGate } from '../loop/v3/safety-gate.js';
 import { RecoveryEngine } from '../loop/v3/recovery.js';
 import { StateManager } from '../loop/v3/state-manager.js';
 import { MemoryStore } from '../loop/v3/memory-store.js';
 import type { ActionSpec, ValidationPlan, TaskNode, TaskResult } from '../loop/v3/types.js';
+import { resetSQLiteMemoryStoreCache } from '../sqlite-memory-store.js';
 
 // ── Helpers ─────────────────────────────────────────────────
 
@@ -180,10 +183,17 @@ describe('Integration: RecoveryEngine new error categories in execution flow', (
   let recovery: RecoveryEngine;
 
   beforeEach(() => {
+    process.env.WOODBURY_MEMORY_DB_PATH = join(tmpdir(), `woodbury-v3-integration-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.db`);
+    resetSQLiteMemoryStoreCache();
     const sid = `test_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
     const stateManager = new StateManager(sid, '/tmp');
     const memoryStore = new MemoryStore();
     recovery = new RecoveryEngine(stateManager, memoryStore);
+  });
+
+  afterEach(() => {
+    resetSQLiteMemoryStoreCache();
+    delete process.env.WOODBURY_MEMORY_DB_PATH;
   });
 
   it('classifies ambiguous entity errors', () => {

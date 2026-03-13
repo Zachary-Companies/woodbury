@@ -1,8 +1,6 @@
-import * as fs from 'fs/promises';
-import * as path from 'path';
-import { randomUUID } from 'crypto';
+import { getSQLiteMemoryStore, type GeneralMemoryCategory } from './sqlite-memory-store.js';
 
-export type MemoryCategory = 'convention' | 'discovery' | 'decision' | 'gotcha' | 'file_location' | 'endpoint';
+export type MemoryCategory = GeneralMemoryCategory;
 
 export interface MemoryEntry {
   id: string;
@@ -13,60 +11,32 @@ export interface MemoryEntry {
 }
 
 export class Memory {
-  private memoryFile: string;
+  private readonly store = getSQLiteMemoryStore();
 
   constructor(private workingDirectory: string) {
-    this.memoryFile = path.join(workingDirectory, '.woodbury-work', 'memory.json');
   }
 
   async save(content: string, category: MemoryCategory, tags: string[] = []): Promise<void> {
-    const entries = await this.loadMemories();
-    
-    const entry: MemoryEntry = {
-      id: randomUUID(),
+    this.store.saveGeneralMemory({
       content,
       category,
       tags,
-      timestamp: Date.now()
-    };
-
-    entries.push(entry);
-    await this.saveMemories(entries);
+      project: this.workingDirectory,
+      source: 'workspace-memory',
+      importance: 0.6,
+    });
   }
 
   async recall(query: string, category?: MemoryCategory): Promise<MemoryEntry[]> {
-    const entries = await this.loadMemories();
-    const queryLower = query.toLowerCase();
-
-    return entries.filter(entry => {
-      // Filter by category if specified
-      if (category && entry.category !== category) {
-        return false;
-      }
-
-      // Search in content and tags
-      const contentMatch = entry.content.toLowerCase().includes(queryLower);
-      const tagMatch = entry.tags.some(tag => tag.toLowerCase().includes(queryLower));
-      
-      return contentMatch || tagMatch;
-    }).sort((a, b) => b.timestamp - a.timestamp); // Most recent first
-  }
-
-  private async loadMemories(): Promise<MemoryEntry[]> {
-    try {
-      const content = await fs.readFile(this.memoryFile, 'utf-8');
-      return JSON.parse(content);
-    } catch (error) {
-      if ((error as any).code === 'ENOENT') {
-        return [];
-      }
-      // Return empty array on parse errors
-      return [];
-    }
-  }
-
-  private async saveMemories(entries: MemoryEntry[]): Promise<void> {
-    await fs.mkdir(path.dirname(this.memoryFile), { recursive: true });
-    await fs.writeFile(this.memoryFile, JSON.stringify(entries, null, 2));
+    return this.store.recallGeneralMemories(query, {
+      category,
+      project: this.workingDirectory,
+    }).map(entry => ({
+      id: entry.id,
+      content: entry.content,
+      category: entry.category,
+      tags: entry.tags,
+      timestamp: Date.parse(entry.createdAt),
+    }));
   }
 }

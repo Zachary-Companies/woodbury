@@ -12,6 +12,7 @@ import { BeliefGraph } from '../loop/v3/belief-graph.js';
 import { ConfidenceEngine } from '../loop/v3/confidence-engine.js';
 import { ToolDescriptorRegistry } from '../loop/v3/tool-descriptor.js';
 import type { Observation, Belief } from '../loop/v3/types.js';
+import { resetSQLiteMemoryStoreCache } from '../sqlite-memory-store.js';
 
 // ── BeliefGraph typed edges ──────────────────────────────────
 
@@ -168,6 +169,8 @@ describe('ConfidenceEngine', () => {
 
   beforeEach(async () => {
     tmpDir = await mkdtemp(join(tmpdir(), 'woodbury-v3-ce-'));
+    process.env.WOODBURY_MEMORY_DB_PATH = join(tmpDir, 'memory.db');
+    resetSQLiteMemoryStoreCache();
     sessionId = `test_ce_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
     stateDir = join(homedir(), '.woodbury', 'data', 'closure-engine', 'sessions', sessionId);
     stateManager = new StateManager(sessionId, tmpDir);
@@ -176,6 +179,8 @@ describe('ConfidenceEngine', () => {
   });
 
   afterEach(async () => {
+    resetSQLiteMemoryStoreCache();
+    delete process.env.WOODBURY_MEMORY_DB_PATH;
     try { rmSync(stateDir, { recursive: true, force: true }); } catch {}
     await rm(tmpDir, { recursive: true, force: true });
   });

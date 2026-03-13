@@ -27,6 +27,7 @@
       <button class="nav-tab" data-tab="marketplace">Marketplace</button>
       <button class="nav-tab" data-tab="social">Social</button>
       <button class="nav-tab" data-tab="assets">Assets</button>
+      <button class="nav-tab" data-tab="memory">Memory</button>
       <button class="nav-tab" data-tab="storyboard">Storyboard</button>
       <button class="nav-tab" data-tab="mcp">MCP</button>
     </div>
@@ -62,6 +63,13 @@
     </div>
     <!-- Assets sidebar content -->
     <div class="ext-list" id="assets-list" data-panel="assets" style="display:none;">
+    </div>
+    <!-- Memory sidebar content -->
+    <div class="ext-list" id="memory-list" data-panel="memory" style="display:none;">
+      <div style="padding:1rem;color:#64748b;font-size:0.78rem;line-height:1.6;">
+        <div style="font-weight:600;color:#e2e8f0;font-size:0.82rem;margin-bottom:0.5rem;">Memory</div>
+        Browse durable memories, search the semantic index, and prune stale entries.
+      </div>
     </div>
     <!-- Chat sidebar content -->
     <div class="ext-list" id="chat-list" data-panel="chat" style="display:none;">
@@ -168,6 +176,7 @@
   <script src="social-core.js"></script>
   <script src="social-compose.js"></script>
   <script src="assets.js"></script>
+  <script src="memories.js"></script>
   <script src="chat.js"></script>
   <script src="storyboard.js"></script>
   <script src="mcp.js"></script>

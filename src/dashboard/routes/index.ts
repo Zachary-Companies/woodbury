@@ -35,6 +35,7 @@ import { handleStoryboardRoutes } from './storyboard.js';
 import { handleGenerationRoutes } from './generation.js';
 import { handleToolsRoutes } from './tools.js';
 import { handleSkillPolicyRoutes } from './skill-policies.js';
+import { handleMemoryRoutes } from './memories.js';
 
 // ── Handler chain (order matters for overlapping prefixes) ──
 
@@ -81,6 +82,9 @@ const handlers: RouteHandler[] = [
 
   // Assets
   handleAssetRoutes,
+
+  // Memories
+  handleMemoryRoutes,
 
   // Storyboards
   handleStoryboardRoutes,
