@@ -29,6 +29,7 @@ const CHAT_LOGS_DIR = join(homedir(), '.woodbury', 'data', 'chat-logs');
 const MAX_CHAT_LOG_DAYS = 30; // keep 30 days of logs
 const CHAT_RECENT_TURNS = 6;
 const CHAT_SUMMARY_MAX_CHARS = 2400;
+const CHAT_AGENT_TIMEOUT_MS = 30 * 60 * 1000;
 
 // ────────────────────────────────────────────────────────────────
 //  Chat log types
@@ -222,6 +223,7 @@ async function ensureChatAgent(ctx: DashboardContext, sessionId: string): Promis
     model: savedModel,
     stream: true,
     verbose: ctx.verbose,
+    timeout: CHAT_AGENT_TIMEOUT_MS,
     sessionId: normalizedSessionId,
     continuationMode: 'resume',
   };

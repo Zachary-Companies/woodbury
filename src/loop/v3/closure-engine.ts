@@ -989,6 +989,11 @@ export class ClosureEngine {
       if (toolUses.length > 0) {
         console.log(`[DIAG] Tool calls: ${toolUses.map((t: any) => t.name).join(', ')}`);
       }
+      this.callbacks.onAssistantTurn?.({
+        text: textContent,
+        stopReason: response.stopReason,
+        toolCalls: toolUses.map((tc: any) => ({ id: tc.id, name: tc.name, input: tc.input })),
+      });
 
       // Stream text tokens
       if (textContent && this.callbacks.onToken) {

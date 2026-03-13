@@ -114,4 +114,88 @@ async function execute(inputs, context) {
     expect(validation.ok).toBe(false);
     expect(validation.issues.join(' ')).toContain('Missing required Woodbury asset/collection tool usage');
   });
+
+  it('keeps valid pipeline script code without regenerating it', async () => {
+    const result = await __testOnly.ensurePipelineScriptNodeCode(
+      { workDir: process.cwd() } as any,
+      {
+        nodes: [
+          {
+            type: 'script',
+            label: 'Parse Shot List',
+            description: 'Parse the shot list into structured entries.',
+            code: `/**
+ * @input shot_list_data string "Raw shot list"
+ * @output parsed_shot_list object[] "Parsed shot list entries"
+ */
+async function execute(inputs, context) {
+  const lines = String(inputs.shot_list_data || '').split(/\\r?\\n/).filter(Boolean);
+  return { parsed_shot_list: lines.map((text, index) => ({ index: index + 1, text })) };
+}`,
+          },
+        ],
+        connections: [],
+      },
+      0,
+      '',
+    );
+
+    expect(mockRunPrompt).not.toHaveBeenCalled();
+    expect(result.regenerated).toBe(false);
+    expect(result.inputs).toHaveLength(1);
+    expect(result.outputs).toHaveLength(1);
+  });
+
+  it('regenerates invalid pipeline script code before returning the pipeline node', async () => {
+    mockRunPrompt.mockResolvedValue({
+      content: [
+        '```javascript',
+        '/**',
+        ' * @input shot_list_data string "Raw shot list"',
+        ' * @output parsed_shot_list object[] "Parsed shot list entries"',
+        ' */',
+        'async function execute(inputs, context) {',
+        '  const lines = String(inputs.shot_list_data || "")',
+        '    .split(/\\r?\\n/)',
+        '    .map(line => line.trim())',
+        '    .filter(Boolean);',
+        '  return {',
+        '    parsed_shot_list: lines.map((text, index) => ({ index: index + 1, text }))',
+        '  };',
+        '}',
+        '```',
+      ].join('\n'),
+    });
+
+    const result = await __testOnly.ensurePipelineScriptNodeCode(
+      { workDir: process.cwd() } as any,
+      {
+        nodes: [
+          {
+            type: 'text',
+            label: 'Shot List Input',
+            textNode: { value: '1. Wide shot of a forest clearing' },
+          },
+          {
+            type: 'script',
+            label: 'Parse Shot List',
+            description: 'Parse the shot list into structured entries for downstream nodes.',
+            code: 'I fixed the script for you.',
+          },
+        ],
+        connections: [
+          { from: 0, fromPort: 'text', to: 1, toPort: 'shot_list_data' },
+        ],
+      },
+      1,
+      '',
+    );
+
+    expect(mockRunPrompt.mock.calls.length).toBeGreaterThanOrEqual(1);
+    expect(result.regenerated).toBe(true);
+    expect(result.code).toContain('async function execute(inputs, context)');
+    expect(result.inputs[0].name).toBe('shot_list_data');
+    expect(result.outputs[0].name).toBe('parsed_shot_list');
+    expect(result.transcript.length).toBeGreaterThan(0);
+  });
 });

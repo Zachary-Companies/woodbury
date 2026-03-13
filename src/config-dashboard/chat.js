@@ -13,6 +13,8 @@
   var isSending = false;
   var abortController = null;
   var chatInitialized = false;
+  var preservedChatView = null;
+  var preservedChatMainStyle = null;
 
   // ── Markdown Rendering ────────────────────────────────────
   // Configure marked for safe, minimal rendering
@@ -277,11 +279,53 @@
     }
   }
 
+  function preserveChatView() {
+    var main = document.getElementById('main');
+    if (!main || !main.firstChild) return;
+
+    var container = document.createElement('div');
+    while (main.firstChild) {
+      container.appendChild(main.firstChild);
+    }
+
+    preservedChatView = container;
+    preservedChatMainStyle = {
+      display: main.style.display,
+      flexDirection: main.style.flexDirection,
+    };
+  }
+
+  function restorePreservedChatView(main) {
+    if (!main || !preservedChatView) return false;
+
+    main.innerHTML = '';
+    if (preservedChatMainStyle) {
+      main.style.display = preservedChatMainStyle.display || 'flex';
+      main.style.flexDirection = preservedChatMainStyle.flexDirection || 'column';
+    }
+
+    while (preservedChatView.firstChild) {
+      main.appendChild(preservedChatView.firstChild);
+    }
+
+    preservedChatView = null;
+    preservedChatMainStyle = null;
+    chatInitialized = true;
+    renderTaskPanel();
+    refreshSessionList();
+    loadSkillPolicyUpdates();
+    return true;
+  }
+
   // ── Init ───────────────────────────────────────────────────
 
   function initChat() {
     var main = document.getElementById('main');
     if (!main) return;
+
+    if (restorePreservedChatView(main)) {
+      return;
+    }
 
     // Only inject layout once; re-entering the tab should preserve state
     if (chatInitialized && main.querySelector('.chat-split')) return;
@@ -1428,4 +1472,5 @@
   // ── Exports ────────────────────────────────────────────────
   window.initChat = initChat;
   window.initChatLogs = initChatLogs;
+  window.preserveChatView = preserveChatView;
 })();

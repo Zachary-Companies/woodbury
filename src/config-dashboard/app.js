@@ -143,7 +143,8 @@ document.addEventListener('DOMContentLoaded', () => {
     '5': 'marketplace',
     '6': 'social',
     '7': 'memory',
-    '8': 'mcp',
+    '8': 'skills',
+    '9': 'mcp',
   };
 
   document.addEventListener('keydown', (e) => {
@@ -430,6 +431,12 @@ let currentTab = 'home';
 
 function switchTab(tab, opts) {
   opts = opts || {};
+  const previousTab = currentTab;
+
+  if (previousTab === 'chat' && tab !== 'chat' && typeof window.preserveChatView === 'function') {
+    window.preserveChatView();
+  }
+
   currentTab = tab;
   document.body.classList.toggle('composition-form-mode', tab === 'compositions' && opts.view === 'form' && !!opts.workflowId);
 
@@ -503,6 +510,11 @@ function switchTab(tab, opts) {
     if (typeof initMemories === 'function') {
       initMemories();
     }
+  } else if (tab === 'skills') {
+    selectedExtension = null;
+    if (typeof initSkills === 'function') {
+      initSkills();
+    }
   } else if (tab === 'storyboard') {
     selectedExtension = null;
     if (typeof initStoryboard === 'function') {
@@ -545,7 +557,7 @@ function parseHash() {
 
 function handleHash() {
   var state = parseHash();
-  var validTabs = ['home', 'chat', 'workflows', 'compositions', 'runs', 'training', 'marketplace', 'social', 'assets', 'memory', 'storyboard', 'mcp'];
+  var validTabs = ['home', 'chat', 'workflows', 'compositions', 'runs', 'training', 'marketplace', 'social', 'assets', 'memory', 'skills', 'storyboard', 'mcp'];
   var tab = validTabs.indexOf(state.tab) !== -1 ? state.tab : 'home';
 
   // Only switch tab if it changed
@@ -628,7 +640,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Restore state from hash on initial load
   var state = parseHash();
-  var validTabs = ['home', 'chat', 'workflows', 'compositions', 'runs', 'training', 'marketplace', 'social', 'assets', 'memory', 'storyboard', 'mcp'];
+  var validTabs = ['home', 'chat', 'workflows', 'compositions', 'runs', 'training', 'marketplace', 'social', 'assets', 'memory', 'skills', 'storyboard', 'mcp'];
   var initialTab = validTabs.indexOf(state.tab) !== -1 ? state.tab : 'home';
 
   // Set detailView early so workflow render picks it up

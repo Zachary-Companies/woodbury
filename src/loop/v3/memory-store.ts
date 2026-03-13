@@ -1,7 +1,7 @@
 /**
  * Memory Store — Persistent cross-session learning for the Closure Engine.
  *
- * Stores typed memories in the shared SQLite memory database.
+ * Stores typed memories in the shared file-backed memory store.
  */
 
 import type { MemoryRecord, MemoryType } from './types.js';

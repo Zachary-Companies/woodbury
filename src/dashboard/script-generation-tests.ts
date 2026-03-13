@@ -17,6 +17,72 @@ export interface ScriptGenerationTestResult {
   error?: string;
 }
 
+interface ScriptTestProgressState {
+  started: boolean;
+  completed: number;
+  total?: number;
+  label?: string;
+}
+
+function createScriptTestExecutionContext(testCase: ScriptGenerationTestCase) {
+  const progressState: ScriptTestProgressState = {
+    started: false,
+    completed: 0,
+    total: undefined,
+    label: undefined,
+  };
+  const logs: string[] = [];
+
+  return {
+    context: {
+      llm: {
+        generate: async () => testCase.llmGenerate ?? '',
+        generateJSON: async () => testCase.llmGenerateJSON ?? {},
+      },
+      log: (message: unknown) => {
+        logs.push(String(message));
+      },
+      tools: new Proxy({}, {
+        get(_target, prop) {
+          return async () => {
+            throw new Error(`context.tools.${String(prop)} is not configured in generated-script unit tests`);
+          };
+        },
+      }),
+      progress: {
+        start(total: number, label?: string) {
+          progressState.started = true;
+          progressState.completed = 0;
+          progressState.total = Number.isFinite(total) ? total : undefined;
+          progressState.label = label;
+        },
+        set(completed: number, total?: number, label?: string) {
+          progressState.started = true;
+          progressState.completed = Number.isFinite(completed) ? completed : progressState.completed;
+          if (typeof total === 'number' && Number.isFinite(total)) {
+            progressState.total = total;
+          }
+          if (label) progressState.label = label;
+        },
+        increment(label?: string) {
+          progressState.started = true;
+          progressState.completed += 1;
+          if (label) progressState.label = label;
+        },
+        complete(label?: string) {
+          progressState.started = true;
+          if (typeof progressState.total === 'number') {
+            progressState.completed = progressState.total;
+          }
+          if (label) progressState.label = label;
+        },
+      },
+    },
+    logs,
+    progressState,
+  };
+}
+
 function describeValue(value: unknown): string {
   if (typeof value === 'string') return JSON.stringify(value);
   try {
@@ -66,14 +132,7 @@ export async function runGeneratedScriptUnitTests(
   for (const testCase of testCases) {
     const failures: string[] = [];
     try {
-      const context = {
-        llm: {
-          generate: async () => testCase.llmGenerate ?? '',
-          generateJSON: async () => testCase.llmGenerateJSON ?? {},
-        },
-        log: () => {},
-        tools: {},
-      };
+      const { context, progressState } = createScriptTestExecutionContext(testCase);
       const output = await Promise.race([
         Promise.resolve(executeFn(testCase.inputs || {}, context)),
         new Promise((_, reject) => setTimeout(() => reject(new Error('Test execution timed out')), 1000)),
@@ -90,6 +149,10 @@ export async function runGeneratedScriptUnitTests(
 
       if (testCase.expectedOutputSubset) {
         failures.push(...collectSubsetMismatches(output, testCase.expectedOutputSubset, 'output'));
+      }
+
+      if (progressState.started && typeof progressState.total === 'number' && progressState.completed > progressState.total) {
+        failures.push(`progress completed value ${progressState.completed} exceeds total ${progressState.total}`);
       }
 
       results.push({

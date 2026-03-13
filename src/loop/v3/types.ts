@@ -394,6 +394,11 @@ export interface SkillSelection {
 
 export interface EngineCallbacks {
   onToken?: (token: string) => void;
+  onAssistantTurn?: (event: {
+    text: string;
+    stopReason?: string;
+    toolCalls: Array<{ id?: string; name: string; input?: any }>;
+  }) => void;
   onToolStart?: (name: string, params?: any) => void;
   onToolEnd?: (name: string, success: boolean, result?: string, duration?: number) => void;
   onPhaseChange?: (from: EnginePhase, to: EnginePhase) => void;

@@ -2033,6 +2033,7 @@ async function repairScriptNode(node, nodeId) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
+        mode: 'repair',
         description: repairDescription,
         chatHistory: node.script.chatHistory || [],
         currentCode: node.script.code || '',
@@ -2049,6 +2050,9 @@ async function repairScriptNode(node, nodeId) {
     node.script.code = data.code;
     if (data.inputs) node.script.inputs = data.inputs;
     if (data.outputs) node.script.outputs = data.outputs;
+    if (Array.isArray(data.transcript)) {
+      node.script.generationTranscript = (node.script.generationTranscript || []).concat(data.transcript);
+    }
 
     // Add to chat history
     if (!node.script.chatHistory) node.script.chatHistory = [];

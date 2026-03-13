@@ -75,6 +75,9 @@ The goal is not to document every file. The goal is to document the contracts, b
 - [todays-log-2026-03-12.md](todays-log-2026-03-12.md)
   Isolated log covering only the March 12, 2026 work, including same-day follow-up contract and runtime-tool updates.
 
+- [todays-log-2026-03-13.md](todays-log-2026-03-13.md)
+  Isolated log covering the March 13, 2026 working-tree changes: file-backed memory artifacts, the new skill optimizer surface, script-generation transcripts, and Electron startup hardening.
+
 ## What Deserves Documentation In This Repo
 
 If a subsystem has one or more of these properties, it should usually have a dedicated doc:

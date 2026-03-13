@@ -1,10 +1,8 @@
 import { randomUUID, createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, extname, join } from 'node:path';
 import type { MemoryRecord, MemoryType } from './loop/v3/types.js';
-
-const { DatabaseSync } = require('node:sqlite') as { DatabaseSync: new (location: string) => any };
 
 export const GENERAL_MEMORY_CATEGORIES = [
   'convention',
@@ -32,6 +30,9 @@ export interface GeneralMemoryRecord {
   importance: number;
   lastRecalledAt?: string;
   recallCount: number;
+  markdownPath?: string;
+  metadataPath?: string;
+  directoryPath?: string;
 }
 
 export interface GeneralMemoryMatch extends GeneralMemoryRecord {
@@ -44,6 +45,15 @@ export interface ClosureMemoryMatch extends MemoryRecord {
   score: number;
   semanticScore: number;
   lexicalScore: number;
+  markdownPath?: string;
+  metadataPath?: string;
+  directoryPath?: string;
+}
+
+export interface MemoryArtifactPaths {
+  directoryPath: string;
+  markdownPath: string;
+  metadataPath: string;
 }
 
 export interface GeneralMemoryBrowseResult {
@@ -73,47 +83,24 @@ export interface MemoryStats {
   };
 }
 
-interface DbGeneralRow {
-  id: string;
-  content: string;
-  category: GeneralMemoryCategory;
-  tags_json: string;
-  created_at: string;
-  updated_at: string;
-  site: string | null;
-  project: string | null;
-  source: string;
-  importance: number;
-  last_recalled_at: string | null;
-  recall_count: number;
+interface StoredGeneralMemory extends GeneralMemoryRecord {
+  contentHash: string;
 }
 
-interface DbClosureRow {
-  id: string;
-  type: MemoryType;
-  title: string | null;
-  content: string;
-  tags_json: string;
-  confidence: number;
-  trigger_pattern: string | null;
-  avoid_pattern: string | null;
-  applicability_json: string;
+interface StoredClosureMemory extends MemoryRecord {
   source: string;
-  access_count: number;
-  last_accessed: string | null;
-  created_at: string;
-  updated_at: string;
+  contentHash: string;
 }
 
-interface DbEmbeddingRow {
+interface StoredEmbeddingRecord {
   scope: 'general' | 'closure';
-  memory_id: string;
+  memoryId: string;
   model: string;
   dimensions: number;
-  embedding_json: string;
-  source_text: string;
-  text_hash: string;
-  updated_at: string;
+  embedding: number[];
+  sourceText: string;
+  textHash: string;
+  updatedAt: string;
 }
 
 interface SaveGeneralMemoryInput {
@@ -144,7 +131,7 @@ interface UpsertClosureMemoryInput {
   accessCount?: number;
 }
 
-const DEFAULT_DB_PATH = join(homedir(), '.woodbury', 'data', 'memory', 'memory.db');
+const DEFAULT_STORE_PATH = join(homedir(), '.woodbury', 'data', 'memory', 'memory-store');
 const LEGACY_GLOBAL_MEMORY_DIR = join(homedir(), '.woodbury', 'memory');
 const LEGACY_CLOSURE_MEMORIES_FILE = join(homedir(), '.woodbury', 'data', 'closure-engine', 'memories.json');
 const MEMORY_EMBEDDING_MODEL = 'hash-semantic-v1';
@@ -172,32 +159,6 @@ function clamp(value: number, min: number, max: number): number {
 
 function normalizeTags(tags: string[] = []): string[] {
   return Array.from(new Set(tags.map(tag => tag.trim()).filter(Boolean)));
-}
-
-function parseJsonArray(value: string | null | undefined): string[] {
-  if (!value) {
-    return [];
-  }
-
-  try {
-    const parsed = JSON.parse(value);
-    return Array.isArray(parsed) ? parsed.filter((entry: unknown): entry is string => typeof entry === 'string') : [];
-  } catch {
-    return [];
-  }
-}
-
-function parseNumberArray(value: string | null | undefined): number[] {
-  if (!value) {
-    return [];
-  }
-
-  try {
-    const parsed = JSON.parse(value);
-    return Array.isArray(parsed) ? parsed.filter((entry: unknown): entry is number => typeof entry === 'number') : [];
-  } catch {
-    return [];
-  }
 }
 
 function buildHash(input: string): string {
@@ -283,43 +244,139 @@ function cosineSimilarity(left: number[], right: number[]): number {
   return dot;
 }
 
-function resolveMemoryDbPath(): string {
-  return process.env.WOODBURY_MEMORY_DB_PATH || DEFAULT_DB_PATH;
+function resolveConfiguredStorePath(): string {
+  return process.env.WOODBURY_MEMORY_DB_PATH || DEFAULT_STORE_PATH;
 }
 
-function toGeneralRecord(row: DbGeneralRow): GeneralMemoryRecord {
-  return {
-    id: row.id,
-    content: row.content,
-    category: row.category,
-    tags: parseJsonArray(row.tags_json),
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-    site: row.site || undefined,
-    project: row.project || undefined,
-    source: row.source,
-    importance: row.importance,
-    lastRecalledAt: row.last_recalled_at || undefined,
-    recallCount: row.recall_count,
-  };
+function resolveStoreBasePath(configuredPath: string): string {
+  const extension = extname(configuredPath);
+  return extension ? configuredPath.slice(0, -extension.length) : configuredPath;
 }
 
-function toClosureRecord(row: DbClosureRow): MemoryRecord {
-  return {
-    id: row.id,
-    type: row.type,
-    title: row.title || undefined,
-    content: row.content,
-    tags: parseJsonArray(row.tags_json),
-    confidence: row.confidence,
-    triggerPattern: row.trigger_pattern || undefined,
-    avoidPattern: row.avoid_pattern || undefined,
-    applicabilityConditions: parseJsonArray(row.applicability_json),
-    accessCount: row.access_count,
-    lastAccessed: row.last_accessed || undefined,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-  };
+function readJson<T>(filePath: string, fallback: T): T {
+  if (!existsSync(filePath)) {
+    return fallback;
+  }
+
+  try {
+    return JSON.parse(readFileSync(filePath, 'utf-8')) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+function atomicWriteText(filePath: string, content: string): void {
+  mkdirSync(dirname(filePath), { recursive: true });
+  const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+  writeFileSync(tempPath, content, 'utf-8');
+  renameSync(tempPath, filePath);
+}
+
+function writeJson(filePath: string, value: unknown): void {
+  atomicWriteText(filePath, JSON.stringify(value, null, 2));
+}
+
+function ensureDirectory(dirPath: string): void {
+  mkdirSync(dirPath, { recursive: true });
+}
+
+function sanitizePathSegment(input: string): string {
+  const normalized = input.trim().toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '');
+  return normalized || 'uncategorized';
+}
+
+function listFilesRecursive(dirPath: string, extension: string): string[] {
+  if (!existsSync(dirPath)) {
+    return [];
+  }
+
+  const results: string[] = [];
+  for (const entry of readdirSync(dirPath, { withFileTypes: true })) {
+    const entryPath = join(dirPath, entry.name);
+    if (entry.isDirectory()) {
+      results.push(...listFilesRecursive(entryPath, extension));
+      continue;
+    }
+    if (entry.isFile() && entry.name.endsWith(extension)) {
+      results.push(entryPath);
+    }
+  }
+  return results;
+}
+
+function readStructuredJsonRecords<T>(dirPath: string): T[] {
+  const items: T[] = [];
+  for (const filePath of listFilesRecursive(dirPath, '.json')) {
+    try {
+      items.push(JSON.parse(readFileSync(filePath, 'utf-8')) as T);
+    } catch {
+      // Ignore malformed record files.
+    }
+  }
+  return items;
+}
+
+function readLegacyJsonl<T>(filePath: string): T[] {
+  if (!existsSync(filePath)) {
+    return [];
+  }
+
+  const raw = readFileSync(filePath, 'utf-8');
+  if (!raw.trim()) {
+    return [];
+  }
+
+  const items: T[] = [];
+  for (const line of raw.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      continue;
+    }
+    try {
+      items.push(JSON.parse(trimmed) as T);
+    } catch {
+      // Ignore malformed legacy lines.
+    }
+  }
+  return items;
+}
+
+function resetDirectory(dirPath: string): void {
+  rmSync(dirPath, { recursive: true, force: true });
+  ensureDirectory(dirPath);
+}
+
+function renderMarkdownRecord(title: string, sections: Array<{ label: string; value?: string | number | string[] }>, content: string): string {
+  const lines = [`# ${title}`, ''];
+
+  for (const section of sections) {
+    if (section.value === undefined) {
+      continue;
+    }
+
+    if (Array.isArray(section.value)) {
+      if (section.value.length === 0) {
+        continue;
+      }
+      lines.push(`- ${section.label}: ${section.value.join(', ')}`);
+      continue;
+    }
+
+    lines.push(`- ${section.label}: ${String(section.value)}`);
+  }
+
+  if (lines[lines.length - 1] !== '') {
+    lines.push('');
+  }
+
+  lines.push(content.trim());
+  lines.push('');
+  return lines.join('\n');
+}
+
+function writeRecordFiles(basePath: string, markdown: string, metadata: unknown): void {
+  atomicWriteText(`${basePath}.md`, markdown);
+  writeJson(`${basePath}.json`, metadata);
 }
 
 function buildGeneralEmbeddingText(input: {
@@ -360,104 +417,133 @@ function buildClosureEmbeddingText(input: {
   ].filter(Boolean).join(' ');
 }
 
-export class SQLiteMemoryStore {
-  private readonly db: any;
+function cloneGeneralRecord(record: StoredGeneralMemory): GeneralMemoryRecord {
+  return {
+    id: record.id,
+    content: record.content,
+    category: record.category,
+    tags: [...record.tags],
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt,
+    site: record.site,
+    project: record.project,
+    source: record.source,
+    importance: record.importance,
+    lastRecalledAt: record.lastRecalledAt,
+    recallCount: record.recallCount,
+  };
+}
 
-  constructor(private readonly dbPath: string = resolveMemoryDbPath()) {
-    mkdirSync(dirname(this.dbPath), { recursive: true });
-    this.db = new DatabaseSync(this.dbPath);
+function cloneClosureRecord(record: StoredClosureMemory): MemoryRecord {
+  return {
+    id: record.id,
+    type: record.type,
+    title: record.title,
+    content: record.content,
+    tags: [...record.tags],
+    confidence: record.confidence,
+    triggerPattern: record.triggerPattern,
+    avoidPattern: record.avoidPattern,
+    applicabilityConditions: [...(record.applicabilityConditions || [])],
+    accessCount: record.accessCount,
+    lastAccessed: record.lastAccessed,
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt,
+  };
+}
+
+export class SQLiteMemoryStore {
+  private readonly storeRootDir: string;
+  private readonly generalRootDir: string;
+  private readonly closureRootDir: string;
+  private readonly embeddingsRootDir: string;
+  private readonly metaPath: string;
+  private readonly legacyGeneralPath: string;
+  private readonly legacyClosurePath: string;
+  private readonly legacyEmbeddingsPath: string;
+  private readonly legacyMetaPath: string;
+  private readonly generalMemories = new Map<string, StoredGeneralMemory>();
+  private readonly closureMemories = new Map<string, StoredClosureMemory>();
+  private readonly embeddings = new Map<string, StoredEmbeddingRecord>();
+  private meta: Record<string, string> = {};
+
+  constructor(private readonly dbPath: string = resolveConfiguredStorePath()) {
+    const basePath = resolveStoreBasePath(this.dbPath);
+    this.storeRootDir = basePath;
+    this.generalRootDir = join(this.storeRootDir, 'general');
+    this.closureRootDir = join(this.storeRootDir, 'closure');
+    this.embeddingsRootDir = join(this.storeRootDir, 'embeddings');
+    this.metaPath = join(this.storeRootDir, 'meta.json');
+    this.legacyGeneralPath = `${basePath}.general.jsonl`;
+    this.legacyClosurePath = `${basePath}.closure.jsonl`;
+    this.legacyEmbeddingsPath = `${basePath}.embeddings.jsonl`;
+    this.legacyMetaPath = `${basePath}.meta.json`;
+    ensureDirectory(this.storeRootDir);
     this.initialize();
   }
 
   saveGeneralMemory(input: SaveGeneralMemoryInput): GeneralMemoryRecord {
     const now = new Date().toISOString();
-    const createdAt = input.createdAt || now;
     const tags = normalizeTags(input.tags);
     const contentHash = buildHash(input.content);
     const siteKey = input.site || '';
     const projectKey = input.project || '';
-    const existing = this.db.prepare(`
-      SELECT *
-      FROM general_memories
-      WHERE category = @category
-        AND content_hash = @contentHash
-        AND ifnull(site, '') = @siteKey
-        AND ifnull(project, '') = @projectKey
-      LIMIT 1
-    `).get({
-      category: input.category,
-      contentHash,
-      siteKey,
-      projectKey,
-    }) as DbGeneralRow | undefined;
+
+    const existing = Array.from(this.generalMemories.values()).find(record => (
+      record.category === input.category
+      && record.contentHash === contentHash
+      && (record.site || '') === siteKey
+      && (record.project || '') === projectKey
+    ));
 
     if (existing) {
-      const mergedTags = normalizeTags([...parseJsonArray(existing.tags_json), ...tags]);
-      const importance = Math.max(existing.importance, input.importance ?? existing.importance ?? 0.5);
-      this.db.prepare(`
-        UPDATE general_memories
-        SET content = @content,
-            tags_json = @tagsJson,
-            updated_at = @updatedAt,
-            site = @site,
-            project = @project,
-            source = @source,
-            importance = @importance
-        WHERE id = @id
-      `).run({
-        id: existing.id,
-        content: input.content,
-        tagsJson: JSON.stringify(mergedTags),
-        updatedAt: now,
-        site: input.site || null,
-        project: input.project || null,
-        source: input.source || existing.source || 'manual',
-        importance,
-      });
+      existing.content = input.content;
+      existing.tags = normalizeTags([...existing.tags, ...tags]);
+      existing.updatedAt = now;
+      existing.site = input.site;
+      existing.project = input.project;
+      existing.source = input.source || existing.source || 'manual';
+      existing.importance = Math.max(existing.importance, input.importance ?? existing.importance ?? 0.5);
+      this.generalMemories.set(existing.id, existing);
       this.upsertEmbedding('general', existing.id, buildGeneralEmbeddingText({
         category: input.category,
         content: input.content,
-        tags: mergedTags,
+        tags: existing.tags,
         site: input.site,
         project: input.project,
-        source: input.source || existing.source || 'manual',
+        source: existing.source,
       }));
-      return this.getGeneralMemoryById(existing.id)!;
+      this.persistGeneralMemories();
+      return cloneGeneralRecord(existing);
     }
 
-    const id = input.id || randomUUID();
-    this.db.prepare(`
-      INSERT INTO general_memories (
-        id, content, category, tags_json, site, project, source, importance,
-        content_hash, created_at, updated_at, last_recalled_at, recall_count
-      ) VALUES (
-        @id, @content, @category, @tagsJson, @site, @project, @source, @importance,
-        @contentHash, @createdAt, @updatedAt, NULL, 0
-      )
-    `).run({
-      id,
+    const createdAt = input.createdAt || now;
+    const record: StoredGeneralMemory = {
+      id: input.id || randomUUID(),
       content: input.content,
       category: input.category,
-      tagsJson: JSON.stringify(tags),
-      site: input.site || null,
-      project: input.project || null,
-      source: input.source || 'manual',
-      importance: clamp(input.importance ?? 0.5, 0, 1),
-      contentHash,
+      tags,
       createdAt,
       updatedAt: now,
-    });
-
-    this.upsertEmbedding('general', id, buildGeneralEmbeddingText({
-      category: input.category,
-      content: input.content,
-      tags,
       site: input.site,
       project: input.project,
       source: input.source || 'manual',
+      importance: clamp(input.importance ?? 0.5, 0, 1),
+      lastRecalledAt: undefined,
+      recallCount: 0,
+      contentHash,
+    };
+    this.generalMemories.set(record.id, record);
+    this.upsertEmbedding('general', record.id, buildGeneralEmbeddingText({
+      category: record.category,
+      content: record.content,
+      tags: record.tags,
+      site: record.site,
+      project: record.project,
+      source: record.source,
     }));
-
-    return this.getGeneralMemoryById(id)!;
+    this.persistGeneralMemories();
+    return cloneGeneralRecord(record);
   }
 
   recallGeneralMemories(
@@ -479,16 +565,14 @@ export class SQLiteMemoryStore {
 
     if (results.length > 0) {
       const now = new Date().toISOString();
-      const updateStmt = this.db.prepare(`
-        UPDATE general_memories
-        SET recall_count = recall_count + 1,
-            last_recalled_at = @lastRecalledAt,
-            updated_at = @updatedAt
-        WHERE id = @id
-      `);
-      for (const row of results) {
-        updateStmt.run({ id: row.id, lastRecalledAt: now, updatedAt: now });
+      for (const result of results) {
+        const stored = this.generalMemories.get(result.id);
+        if (!stored) continue;
+        stored.recallCount += 1;
+        stored.lastRecalledAt = now;
+        stored.updatedAt = now;
       }
+      this.persistGeneralMemories();
     }
 
     return results.map(({ score, semanticScore, lexicalScore, ...record }) => record);
@@ -506,7 +590,12 @@ export class SQLiteMemoryStore {
       this.importLegacyWorkspaceMemories(options.project);
     }
 
-    const rows = this.getGeneralMemoryRows(options);
+    const rows = Array.from(this.generalMemories.values()).filter(record => {
+      if (options.category && record.category !== options.category) return false;
+      if (options.site && !(record.site || '').toLowerCase().includes(options.site.toLowerCase())) return false;
+      if (options.project && record.project !== options.project) return false;
+      return true;
+    });
     const ranked = this.rankGeneralRows(rows, options.query || '');
     const offset = Math.max(0, options.offset ?? 0);
     const limit = Math.max(1, options.limit ?? 50);
@@ -517,116 +606,80 @@ export class SQLiteMemoryStore {
   }
 
   countGeneralMemories(category?: GeneralMemoryCategory): number {
-    if (category) {
-      const row = this.db.prepare('SELECT COUNT(*) as count FROM general_memories WHERE category = @category').get({ category }) as { count: number };
-      return row.count;
-    }
-
-    const row = this.db.prepare('SELECT COUNT(*) as count FROM general_memories').get() as { count: number };
-    return row.count;
+    return Array.from(this.generalMemories.values()).filter(record => !category || record.category === category).length;
   }
 
   deleteGeneralMemory(id: string): boolean {
-    this.db.prepare('DELETE FROM memory_embeddings WHERE scope = @scope AND memory_id = @memoryId').run({
-      scope: 'general',
-      memoryId: id,
-    });
-    const result = this.db.prepare('DELETE FROM general_memories WHERE id = @id').run({ id }) as { changes?: number };
-    return (result.changes ?? 0) > 0;
+    const deleted = this.generalMemories.delete(id);
+    if (!deleted) {
+      return false;
+    }
+    this.embeddings.delete(this.embeddingKey('general', id));
+    this.persistGeneralMemories();
+    this.persistEmbeddings();
+    return true;
   }
 
   upsertClosureMemory(input: UpsertClosureMemoryInput): MemoryRecord {
     const now = new Date().toISOString();
-    const createdAt = input.createdAt || now;
     const tags = normalizeTags(input.tags);
     const contentHash = buildHash(input.content);
-    const existing = this.db.prepare(`
-      SELECT *
-      FROM closure_memories
-      WHERE type = @type AND content_hash = @contentHash
-      LIMIT 1
-    `).get({ type: input.type, contentHash }) as DbClosureRow | undefined;
+    const existing = Array.from(this.closureMemories.values()).find(record => record.type === input.type && record.contentHash === contentHash);
 
     if (existing) {
-      const mergedTags = normalizeTags([...parseJsonArray(existing.tags_json), ...tags]);
-      const mergedApplicability = normalizeTags([
-        ...parseJsonArray(existing.applicability_json),
-        ...(input.applicabilityConditions || []),
-      ]);
-      this.db.prepare(`
-        UPDATE closure_memories
-        SET title = @title,
-            content = @content,
-            tags_json = @tagsJson,
-            confidence = @confidence,
-            trigger_pattern = @triggerPattern,
-            avoid_pattern = @avoidPattern,
-            applicability_json = @applicabilityJson,
-            source = @source,
-            updated_at = @updatedAt
-        WHERE id = @id
-      `).run({
-        id: existing.id,
-        title: input.title || existing.title,
-        content: input.content,
-        tagsJson: JSON.stringify(mergedTags),
-        confidence: Math.max(existing.confidence, clamp(input.confidence, 0.1, 1)),
-        triggerPattern: input.triggerPattern || existing.trigger_pattern,
-        avoidPattern: input.avoidPattern || existing.avoid_pattern,
-        applicabilityJson: JSON.stringify(mergedApplicability),
-        source: input.source || existing.source || 'manual',
-        updatedAt: now,
-      });
+      existing.title = input.title || existing.title;
+      existing.content = input.content;
+      existing.tags = normalizeTags([...existing.tags, ...tags]);
+      existing.confidence = Math.max(existing.confidence, clamp(input.confidence, 0.1, 1));
+      existing.triggerPattern = input.triggerPattern || existing.triggerPattern;
+      existing.avoidPattern = input.avoidPattern || existing.avoidPattern;
+      existing.applicabilityConditions = normalizeTags([...(existing.applicabilityConditions || []), ...(input.applicabilityConditions || [])]);
+      existing.source = input.source || existing.source || 'manual';
+      existing.updatedAt = now;
+      this.closureMemories.set(existing.id, existing);
       this.upsertEmbedding('closure', existing.id, buildClosureEmbeddingText({
-        type: input.type,
-        title: input.title || existing.title || undefined,
-        content: input.content,
-        tags: mergedTags,
-        applicabilityConditions: mergedApplicability,
-        triggerPattern: input.triggerPattern || existing.trigger_pattern || undefined,
-        avoidPattern: input.avoidPattern || existing.avoid_pattern || undefined,
+        type: existing.type,
+        title: existing.title,
+        content: existing.content,
+        tags: existing.tags,
+        applicabilityConditions: existing.applicabilityConditions,
+        triggerPattern: existing.triggerPattern,
+        avoidPattern: existing.avoidPattern,
       }));
-      return this.getClosureMemoryById(existing.id)!;
+      this.persistClosureMemories();
+      return cloneClosureRecord(existing);
     }
 
-    const id = input.id || `mem_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
-    this.db.prepare(`
-      INSERT INTO closure_memories (
-        id, type, title, content, tags_json, confidence, trigger_pattern, avoid_pattern,
-        applicability_json, source, content_hash, access_count, last_accessed, created_at, updated_at
-      ) VALUES (
-        @id, @type, @title, @content, @tagsJson, @confidence, @triggerPattern, @avoidPattern,
-        @applicabilityJson, @source, @contentHash, @accessCount, @lastAccessed, @createdAt, @updatedAt
-      )
-    `).run({
-      id,
-      type: input.type,
-      title: input.title || null,
-      content: input.content,
-      tagsJson: JSON.stringify(tags),
-      confidence: clamp(input.confidence, 0.1, 1),
-      triggerPattern: input.triggerPattern || null,
-      avoidPattern: input.avoidPattern || null,
-      applicabilityJson: JSON.stringify(normalizeTags(input.applicabilityConditions || [])),
-      source: input.source || 'manual',
-      contentHash,
-      accessCount: input.accessCount ?? 0,
-      lastAccessed: input.lastAccessed || null,
-      createdAt,
-      updatedAt: now,
-    });
-
-    this.upsertEmbedding('closure', id, buildClosureEmbeddingText({
+    const createdAt = input.createdAt || now;
+    const record: StoredClosureMemory = {
+      id: input.id || `mem_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
       type: input.type,
       title: input.title,
       content: input.content,
       tags,
-      applicabilityConditions: input.applicabilityConditions,
+      confidence: clamp(input.confidence, 0.1, 1),
       triggerPattern: input.triggerPattern,
       avoidPattern: input.avoidPattern,
+      applicabilityConditions: normalizeTags(input.applicabilityConditions || []),
+      accessCount: input.accessCount ?? 0,
+      lastAccessed: input.lastAccessed,
+      createdAt,
+      updatedAt: now,
+      source: input.source || 'manual',
+      contentHash,
+    };
+    this.closureMemories.set(record.id, record);
+    this.upsertEmbedding('closure', record.id, buildClosureEmbeddingText({
+      type: record.type,
+      title: record.title,
+      content: record.content,
+      tags: record.tags,
+      applicabilityConditions: record.applicabilityConditions,
+      triggerPattern: record.triggerPattern,
+      avoidPattern: record.avoidPattern,
     }));
-
-    return this.getClosureMemoryById(id)!;
+    this.persistClosureMemories();
+    return cloneClosureRecord(record);
   }
 
   queryClosureMemories(text: string, limit: number = 10): MemoryRecord[] {
@@ -636,26 +689,23 @@ export class SQLiteMemoryStore {
     }
 
     const matches = this.browseClosureMemories({ query: text, limit }).items;
-
     if (matches.length > 0) {
       const now = new Date().toISOString();
-      const updateStmt = this.db.prepare(`
-        UPDATE closure_memories
-        SET access_count = access_count + 1,
-            last_accessed = @lastAccessed,
-            updated_at = @updatedAt
-        WHERE id = @id
-      `);
-      for (const row of matches) {
-        updateStmt.run({ id: row.id, lastAccessed: now, updatedAt: now });
+      for (const match of matches) {
+        const stored = this.closureMemories.get(match.id);
+        if (!stored) continue;
+        stored.accessCount += 1;
+        stored.lastAccessed = now;
+        stored.updatedAt = now;
       }
+      this.persistClosureMemories();
     }
 
     return matches.map(({ score, semanticScore, lexicalScore, ...record }) => record);
   }
 
   browseClosureMemories(options: { query?: string; type?: MemoryType; limit?: number; offset?: number } = {}): ClosureMemoryBrowseResult {
-    const rows = this.listClosureMemoryRows().filter(row => !options.type || row.type === options.type);
+    const rows = Array.from(this.closureMemories.values()).filter(record => !options.type || record.type === options.type);
     const ranked = this.rankClosureRows(rows, options.query || '');
     const offset = Math.max(0, options.offset ?? 0);
     const limit = Math.max(1, options.limit ?? 50);
@@ -666,198 +716,287 @@ export class SQLiteMemoryStore {
   }
 
   listClosureMemories(): MemoryRecord[] {
-    return this.listClosureMemoryRows().map(toClosureRecord);
+    return Array.from(this.closureMemories.values())
+      .sort((left, right) => new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime())
+      .map(record => cloneClosureRecord(record));
   }
 
   updateClosureMemory(id: string, updates: Partial<Pick<MemoryRecord, 'confidence' | 'lastAccessed' | 'accessCount'>>): MemoryRecord | null {
-    const existing = this.getClosureMemoryRowById(id);
+    const existing = this.closureMemories.get(id);
     if (!existing) {
       return null;
     }
 
-    this.db.prepare(`
-      UPDATE closure_memories
-      SET confidence = @confidence,
-          access_count = @accessCount,
-          last_accessed = @lastAccessed,
-          updated_at = @updatedAt
-      WHERE id = @id
-    `).run({
-      id,
-      confidence: updates.confidence ?? existing.confidence,
-      accessCount: updates.accessCount ?? existing.access_count,
-      lastAccessed: updates.lastAccessed ?? existing.last_accessed,
-      updatedAt: new Date().toISOString(),
-    });
-
-    return this.getClosureMemoryById(id);
+    existing.confidence = updates.confidence ?? existing.confidence;
+    existing.accessCount = updates.accessCount ?? existing.accessCount;
+    existing.lastAccessed = updates.lastAccessed ?? existing.lastAccessed;
+    existing.updatedAt = new Date().toISOString();
+    this.persistClosureMemories();
+    return cloneClosureRecord(existing);
   }
 
   deleteClosureMemory(id: string): boolean {
-    this.db.prepare('DELETE FROM memory_embeddings WHERE scope = @scope AND memory_id = @memoryId').run({
-      scope: 'closure',
-      memoryId: id,
-    });
-    const result = this.db.prepare('DELETE FROM closure_memories WHERE id = @id').run({ id }) as { changes?: number };
-    return (result.changes ?? 0) > 0;
+    const deleted = this.closureMemories.delete(id);
+    if (!deleted) {
+      return false;
+    }
+    this.embeddings.delete(this.embeddingKey('closure', id));
+    this.persistClosureMemories();
+    this.persistEmbeddings();
+    return true;
   }
 
   getMemoryStats(): MemoryStats {
-    const generalRows = this.getGeneralMemoryRows();
-    const closureRows = this.listClosureMemoryRows();
     const generalCounts: Record<string, number> = {};
     const closureCounts: Record<string, number> = {};
 
-    for (const row of generalRows) {
-      generalCounts[row.category] = (generalCounts[row.category] || 0) + 1;
+    for (const record of this.generalMemories.values()) {
+      generalCounts[record.category] = (generalCounts[record.category] || 0) + 1;
     }
-    for (const row of closureRows) {
-      closureCounts[row.type] = (closureCounts[row.type] || 0) + 1;
+    for (const record of this.closureMemories.values()) {
+      closureCounts[record.type] = (closureCounts[record.type] || 0) + 1;
     }
 
-    const indexedGeneral = this.db.prepare('SELECT COUNT(*) as count FROM memory_embeddings WHERE scope = @scope').get({ scope: 'general' }) as { count: number };
-    const indexedClosure = this.db.prepare('SELECT COUNT(*) as count FROM memory_embeddings WHERE scope = @scope').get({ scope: 'closure' }) as { count: number };
+    let indexedGeneral = 0;
+    let indexedClosure = 0;
+    for (const embedding of this.embeddings.values()) {
+      if (embedding.scope === 'general') indexedGeneral += 1;
+      if (embedding.scope === 'closure') indexedClosure += 1;
+    }
 
     return {
       general: {
-        total: generalRows.length,
+        total: this.generalMemories.size,
         byCategory: generalCounts,
       },
       closure: {
-        total: closureRows.length,
+        total: this.closureMemories.size,
         byType: closureCounts,
       },
       indexing: {
         provider: MEMORY_EMBEDDING_MODEL,
         dimensions: MEMORY_EMBEDDING_DIMENSIONS,
-        indexedGeneral: indexedGeneral.count,
-        indexedClosure: indexedClosure.count,
+        indexedGeneral,
+        indexedClosure,
       },
     };
   }
 
   reindexAllMemories(): { general: number; closure: number } {
-    const generalRows = this.getGeneralMemoryRows();
-    const closureRows = this.listClosureMemoryRows();
+    const nextEmbeddings = new Map<string, StoredEmbeddingRecord>();
 
-    for (const row of generalRows) {
-      this.upsertEmbedding('general', row.id, buildGeneralEmbeddingText({
-        category: row.category,
-        content: row.content,
-        tags: parseJsonArray(row.tags_json),
-        site: row.site || undefined,
-        project: row.project || undefined,
-        source: row.source,
-      }));
-    }
-    for (const row of closureRows) {
-      this.upsertEmbedding('closure', row.id, buildClosureEmbeddingText({
-        type: row.type,
-        title: row.title || undefined,
-        content: row.content,
-        tags: parseJsonArray(row.tags_json),
-        applicabilityConditions: parseJsonArray(row.applicability_json),
-        triggerPattern: row.trigger_pattern || undefined,
-        avoidPattern: row.avoid_pattern || undefined,
-      }));
+    for (const record of this.generalMemories.values()) {
+      const sourceText = buildGeneralEmbeddingText({
+        category: record.category,
+        content: record.content,
+        tags: record.tags,
+        site: record.site,
+        project: record.project,
+        source: record.source,
+      });
+      nextEmbeddings.set(this.embeddingKey('general', record.id), this.buildEmbeddingRecord('general', record.id, sourceText));
     }
 
-    return { general: generalRows.length, closure: closureRows.length };
+    for (const record of this.closureMemories.values()) {
+      const sourceText = buildClosureEmbeddingText({
+        type: record.type,
+        title: record.title,
+        content: record.content,
+        tags: record.tags,
+        applicabilityConditions: record.applicabilityConditions,
+        triggerPattern: record.triggerPattern,
+        avoidPattern: record.avoidPattern,
+      });
+      nextEmbeddings.set(this.embeddingKey('closure', record.id), this.buildEmbeddingRecord('closure', record.id, sourceText));
+    }
+
+    this.embeddings.clear();
+    for (const [key, value] of nextEmbeddings.entries()) {
+      this.embeddings.set(key, value);
+    }
+    this.persistEmbeddings();
+    return { general: this.generalMemories.size, closure: this.closureMemories.size };
   }
 
   clearForTesting(): void {
-    this.db.exec('DELETE FROM memory_embeddings; DELETE FROM general_memories; DELETE FROM closure_memories; DELETE FROM memory_meta;');
+    this.generalMemories.clear();
+    this.closureMemories.clear();
+    this.embeddings.clear();
+    this.meta = {};
+    resetDirectory(this.generalRootDir);
+    resetDirectory(this.closureRootDir);
+    resetDirectory(this.embeddingsRootDir);
+    this.persistGeneralMemories();
+    this.persistClosureMemories();
+    this.persistEmbeddings();
+    writeJson(this.metaPath, this.meta);
+    rmSync(this.legacyGeneralPath, { force: true });
+    rmSync(this.legacyClosurePath, { force: true });
+    rmSync(this.legacyEmbeddingsPath, { force: true });
+    rmSync(this.legacyMetaPath, { force: true });
   }
 
   close(): void {
-    if (typeof this.db.close === 'function') {
-      this.db.close();
+    // No runtime handle to close for file-backed storage.
+  }
+
+  getMemoryArtifactPaths(scope: 'general' | 'closure', id: string): MemoryArtifactPaths | null {
+    if (scope === 'general') {
+      const record = this.generalMemories.get(id);
+      return record ? this.getGeneralRecordPaths(record) : null;
     }
+
+    const record = this.closureMemories.get(id);
+    return record ? this.getClosureRecordPaths(record) : null;
   }
 
   private initialize(): void {
-    this.db.exec(`
-      PRAGMA journal_mode = WAL;
-      PRAGMA synchronous = NORMAL;
-
-      CREATE TABLE IF NOT EXISTS memory_meta (
-        key TEXT PRIMARY KEY,
-        value TEXT NOT NULL
-      );
-
-      CREATE TABLE IF NOT EXISTS general_memories (
-        id TEXT PRIMARY KEY,
-        content TEXT NOT NULL,
-        category TEXT NOT NULL,
-        tags_json TEXT NOT NULL DEFAULT '[]',
-        site TEXT,
-        project TEXT,
-        source TEXT NOT NULL DEFAULT 'manual',
-        importance REAL NOT NULL DEFAULT 0.5,
-        content_hash TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        last_recalled_at TEXT,
-        recall_count INTEGER NOT NULL DEFAULT 0
-      );
-
-      CREATE UNIQUE INDEX IF NOT EXISTS idx_general_memories_dedupe
-      ON general_memories(category, content_hash, ifnull(site, ''), ifnull(project, ''));
-
-      CREATE INDEX IF NOT EXISTS idx_general_memories_category ON general_memories(category);
-
-      CREATE TABLE IF NOT EXISTS closure_memories (
-        id TEXT PRIMARY KEY,
-        type TEXT NOT NULL,
-        title TEXT,
-        content TEXT NOT NULL,
-        tags_json TEXT NOT NULL DEFAULT '[]',
-        confidence REAL NOT NULL,
-        trigger_pattern TEXT,
-        avoid_pattern TEXT,
-        applicability_json TEXT NOT NULL DEFAULT '[]',
-        source TEXT NOT NULL DEFAULT 'manual',
-        content_hash TEXT NOT NULL,
-        access_count INTEGER NOT NULL DEFAULT 0,
-        last_accessed TEXT,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      );
-
-      CREATE UNIQUE INDEX IF NOT EXISTS idx_closure_memories_dedupe
-      ON closure_memories(type, content_hash);
-
-      CREATE INDEX IF NOT EXISTS idx_closure_memories_type ON closure_memories(type);
-
-      CREATE TABLE IF NOT EXISTS memory_embeddings (
-        scope TEXT NOT NULL,
-        memory_id TEXT NOT NULL,
-        model TEXT NOT NULL,
-        dimensions INTEGER NOT NULL,
-        embedding_json TEXT NOT NULL,
-        source_text TEXT NOT NULL,
-        text_hash TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        PRIMARY KEY (scope, memory_id)
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_memory_embeddings_scope ON memory_embeddings(scope);
-    `);
-
+    this.loadState();
     this.importLegacyGlobalMemories();
     this.importLegacyClosureMemories();
   }
 
+  private loadState(): void {
+    this.generalMemories.clear();
+    for (const record of [
+      ...readLegacyJsonl<StoredGeneralMemory>(this.legacyGeneralPath),
+      ...readStructuredJsonRecords<StoredGeneralMemory>(this.generalRootDir),
+    ]) {
+      if (!record || typeof record.id !== 'string' || typeof record.content !== 'string' || typeof record.category !== 'string') {
+        continue;
+      }
+      this.generalMemories.set(record.id, {
+        ...record,
+        tags: normalizeTags(record.tags),
+        importance: clamp(record.importance ?? 0.5, 0, 1),
+        recallCount: record.recallCount ?? 0,
+        source: record.source || 'manual',
+        contentHash: record.contentHash || buildHash(record.content),
+      });
+    }
+
+    this.closureMemories.clear();
+    for (const record of [
+      ...readLegacyJsonl<StoredClosureMemory>(this.legacyClosurePath),
+      ...readStructuredJsonRecords<StoredClosureMemory>(this.closureRootDir),
+    ]) {
+      if (!record || typeof record.id !== 'string' || typeof record.content !== 'string' || typeof record.type !== 'string') {
+        continue;
+      }
+      this.closureMemories.set(record.id, {
+        ...record,
+        tags: normalizeTags(record.tags),
+        applicabilityConditions: normalizeTags(record.applicabilityConditions || []),
+        confidence: clamp(record.confidence ?? 0.7, 0.1, 1),
+        accessCount: record.accessCount ?? 0,
+        source: record.source || 'manual',
+        contentHash: record.contentHash || buildHash(record.content),
+      });
+    }
+
+    this.embeddings.clear();
+    for (const record of [
+      ...readLegacyJsonl<StoredEmbeddingRecord>(this.legacyEmbeddingsPath),
+      ...readStructuredJsonRecords<StoredEmbeddingRecord>(this.embeddingsRootDir),
+    ]) {
+      if (!record || typeof record.memoryId !== 'string' || !Array.isArray(record.embedding) || typeof record.scope !== 'string') {
+        continue;
+      }
+      this.embeddings.set(this.embeddingKey(record.scope, record.memoryId), {
+        ...record,
+        model: record.model || MEMORY_EMBEDDING_MODEL,
+        dimensions: record.dimensions || MEMORY_EMBEDDING_DIMENSIONS,
+        embedding: record.embedding.filter((value): value is number => typeof value === 'number'),
+      });
+    }
+
+    this.meta = {
+      ...readJson<Record<string, string>>(this.legacyMetaPath, {}),
+      ...readJson<Record<string, string>>(this.metaPath, {}),
+    };
+  }
+
   private getMeta(key: string): string | null {
-    const row = this.db.prepare('SELECT value FROM memory_meta WHERE key = @key').get({ key }) as { value: string } | undefined;
-    return row?.value || null;
+    return this.meta[key] || null;
   }
 
   private setMeta(key: string, value: string): void {
-    this.db.prepare(`
-      INSERT INTO memory_meta (key, value) VALUES (@key, @value)
-      ON CONFLICT(key) DO UPDATE SET value = excluded.value
-    `).run({ key, value });
+    this.meta[key] = value;
+    writeJson(this.metaPath, this.meta);
+  }
+
+  private persistGeneralMemories(): void {
+    const records = Array.from(this.generalMemories.values())
+      .sort((left, right) => new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime());
+    resetDirectory(this.generalRootDir);
+    for (const record of records) {
+      const paths = this.getGeneralRecordPaths(record);
+      const fileBase = paths.markdownPath.replace(/\.md$/, '');
+      writeRecordFiles(
+        fileBase,
+        renderMarkdownRecord(
+          `${record.category.replace(/_/g, ' ')} memory`,
+          [
+            { label: 'ID', value: record.id },
+            { label: 'Category', value: record.category },
+            { label: 'Tags', value: record.tags },
+            { label: 'Site', value: record.site },
+            { label: 'Project', value: record.project },
+            { label: 'Source', value: record.source },
+            { label: 'Importance', value: record.importance },
+            { label: 'Created', value: record.createdAt },
+            { label: 'Updated', value: record.updatedAt },
+            { label: 'Recall count', value: record.recallCount },
+            { label: 'Last recalled', value: record.lastRecalledAt },
+          ],
+          record.content,
+        ),
+        record,
+      );
+    }
+  }
+
+  private persistClosureMemories(): void {
+    const records = Array.from(this.closureMemories.values())
+      .sort((left, right) => new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime());
+    resetDirectory(this.closureRootDir);
+    for (const record of records) {
+      const paths = this.getClosureRecordPaths(record);
+      const fileBase = paths.markdownPath.replace(/\.md$/, '');
+      writeRecordFiles(
+        fileBase,
+        renderMarkdownRecord(
+          record.title || `${record.type} memory`,
+          [
+            { label: 'ID', value: record.id },
+            { label: 'Type', value: record.type },
+            { label: 'Tags', value: record.tags },
+            { label: 'Confidence', value: record.confidence },
+            { label: 'Trigger pattern', value: record.triggerPattern },
+            { label: 'Avoid pattern', value: record.avoidPattern },
+            { label: 'Applicability conditions', value: record.applicabilityConditions },
+            { label: 'Source', value: record.source },
+            { label: 'Created', value: record.createdAt },
+            { label: 'Updated', value: record.updatedAt },
+            { label: 'Access count', value: record.accessCount },
+            { label: 'Last accessed', value: record.lastAccessed },
+          ],
+          record.content,
+        ),
+        record,
+      );
+    }
+  }
+
+  private persistEmbeddings(): void {
+    const records = Array.from(this.embeddings.values())
+      .sort((left, right) => left.scope.localeCompare(right.scope) || left.memoryId.localeCompare(right.memoryId));
+    resetDirectory(this.embeddingsRootDir);
+    for (const record of records) {
+      const scopeDir = join(this.embeddingsRootDir, sanitizePathSegment(record.scope));
+      const fileBase = join(scopeDir, sanitizePathSegment(record.memoryId));
+      writeJson(`${fileBase}.json`, record);
+    }
   }
 
   private importLegacyGlobalMemories(): void {
@@ -925,7 +1064,6 @@ export class SQLiteMemoryStore {
             if (!entry || typeof entry.content !== 'string' || typeof entry.type !== 'string') {
               continue;
             }
-
             this.upsertClosureMemory({
               id: typeof entry.id === 'string' ? entry.id : undefined,
               type: entry.type as MemoryType,
@@ -973,7 +1111,6 @@ export class SQLiteMemoryStore {
           if (!entry || typeof entry.content !== 'string' || typeof entry.category !== 'string') {
             continue;
           }
-
           if (!GENERAL_MEMORY_CATEGORIES.includes(entry.category as GeneralMemoryCategory)) {
             continue;
           }
@@ -1001,96 +1138,49 @@ export class SQLiteMemoryStore {
     this.setMeta(metaKey, '1');
   }
 
-  private getGeneralMemoryRows(options: { category?: GeneralMemoryCategory; site?: string; project?: string } = {}): DbGeneralRow[] {
-    const clauses = ['1 = 1'];
-    const params: Record<string, unknown> = {};
-
-    if (options.category) {
-      clauses.push('category = @category');
-      params.category = options.category;
-    }
-    if (options.site) {
-      clauses.push("lower(ifnull(site, '')) LIKE @site");
-      params.site = `%${options.site.toLowerCase()}%`;
-    }
-    if (options.project) {
-      clauses.push('project = @project');
-      params.project = options.project;
-    }
-
-    const sql = `
-      SELECT *
-      FROM general_memories
-      WHERE ${clauses.join(' AND ')}
-      ORDER BY updated_at DESC
-    `;
-    return this.db.prepare(sql).all(params) as DbGeneralRow[];
-  }
-
-  private getGeneralMemoryById(id: string): GeneralMemoryRecord | null {
-    const row = this.db.prepare('SELECT * FROM general_memories WHERE id = @id').get({ id }) as DbGeneralRow | undefined;
-    return row ? toGeneralRecord(row) : null;
-  }
-
-  private listClosureMemoryRows(): DbClosureRow[] {
-    return this.db.prepare('SELECT * FROM closure_memories ORDER BY updated_at DESC, created_at DESC').all() as DbClosureRow[];
-  }
-
-  private getClosureMemoryRowById(id: string): DbClosureRow | null {
-    const row = this.db.prepare('SELECT * FROM closure_memories WHERE id = @id').get({ id }) as DbClosureRow | undefined;
-    return row || null;
-  }
-
-  private getClosureMemoryById(id: string): MemoryRecord | null {
-    const row = this.getClosureMemoryRowById(id);
-    return row ? toClosureRecord(row) : null;
-  }
-
-  private rankGeneralRows(rows: DbGeneralRow[], query: string): GeneralMemoryMatch[] {
+  private rankGeneralRows(rows: StoredGeneralMemory[], query: string): GeneralMemoryMatch[] {
     const queryText = query.trim();
     if (!queryText) {
       return rows
-        .sort((left, right) => new Date(right.updated_at).getTime() - new Date(left.updated_at).getTime())
-        .map(row => ({ ...toGeneralRecord(row), score: 0, semanticScore: 0, lexicalScore: 0 }));
+        .sort((left, right) => new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime())
+        .map(record => ({ ...cloneGeneralRecord(record), ...this.getGeneralRecordPaths(record), score: 0, semanticScore: 0, lexicalScore: 0 }));
     }
 
     const queryEmbedding = computeSemanticEmbedding(queryText);
     const queryTerms = tokenizeSemanticText(queryText);
-    const embeddings = this.getEmbeddings('general', rows.map(row => row.id));
 
     return rows
-      .map(row => {
-        const lexicalScore = this.computeGeneralLexicalScore(row, queryTerms);
-        const embedding = embeddings.get(row.id) || queryEmbedding.map(() => 0);
+      .map(record => {
+        const lexicalScore = this.computeGeneralLexicalScore(record, queryTerms);
+        const embedding = this.embeddings.get(this.embeddingKey('general', record.id))?.embedding || queryEmbedding.map(() => 0);
         const semanticScore = cosineSimilarity(queryEmbedding, embedding);
-        const score = ((semanticScore * 0.82) + (lexicalScore * 0.18)) * Math.max(0.25, row.importance || 0.5);
-        return { ...toGeneralRecord(row), score, semanticScore, lexicalScore };
+        const score = ((semanticScore * 0.82) + (lexicalScore * 0.18)) * Math.max(0.25, record.importance || 0.5);
+        return { ...cloneGeneralRecord(record), ...this.getGeneralRecordPaths(record), score, semanticScore, lexicalScore };
       })
       .filter(match => this.shouldIncludeGeneralMatch(match))
       .sort((left, right) => right.score - left.score || new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime());
   }
 
-  private rankClosureRows(rows: DbClosureRow[], query: string): ClosureMemoryMatch[] {
+  private rankClosureRows(rows: StoredClosureMemory[], query: string): ClosureMemoryMatch[] {
     const queryText = query.trim();
     if (!queryText) {
       return rows
-        .sort((left, right) => new Date(right.updated_at).getTime() - new Date(left.updated_at).getTime())
-        .map(row => ({ ...toClosureRecord(row), score: 0, semanticScore: 0, lexicalScore: 0 }));
+        .sort((left, right) => new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime())
+        .map(record => ({ ...cloneClosureRecord(record), ...this.getClosureRecordPaths(record), score: 0, semanticScore: 0, lexicalScore: 0 }));
     }
 
     const queryEmbedding = computeSemanticEmbedding(queryText);
     const queryTerms = tokenizeSemanticText(queryText);
-    const embeddings = this.getEmbeddings('closure', rows.map(row => row.id));
 
     return rows
-      .map(row => {
-        const lexicalScore = this.computeClosureLexicalScore(row, queryTerms, queryText);
-        const embedding = embeddings.get(row.id) || queryEmbedding.map(() => 0);
+      .map(record => {
+        const lexicalScore = this.computeClosureLexicalScore(record, queryTerms, queryText);
+        const embedding = this.embeddings.get(this.embeddingKey('closure', record.id))?.embedding || queryEmbedding.map(() => 0);
         const semanticScore = cosineSimilarity(queryEmbedding, embedding);
-        let score = ((semanticScore * 0.8) + (lexicalScore * 0.2)) * row.confidence;
-        if (row.type === 'failure') score *= 1.15;
-        if (row.type === 'procedural') score *= 1.1;
-        return { ...toClosureRecord(row), score, semanticScore, lexicalScore };
+        let score = ((semanticScore * 0.8) + (lexicalScore * 0.2)) * record.confidence;
+        if (record.type === 'failure') score *= 1.15;
+        if (record.type === 'procedural') score *= 1.1;
+        return { ...cloneClosureRecord(record), ...this.getClosureRecordPaths(record), score, semanticScore, lexicalScore };
       })
       .filter(match => this.shouldIncludeClosureMatch(match))
       .sort((left, right) => right.score - left.score || new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime());
@@ -1100,7 +1190,6 @@ export class SQLiteMemoryStore {
     if (match.lexicalScore > 0) {
       return true;
     }
-
     return match.semanticScore >= 0.45 && match.score >= 0.12;
   }
 
@@ -1108,18 +1197,17 @@ export class SQLiteMemoryStore {
     if (match.lexicalScore > 0) {
       return true;
     }
-
     return match.semanticScore >= 0.45 && match.score >= 0.12;
   }
 
-  private computeGeneralLexicalScore(row: DbGeneralRow, queryTerms: string[]): number {
+  private computeGeneralLexicalScore(record: StoredGeneralMemory, queryTerms: string[]): number {
     if (queryTerms.length === 0) {
       return 0;
     }
 
-    const contentLower = row.content.toLowerCase();
-    const tagsLower = parseJsonArray(row.tags_json).map(tag => tag.toLowerCase());
-    const categoryLower = row.category.toLowerCase();
+    const contentLower = record.content.toLowerCase();
+    const tagsLower = record.tags.map(tag => tag.toLowerCase());
+    const categoryLower = record.category.toLowerCase();
     let score = 0;
 
     for (const term of queryTerms) {
@@ -1131,22 +1219,23 @@ export class SQLiteMemoryStore {
     return score / Math.max(1, queryTerms.length * 3);
   }
 
-  private computeClosureLexicalScore(row: DbClosureRow, queryTerms: string[], queryText: string): number {
+  private computeClosureLexicalScore(record: StoredClosureMemory, queryTerms: string[], queryText: string): number {
     if (queryTerms.length === 0) {
       return 0;
     }
 
-    const contentLower = row.content.toLowerCase();
-    const tagsLower = parseJsonArray(row.tags_json).map(tag => tag.toLowerCase());
+    const contentLower = record.content.toLowerCase();
+    const tagsLower = record.tags.map(tag => tag.toLowerCase());
     let score = 0;
 
     for (const term of queryTerms) {
       if (contentLower.includes(term)) score += 1;
       if (tagsLower.some(tag => tag.includes(term))) score += 2;
     }
-    if (row.trigger_pattern) {
+
+    if (record.triggerPattern) {
       try {
-        if (new RegExp(row.trigger_pattern, 'i').test(queryText)) score += 4;
+        if (new RegExp(record.triggerPattern, 'i').test(queryText)) score += 4;
       } catch {
         // Ignore invalid regex patterns.
       }
@@ -1155,72 +1244,64 @@ export class SQLiteMemoryStore {
     return score / Math.max(1, queryTerms.length * 2);
   }
 
-  private upsertEmbedding(scope: 'general' | 'closure', memoryId: string, sourceText: string): void {
-    const updatedAt = new Date().toISOString();
-    const textHash = buildHash(sourceText);
-    const existing = this.db.prepare(`
-      SELECT *
-      FROM memory_embeddings
-      WHERE scope = @scope AND memory_id = @memoryId
-      LIMIT 1
-    `).get({ scope, memoryId }) as DbEmbeddingRow | undefined;
+  private embeddingKey(scope: 'general' | 'closure', memoryId: string): string {
+    return `${scope}:${memoryId}`;
+  }
 
-    if (existing && existing.text_hash === textHash) {
-      return;
-    }
-
-    const embedding = computeSemanticEmbedding(sourceText, MEMORY_EMBEDDING_DIMENSIONS);
-    this.db.prepare(`
-      INSERT INTO memory_embeddings (scope, memory_id, model, dimensions, embedding_json, source_text, text_hash, updated_at)
-      VALUES (@scope, @memoryId, @model, @dimensions, @embeddingJson, @sourceText, @textHash, @updatedAt)
-      ON CONFLICT(scope, memory_id) DO UPDATE SET
-        model = excluded.model,
-        dimensions = excluded.dimensions,
-        embedding_json = excluded.embedding_json,
-        source_text = excluded.source_text,
-        text_hash = excluded.text_hash,
-        updated_at = excluded.updated_at
-    `).run({
+  private buildEmbeddingRecord(scope: 'general' | 'closure', memoryId: string, sourceText: string): StoredEmbeddingRecord {
+    return {
       scope,
       memoryId,
       model: MEMORY_EMBEDDING_MODEL,
       dimensions: MEMORY_EMBEDDING_DIMENSIONS,
-      embeddingJson: JSON.stringify(embedding),
+      embedding: computeSemanticEmbedding(sourceText, MEMORY_EMBEDDING_DIMENSIONS),
       sourceText,
-      textHash,
-      updatedAt,
-    });
+      textHash: buildHash(sourceText),
+      updatedAt: new Date().toISOString(),
+    };
   }
 
-  private getEmbeddings(scope: 'general' | 'closure', ids: string[]): Map<string, number[]> {
-    const embeddings = new Map<string, number[]>();
-    if (ids.length === 0) {
-      return embeddings;
+  private upsertEmbedding(scope: 'general' | 'closure', memoryId: string, sourceText: string): void {
+    const key = this.embeddingKey(scope, memoryId);
+    const textHash = buildHash(sourceText);
+    const existing = this.embeddings.get(key);
+    if (existing && existing.textHash === textHash) {
+      return;
     }
+    this.embeddings.set(key, this.buildEmbeddingRecord(scope, memoryId, sourceText));
+    this.persistEmbeddings();
+  }
 
-    const rows = this.db.prepare('SELECT * FROM memory_embeddings WHERE scope = @scope').all({ scope }) as DbEmbeddingRow[];
-    const idSet = new Set(ids);
-    for (const row of rows) {
-      if (!idSet.has(row.memory_id)) {
-        continue;
-      }
-      const vector = parseNumberArray(row.embedding_json);
-      if (vector.length > 0) {
-        embeddings.set(row.memory_id, vector);
-      }
-    }
-    return embeddings;
+  private getGeneralRecordPaths(record: StoredGeneralMemory): MemoryArtifactPaths {
+    const directoryPath = join(this.generalRootDir, sanitizePathSegment(record.category));
+    const basePath = join(directoryPath, sanitizePathSegment(record.id));
+    return {
+      directoryPath,
+      markdownPath: `${basePath}.md`,
+      metadataPath: `${basePath}.json`,
+    };
+  }
+
+  private getClosureRecordPaths(record: StoredClosureMemory): MemoryArtifactPaths {
+    const directoryPath = join(this.closureRootDir, sanitizePathSegment(record.type));
+    const basePath = join(directoryPath, sanitizePathSegment(record.id));
+    return {
+      directoryPath,
+      markdownPath: `${basePath}.md`,
+      metadataPath: `${basePath}.json`,
+    };
   }
 }
 
 export function getSQLiteMemoryStore(dbPath?: string): SQLiteMemoryStore {
-  const resolvedPath = dbPath || resolveMemoryDbPath();
+  const configuredPath = dbPath || resolveConfiguredStorePath();
+  const resolvedPath = resolveStoreBasePath(configuredPath);
   const existing = storeCache.get(resolvedPath);
   if (existing) {
     return existing;
   }
 
-  const store = new SQLiteMemoryStore(resolvedPath);
+  const store = new SQLiteMemoryStore(configuredPath);
   storeCache.set(resolvedPath, store);
   return store;
 }

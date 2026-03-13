@@ -140,7 +140,7 @@ Git checkpoints are created automatically before high/critical risk actions. Use
   parts.push(`
 ## Memory
 
-Use \`memory_save\` to persist important knowledge across sessions. Use \`memory_recall\` at the start of complex tasks to leverage past discoveries. Memory is stored globally in a SQLite database at \`~/.woodbury/data/memory/memory.db\` and persists across projects and sessions.
+Use \`memory_save\` to persist important knowledge across sessions. Use \`memory_recall\` at the start of complex tasks to leverage past discoveries. Memory is stored globally as organized Markdown and JSON files under \`~/.woodbury/data/memory/\` and persists across projects and sessions.
 
 You should proactively save durable information without waiting for the user to ask. If you learn a stable project convention, decision, gotcha, file location, endpoint, or reusable web procedure that would help a future run, call \`memory_save\` before finishing.
 

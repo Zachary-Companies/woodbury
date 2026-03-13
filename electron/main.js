@@ -1,6 +1,7 @@
 const { app, BrowserWindow, Tray, Menu, nativeImage, dialog, shell } = require('electron');
 const path = require('path');
 const os = require('os');
+const fs = require('fs');
 
 // ── App identity (must be set before menus are built) ────────
 app.name = 'Woodbury';
@@ -43,6 +44,34 @@ function withTimeout(promise, ms, label) {
   ]);
 }
 
+function formatStartupError(err) {
+  const message = err && err.message ? String(err.message) : String(err || 'Unknown startup failure');
+
+  if (message.includes('NODE_MODULE_VERSION') || message.includes('ERR_DLOPEN_FAILED')) {
+    return [
+      'Woodbury could not load one of its bundled native components.',
+      '',
+      'If you installed the app from a release build, reinstall or update Woodbury and try again.',
+      'If you are running from source, run: npm run electron:prepare-native',
+      '',
+      `Technical detail: ${message}`,
+    ].join('\n');
+  }
+
+  if (message.includes('node:sqlite') || message.includes('better-sqlite3') || message.includes('SQLite runtime')) {
+    return [
+      'Woodbury could not start its local memory database.',
+      '',
+      'Please reinstall or update the app and try again.',
+      'If you are running from source, run: npm install && npm run electron:prepare-native',
+      '',
+      `Technical detail: ${message}`,
+    ].join('\n');
+  }
+
+  return `The backend server could not start.\n\n${message}`;
+}
+
 async function startBackend() {
   const distDir = path.join(__dirname, '..', 'dist');
   console.log('[electron] distDir:', distDir);
@@ -53,10 +82,8 @@ async function startBackend() {
   const { ExtensionRegistry, migrateToRegistry, syncBundledExtensions } = require(path.join(distDir, 'extension-loader'));
   console.log('[electron] Modules loaded.');
 
-  // Use home directory as a stable working directory for the Electron app.
-  // process.cwd() is unpredictable for installed apps (depends on how the app is launched),
-  // which causes workflow/composition discovery to fail when looking in project-local dirs.
-  const workDir = os.homedir();
+  const workDir = resolveDashboardWorkDir();
+  console.log('[electron] workDir:', workDir);
 
   // Load extension registry (instant JSON read — no disk scanning)
   console.log('[electron] Loading extension registry...');
@@ -87,6 +114,21 @@ async function startBackend() {
     .catch((err) => console.error('[electron] Extension loading error:', err.message || err));
 
   return handle;
+}
+
+function resolveDashboardWorkDir() {
+  if (!app.isPackaged) {
+    return path.resolve(__dirname, '..');
+  }
+
+  const stableWorkspaceDir = path.join(os.homedir(), '.woodbury', 'workspace');
+  try {
+    fs.mkdirSync(stableWorkspaceDir, { recursive: true });
+  } catch {
+    // Fall back to the Woodbury data root if the workspace directory cannot be created.
+    return path.join(os.homedir(), '.woodbury');
+  }
+  return stableWorkspaceDir;
 }
 
 // ── Window ───────────────────────────────────────────────────
@@ -638,7 +680,7 @@ app.on('ready', async () => {
     console.error('[electron] Failed to start:', err);
     dialog.showErrorBox(
       'Woodbury Failed to Start',
-      `The backend server could not start.\n\n${err.message || err}`
+      formatStartupError(err)
     );
     app.quit();
   }

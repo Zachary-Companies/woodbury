@@ -1,0 +1,16 @@
+{
+  "objective": "Repair the Scene Generator script to generate scenes one at a time with proper format validation and pass the failing unit tests",
+  "successCriteria": [
+    "Generate scenes individually in a loop rather than all at once",
+    "Pass handles_malformed_script_plan test with correct fallback format",
+    "Pass fixes_scene_format_issues test with proper scene validation",
+    "Maintain existing structure and error handling patterns"
+  ],
+  "constraints": [
+    "Must preserve existing input/output annotations and function signature",
+    "Must implement explicit per-scene iteration as requested",
+    "Must return properly formatted JSON string output"
+  ],
+  "createdAt": "2026-03-13T23:00:05.093Z",
+  "updatedAt": "2026-03-13T23:00:05.093Z"
+}

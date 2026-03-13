@@ -2300,7 +2300,7 @@ function showAddScriptModal() {
       addScriptNode(desc, data.code, data.inputs, data.outputs, [
         { role: 'user', content: desc },
         { role: 'assistant', content: data.assistantMessage },
-      ], chosenContextNodeIds);
+      ], chosenContextNodeIds, data.transcript || []);
 
       overlay.remove();
       toast('Script node created!', 'success');
@@ -2436,7 +2436,7 @@ function showDataAwareScriptModal(srcNodeId, srcPortName, portValue, dropX, drop
       addScriptNodeAt(desc, data.code, data.inputs, data.outputs, [
         { role: 'user', content: desc },
         { role: 'assistant', content: data.assistantMessage },
-      ], dropX, dropY, chosenContextNodeIds);
+      ], dropX, dropY, chosenContextNodeIds, data.transcript || []);
 
       // Auto-connect: find the first input port of the new node and create an edge
       var newNode = compData.nodes[compData.nodes.length - 1];
@@ -2482,7 +2482,7 @@ function getViewportCenter() {
   return { x: Math.round(cx + jx), y: Math.round(cy + jy) };
 }
 
-function addScriptNodeAt(description, code, inputs, outputs, chatHistory, posX, posY, contextNodeIds) {
+function addScriptNodeAt(description, code, inputs, outputs, chatHistory, posX, posY, contextNodeIds, generationTranscript) {
   if (!compData) return;
   pushUndoSnapshot();
 
@@ -2500,6 +2500,7 @@ function addScriptNodeAt(description, code, inputs, outputs, chatHistory, posX, 
       outputs: outputs || [],
       chatHistory: chatHistory || [],
       contextNodeIds: Array.isArray(contextNodeIds) ? contextNodeIds.slice() : [],
+      generationTranscript: Array.isArray(generationTranscript) ? generationTranscript.slice() : [],
     },
   };
 
@@ -2520,7 +2521,7 @@ function addScriptNodeAt(description, code, inputs, outputs, chatHistory, posX, 
   fetchCompositions();
 }
 
-function addScriptNode(description, code, inputs, outputs, chatHistory, contextNodeIds) {
+function addScriptNode(description, code, inputs, outputs, chatHistory, contextNodeIds, generationTranscript) {
   if (!compData) return;
   pushUndoSnapshot();
 
@@ -2540,6 +2541,7 @@ function addScriptNode(description, code, inputs, outputs, chatHistory, contextN
       outputs: outputs || [],
       chatHistory: chatHistory || [],
       contextNodeIds: Array.isArray(contextNodeIds) ? contextNodeIds.slice() : [],
+      generationTranscript: Array.isArray(generationTranscript) ? generationTranscript.slice() : [],
     },
   };
 
@@ -2568,6 +2570,12 @@ function showGeneratePipelineModal() {
   var selectedContextNodeIds = Array.from(selectedNodes || []).filter(function(id) {
     return availableContextNodes.some(function(node) { return node.id === id; });
   });
+  var publishedSkillsSectionHtml =
+    '<div id="comp-published-skills-section" style="margin-top:0.75rem;padding:0.75rem;border-radius:8px;background:rgba(15,23,42,0.65);border:1px solid rgba(56,189,248,0.18);">' +
+      '<div style="color:#cbd5e1;font-size:0.74rem;font-weight:600;margin-bottom:0.5rem;">Published Skills Bias</div>' +
+      '<div style="color:#64748b;font-size:0.68rem;margin-bottom:0.55rem;">Optionally select published skills to bias this pipeline. If you select any, generation will prioritize only those skill patterns.</div>' +
+      '<div id="comp-published-skills-list" style="display:flex;flex-direction:column;gap:0.45rem;max-height:180px;overflow:auto;color:#94a3b8;font-size:0.7rem;">Loading published skills…</div>' +
+    '</div>';
   var contextSectionHtml = '';
   if (availableContextNodes.length > 0) {
     var contextItemsHtml = availableContextNodes.map(function(node) {
@@ -2603,6 +2611,7 @@ function showGeneratePipelineModal() {
         '</p>' +
         '<textarea id="comp-pipeline-gen-desc" class="comp-props-input comp-gate-textarea" style="min-height:100px;" ' +
           'placeholder="e.g. Take a photo from the asset library, generate a cartoon version with nanobanana, then copy the result to ~/Gallery/cartoons"></textarea>' +
+        publishedSkillsSectionHtml +
         contextSectionHtml +
         '<div style="display:flex;gap:0.5rem;margin-top:1rem;">' +
           '<button class="comp-tb-btn comp-tb-btn-run" id="comp-pipeline-gen-go" style="flex:1;">Generate Pipeline</button>' +
@@ -2616,6 +2625,37 @@ function showGeneratePipelineModal() {
     '</div>';
 
   document.body.appendChild(overlay);
+
+  fetch('/api/skills/library')
+    .then(function(res) { return res.json().then(function(data) { return { ok: res.ok, data: data }; }); })
+    .then(function(result) {
+      var listEl = overlay.querySelector('#comp-published-skills-list');
+      if (!listEl) return;
+      if (!result.ok) {
+        listEl.textContent = result.data && result.data.error ? result.data.error : 'Failed to load published skills';
+        return;
+      }
+      var skills = (result.data.skills || []).filter(function(skill) {
+        return !skill.unpublishedAt && skill.audience && skill.audience.pipelines;
+      });
+      if (!skills.length) {
+        listEl.textContent = 'No published pipeline skills available yet.';
+        return;
+      }
+      listEl.innerHTML = skills.map(function(skill) {
+        return '<label style="display:flex;align-items:flex-start;gap:8px;padding:0.45rem 0.55rem;border-radius:8px;background:rgba(15,23,42,0.45);border:1px solid rgba(255,255,255,0.06);cursor:pointer;">' +
+          '<input type="checkbox" class="comp-published-skill-picker" data-skill-id="' + compEscAttr(skill.publishedSkillId) + '" style="margin-top:2px;accent-color:#38bdf8;">' +
+          '<span style="display:flex;flex-direction:column;gap:2px;min-width:0;">' +
+            '<span style="color:#e2e8f0;font-size:0.72rem;">' + compEscHtml(skill.name) + '</span>' +
+            '<span style="color:#64748b;font-size:0.64rem;line-height:1.35;">' + compEscHtml(skill.description || skill.skill.purpose || '') + '</span>' +
+          '</span>' +
+        '</label>';
+      }).join('');
+    })
+    .catch(function() {
+      var listEl = overlay.querySelector('#comp-published-skills-list');
+      if (listEl) listEl.textContent = 'Failed to load published skills';
+    });
 
   overlay.querySelector('#comp-pipeline-gen-close').addEventListener('click', function() { overlay.remove(); });
   overlay.querySelector('#comp-pipeline-gen-cancel').addEventListener('click', function() { overlay.remove(); });
@@ -2634,11 +2674,15 @@ function showGeneratePipelineModal() {
       var chosenContextNodeIds = Array.from(overlay.querySelectorAll('.comp-pipeline-context-picker:checked')).map(function(input) {
         return input.getAttribute('data-node-id');
       }).filter(Boolean);
+      var chosenPublishedSkillIds = Array.from(overlay.querySelectorAll('.comp-published-skill-picker:checked')).map(function(input) {
+        return input.getAttribute('data-skill-id');
+      }).filter(Boolean);
       var res = await fetch('/api/compositions/generate-pipeline', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           description: desc,
+          selectedPublishedSkillIds: chosenPublishedSkillIds,
           graphContext: chosenContextNodeIds.length > 0
             ? buildScriptGenerationContext(null, chosenContextNodeIds)
             : undefined,

@@ -1,3 +1,4 @@
+import { exec } from 'node:child_process';
 import type { DashboardContext, RouteHandler } from '../types.js';
 import { sendJson } from '../utils.js';
 import { GENERAL_MEMORY_CATEGORIES, getSQLiteMemoryStore } from '../../sqlite-memory-store.js';
@@ -83,6 +84,44 @@ export const handleMemoryRoutes: RouteHandler = async (req, res, pathname, url, 
       stats: store.getMemoryStats(),
     });
     return true;
+  }
+
+  {
+    const openMatch = pathname.match(/^\/api\/memories\/([^/]+)\/(open|reveal)$/);
+    if (req.method === 'POST' && openMatch) {
+      const id = decodeURIComponent(openMatch[1]);
+      const action = openMatch[2];
+      const scope = url.searchParams.get('scope') === 'closure' ? 'closure' : 'general';
+      const paths = store.getMemoryArtifactPaths(scope, id);
+
+      if (!paths?.markdownPath) {
+        sendJson(res, 404, { error: 'Memory file not found' });
+        return true;
+      }
+
+      try {
+        if (action === 'reveal') {
+          if (process.platform === 'darwin') {
+            exec(`open -R "${paths.markdownPath}"`);
+          } else if (process.platform === 'win32') {
+            exec(`explorer /select,"${paths.markdownPath.replace(/\//g, '\\\\')}"`);
+          } else {
+            exec(`xdg-open "${paths.directoryPath}"`);
+          }
+        } else if (process.platform === 'darwin') {
+          exec(`open "${paths.markdownPath}"`);
+        } else if (process.platform === 'win32') {
+          exec(`start "" "${paths.markdownPath.replace(/\//g, '\\\\')}"`);
+        } else {
+          exec(`xdg-open "${paths.markdownPath}"`);
+        }
+
+        sendJson(res, 200, { success: true, scope, id, action, path: paths.markdownPath });
+      } catch {
+        sendJson(res, 500, { error: `Failed to ${action} memory file` });
+      }
+      return true;
+    }
   }
 
   if (req.method === 'DELETE' && pathname.startsWith('/api/memories/')) {

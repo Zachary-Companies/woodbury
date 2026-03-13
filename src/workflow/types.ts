@@ -909,6 +909,12 @@ export interface ScriptNodeConfig {
   outputs: PortDeclaration[];
   /** Agent conversation history for iterative refinement */
   chatHistory?: Array<{ role: 'user' | 'assistant'; content: string }>;
+  /** Persisted generation transcript for script creation/refinement/repair runs */
+  generationTranscript?: Array<{
+    stage: 'request' | 'generation' | 'repair' | 'fallback' | 'validation' | 'tests' | 'verification';
+    title: string;
+    content: string;
+  }>;
 }
 
 /** Configuration for an output node in a composition — collects pipeline results */

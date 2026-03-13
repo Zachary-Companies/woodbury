@@ -1,11 +1,11 @@
 import { ToolDefinition, ToolHandler, ToolContext } from '../types.js';
 import { GENERAL_MEMORY_CATEGORIES, getSQLiteMemoryStore } from '../../sqlite-memory-store.js';
 
-const MEMORY_DB_PATH = process.env.WOODBURY_MEMORY_DB_PATH || '~/.woodbury/data/memory/memory.db';
+const MEMORY_DB_PATH = process.env.WOODBURY_MEMORY_DB_PATH || '~/.woodbury/data/memory/memory-store';
 
 export const definition: ToolDefinition = {
   name: 'memory_save',
-  description: `Save information to long-term memory for later retrieval. Persists to a SQLite database at ${MEMORY_DB_PATH}.
+  description: `Save information to long-term memory for later retrieval. Persists to a file-and-folder memory store rooted at ${MEMORY_DB_PATH}, with Markdown content files and JSON metadata.
 
 Categories:
 - convention — Project conventions and patterns

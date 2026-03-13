@@ -47,6 +47,7 @@ export { definition as goalContractDefinition, handler as goalContractHandler } 
 export { definition as reflectDefinition, handler as reflectHandler } from './reflect.js';
 export { definition as memorySaveDefinition, handler as memorySaveHandler } from './memory-save.js';
 export { definition as memoryRecallDefinition, handler as memoryRecallHandler } from './memory-recall.js';
+export { definition as skillOptimizeDefinition, handler as skillOptimizeHandler } from './skill-optimize.js';
 export { definition as preflightCheckDefinition, handler as preflightCheckHandler } from './preflight-check.js';
 
 // Flow-Frame tools (powered by flow-frame-core)
@@ -112,6 +113,7 @@ import { ffFileDialogDefinition, ffFileDialogHandler } from './ff-file-dialog.js
 import { browserQueryDefinition, browserQueryHandler } from './browser-query.js';
 import { workflowPlayDefinition, workflowPlayHandler } from './workflow-play.js';
 import { nanobananaTool } from './nanobanana.js';
+import { definition as skillOptimizeDefinition, handler as skillOptimizeHandler } from './skill-optimize.js';
 
 // Tool definition type
 export interface ToolDefinition {
@@ -160,6 +162,7 @@ export const allTools = [
   { definition: ffFileDialogDefinition, handler: ffFileDialogHandler },
   // Browser Bridge (Chrome extension via WebSocket)
   { definition: browserQueryDefinition, handler: browserQueryHandler },
+  { definition: skillOptimizeDefinition, handler: skillOptimizeHandler },
   // Workflow automation
   { definition: workflowPlayDefinition, handler: workflowPlayHandler },
   // AI Image Generation

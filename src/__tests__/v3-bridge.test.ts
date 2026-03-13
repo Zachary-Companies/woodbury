@@ -2,8 +2,12 @@
  * Unit tests for Closure Engine V3 — AgentHandleBridge, System Prompt, Barrel Exports
  */
 import { describe, it, expect } from '@jest/globals';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { createAgentHandleBridge } from '../loop/v3/agent-handle-bridge.js';
 import { buildV3SystemPrompt } from '../loop/v3/system-prompt-v3.js';
+import { savePublishedSkill } from '../skill-builder/storage.js';
 
 // ── AgentHandleBridge ────────────────────────────────────────
 
@@ -196,6 +200,37 @@ describe('buildV3SystemPrompt', () => {
     expect(prompt).not.toContain('<tool_call>');
     expect(prompt).not.toContain('</tool_call>');
     expect(prompt).not.toContain('<final_answer>');
+  });
+
+  it('includes published chat skills when available', async () => {
+    const workDir = await mkdtemp(join(tmpdir(), 'woodbury-v3-prompt-'));
+    try {
+      await savePublishedSkill(workDir, {
+        publishedSkillId: 'published-chat-skill',
+        name: 'Support Ticket Summary',
+        description: 'Summarize support tickets with verification state.',
+        publishedAt: '2026-03-13T14:00:00.000Z',
+        updatedAt: '2026-03-13T14:00:00.000Z',
+        audience: { chat: true, pipelines: true },
+        source: { type: 'draft', draftSessionId: 'draft-1' },
+        skill: {
+          name: 'support_ticket_summary',
+          purpose: 'Summarize support tickets.',
+          triggerConditions: ['support summary requested'],
+          inputs: { ticket: 'string' },
+          instructions: ['Mention the customer name', 'Mention verification state'],
+          outputFormat: { type: 'text' },
+          version: 1,
+        },
+      });
+
+      const prompt = await buildV3SystemPrompt(workDir);
+      expect(prompt).toContain('Published Skills Library');
+      expect(prompt).toContain('Support Ticket Summary');
+      expect(prompt).toContain('support summary requested');
+    } finally {
+      await rm(workDir, { recursive: true, force: true });
+    }
   });
 });
 

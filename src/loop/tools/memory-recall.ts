@@ -1,13 +1,13 @@
 import { ToolDefinition, ToolHandler, ToolContext } from '../types.js';
 import { GENERAL_MEMORY_CATEGORIES, getSQLiteMemoryStore } from '../../sqlite-memory-store.js';
 
-const MEMORY_DB_PATH = process.env.WOODBURY_MEMORY_DB_PATH || '~/.woodbury/data/memory/memory.db';
+const MEMORY_DB_PATH = process.env.WOODBURY_MEMORY_DB_PATH || '~/.woodbury/data/memory/memory-store';
 
 export const definition: ToolDefinition = {
   name: 'memory_recall',
   description: `Recall information from long-term memory. Searches across saved memories by keywords, category, and optionally site domain.
 
-Searches the SQLite memory database at ${MEMORY_DB_PATH}. Results are ranked by relevance (tag matches score highest, then content matches). Use before starting complex tasks to leverage past discoveries.`,
+Searches the file-and-folder memory store at ${MEMORY_DB_PATH}. Results are ranked by relevance (tag matches score highest, then content matches). Use before starting complex tasks to leverage past discoveries.`,
   dangerous: false,
   parameters: {
     type: 'object',

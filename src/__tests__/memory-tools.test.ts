@@ -1,7 +1,7 @@
 /**
  * Tests for memory-save.ts and memory-recall.ts tool handlers.
  *
- * Verifies SQLite-backed memory storage and ranked recall.
+ * Verifies file-backed memory storage and ranked recall.
  */
 
 import { mkdtemp, rm } from 'node:fs/promises';

@@ -15,10 +15,49 @@ import type { DashboardContext, RouteHandler, ScriptToolDoc } from '../types.js'
 import { sendJson, readBody } from '../utils.js';
 import type { ToolDefinition } from '../../loop/types.js';
 import { debugLog } from '../../debug-log.js';
+import { formatPublishedSkillsPromptSection } from '../../skill-builder/storage.js';
 import {
   runGeneratedScriptUnitTests,
   type ScriptGenerationTestCase,
 } from '../script-generation-tests.js';
+
+interface ScriptGenerationTranscriptEntry {
+  stage: 'request' | 'generation' | 'repair' | 'fallback' | 'validation' | 'tests' | 'verification';
+  title: string;
+  content: string;
+}
+
+interface ScriptGenerationTraceEvent {
+  type: 'assistant' | 'tool_start' | 'tool_end';
+  stopReason?: string;
+  text?: string;
+  toolCalls?: Array<{ id?: string; name: string; input?: unknown }>;
+  toolName?: string;
+  params?: unknown;
+  success?: boolean;
+  result?: string;
+  durationMs?: number;
+}
+
+interface ScriptGenerationLifecycle {
+  designedPlan: string;
+  validationIssues: string[];
+  repaired: boolean;
+  verificationSummary: string;
+  selectedSkills: string[];
+  toolNames: string[];
+  transcript: ScriptGenerationTranscriptEntry[];
+}
+
+interface PipelineScriptNodeGenerationResult {
+  description: string;
+  code: string;
+  inputs: Array<{ name: string; type: string; description: string }>;
+  outputs: Array<{ name: string; type: string; description: string }>;
+  assistantMessage?: string;
+  transcript: ScriptGenerationTranscriptEntry[];
+  regenerated: boolean;
+}
 
 // ── Constants ────────────────────────────────────────────────
 const SCRIPT_TOOL_DOCS_PATH = join(homedir(), '.woodbury', 'data', 'script-tool-docs.json');
@@ -204,13 +243,77 @@ const SCRIPT_PROGRESS_GUIDANCE = [
   'When generating script-node code with long-running loops, use context.progress.start(total, label), context.progress.set(completed, total, label), context.progress.increment(label), and context.progress.complete(label) so the node UI can show a progress bar while the script runs.',
 ].join(' ');
 
-const SCRIPT_GENERATION_ALLOWED_TOOLS = [
+type ScriptGenerationMode = 'generate' | 'edit' | 'repair' | 'verify';
+
+const SCRIPT_GENERATION_BASE_TOOLS = [
   'memory_recall',
   'goal_contract',
   'reflect',
+];
+
+const SCRIPT_GENERATION_EXECUTION_TOOLS = [
   'code_execute',
   'test_run',
 ];
+
+function getScriptGenerationAllowedTools(mode: ScriptGenerationMode): string[] {
+  if (mode === 'edit' || mode === 'repair' || mode === 'verify') {
+    return SCRIPT_GENERATION_BASE_TOOLS.concat(SCRIPT_GENERATION_EXECUTION_TOOLS);
+  }
+  return SCRIPT_GENERATION_BASE_TOOLS.slice();
+}
+
+function getScriptGenerationModeGuidance(mode: ScriptGenerationMode): string {
+  if (mode === 'edit') {
+    return [
+      'This is an explicit code edit flow for an existing script.',
+      'You must update the provided code to satisfy the request, then verify the updated result.',
+      'Execution evidence can be useful after editing.',
+      'If necessary, you may use code_execute or test_run to validate the updated script before returning the final JavaScript code block.',
+      'Do not use execution tools unless they materially improve confidence in the edit.',
+    ].join(' ');
+  }
+
+  if (mode === 'repair' || mode === 'verify') {
+    return [
+      'This is an explicit repair or verification flow.',
+      'Execution evidence can be useful here.',
+      'If necessary, you may use code_execute or test_run to validate a repair before returning the final JavaScript code block.',
+      'Do not use execution tools unless they materially improve confidence in the repair or verification.',
+    ].join(' ');
+  }
+
+  return [
+    'This is a normal script generation flow.',
+    'Execution tools are unavailable in this mode.',
+    'Do not call code_execute or test_run.',
+    'Rely on reasoning, structural validation, and the scoped non-execution tools only.',
+  ].join(' ');
+}
+
+function getScriptEditGuidance(userMessage: string, hasCurrentCode: boolean): string {
+  const lower = String(userMessage || '').toLowerCase();
+  const guidance: string[] = [];
+
+  if (hasCurrentCode) {
+    guidance.push(
+      'Current code is provided. Treat this as an edit request.',
+      'Modify the existing script to satisfy the new requirement and return the full updated script.',
+      'Do not describe changes, summarize intent, or return pseudocode. Return the actual rewritten JavaScript.',
+      'Preserve existing structure, annotations, inputs, outputs, and behavior unless the request explicitly changes them.',
+    );
+  }
+
+  if (/(scene by scene|each scene|one scene at a time|one-by-one|one by one|sequential)/.test(lower)) {
+    guidance.push(
+      'If the request says to process scenes one-by-one, implement explicit per-scene iteration.',
+      'Do not generate the full scenes array with a single LLM call when the request asks for scene-by-scene generation.',
+      'Instead, parse or derive the list of planned scenes first, then generate each scene individually inside a loop and accumulate the results.',
+    );
+  }
+
+  return guidance.join(' ');
+}
 
 function getScriptGenerationProviderAndModel(): { provider: 'openai' | 'anthropic' | 'groq'; model: string } {
   if (process.env.ANTHROPIC_API_KEY) return { provider: 'anthropic', model: 'claude-sonnet-4-20250514' };
@@ -297,8 +400,8 @@ function sanitizeScriptGenerationTestCases(
 async function runScopedScriptGenerationPass(
   ctx: DashboardContext,
   objective: string,
-  options?: { chatHistory?: Array<{ role: 'user' | 'assistant'; content: string }>; sessionSuffix?: string },
-): Promise<{ content: string; selectedSkills: string[]; toolNames: string[] }> {
+  options?: { chatHistory?: Array<{ role: 'user' | 'assistant'; content: string }>; sessionSuffix?: string; mode?: ScriptGenerationMode },
+): Promise<{ content: string; selectedSkills: string[]; toolNames: string[]; trace: ScriptGenerationTraceEvent[] }> {
   const [{ createDefaultToolRegistry }, { convertAllTools }, { ToolRegistryV2 }, { buildV3SystemPrompt }, { ClosureEngine }] = await Promise.all([
     import('../../loop/index.js'),
     import('../../loop/v2/tools/native-converter.js'),
@@ -309,7 +412,8 @@ async function runScopedScriptGenerationPass(
 
   const baseRegistry = createDefaultToolRegistry();
   const nativeTools = convertAllTools(baseRegistry.getAll?.() || []);
-  const allowed = new Set(SCRIPT_GENERATION_ALLOWED_TOOLS);
+  const mode = options?.mode || 'generate';
+  const allowed = new Set(getScriptGenerationAllowedTools(mode));
   const scopedRegistry = new ToolRegistryV2({ debug: () => {}, info: () => {}, warn: () => {}, error: () => {} });
   for (const tool of nativeTools) {
     if (allowed.has(tool.definition.name)) {
@@ -323,10 +427,11 @@ async function runScopedScriptGenerationPass(
     ctx.extensionManager?.getAllPromptSections(),
     scopedRegistry.getAllDefinitions(),
   );
-  const systemPrompt = `${basePrompt}\n\n## Script Node Generation\nYou are generating or repairing code for a Woodbury __script__ node. This is not a repository editing task. Use only the scoped tools available for planning, reasoning, validation, and repair. The final answer must be a single JavaScript code block and nothing else.`;
+  const systemPrompt = `${basePrompt}\n\n## Script Node Generation\nYou are generating or repairing code for a Woodbury __script__ node. This is not a repository editing task. Use only the scoped tools available for planning, reasoning, validation, and repair. ${getScriptGenerationModeGuidance(mode)} The final answer must be a single JavaScript code block and nothing else.`;
   const providerAndModel = getScriptGenerationProviderAndModel();
   const selectedSkills: string[] = [];
   const toolNames: string[] = [];
+  const trace: ScriptGenerationTraceEvent[] = [];
   const engine = new ClosureEngine({
     provider: providerAndModel.provider,
     model: providerAndModel.model,
@@ -338,10 +443,18 @@ async function runScopedScriptGenerationPass(
     toolTimeout: 15000,
     temperature: 0.1,
     workingDirectory: ctx.workDir,
-    allowDangerousTools: false,
+    allowDangerousTools: mode === 'edit' || mode === 'repair' || mode === 'verify',
     streaming: false,
     reflectionInterval: 4,
     callbacks: {
+      onAssistantTurn(event) {
+        trace.push({
+          type: 'assistant',
+          stopReason: event.stopReason,
+          text: event.text,
+          toolCalls: event.toolCalls,
+        });
+      },
       onSkillSelected(selection) {
         if (selection?.skill?.name && selectedSkills.indexOf(selection.skill.name) === -1) {
           selectedSkills.push(selection.skill.name);
@@ -351,6 +464,19 @@ async function runScopedScriptGenerationPass(
         if (name && toolNames.indexOf(name) === -1) {
           toolNames.push(name);
         }
+        trace.push({
+          type: 'tool_start',
+          toolName: name,
+        });
+      },
+      onToolEnd(name, success, result, duration) {
+        trace.push({
+          type: 'tool_end',
+          toolName: name,
+          success,
+          result,
+          durationMs: duration,
+        });
       },
     },
   }, scopedRegistry, systemPrompt);
@@ -364,7 +490,43 @@ async function runScopedScriptGenerationPass(
     throw new Error(result.error || result.content || 'Scoped script generation failed');
   }
 
-  return { content: result.content.trim(), selectedSkills, toolNames };
+  return { content: result.content.trim(), selectedSkills, toolNames, trace };
+}
+
+function formatScriptGenerationTrace(trace: ScriptGenerationTraceEvent[]): string {
+  if (!Array.isArray(trace) || trace.length === 0) {
+    return 'No detailed trace was recorded for this pass.';
+  }
+
+  return trace.map((event, index) => {
+    if (event.type === 'assistant') {
+      const lines = [
+        `[${index + 1}] Assistant response`,
+        `stop=${event.stopReason || 'unknown'}`,
+      ];
+      if (Array.isArray(event.toolCalls) && event.toolCalls.length > 0) {
+        lines.push(`toolCalls=${event.toolCalls.map(call => call.name).join(', ')}`);
+      } else {
+        lines.push('toolCalls=none');
+      }
+      if (event.text) {
+        lines.push('text:');
+        lines.push(event.text);
+      }
+      return lines.join('\n');
+    }
+    if (event.type === 'tool_start') {
+      return `[${index + 1}] Tool start\nname=${event.toolName || 'unknown'}`;
+    }
+    return [
+      `[${index + 1}] Tool result`,
+      `name=${event.toolName || 'unknown'}`,
+      `success=${event.success ? 'true' : 'false'}`,
+      `durationMs=${typeof event.durationMs === 'number' ? event.durationMs : 0}`,
+      'result:',
+      event.result || '',
+    ].join('\n');
+  }).join('\n\n');
 }
 
 async function runStrictScriptGenerationFallback(
@@ -374,6 +536,7 @@ async function runStrictScriptGenerationFallback(
     chatHistory?: Array<{ role: 'user' | 'assistant'; content: string }>;
     currentCode?: string;
     issues?: string[];
+    mode?: ScriptGenerationMode;
   },
 ): Promise<string> {
   const { runPrompt } = await import('../../loop/llm-service.js');
@@ -388,6 +551,11 @@ async function runStrictScriptGenerationFallback(
   const issuesText = options?.issues && options.issues.length > 0
     ? `Known problems to fix:\n- ${options.issues.join('\n- ')}`
     : '';
+  const modeGuidance = getScriptGenerationModeGuidance(options?.mode || 'generate');
+  const editGuidance = getScriptEditGuidance(userMessage, Boolean(options?.currentCode));
+  const requestInstruction = options?.currentCode
+    ? 'Update the existing Woodbury script node code to satisfy the request. Return the full updated script.'
+    : 'Generate a Woodbury script node that satisfies the request. Return the full script.';
 
   const response = await runPrompt([
     {
@@ -401,12 +569,14 @@ async function runStrictScriptGenerationFallback(
         'Preserve the requested behavior while fixing any structural validation errors.',
         builtinGuidance,
         SCRIPT_PROGRESS_GUIDANCE,
+        modeGuidance,
+        editGuidance,
       ].join(' '),
     },
     {
       role: 'user',
       content: [
-        'Repair or regenerate the Woodbury script node so it satisfies the required output format.',
+        requestInstruction,
         `Task request:\n${userMessage}`,
         issuesText,
         codeText,
@@ -424,8 +594,13 @@ async function runScriptGenerationWithClosureEngine(
   userMessage: string,
   toolDocs: string,
   chatHistory: Array<{ role: 'user' | 'assistant'; content: string }> | undefined,
-): Promise<{ code: string; assistantMessage: string; inputs: Array<{ name: string; type: string; description: string }>; outputs: Array<{ name: string; type: string; description: string }>; lifecycle: { designedPlan: string; validationIssues: string[]; repaired: boolean; verificationSummary: string; selectedSkills: string[]; toolNames: string[] } }> {
+  mode: ScriptGenerationMode = 'generate',
+  currentCode?: unknown,
+): Promise<{ code: string; assistantMessage: string; inputs: Array<{ name: string; type: string; description: string }>; outputs: Array<{ name: string; type: string; description: string }>; lifecycle: ScriptGenerationLifecycle }> {
   const builtinGuidance = buildWoodburyBuiltinToolingGuidance(userMessage);
+  const normalizedCurrentCode = typeof currentCode === 'string' && currentCode.trim() ? currentCode : undefined;
+  const hasCurrentCode = Boolean(normalizedCurrentCode);
+  const editGuidance = getScriptEditGuidance(userMessage, hasCurrentCode);
   const generationObjective = [
     'Generate JavaScript for a Woodbury pipeline script node.',
     'Use the dedicated script-node generation skill and validate the result before finishing.',
@@ -435,14 +610,54 @@ async function runScriptGenerationWithClosureEngine(
     'The function must return an object containing all declared outputs.',
     builtinGuidance,
     SCRIPT_PROGRESS_GUIDANCE,
+    getScriptGenerationModeGuidance(mode),
+    editGuidance,
     toolDocs ? `Runtime tool documentation for generated code:\n${toolDocs}` : '',
     `Task request:\n${userMessage}`,
   ].filter(Boolean).join('\n\n');
 
-  const generationPass = await runScopedScriptGenerationPass(ctx, generationObjective, {
-    chatHistory,
-    sessionSuffix: 'generate',
-  });
+  let generationPass: { content: string; selectedSkills: string[]; toolNames: string[]; trace: ScriptGenerationTraceEvent[] };
+  if (mode === 'generate' || mode === 'edit') {
+    const directResponse = await runStrictScriptGenerationFallback(userMessage, toolDocs, {
+      chatHistory,
+      currentCode: normalizedCurrentCode,
+      mode,
+    });
+    generationPass = {
+      content: directResponse,
+      selectedSkills: [],
+      toolNames: [],
+      trace: [{
+        type: 'assistant',
+        stopReason: 'direct_prompt',
+        text: directResponse,
+        toolCalls: [],
+      }],
+    };
+  } else {
+    generationPass = await runScopedScriptGenerationPass(ctx, generationObjective, {
+      chatHistory,
+      sessionSuffix: 'generate',
+      mode,
+    });
+  }
+  const transcript: ScriptGenerationTranscriptEntry[] = [
+    {
+      stage: 'request',
+      title: 'Request',
+      content: userMessage,
+    },
+    {
+      stage: 'generation',
+      title: mode === 'generate' ? 'Direct generation pass' : 'Initial generation pass',
+      content: [
+        `Selected skills: ${generationPass.selectedSkills.length > 0 ? generationPass.selectedSkills.join(', ') : 'none recorded'}`,
+        `Scoped tools used: ${generationPass.toolNames.length > 0 ? generationPass.toolNames.join(', ') : 'none'}`,
+        '',
+        formatScriptGenerationTrace(generationPass.trace),
+      ].join('\n'),
+    },
+  ];
   let assistantMessage = generationPass.content;
   let code = extractCodeBlock(assistantMessage);
   let validation = validateGeneratedScriptCode(code, { userMessage });
@@ -452,6 +667,11 @@ async function runScriptGenerationWithClosureEngine(
   const toolNames = generationPass.toolNames.slice();
 
   if (!validation.ok) {
+    transcript.push({
+      stage: 'validation',
+      title: 'Validation issues after initial pass',
+      content: validation.issues.join('\n'),
+    });
     repaired = true;
     const repairObjective = [
       'Repair malformed Woodbury script-node JavaScript.',
@@ -460,12 +680,24 @@ async function runScriptGenerationWithClosureEngine(
       `Current code:\n\`\`\`javascript\n${code}\n\`\`\``,
       `Validation issues:\n- ${validation.issues.join('\n- ')}`,
       builtinGuidance,
+      editGuidance,
       toolDocs ? `Runtime tool documentation for generated code:\n${toolDocs}` : '',
     ].filter(Boolean).join('\n\n');
 
     const repairPass = await runScopedScriptGenerationPass(ctx, repairObjective, {
       chatHistory,
       sessionSuffix: 'repair',
+      mode,
+    });
+    transcript.push({
+      stage: 'repair',
+      title: 'Repair pass',
+      content: [
+        `Selected skills: ${repairPass.selectedSkills.length > 0 ? repairPass.selectedSkills.join(', ') : 'none recorded'}`,
+        `Scoped tools used: ${repairPass.toolNames.length > 0 ? repairPass.toolNames.join(', ') : 'none'}`,
+        '',
+        formatScriptGenerationTrace(repairPass.trace),
+      ].join('\n'),
     });
     assistantMessage = repairPass.content;
     code = extractCodeBlock(assistantMessage);
@@ -484,6 +716,12 @@ async function runScriptGenerationWithClosureEngine(
       chatHistory,
       currentCode: code,
       issues: validation.issues,
+      mode,
+    });
+    transcript.push({
+      stage: 'fallback',
+      title: 'Strict format fallback',
+      content: assistantMessage.trim(),
     });
     code = extractCodeBlock(assistantMessage);
     validation = validateGeneratedScriptCode(code, { userMessage });
@@ -502,8 +740,24 @@ async function runScriptGenerationWithClosureEngine(
   }
 
   if (generatedTests.length > 0) {
+    transcript.push({
+      stage: 'tests',
+      title: 'Generated unit tests',
+      content: generatedTests.map(testCase => {
+        const inputsText = JSON.stringify(testCase.inputs || {}, null, 2);
+        const requiredKeys = Array.isArray(testCase.requiredOutputKeys) && testCase.requiredOutputKeys.length > 0
+          ? `required outputs: ${testCase.requiredOutputKeys.join(', ')}`
+          : 'required outputs: none';
+        return `${testCase.name}\ninputs: ${inputsText}\n${requiredKeys}`;
+      }).join('\n\n'),
+    });
     testResults = await runGeneratedScriptUnitTests(code, generatedTests);
     const failingTests = testResults.filter(result => !result.passed);
+    transcript.push({
+      stage: 'tests',
+      title: failingTests.length > 0 ? 'Unit test failures' : 'Unit test results',
+      content: testResults.map(result => `${result.passed ? 'PASS' : 'FAIL'} ${result.name}${result.failures.length > 0 ? `\n${result.failures.join('\n')}` : ''}`).join('\n\n'),
+    });
     if (failingTests.length > 0) {
       repaired = true;
       const repairObjective = [
@@ -513,11 +767,23 @@ async function runScriptGenerationWithClosureEngine(
         `Current code:\n\`\`\`javascript\n${code}\n\`\`\``,
         `Failing unit tests:\n${failingTests.map(result => `- ${result.name}: ${result.failures.join('; ')}`).join('\n')}`,
         builtinGuidance,
+        editGuidance,
         toolDocs ? `Runtime tool documentation for generated code:\n${toolDocs}` : '',
       ].filter(Boolean).join('\n\n');
       const repairPass = await runScopedScriptGenerationPass(ctx, repairObjective, {
         chatHistory,
         sessionSuffix: 'unit-test-repair',
+        mode,
+      });
+      transcript.push({
+        stage: 'repair',
+        title: 'Unit-test repair pass',
+        content: [
+          `Selected skills: ${repairPass.selectedSkills.length > 0 ? repairPass.selectedSkills.join(', ') : 'none recorded'}`,
+          `Scoped tools used: ${repairPass.toolNames.length > 0 ? repairPass.toolNames.join(', ') : 'none'}`,
+          '',
+          formatScriptGenerationTrace(repairPass.trace),
+        ].join('\n'),
       });
       assistantMessage = repairPass.content;
       code = extractCodeBlock(assistantMessage);
@@ -528,6 +794,12 @@ async function runScriptGenerationWithClosureEngine(
           chatHistory,
           currentCode: code,
           issues: validation.issues.concat(failingTests.map(result => `${result.name}: ${result.failures.join('; ')}`)),
+          mode,
+        });
+        transcript.push({
+          stage: 'fallback',
+          title: 'Strict fallback after unit-test repair',
+          content: assistantMessage.trim(),
         });
         code = extractCodeBlock(assistantMessage);
         validation = validateGeneratedScriptCode(code, { userMessage });
@@ -538,6 +810,11 @@ async function runScriptGenerationWithClosureEngine(
       generatedTests = await generateScriptUnitTestCases(userMessage, code, validation.ports.inputs, validation.ports.outputs);
       testResults = generatedTests.length > 0 ? await runGeneratedScriptUnitTests(code, generatedTests) : [];
       const remainingFailures = testResults.filter(result => !result.passed);
+      transcript.push({
+        stage: 'tests',
+        title: remainingFailures.length > 0 ? 'Post-repair unit test failures' : 'Post-repair unit test results',
+        content: testResults.map(result => `${result.passed ? 'PASS' : 'FAIL'} ${result.name}${result.failures.length > 0 ? `\n${result.failures.join('\n')}` : ''}`).join('\n\n'),
+      });
       if (remainingFailures.length > 0) {
         throw new Error(`Generated code failed unit tests after repair: ${remainingFailures.map(result => `${result.name}: ${result.failures.join('; ')}`).join(' | ')}`);
       }
@@ -549,6 +826,12 @@ async function runScriptGenerationWithClosureEngine(
       }
     }
   }
+  const verificationSummary = `Selected skills: ${selectedSkills.length > 0 ? selectedSkills.join(', ') : 'none recorded'}. Scoped tools used: ${toolNames.length > 0 ? toolNames.join(', ') : 'none'}.${strictFallbackUsed ? ' A strict output-format fallback was used after the closure-engine response failed validation.' : ''} Structural validation passed for JSDoc annotations, execute(inputs, context), return object, and JavaScript parsing.${generatedTests.length > 0 ? ` Executed ${testResults.length} deterministic unit test(s) and all passed.` : ' No deterministic unit tests were generated.'}`;
+  transcript.push({
+    stage: 'verification',
+    title: 'Verification summary',
+    content: verificationSummary,
+  });
   return {
     code,
     assistantMessage,
@@ -558,15 +841,101 @@ async function runScriptGenerationWithClosureEngine(
       designedPlan: `Closure engine routed this through ${selectedSkills[0] || 'script generation'} and kept the tool scope constrained for validation-oriented problem solving.${strictFallbackUsed ? ' A strict output-format fallback was used to force valid script-node code when the model answered in the wrong shape.' : ''}`,
       validationIssues: validation.issues,
       repaired,
-      verificationSummary: `Selected skills: ${selectedSkills.length > 0 ? selectedSkills.join(', ') : 'none recorded'}. Scoped tools used: ${toolNames.length > 0 ? toolNames.join(', ') : 'none'}.${strictFallbackUsed ? ' A strict output-format fallback was used after the closure-engine response failed validation.' : ''} Structural validation passed for JSDoc annotations, execute(inputs, context), return object, and JavaScript parsing.${generatedTests.length > 0 ? ` Executed ${testResults.length} deterministic unit test(s) and all passed.` : ' No deterministic unit tests were generated.'}`,
+      verificationSummary,
       selectedSkills,
       toolNames,
+      transcript,
     },
+  };
+}
+
+function buildPipelineScriptGraphContext(
+  pipeline: { nodes?: any[]; connections?: any[] },
+  nodeIndex: number,
+): Record<string, unknown> {
+  const nodes = Array.isArray(pipeline.nodes) ? pipeline.nodes : [];
+  const connections = Array.isArray(pipeline.connections) ? pipeline.connections : [];
+  const currentNode = nodes[nodeIndex] || {};
+  const summarizeNode = (node: any, index: number) => ({
+    index,
+    type: node?.type || 'script',
+    label: node?.label || `Step ${index + 1}`,
+    description: node?.description || '',
+  });
+
+  return {
+    currentNode: summarizeNode(currentNode, nodeIndex),
+    upstream: connections
+      .filter(conn => conn?.to === nodeIndex && Number.isInteger(conn?.from) && nodes[conn.from])
+      .map(conn => ({
+        fromPort: conn.fromPort,
+        toPort: conn.toPort,
+        node: summarizeNode(nodes[conn.from], conn.from),
+      })),
+    downstream: connections
+      .filter(conn => conn?.from === nodeIndex && Number.isInteger(conn?.to) && nodes[conn.to])
+      .map(conn => ({
+        fromPort: conn.fromPort,
+        toPort: conn.toPort,
+        node: summarizeNode(nodes[conn.to], conn.to),
+      })),
+    plannedNodes: nodes.map((node, index) => summarizeNode(node, index)),
+  };
+}
+
+async function ensurePipelineScriptNodeCode(
+  ctx: DashboardContext,
+  pipeline: { nodes?: any[]; connections?: any[] },
+  nodeIndex: number,
+  toolDocs: string,
+): Promise<PipelineScriptNodeGenerationResult> {
+  const pipelineNodes = Array.isArray(pipeline.nodes) ? pipeline.nodes : [];
+  const node = pipelineNodes[nodeIndex] || {};
+  const description = typeof node.description === 'string' && node.description.trim()
+    ? node.description.trim()
+    : (typeof node.label === 'string' && node.label.trim() ? node.label.trim() : `Step ${nodeIndex + 1}`);
+  const currentCode = typeof node.code === 'string' && node.code.trim() ? node.code.trim() : '';
+  const currentValidation = currentCode
+    ? validateGeneratedScriptCode(currentCode, { userMessage: description })
+    : { ok: false, issues: ['Missing script code.'], ports: { inputs: [], outputs: [] } };
+
+  if (currentValidation.ok) {
+    return {
+      description,
+      code: currentCode,
+      inputs: currentValidation.ports.inputs,
+      outputs: currentValidation.ports.outputs,
+      transcript: [],
+      regenerated: false,
+    };
+  }
+
+  const graphContext = buildPipelineScriptGraphContext(pipeline, nodeIndex);
+  const requestMessage = buildScriptRequestMessage(description, undefined, graphContext, currentCode || undefined);
+  const lifecycleResult = await runScriptGenerationWithClosureEngine(
+    ctx,
+    requestMessage,
+    toolDocs,
+    undefined,
+    currentCode ? 'edit' : 'generate',
+    currentCode || undefined,
+  );
+
+  return {
+    description,
+    code: lifecycleResult.code,
+    inputs: lifecycleResult.inputs,
+    outputs: lifecycleResult.outputs,
+    assistantMessage: lifecycleResult.assistantMessage,
+    transcript: lifecycleResult.lifecycle.transcript,
+    regenerated: true,
   };
 }
 
 export const __testOnly = {
   buildWoodburyBuiltinToolingGuidance,
+  buildPipelineScriptGraphContext,
+  ensurePipelineScriptNodeCode,
   extractCodeBlock,
   validateGeneratedScriptCode,
   runStrictScriptGenerationFallback,
@@ -739,7 +1108,11 @@ Rules:
   if (req.method === 'POST' && pathname === '/api/compositions/generate-script') {
     try {
       const body = await readBody(req);
-      const { description, chatHistory, currentCode, dataContext, graphContext } = body || {};
+      const { description, chatHistory, currentCode, dataContext, graphContext, mode } = body || {};
+      const hasCurrentCode = typeof currentCode === 'string' && currentCode.trim().length > 0;
+      const scriptMode: ScriptGenerationMode = mode === 'edit' || mode === 'repair' || mode === 'verify'
+        ? mode
+        : (hasCurrentCode ? 'edit' : 'generate');
 
       if (!description && (!chatHistory || chatHistory.length === 0)) {
         sendJson(res, 400, { error: 'description or chatHistory is required' });
@@ -753,6 +1126,8 @@ Rules:
         userMessage,
         toolDocs,
         chatHistory,
+        scriptMode,
+        currentCode,
       );
 
       debugLog.info('dashboard', 'Script generated', {
@@ -769,6 +1144,7 @@ Rules:
         outputs: lifecycleResult.outputs,
         assistantMessage: lifecycleResult.assistantMessage,
         lifecycle: lifecycleResult.lifecycle,
+        transcript: lifecycleResult.lifecycle.transcript,
       });
     } catch (err) {
       debugLog.error('dashboard', 'Script generation failed', { error: String(err) });
@@ -780,7 +1156,7 @@ Rules:
   if (req.method === 'POST' && pathname === '/api/compositions/generate-pipeline') {
     try {
       const body = await readBody(req);
-      const { description, graphContext } = body || {};
+      const { description, graphContext, selectedPublishedSkillIds } = body || {};
 
       if (!description || !String(description).trim()) {
         sendJson(res, 400, { error: 'description is required' });
@@ -788,6 +1164,11 @@ Rules:
       }
 
       const toolDocs = await generateScriptToolDocs(ctx);
+      const publishedSkillsSection = await formatPublishedSkillsPromptSection(ctx.workDir, {
+        audience: 'pipelines',
+        maxSkills: 6,
+        selectedSkillIds: Array.isArray(selectedPublishedSkillIds) ? selectedPublishedSkillIds : undefined,
+      });
       const pipelineSystemPrompt = `You are a pipeline architect for a visual automation platform. The user describes a task, and you decompose it into multiple small, focused steps — each becoming a node in a pipeline graph.
 
 IMPORTANT RULES:
@@ -827,6 +1208,11 @@ NODE TYPES:
   - context.log(message) — Log a message
   - require('fs'), require('path'), require('os') — Node.js modules
 ${toolDocs}
+
+${publishedSkillsSection ? `${publishedSkillsSection}
+
+When one of these published skills clearly matches the requested behavior, incorporate its trigger conditions, input contract, and guidance into the pipeline nodes instead of inventing a new pattern.
+` : ''}
 
 ${graphContext ? `EXISTING PIPELINE CONTEXT:
 ${typeof graphContext === 'string' ? graphContext : JSON.stringify(graphContext, null, 2)}
@@ -940,6 +1326,16 @@ Remember: respond with ONLY the JSON object.`;
 
       const realNodes: any[] = [];
       const idByIndex: string[] = [];
+      const scriptNodeResults = new Map<number, PipelineScriptNodeGenerationResult>();
+
+      for (let i = 0; i < pipeline.nodes.length; i++) {
+        const pNode = pipeline.nodes[i];
+        const nodeType = pNode?.type || 'script';
+        if (nodeType !== 'script') continue;
+
+        const scriptNodeResult = await ensurePipelineScriptNodeCode(ctx, pipeline, i, toolDocs);
+        scriptNodeResults.set(i, scriptNodeResult);
+      }
 
       for (let i = 0; i < pipeline.nodes.length; i++) {
         const pNode = pipeline.nodes[i];
@@ -957,14 +1353,23 @@ Remember: respond with ONLY the JSON object.`;
         };
 
         if (workflowId === '__script__') {
-          const code = pNode.code || '';
-          const ports = parseScriptPorts(code);
+          const scriptNodeResult = scriptNodeResults.get(i);
+          const code = scriptNodeResult?.code || pNode.code || '';
+          const ports = scriptNodeResult
+            ? { inputs: scriptNodeResult.inputs, outputs: scriptNodeResult.outputs }
+            : parseScriptPorts(code);
           node.script = {
-            description: pNode.description || pNode.label || '',
+            description: scriptNodeResult?.description || pNode.description || pNode.label || '',
             code,
             inputs: ports.inputs.length > 0 ? ports.inputs : (pNode.inputs || []),
             outputs: ports.outputs.length > 0 ? ports.outputs : (pNode.outputs || []),
-            chatHistory: [],
+            chatHistory: scriptNodeResult?.assistantMessage
+              ? [
+                { role: 'user', content: scriptNodeResult.description },
+                { role: 'assistant', content: scriptNodeResult.assistantMessage },
+              ]
+              : [],
+            generationTranscript: scriptNodeResult?.transcript || [],
           };
         } else if (workflowId === '__text__') {
           node.textNode = { value: pNode.textNode?.value || pNode.value || '' };
@@ -1010,6 +1415,7 @@ Remember: respond with ONLY the JSON object.`;
         model: pipelineModel,
         nodeCount: realNodes.length,
         edgeCount: realEdges.length,
+        regeneratedScriptNodeCount: Array.from(scriptNodeResults.values()).filter(result => result.regenerated).length,
         description: description.slice(0, 100),
       });
 

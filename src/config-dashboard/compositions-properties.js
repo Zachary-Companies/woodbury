@@ -3502,8 +3502,53 @@ function validateWoodburyScriptCode(code) {
   };
 }
 
+var compScriptGenerationUiState = Object.create(null);
+
+function getCompScriptGenerationState(nodeId) {
+  return nodeId ? compScriptGenerationUiState[nodeId] || null : null;
+}
+
+function setCompScriptGenerationState(nodeId, state) {
+  if (!nodeId) return;
+  compScriptGenerationUiState[nodeId] = state;
+}
+
+function clearCompScriptGenerationState(nodeId) {
+  if (!nodeId) return;
+  delete compScriptGenerationUiState[nodeId];
+}
+
+function renderScriptGenerationTranscript(scriptCfg) {
+  var transcript = scriptCfg && Array.isArray(scriptCfg.generationTranscript) ? scriptCfg.generationTranscript : [];
+  var html = '';
+  html += '<div class="comp-props-section">';
+  html += '<div class="comp-props-label">Generation Transcript</div>';
+  html += '<div class="comp-props-value" style="font-size:0.68rem;color:#64748b;margin-bottom:0.45rem;">Stored generation, repair, validation, and verification passes for this script node.</div>';
+  if (transcript.length === 0) {
+    html += '<div style="color:#475569;font-size:0.72rem;">No transcript recorded yet.</div>';
+  } else {
+    html += '<div style="display:flex;flex-direction:column;gap:0.5rem;max-height:320px;overflow:auto;">';
+    for (var ti = 0; ti < transcript.length; ti++) {
+      var entry = transcript[ti] || {};
+      html += '<details style="border:1px solid rgba(129,140,248,0.16);border-radius:10px;background:rgba(15,23,42,0.5);padding:0.15rem 0.2rem;"' + (ti === transcript.length - 1 ? ' open' : '') + '>';
+      html += '<summary style="cursor:pointer;list-style:none;color:#dbe4ff;font-size:0.72rem;font-weight:600;padding:0.45rem 0.55rem;">' + compEscHtml(entry.title || ('Step ' + (ti + 1))) + '</summary>';
+      html += '<div style="padding:0 0.55rem 0.55rem 0.55rem;">';
+      if (entry.stage) {
+        html += '<div style="color:#818cf8;font-size:0.64rem;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:0.35rem;">' + compEscHtml(entry.stage) + '</div>';
+      }
+      html += '<pre style="margin:0;white-space:pre-wrap;word-break:break-word;font-size:0.69rem;line-height:1.45;color:#cbd5e1;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;">' + compEscHtml(entry.content || '') + '</pre>';
+      html += '</div>';
+      html += '</details>';
+    }
+    html += '</div>';
+  }
+  html += '</div>';
+  return html;
+}
+
 function renderScriptProperties(body, node, nodeId) {
   var scriptCfg = node.script || { description: '', code: '', inputs: [], outputs: [], chatHistory: [], contextNodeIds: [] };
+  var pendingGeneration = getCompScriptGenerationState(nodeId);
   var html = '';
 
   // Error display (if node has a failed state)
@@ -3574,19 +3619,27 @@ function renderScriptProperties(body, node, nodeId) {
     html += '<div class="comp-script-chat-text">' + compEscHtml(msg.content) + '</div>';
     html += '</div>';
   }
-  if (chatHistory.length === 0) {
+  if (pendingGeneration && pendingGeneration.message) {
+    html += '<div class="comp-script-chat-msg comp-script-chat-user">';
+    html += '<div class="comp-script-chat-role">You</div>';
+    html += '<div class="comp-script-chat-text">' + compEscHtml(pendingGeneration.message) + '</div>';
+    html += '</div>';
+  }
+  if (chatHistory.length === 0 && !pendingGeneration) {
     html += '<div style="color:#475569;font-size:0.72rem;padding:0.5rem;">No messages yet. Describe what you want below.</div>';
   }
   html += '</div>';
   html += '<div class="comp-script-chat-input-wrap">';
-  html += '<input type="text" class="comp-props-input" id="comp-script-chat-input" placeholder="Refine: e.g. also output a word count...">';
-  html += '<button class="comp-tb-btn comp-tb-btn-run" id="comp-script-chat-send" style="padding:0.3rem 0.6rem;font-size:0.72rem;">Send</button>';
+  html += '<input type="text" class="comp-props-input" id="comp-script-chat-input" placeholder="Refine: e.g. also output a word count..."' + (pendingGeneration ? ' disabled' : '') + '>';
+  html += '<button class="comp-tb-btn comp-tb-btn-run" id="comp-script-chat-send" style="padding:0.3rem 0.6rem;font-size:0.72rem;"' + (pendingGeneration ? ' disabled' : '') + '>Send</button>';
   html += '</div>';
-  html += '<div id="comp-script-chat-status" style="display:none;margin-top:4px;">';
+  html += '<div id="comp-script-chat-status" style="display:' + (pendingGeneration ? '' : 'none') + ';margin-top:4px;">';
   html += '<div class="spinner" style="display:inline-block;width:12px;height:12px;margin-right:4px;vertical-align:middle;"></div>';
-  html += '<span style="color:#94a3b8;font-size:0.7rem;">Generating...</span>';
+  html += '<span style="color:#94a3b8;font-size:0.7rem;">' + compEscHtml((pendingGeneration && pendingGeneration.statusText) || 'Generating...') + '</span>';
   html += '</div>';
   html += '</div>';
+
+  html += renderScriptGenerationTranscript(scriptCfg);
 
   // Code Preview
   html += '<div class="comp-props-section">';
@@ -3819,13 +3872,15 @@ function renderScriptProperties(body, node, nodeId) {
   var chatSendBtn = body.querySelector('#comp-script-chat-send');
   var chatStatus = body.querySelector('#comp-script-chat-status');
 
-  function sendScriptChat() {
-    var message = chatInput.value.trim();
-    if (!message) return;
+  function isScriptNodeSelected() {
+    return selectedNodes.size === 1 && Array.from(selectedNodes)[0] === nodeId;
+  }
 
-    chatInput.disabled = true;
-    chatSendBtn.disabled = true;
-    chatStatus.style.display = '';
+  function runScriptChatRequest(message) {
+    var generationState = getCompScriptGenerationState(nodeId);
+    if (!generationState || generationState.requestStarted || generationState.message !== message) return;
+
+    generationState.requestStarted = true;
 
     // Build full chat history
     var history = (node.script.chatHistory || []).slice();
@@ -3835,8 +3890,9 @@ function renderScriptProperties(body, node, nodeId) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
+        mode: node.script.code ? 'edit' : 'generate',
         description: message,
-        chatHistory: history.slice(0, -1), // Send prior history, description is current message
+        chatHistory: history.slice(0, -1),
         currentCode: node.script.code || undefined,
         graphContext: buildScriptGenerationContext(nodeId, node.script.contextNodeIds || []),
       }),
@@ -3846,31 +3902,57 @@ function renderScriptProperties(body, node, nodeId) {
         if (!result.ok) throw new Error(result.data.error || 'Generation failed');
 
         pushUndoSnapshot();
+        clearCompScriptGenerationState(nodeId);
 
-        // Update node's script config
         node.script.code = result.data.code;
         node.script.inputs = result.data.inputs;
         node.script.outputs = result.data.outputs;
         node.script.chatHistory = history.concat([
           { role: 'assistant', content: result.data.assistantMessage },
         ]);
+        if (Array.isArray(result.data.transcript)) {
+          node.script.generationTranscript = (node.script.generationTranscript || []).concat(result.data.transcript);
+        }
 
-        // Re-render everything — ports may have changed
         renderNodes();
         renderEdges();
         wireUpCanvas();
         updateNodeSelection();
         debouncedSave();
 
-        // Re-render properties panel to show updated chat + code
-        renderScriptProperties(body, node, nodeId);
+        if (isScriptNodeSelected()) {
+          renderScriptProperties(body, node, nodeId);
+        }
       })
       .catch(function(err) {
+        clearCompScriptGenerationState(nodeId);
         toast('Script generation failed: ' + err.message, 'error');
-        chatInput.disabled = false;
-        chatSendBtn.disabled = false;
-        chatStatus.style.display = 'none';
+        if (isScriptNodeSelected()) {
+          renderScriptProperties(body, node, nodeId);
+        } else if (chatInput && chatSendBtn && chatStatus) {
+          chatInput.disabled = false;
+          chatSendBtn.disabled = false;
+          chatStatus.style.display = 'none';
+        }
       });
+  }
+
+  function sendScriptChat() {
+    if (getCompScriptGenerationState(nodeId)) return;
+    var message = chatInput.value.trim();
+    if (!message) return;
+
+    setCompScriptGenerationState(nodeId, {
+      message: message,
+      statusText: 'Generating...',
+      requestStarted: false,
+    });
+
+    renderScriptProperties(body, node, nodeId);
+  }
+
+  if (pendingGeneration && pendingGeneration.message && !pendingGeneration.requestStarted) {
+    runScriptChatRequest(pendingGeneration.message);
   }
 
   if (chatSendBtn) {

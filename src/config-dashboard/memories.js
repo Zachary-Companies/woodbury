@@ -74,6 +74,15 @@
     return data;
   }
 
+  async function openMemoryFile(id, action) {
+    var res = await fetch('/api/memories/' + encodeURIComponent(id) + '/' + action + '?scope=' + encodeURIComponent(memoryScope), {
+      method: 'POST'
+    });
+    var data = await res.json().catch(function () { return {}; });
+    if (!res.ok) throw new Error(data.error || ('Failed to ' + action + ' memory file'));
+    return data;
+  }
+
   function renderMemorySidebar() {
     var list = document.getElementById('memory-list');
     if (!list) return;
@@ -167,11 +176,25 @@
     var tagsHtml = (selected.tags || []).map(function (tag) {
       return '<span class="memory-chip">' + memoryEscHtml(tag) + '</span>';
     }).join('');
+    var revealLabel = (window.woodburyElectron && window.woodburyElectron.platform === 'win32') ? 'Show in Explorer' : 'Show in Finder';
+    var fileActionsHtml = selected.markdownPath
+      ? '<div class="memory-detail-actions">' +
+          '<button id="memory-open-file-btn" class="memory-action-btn">Open Markdown</button>' +
+          '<button id="memory-reveal-file-btn" class="memory-action-btn memory-action-secondary">' + revealLabel + '</button>' +
+        '</div>'
+      : '';
+    var filePathsHtml = selected.markdownPath
+      ? '<div class="memory-file-panel">' +
+          '<div class="memory-file-row"><strong>Markdown File</strong><div class="memory-file-path">' + memoryEscHtml(selected.markdownPath) + '</div></div>' +
+          (selected.metadataPath ? '<div class="memory-file-row"><strong>Metadata File</strong><div class="memory-file-path">' + memoryEscHtml(selected.metadataPath) + '</div></div>' : '') +
+          (selected.directoryPath ? '<div class="memory-file-row"><strong>Directory</strong><div class="memory-file-path">' + memoryEscHtml(selected.directoryPath) + '</div></div>' : '') +
+        '</div>'
+      : '';
 
     main.innerHTML =
       '<div class="ext-header">' +
       '<h2>Memory Browser</h2>' +
-      '<div class="ext-header-meta">Semantic search over SQLite-backed memory.</div>' +
+      '<div class="ext-header-meta">Semantic search over memory stored as Markdown and JSON files.</div>' +
       '</div>' +
       statsHtml +
       '<div class="memory-detail-card">' +
@@ -184,6 +207,8 @@
       '</div>' +
       '<div class="memory-detail-body">' + memoryEscHtml(selected.content) + '</div>' +
       (tagsHtml ? '<div class="memory-chip-row">' + tagsHtml + '</div>' : '') +
+      fileActionsHtml +
+      filePathsHtml +
       '<div class="memory-detail-grid">' +
       '<div><strong>Source</strong><div>' + memoryEscHtml(selected.source || 'manual') + '</div></div>' +
       '<div><strong>Importance</strong><div>' + (typeof selected.importance === 'number' ? selected.importance.toFixed(2) : (typeof selected.confidence === 'number' ? selected.confidence.toFixed(2) : '')) + '</div></div>' +
@@ -204,6 +229,28 @@
           await deleteMemory(selected.id);
           toast('Memory deleted', 'success');
           await refreshMemories();
+        } catch (err) {
+          toast('Failed: ' + err.message, 'error');
+        }
+      });
+    }
+
+    var openBtn = document.getElementById('memory-open-file-btn');
+    if (openBtn) {
+      openBtn.addEventListener('click', async function () {
+        try {
+          await openMemoryFile(selected.id, 'open');
+        } catch (err) {
+          toast('Failed: ' + err.message, 'error');
+        }
+      });
+    }
+
+    var revealBtn = document.getElementById('memory-reveal-file-btn');
+    if (revealBtn) {
+      revealBtn.addEventListener('click', async function () {
+        try {
+          await openMemoryFile(selected.id, 'reveal');
         } catch (err) {
           toast('Failed: ' + err.message, 'error');
         }

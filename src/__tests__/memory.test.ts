@@ -1,8 +1,9 @@
 import { Memory } from '../memory';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { resetSQLiteMemoryStoreCache } from '../sqlite-memory-store.js';
+import { getSQLiteMemoryStore, resetSQLiteMemoryStoreCache } from '../sqlite-memory-store';
 
 describe('Memory', () => {
   let memory: Memory;
@@ -44,6 +45,20 @@ describe('Memory', () => {
       expect(results).toHaveLength(2);
       expect(results.some(entry => entry.content === 'Existing memory')).toBe(true);
       expect(results.some(entry => entry.content === 'New memory')).toBe(true);
+    });
+
+    it('should persist memories as markdown and json artifacts', async () => {
+      await memory.save('Paths should be exposed for memory browsing', 'discovery', ['paths']);
+
+      const store = getSQLiteMemoryStore();
+      const results = store.browseGeneralMemories({ query: 'paths', project: testWorkDir, limit: 5 }).items;
+
+      expect(results).toHaveLength(1);
+      expect(results[0].markdownPath).toBeTruthy();
+      expect(results[0].metadataPath).toBeTruthy();
+      expect(results[0].directoryPath).toBeTruthy();
+      expect(existsSync(results[0].markdownPath || '')).toBe(true);
+      expect(existsSync(results[0].metadataPath || '')).toBe(true);
     });
 
     it('should import legacy workspace memory files on recall', async () => {

@@ -11,6 +11,7 @@ import { platform, homedir } from 'node:os';
 import { loadProjectContext, loadContextDirectory } from '../../context-loader.js';
 import type { McpServerInfo } from '../../system-prompt.js';
 import type { NativeToolDefinition } from '../v2/types/tool-types.js';
+import { formatPublishedSkillsPromptSection } from '../../skill-builder/storage.js';
 
 /**
  * Build a compact V3 system prompt for the chat dashboard.
@@ -136,6 +137,15 @@ When the same user-provided value should feed multiple nodes, centralize it. Pre
 ## Extension Instructions
 
 ${extensionPromptSections.join('\n\n')}`);
+  }
+
+  const publishedSkillsSection = await formatPublishedSkillsPromptSection(workingDirectory, {
+    audience: 'chat',
+    maxSkills: 6,
+  });
+  if (publishedSkillsSection) {
+    parts.push(`
+${publishedSkillsSection}`);
   }
 
   // ── Project context ──────────────────────────────────────
