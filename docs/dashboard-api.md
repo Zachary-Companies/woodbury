@@ -845,6 +845,14 @@ Body: { name?, description?, tags?, collections?, is_default_for?, metadata? }
 Response: { asset }
 ```
 
+Notes:
+- `collections` replaces the asset's full collection membership list.
+- This is the correct dashboard API path for a true asset move between collections.
+- For assets with `path_mode: "collection_root"`, the first collection in `collections` is the primary collection used to resolve `file_path_absolute`.
+- The creator-assets runtime extension exposes related but separate tool semantics on `asset_update`: `collection` now promotes the target collection to primary and physically moves the current file into that collection's storage location, `collections` replaces the full list, `move_to_collection` performs a true move to one collection, and `remove_collection` removes one collection without replacing the rest.
+- If the target collection has a `rootPath`, the file is moved into that root and the asset becomes `path_mode: "collection_root"`.
+- If the target collection does not have a `rootPath`, the file is moved into a collection-scoped folder under the library storage.
+
 **PUT `/api/assets/settings`**
 ```
 Body: { dataDir: "/path/to/assets" }

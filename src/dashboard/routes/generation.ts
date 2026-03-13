@@ -200,6 +200,10 @@ function buildWoodburyBuiltinToolingGuidance(userMessage: string): string {
   ].join(' ');
 }
 
+const SCRIPT_PROGRESS_GUIDANCE = [
+  'When generating script-node code with long-running loops, use context.progress.start(total, label), context.progress.set(completed, total, label), context.progress.increment(label), and context.progress.complete(label) so the node UI can show a progress bar while the script runs.',
+].join(' ');
+
 const SCRIPT_GENERATION_ALLOWED_TOOLS = [
   'memory_recall',
   'goal_contract',
@@ -396,6 +400,7 @@ async function runStrictScriptGenerationFallback(
         'The execute function must return an object containing all declared outputs.',
         'Preserve the requested behavior while fixing any structural validation errors.',
         builtinGuidance,
+        SCRIPT_PROGRESS_GUIDANCE,
       ].join(' '),
     },
     {
@@ -429,6 +434,7 @@ async function runScriptGenerationWithClosureEngine(
     'The code must define async function execute(inputs, context).',
     'The function must return an object containing all declared outputs.',
     builtinGuidance,
+    SCRIPT_PROGRESS_GUIDANCE,
     toolDocs ? `Runtime tool documentation for generated code:\n${toolDocs}` : '',
     `Task request:\n${userMessage}`,
   ].filter(Boolean).join('\n\n');

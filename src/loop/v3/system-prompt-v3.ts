@@ -45,6 +45,15 @@ export async function buildV3SystemPrompt(
 - When you finish a task, give a brief summary of what you did.
 - NEVER write secrets, API keys, or passwords to files or output.`);
 
+  parts.push(`
+## Woodbury Contracts
+- Treat Woodbury built-ins as concrete product contracts owned by specific routes, dashboard modules, and runtime tools.
+- For assets and collections, distinguish dashboard API behavior from creator-assets runtime tool behavior before answering or editing.
+- Dashboard asset updates can replace the full \`collections\` array; runtime asset tools may expose append, remove, or explicit move semantics separately.
+- In the installed creator-assets runtime, duplicate \`asset_collection_create\` calls are idempotent, \`asset_save\` returns the created ID at \`result.asset.id\`, and \`asset_update({ collection })\` promotes the target collection to primary and physically relocates the current file: into that collection root when it has a \`rootPath\`, otherwise into a collection-scoped folder inside the library.
+- For assets with \`path_mode: "collection_root"\`, the first collection controls absolute path resolution, so changing collection order or primary membership can change the resolved file path.
+- For script nodes, \`context.progress.start/set/increment/complete\` is the supported runtime contract for updating the node progress bar during long-running loops, and those calls flow into execution-state fields like \`stepsCompleted\`, \`stepsTotal\`, and \`currentStep\`.`);
+
   // ── Tool Calling (critical for native tool use) ──────────
   parts.push(`
 ## Tool Calling — CRITICAL

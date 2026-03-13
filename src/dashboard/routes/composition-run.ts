@@ -499,7 +499,30 @@ function makeScriptExecutionContext(
   scriptModel: string,
   scriptTools: Record<string, (params: any) => Promise<any>>,
   scriptLogs: string[],
+  progressHooks?: {
+    setProgress?: (completed: number, total?: number, label?: string) => void;
+  },
 ) {
+  const progress = {
+    start: (total: number, label?: string) => {
+      const safeTotal = Number.isFinite(total) ? Math.max(0, Math.floor(total)) : 0;
+      progressHooks?.setProgress?.(0, safeTotal, label || 'Running...');
+    },
+    set: (completed: number, total?: number, label?: string) => {
+      const safeCompleted = Number.isFinite(completed) ? Math.max(0, Math.floor(completed)) : 0;
+      const safeTotal = total == null
+        ? undefined
+        : (Number.isFinite(total) ? Math.max(0, Math.floor(total)) : undefined);
+      progressHooks?.setProgress?.(safeCompleted, safeTotal, label);
+    },
+    increment: (label?: string) => {
+      progressHooks?.setProgress?.(NaN, undefined, label);
+    },
+    complete: (label?: string) => {
+      progressHooks?.setProgress?.(Infinity, undefined, label || 'Done');
+    },
+  };
+
   return {
     llm: {
       generate: async (prompt: string, opts?: { temperature?: number; maxTokens?: number; model?: string }) => {
@@ -523,6 +546,7 @@ function makeScriptExecutionContext(
     },
     tools: scriptTools,
     log: (msg: string) => { scriptLogs.push(String(msg)); },
+    progress,
   };
 }
 
@@ -649,6 +673,7 @@ async function runScriptNodeWithAutoFix(options: {
   wfMap: Record<string, any>;
   locationLabel: string;
   updateCurrentStep?: (step: string) => void;
+  updateProgress?: (completed: number, total: number) => void;
   recomputeInputs?: () => Record<string, unknown>;
 }): Promise<{
   outputs: Record<string, unknown>;
@@ -657,6 +682,7 @@ async function runScriptNodeWithAutoFix(options: {
   originalError?: string;
   repairedInputs?: Record<string, unknown>;
   graphRepaired?: boolean;
+  progress?: { completed: number; total: number };
 }> {
   const {
     ctx,
@@ -671,17 +697,38 @@ async function runScriptNodeWithAutoFix(options: {
     wfMap,
     locationLabel,
     updateCurrentStep,
+    updateProgress,
     recomputeInputs,
   } = options;
 
   const { scriptRunPrompt, scriptModel, scriptTools } = await buildScriptContext(ctx);
   const scriptLogs: string[] = [];
-  const context = makeScriptExecutionContext(scriptRunPrompt, scriptModel, scriptTools, scriptLogs);
+  const progressState = { completed: 0, total: 1 };
+  const context = makeScriptExecutionContext(scriptRunPrompt, scriptModel, scriptTools, scriptLogs, {
+    setProgress: (completed, total, label) => {
+      if (typeof total === 'number' && Number.isFinite(total)) {
+        progressState.total = Math.max(1, total);
+      }
+      if (Number.isFinite(completed)) {
+        progressState.completed = Math.min(progressState.total, Math.max(0, completed));
+      } else if (completed === Infinity) {
+        progressState.completed = progressState.total;
+      } else {
+        progressState.completed = Math.min(progressState.total, progressState.completed + 1);
+      }
+      updateProgress?.(progressState.completed, progressState.total);
+      if (updateCurrentStep && label) updateCurrentStep(label);
+    },
+  });
   let runtimeInputs = recomputeInputs ? recomputeInputs() : mergedInputs;
 
   try {
     const outputs = await executeScriptCode(node.script.code, runtimeInputs, context);
-    return { outputs: outputs || {}, logs: scriptLogs, repairedInputs: runtimeInputs };
+    if (progressState.total > 1 || progressState.completed > 0) {
+      progressState.completed = progressState.total;
+    }
+    updateProgress?.(progressState.completed, progressState.total);
+    return { outputs: outputs || {}, logs: scriptLogs, repairedInputs: runtimeInputs, progress: { ...progressState } };
   } catch (scriptErr: any) {
     const originalError = scriptErr?.message || String(scriptErr);
 
@@ -810,7 +857,7 @@ Return JSON only.`;
 The script format:
 1. JSDoc comment with @input and @output annotations
 2. async function execute(inputs, context)
-3. Available: context.llm.generate(prompt), context.llm.generateJSON(prompt), context.log(message)${fixToolDocs ? '\n' + fixToolDocs : ''}
+3. Available: context.llm.generate(prompt), context.llm.generateJSON(prompt), context.log(message), context.progress.start(total, label?), context.progress.set(completed, total?, label?), context.progress.increment(label?), context.progress.complete(label?)${fixToolDocs ? '\n' + fixToolDocs : ''}
 4. Must return an object with all declared outputs
 
 CRITICAL RULES:
@@ -1397,6 +1444,10 @@ async function executeForEachBodyNode(
       updateCurrentStep: (step) => {
         bodyNs.currentStep = `${step} (iter ${iterIndex + 1})`;
       },
+              updateProgress: (completed, total) => {
+                bodyNs.stepsCompleted = completed;
+                bodyNs.stepsTotal = total;
+              },
       recomputeInputs: () => ({
         ...initialVariables,
         ...gatherInputVariables(bodyNodeId, comp.edges, nodeOutputs),
@@ -1405,7 +1456,8 @@ async function executeForEachBodyNode(
 
     const scriptOutputs: Record<string, unknown> = scriptResult.outputs || {};
     bodyNs.status = 'completed';
-    bodyNs.stepsCompleted = 1;
+    bodyNs.stepsTotal = scriptResult.progress?.total || bodyNs.stepsTotal || 1;
+    bodyNs.stepsCompleted = scriptResult.progress?.completed || bodyNs.stepsTotal || 1;
     bodyNs.logs = scriptResult.logs;
     bodyNs.inputVariables = { ...(scriptResult.repairedInputs || bodyMergedInputs) };
     bodyNs.outputVariables = scriptOutputs;
@@ -2032,6 +2084,10 @@ export const handleCompositionRunRoutes: RouteHandler = async (req, res, pathnam
                   updateCurrentStep: (step) => {
                     ns.currentStep = step;
                   },
+                  updateProgress: (completed, total) => {
+                    ns.stepsCompleted = completed;
+                    ns.stepsTotal = total;
+                  },
                   recomputeInputs: () => ({
                     ...initialVariables,
                     ...gatherInputVariables(nodeId, comp.edges, nodeOutputs),
@@ -2040,7 +2096,8 @@ export const handleCompositionRunRoutes: RouteHandler = async (req, res, pathnam
 
                 ns.durationMs = Date.now() - scriptStart;
                 ns.status = 'completed';
-                ns.stepsCompleted = 1;
+                ns.stepsTotal = result.progress?.total || ns.stepsTotal || 1;
+                ns.stepsCompleted = result.progress?.completed || ns.stepsTotal || 1;
                 ns.logs = result.logs;
                 ns.inputVariables = { ...(result.repairedInputs || mergedInputs) };
                 ns.outputVariables = result.outputs || {};
@@ -2099,6 +2156,7 @@ export const handleCompositionRunRoutes: RouteHandler = async (req, res, pathnam
 
               ns.status = 'completed';
               ns.stepsCompleted = 1;
+              ns.currentStep = 'Image ready';
               ns.outputVariables = { file_path: filePath };
               nodeOutputs[nodeId] = { file_path: filePath };
               run.nodesCompleted++;
@@ -2145,6 +2203,7 @@ export const handleCompositionRunRoutes: RouteHandler = async (req, res, pathnam
 
               ns.status = 'completed';
               ns.stepsCompleted = 1;
+              ns.currentStep = 'Media resolved';
               ns.outputVariables = { file_path: resolvedPath, media_type: detectedType };
               nodeOutputs[nodeId] = { file_path: resolvedPath, media_type: detectedType };
               run.nodesCompleted++;
@@ -2495,6 +2554,7 @@ export const handleCompositionRunRoutes: RouteHandler = async (req, res, pathnam
               const textValue = node.textNode?.value ?? '';
               ns.status = 'completed';
               ns.stepsCompleted = 1;
+              ns.currentStep = 'Text ready';
               ns.outputVariables = { text: textValue };
               nodeOutputs[nodeId] = { text: textValue };
               run.nodesCompleted++;
@@ -2519,6 +2579,7 @@ export const handleCompositionRunRoutes: RouteHandler = async (req, res, pathnam
               const outputs = executeVariableNode(node, edgeInputs, initialVariables, nodeOutputs[nodeId]);
               ns.status = 'completed';
               ns.stepsCompleted = 1;
+              ns.currentStep = 'Value ready';
               ns.outputVariables = outputs;
               nodeOutputs[nodeId] = outputs;
               run.nodesCompleted++;
@@ -2536,6 +2597,7 @@ export const handleCompositionRunRoutes: RouteHandler = async (req, res, pathnam
               const outputs = executeGetVariableNode(node, nodeOutputs);
               ns.status = 'completed';
               ns.stepsCompleted = 1;
+              ns.currentStep = 'Variable read';
               ns.outputVariables = outputs;
               nodeOutputs[nodeId] = outputs;
               run.nodesCompleted++;

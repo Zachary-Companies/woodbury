@@ -72,6 +72,9 @@ The goal is not to document every file. The goal is to document the contracts, b
 - [change-log-2026-03-05-to-2026-03-12.md](change-log-2026-03-05-to-2026-03-12.md)
   Commit-grounded retrospective covering all changes landed from March 5 through March 12, 2026, with rationale and architectural analysis.
 
+- [todays-log-2026-03-12.md](todays-log-2026-03-12.md)
+  Isolated log covering only the March 12, 2026 work, including same-day follow-up contract and runtime-tool updates.
+
 ## What Deserves Documentation In This Repo
 
 If a subsystem has one or more of these properties, it should usually have a dedicated doc:
