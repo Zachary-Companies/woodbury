@@ -22,7 +22,7 @@ import {
 } from '../script-generation-tests.js';
 
 interface ScriptGenerationTranscriptEntry {
-  stage: 'request' | 'generation' | 'repair' | 'fallback' | 'validation' | 'tests' | 'verification';
+  stage: 'request' | 'generation' | 'repair' | 'fallback' | 'validation' | 'tests' | 'verification' | 'checks';
   title: string;
   content: string;
 }
@@ -57,6 +57,16 @@ interface PipelineScriptNodeGenerationResult {
   assistantMessage?: string;
   transcript: ScriptGenerationTranscriptEntry[];
   regenerated: boolean;
+}
+
+interface PipelinePortContract {
+  name: string;
+  type: string;
+  description: string;
+}
+
+function shouldUseDirectScriptGeneration(mode: ScriptGenerationMode): boolean {
+  return mode === 'generate' || mode === 'edit' || mode === 'repair' || mode === 'verify';
 }
 
 // ── Constants ────────────────────────────────────────────────
@@ -357,6 +367,37 @@ function isSafeExpectedSubsetValue(value: unknown, depth = 0): boolean {
   return Object.values(value as Record<string, unknown>).every(child => isSafeExpectedSubsetValue(child, depth + 1));
 }
 
+function isOverSpecificStringExpectation(value: string): boolean {
+  const trimmed = value.trim();
+  return trimmed.length > 120 || /\r|\n/.test(trimmed) || /^[\[{]/.test(trimmed);
+}
+
+function sanitizeExpectedOutputSubset(
+  rawSubset: unknown,
+  outputs: Array<{ name: string; type: string; description: string }>,
+): Record<string, unknown> | undefined {
+  if (!isSafeExpectedSubsetValue(rawSubset) || !rawSubset || typeof rawSubset !== 'object' || Array.isArray(rawSubset)) {
+    return undefined;
+  }
+
+  const outputTypeByName = new Map(outputs.map((output) => [output.name, output.type]));
+  const sanitizedEntries = Object.entries(rawSubset as Record<string, unknown>)
+    .filter(([key]) => outputTypeByName.has(key))
+    .filter(([, value]) => value == null || typeof value === 'number' || typeof value === 'boolean' || typeof value === 'string')
+    .filter(([key, value]) => {
+      if (typeof value !== 'string') return true;
+      const outputType = outputTypeByName.get(key) || 'string';
+      if (outputType !== 'string') return false;
+      return !isOverSpecificStringExpectation(value);
+    });
+
+  if (sanitizedEntries.length === 0) {
+    return undefined;
+  }
+
+  return Object.fromEntries(sanitizedEntries);
+}
+
 function sanitizeScriptGenerationTestCases(
   rawCases: unknown[],
   outputs: Array<{ name: string; type: string; description: string }>,
@@ -376,9 +417,7 @@ function sanitizeScriptGenerationTestCases(
     const requiredOutputKeys = Array.isArray(candidate.requiredOutputKeys)
       ? candidate.requiredOutputKeys.filter((key): key is string => typeof key === 'string' && declaredOutputNames.includes(key))
       : [];
-    const expectedOutputSubset = isSafeExpectedSubsetValue(candidate.expectedOutputSubset)
-      ? candidate.expectedOutputSubset as Record<string, unknown> | undefined
-      : undefined;
+    const expectedOutputSubset = sanitizeExpectedOutputSubset(candidate.expectedOutputSubset, outputs);
 
     if (requiredOutputKeys.length === 0 && declaredOutputNames.length > 0 && !expectedOutputSubset) {
       requiredOutputKeys.push(...declaredOutputNames);
@@ -617,7 +656,7 @@ async function runScriptGenerationWithClosureEngine(
   ].filter(Boolean).join('\n\n');
 
   let generationPass: { content: string; selectedSkills: string[]; toolNames: string[]; trace: ScriptGenerationTraceEvent[] };
-  if (mode === 'generate' || mode === 'edit') {
+  if (shouldUseDirectScriptGeneration(mode)) {
     const directResponse = await runStrictScriptGenerationFallback(userMessage, toolDocs, {
       chatHistory,
       currentCode: normalizedCurrentCode,
@@ -649,7 +688,7 @@ async function runScriptGenerationWithClosureEngine(
     },
     {
       stage: 'generation',
-      title: mode === 'generate' ? 'Direct generation pass' : 'Initial generation pass',
+      title: shouldUseDirectScriptGeneration(mode) ? 'Direct generation pass' : 'Initial generation pass',
       content: [
         `Selected skills: ${generationPass.selectedSkills.length > 0 ? generationPass.selectedSkills.join(', ') : 'none recorded'}`,
         `Scoped tools used: ${generationPass.toolNames.length > 0 ? generationPass.toolNames.join(', ') : 'none'}`,
@@ -684,11 +723,28 @@ async function runScriptGenerationWithClosureEngine(
       toolDocs ? `Runtime tool documentation for generated code:\n${toolDocs}` : '',
     ].filter(Boolean).join('\n\n');
 
-    const repairPass = await runScopedScriptGenerationPass(ctx, repairObjective, {
-      chatHistory,
-      sessionSuffix: 'repair',
-      mode,
-    });
+    const repairPass = shouldUseDirectScriptGeneration(mode)
+      ? {
+        content: await runStrictScriptGenerationFallback(userMessage, toolDocs, {
+          chatHistory,
+          currentCode: code,
+          issues: validation.issues,
+          mode,
+        }),
+        selectedSkills: [],
+        toolNames: [],
+        trace: [{
+          type: 'assistant' as const,
+          stopReason: 'direct_prompt',
+          text: 'Repair generated through direct prompt fallback.',
+          toolCalls: [],
+        }],
+      }
+      : await runScopedScriptGenerationPass(ctx, repairObjective, {
+        chatHistory,
+        sessionSuffix: 'repair',
+        mode,
+      });
     transcript.push({
       stage: 'repair',
       title: 'Repair pass',
@@ -770,11 +826,28 @@ async function runScriptGenerationWithClosureEngine(
         editGuidance,
         toolDocs ? `Runtime tool documentation for generated code:\n${toolDocs}` : '',
       ].filter(Boolean).join('\n\n');
-      const repairPass = await runScopedScriptGenerationPass(ctx, repairObjective, {
-        chatHistory,
-        sessionSuffix: 'unit-test-repair',
-        mode,
-      });
+      const repairPass = shouldUseDirectScriptGeneration(mode)
+        ? {
+          content: await runStrictScriptGenerationFallback(userMessage, toolDocs, {
+            chatHistory,
+            currentCode: code,
+            issues: failingTests.map(result => `${result.name}: ${result.failures.join('; ')}`),
+            mode,
+          }),
+          selectedSkills: [],
+          toolNames: [],
+          trace: [{
+            type: 'assistant' as const,
+            stopReason: 'direct_prompt',
+            text: 'Unit-test repair generated through direct prompt fallback.',
+            toolCalls: [],
+          }],
+        }
+        : await runScopedScriptGenerationPass(ctx, repairObjective, {
+          chatHistory,
+          sessionSuffix: 'unit-test-repair',
+          mode,
+        });
       transcript.push({
         stage: 'repair',
         title: 'Unit-test repair pass',
@@ -826,10 +899,10 @@ async function runScriptGenerationWithClosureEngine(
       }
     }
   }
-  const verificationSummary = `Selected skills: ${selectedSkills.length > 0 ? selectedSkills.join(', ') : 'none recorded'}. Scoped tools used: ${toolNames.length > 0 ? toolNames.join(', ') : 'none'}.${strictFallbackUsed ? ' A strict output-format fallback was used after the closure-engine response failed validation.' : ''} Structural validation passed for JSDoc annotations, execute(inputs, context), return object, and JavaScript parsing.${generatedTests.length > 0 ? ` Executed ${testResults.length} deterministic unit test(s) and all passed.` : ' No deterministic unit tests were generated.'}`;
+  const verificationSummary = `Selected skills: ${selectedSkills.length > 0 ? selectedSkills.join(', ') : 'none recorded'}. Scoped tools used: ${toolNames.length > 0 ? toolNames.join(', ') : 'none'}.${strictFallbackUsed ? ' A strict output-format fallback was used after the closure-engine response failed validation.' : ''} Structural validation passed for JSDoc annotations, execute(inputs, context), return object, and JavaScript parsing.${generatedTests.length > 0 ? ` Executed ${testResults.length} deterministic unit test(s) and all passed.` : ' No deterministic unit tests were generated.'} These checks cover generated code structure and deterministic sandbox behavior only, not full pipeline runtime execution.`;
   transcript.push({
-    stage: 'verification',
-    title: 'Verification summary',
+    stage: 'checks',
+    title: 'Generation checks passed',
     content: verificationSummary,
   });
   return {
@@ -883,6 +956,47 @@ function buildPipelineScriptGraphContext(
   };
 }
 
+function normalizePipelinePortContracts(rawPorts: unknown): PipelinePortContract[] {
+  if (!Array.isArray(rawPorts)) return [];
+
+  return rawPorts
+    .filter((port): port is Record<string, unknown> => Boolean(port) && typeof port === 'object')
+    .map((port) => {
+      const name = typeof port.name === 'string' ? port.name.trim() : '';
+      const type = typeof port.type === 'string' ? port.type.trim() : 'string';
+      const description = typeof port.description === 'string' ? port.description.trim() : '';
+      if (!name) return null;
+      return { name, type: type || 'string', description };
+    })
+    .filter((port): port is PipelinePortContract => Boolean(port));
+}
+
+function buildPipelineScriptGenerationDescription(
+  description: string,
+  node: { inputs?: unknown; outputs?: unknown },
+): string {
+  const inputContracts = normalizePipelinePortContracts(node.inputs);
+  const outputContracts = normalizePipelinePortContracts(node.outputs);
+  const sections = [description.trim()];
+
+  if (inputContracts.length > 0) {
+    sections.push([
+      'Required input ports:',
+      ...inputContracts.map((port) => `- ${port.name} (${port.type}): ${port.description || 'No description provided.'}`),
+    ].join('\n'));
+  }
+
+  if (outputContracts.length > 0) {
+    sections.push([
+      'Required output ports:',
+      ...outputContracts.map((port) => `- ${port.name} (${port.type}): ${port.description || 'No description provided.'}`),
+    ].join('\n'));
+  }
+
+  sections.push('Honor these exact port names unless there is a clear validation error in the declared contract.');
+  return sections.filter(Boolean).join('\n\n');
+}
+
 async function ensurePipelineScriptNodeCode(
   ctx: DashboardContext,
   pipeline: { nodes?: any[]; connections?: any[] },
@@ -895,23 +1009,9 @@ async function ensurePipelineScriptNodeCode(
     ? node.description.trim()
     : (typeof node.label === 'string' && node.label.trim() ? node.label.trim() : `Step ${nodeIndex + 1}`);
   const currentCode = typeof node.code === 'string' && node.code.trim() ? node.code.trim() : '';
-  const currentValidation = currentCode
-    ? validateGeneratedScriptCode(currentCode, { userMessage: description })
-    : { ok: false, issues: ['Missing script code.'], ports: { inputs: [], outputs: [] } };
-
-  if (currentValidation.ok) {
-    return {
-      description,
-      code: currentCode,
-      inputs: currentValidation.ports.inputs,
-      outputs: currentValidation.ports.outputs,
-      transcript: [],
-      regenerated: false,
-    };
-  }
-
   const graphContext = buildPipelineScriptGraphContext(pipeline, nodeIndex);
-  const requestMessage = buildScriptRequestMessage(description, undefined, graphContext, currentCode || undefined);
+  const requestedDescription = buildPipelineScriptGenerationDescription(description, node);
+  const requestMessage = buildScriptRequestMessage(requestedDescription, undefined, graphContext, currentCode || undefined);
   const lifecycleResult = await runScriptGenerationWithClosureEngine(
     ctx,
     requestMessage,
@@ -934,9 +1034,11 @@ async function ensurePipelineScriptNodeCode(
 
 export const __testOnly = {
   buildWoodburyBuiltinToolingGuidance,
+  buildPipelineScriptGenerationDescription,
   buildPipelineScriptGraphContext,
   ensurePipelineScriptNodeCode,
   extractCodeBlock,
+  shouldUseDirectScriptGeneration,
   validateGeneratedScriptCode,
   runStrictScriptGenerationFallback,
   sanitizeScriptGenerationTestCases,
@@ -1176,10 +1278,11 @@ IMPORTANT RULES:
 2. Use the simplest node type for each step:
    - "text" for constant values (prompts, paths, configuration strings)
    - "file_op" for file operations (copy, move, delete, mkdir, list)
-   - "script" for custom logic, LLM calls, data transformation, or tool usage
+  - "script" for custom logic, LLM calls, data transformation, or tool usage
 3. Connect nodes via matching port names in the connections array
 4. Port names must use snake_case (e.g., "generated_text", "file_path")
 5. Keep the pipeline linear or fan-out — avoid unnecessary complexity
+6. For script nodes, describe the intent and declare ports only. Do NOT write JavaScript code. The backend will generate the code in a separate pass.
 
 NODE TYPES:
 
@@ -1197,16 +1300,9 @@ NODE TYPES:
   Config: { "type": "file_op", "label": "...", "fileOp": { "operation": "copy" } }
 
 "script" — custom code with @input/@output ports
-  Must include a JSDoc block with @input and @output annotations.
-  Format: @input <name> <type> "<description>"  |  @output <name> <type> "<description>"
-  Types: string, number, boolean, object, string[], number[], object[]
-  Function signature: async function execute(inputs, context)
-  Available in context:
-  - context.llm.generate(prompt) — Call an LLM, returns string
-  - context.llm.generate(prompt, { temperature, maxTokens }) — With options
-  - context.llm.generateJSON(prompt) — Call LLM, parse JSON response
-  - context.log(message) — Log a message
-  - require('fs'), require('path'), require('os') — Node.js modules
+  Provide a short intent/description and explicit input/output port declarations only.
+  Port format: { "name": "snake_case_name", "type": "string|number|boolean|object|string[]|number[]|object[]", "description": "..." }
+  The backend will later turn this into executable code.
 ${toolDocs}
 
 ${publishedSkillsSection ? `${publishedSkillsSection}
@@ -1229,7 +1325,8 @@ RESPONSE FORMAT — respond with ONLY a JSON object (no explanation, no markdown
       "type": "text|script|file_op",
       "label": "Short Node Label",
       "description": "What this node does (script only)",
-      "code": "// JavaScript code (script only)",
+      "inputs": [{ "name": "input_name", "type": "string", "description": "What this input means" }],
+      "outputs": [{ "name": "output_name", "type": "string", "description": "What this output means" }],
       "textNode": { "value": "..." },
       "fileOp": { "operation": "copy|move|delete|mkdir|list" }
     }
@@ -1241,7 +1338,8 @@ RESPONSE FORMAT — respond with ONLY a JSON object (no explanation, no markdown
 
 - "from" and "to" are zero-based indices into the nodes array
 - Only include fields relevant to each node type
-- Script nodes MUST have "code" with proper @input/@output JSDoc annotations
+- Script nodes MUST include "description", "inputs", and "outputs"
+- Script nodes MUST NOT include "code"
 - Make sure every connection references port names that actually exist on the source and target nodes
 
 EXAMPLE — "Generate a poem about a theme and save it to a file":
@@ -1253,13 +1351,25 @@ EXAMPLE — "Generate a poem about a theme and save it to a file":
       "type": "text",
       "label": "Theme",
       "textNode": { "value": "autumn leaves" }
-    },
+      "inputs": [
+        { "name": "theme", "type": "string", "description": "The theme to write about" }
+      ],
+      "outputs": [
+        { "name": "poem", "type": "string", "description": "The generated poem" },
+        { "name": "title", "type": "string", "description": "A title for the poem" }
+      ]
     {
       "type": "script",
       "label": "Generate Poem",
       "description": "Generate a poem from a theme using AI",
       "code": "/**\\n * @input theme string \\"The theme to write about\\"\\n * @output poem string \\"The generated poem\\"\\n * @output title string \\"A title for the poem\\"\\n */\\nasync function execute(inputs, context) {\\n  const { theme } = inputs;\\n  const result = await context.llm.generateJSON(\\n    \`Write a poem about \\"\${theme}\\". Return JSON: { \\"title\\": \\"...\\\", \\"poem\\": \\"...\\" }\`\\n  );\\n  return { poem: result.poem, title: result.title };\\n}"
-    },
+      "inputs": [
+        { "name": "content", "type": "string", "description": "Text to save" },
+        { "name": "filename", "type": "string", "description": "File name" }
+      ],
+      "outputs": [
+        { "name": "file_path", "type": "string", "description": "Path where saved" }
+      ]
     {
       "type": "script",
       "label": "Save to File",
@@ -1357,18 +1467,19 @@ Remember: respond with ONLY the JSON object.`;
           const code = scriptNodeResult?.code || pNode.code || '';
           const ports = scriptNodeResult
             ? { inputs: scriptNodeResult.inputs, outputs: scriptNodeResult.outputs }
-            : parseScriptPorts(code);
+            : { inputs: normalizePipelinePortContracts(pNode.inputs), outputs: normalizePipelinePortContracts(pNode.outputs) };
+          const chatHistory = scriptNodeResult && scriptNodeResult.assistantMessage
+            ? [
+              { role: 'user', content: scriptNodeResult.description },
+              { role: 'assistant', content: scriptNodeResult.assistantMessage },
+            ]
+            : [];
           node.script = {
             description: scriptNodeResult?.description || pNode.description || pNode.label || '',
             code,
             inputs: ports.inputs.length > 0 ? ports.inputs : (pNode.inputs || []),
             outputs: ports.outputs.length > 0 ? ports.outputs : (pNode.outputs || []),
-            chatHistory: scriptNodeResult?.assistantMessage
-              ? [
-                { role: 'user', content: scriptNodeResult.description },
-                { role: 'assistant', content: scriptNodeResult.assistantMessage },
-              ]
-              : [],
+            chatHistory,
             generationTranscript: scriptNodeResult?.transcript || [],
           };
         } else if (workflowId === '__text__') {

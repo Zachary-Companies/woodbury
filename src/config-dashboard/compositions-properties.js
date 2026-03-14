@@ -3523,7 +3523,7 @@ function renderScriptGenerationTranscript(scriptCfg) {
   var html = '';
   html += '<div class="comp-props-section">';
   html += '<div class="comp-props-label">Generation Transcript</div>';
-  html += '<div class="comp-props-value" style="font-size:0.68rem;color:#64748b;margin-bottom:0.45rem;">Stored generation, repair, validation, and verification passes for this script node.</div>';
+  html += '<div class="comp-props-value" style="font-size:0.68rem;color:#64748b;margin-bottom:0.45rem;">Stored generation, repair, validation, and code-check passes for this script node.</div>';
   if (transcript.length === 0) {
     html += '<div style="color:#475569;font-size:0.72rem;">No transcript recorded yet.</div>';
   } else {

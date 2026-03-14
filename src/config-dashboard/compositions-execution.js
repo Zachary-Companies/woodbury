@@ -2026,6 +2026,23 @@ async function repairScriptNode(node, nodeId) {
   }
 
   try {
+    var neighborContextIds = [];
+    var seenContextIds = {};
+    function pushContextNodeId(candidateId) {
+      if (!candidateId || candidateId === nodeId || seenContextIds[candidateId]) return;
+      seenContextIds[candidateId] = true;
+      neighborContextIds.push(candidateId);
+    }
+    (node.script.contextNodeIds || []).forEach(pushContextNodeId);
+    ((compData && compData.edges) || []).forEach(function(edge) {
+      if (!edge) return;
+      if (edge.targetNodeId === nodeId) pushContextNodeId(edge.sourceNodeId);
+      if (edge.sourceNodeId === nodeId) pushContextNodeId(edge.targetNodeId);
+    });
+    var repairGraphContext = neighborContextIds.length > 0
+      ? buildScriptGenerationContext(nodeId, neighborContextIds)
+      : '';
+
     var repairDescription = 'Fix this script node. It failed during execution with the following error:\n\n' +
       nodeError + '\n\nPlease fix the bug in the code. Do NOT change the @input/@output annotations — only fix the implementation.';
 
@@ -2037,6 +2054,7 @@ async function repairScriptNode(node, nodeId) {
         description: repairDescription,
         chatHistory: node.script.chatHistory || [],
         currentCode: node.script.code || '',
+        graphContext: repairGraphContext || undefined,
       }),
     });
 
