@@ -237,7 +237,11 @@ export function validateComposition(composition: any, availableWorkflowIds: Set<
   const builtInTypes = new Set([
     '__script__', '__output__', '__for_each__',
     '__approval_gate__', '__branch__', '__delay__',
-    '__variable__', '__get_variable__',
+    '__variable__', '__get_variable__', '__switch__',
+    '__text__', '__file_op__', '__json_keys__',
+    '__tool__', '__file_write__', '__file_read__',
+    '__junction__', '__asset__', '__image_viewer__',
+    '__media__', '__gate__',
   ]);
 
   const nodeIds = new Set(nodes.map((n: any) => n.id));

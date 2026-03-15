@@ -346,7 +346,7 @@
           '</div>' +
         '</div>' +
         '<div class="chat-input-area">' +
-          '<input type="text" class="chat-input" id="chat-input" placeholder="Ask me anything..." autocomplete="off">' +
+          '<textarea class="chat-input" id="chat-input" placeholder="Ask me anything..." rows="1"></textarea>' +
           '<button class="chat-send-btn" id="chat-send-btn">Send</button>' +
         '</div>' +
       '</div>' +
@@ -407,11 +407,16 @@
     var input = document.getElementById('chat-input');
     var sendBtn = document.getElementById('chat-send-btn');
 
+    resizeChatInput(input);
+
     input.addEventListener('keydown', function (e) {
       if (e.key === 'Enter' && !e.shiftKey && !isSending) {
         e.preventDefault();
         sendMessage();
       }
+    });
+    input.addEventListener('input', function () {
+      resizeChatInput(input);
     });
     sendBtn.addEventListener('click', function () {
       if (!isSending) sendMessage();
@@ -447,6 +452,7 @@
     if (!text) return;
 
     input.value = '';
+    resizeChatInput(input);
     appendMessage('user', text);
     chatHistory.push({ role: 'user', content: text });
 
@@ -901,6 +907,12 @@
       btn.disabled = isSending;
       btn.textContent = isSending ? '...' : 'Send';
     }
+  }
+
+  function resizeChatInput(input) {
+    if (!input) return;
+    input.style.height = 'auto';
+    input.style.height = Math.min(input.scrollHeight, 180) + 'px';
   }
 
   function humanizeToolName(name) {

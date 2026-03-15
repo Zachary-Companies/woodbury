@@ -42,12 +42,37 @@ function updatePropertiesPanel() {
     panel.style.display = '';
     renderNodeProperties(nodeId);
   } else if (selectedNodes.size > 1) {
+    var selectionKey = getCurrentBulkRedesignSelectionKey();
+    var bulkRedesignState = getCompBulkRedesignState(selectionKey);
+    var selectedNodeList = Array.from(selectedNodes || []).map(function(nodeId) {
+      return compData && compData.nodes ? compData.nodes.find(function(node) { return node.id === nodeId; }) : null;
+    }).filter(Boolean);
+    var selectedDocs = getSelectedGeneratedPipelineDocs();
+    var redesignableCount = selectedNodeList.filter(function(node) { return getBulkRedesignNodeKind(node) !== 'unsupported'; }).length;
     panel.style.display = '';
     body.innerHTML =
       '<div class="comp-props-section">' +
       '<div class="comp-props-label">Selection</div>' +
       '<div class="comp-props-value">' + selectedNodes.size + ' workflows selected</div>' +
       '</div>' +
+      '<div class="comp-props-section">' +
+      '<div class="comp-props-label">Agent Redesign</div>' +
+      '<div class="comp-props-value" style="font-size:0.68rem;color:#64748b;margin-bottom:0.45rem;">Redesign the selected nodes together so their responsibilities and contracts line up better. Supports script, text, and file-op nodes.</div>' +
+      '<div class="comp-props-value" style="font-size:0.68rem;color:#94a3b8;margin-bottom:0.45rem;">Redesignable nodes in selection: ' + redesignableCount + '</div>' +
+      '<textarea class="comp-props-input" id="comp-props-bulk-redesign-prompt" rows="5" placeholder="Describe how these selected nodes should be redesigned together.">' + compEscHtml((bulkRedesignState && bulkRedesignState.message) || '') + '</textarea>' +
+      '<div id="comp-props-bulk-redesign-status" style="display:' + (bulkRedesignState ? '' : 'none') + ';margin-top:0.45rem;">' +
+      '<div style="height:3px;background:#334155;border-radius:2px;overflow:hidden;">' +
+      '<div id="comp-bulk-redesign-bar" style="height:100%;background:linear-gradient(90deg,#7c3aed,#8b5cf6);width:' + ((bulkRedesignState && bulkRedesignState.progressPct) || '0%') + ';transition:width 0.4s;"></div>' +
+      '</div>' +
+      '<div style="display:flex;align-items:center;gap:6px;margin-top:4px;">' +
+      '<div class="spinner" style="display:' + (bulkRedesignState && !bulkRedesignState.completed ? 'inline-block' : 'none') + ';width:10px;height:10px;flex-shrink:0;"></div>' +
+      '<span id="comp-bulk-redesign-phase" style="color:#94a3b8;font-size:0.7rem;">' + compEscHtml((bulkRedesignState && bulkRedesignState.statusText) || 'Ready to coordinate redesign.') + '</span>' +
+      '</div>' +
+      '</div>' +
+      '<button class="comp-tb-btn comp-tb-btn-generate" id="comp-props-bulk-redesign" style="width:100%;margin-top:0.5rem;"' + (redesignableCount === 0 || (bulkRedesignState && !bulkRedesignState.completed) ? ' disabled' : '') + '>' + ((bulkRedesignState && !bulkRedesignState.completed) ? 'Redesigning...' : 'Redesign Selected') + '</button>' +
+      '</div>' +
+      renderBulkRedesignTranscript(bulkRedesignState) +
+      renderGeneratedPipelineDocsSection(selectedDocs, 'Generated Documentation', 'No generated documentation is attached to this exact node selection.') +
       '<div class="comp-props-section">' +
       '<button class="comp-tb-btn" id="comp-props-copy" style="width:100%;margin-bottom:0.3rem;">Copy</button>' +
       '<button class="comp-tb-btn comp-tb-btn-danger" id="comp-props-delete" style="width:100%;">Remove All</button>' +
@@ -56,6 +81,19 @@ function updatePropertiesPanel() {
     if (copyBtn) copyBtn.addEventListener('click', function() { copySelected(); });
     var delBtn = body.querySelector('#comp-props-delete');
     if (delBtn) delBtn.addEventListener('click', function() { deleteSelected(); });
+    var redesignBtn = body.querySelector('#comp-props-bulk-redesign');
+    var redesignInput = body.querySelector('#comp-props-bulk-redesign-prompt');
+    var redesignStatus = body.querySelector('#comp-props-bulk-redesign-status');
+    if (redesignBtn) {
+      redesignBtn.addEventListener('click', function() {
+        var prompt = redesignInput ? redesignInput.value.trim() : '';
+        if (!prompt) {
+          toast('Describe how the selected nodes should be redesigned.', 'error');
+          return;
+        }
+        runBulkSelectionRedesign(prompt, redesignBtn, redesignStatus);
+      });
+    }
   } else if (selectedEdges.size > 0 && selectedNodes.size === 0) {
     panel.style.display = '';
     body.innerHTML =
@@ -75,7 +113,7 @@ function updatePropertiesPanel() {
     panel.style.display = '';
     renderEdgeProperties(selectedEdge);
   } else {
-    hidePropertiesPanel();
+    renderCompositionOverviewProperties(panel, body);
   }
 
   // After showing/hiding panel, update edge positions (canvas resize)
@@ -86,6 +124,540 @@ function hidePropertiesPanel() {
   var panel = document.querySelector('#comp-props-panel');
   if (panel) panel.style.display = 'none';
   setTimeout(function() { updateEdgePositions(); updateMinimap(); }, 0);
+}
+
+var compBulkRedesignUiState = Object.create(null);
+var compBulkRedesignTimers = Object.create(null);
+
+function getBulkRedesignSelectionKey(nodeIds) {
+  return (nodeIds || []).slice().sort().join('|');
+}
+
+function getCurrentBulkRedesignSelectionKey() {
+  return getBulkRedesignSelectionKey(Array.from(selectedNodes || []));
+}
+
+function getCompBulkRedesignState(selectionKey) {
+  return selectionKey ? compBulkRedesignUiState[selectionKey] || null : null;
+}
+
+function setCompBulkRedesignState(selectionKey, state) {
+  if (!selectionKey) return;
+  compBulkRedesignUiState[selectionKey] = state;
+}
+
+function clearCompBulkRedesignTimers(selectionKey) {
+  if (!selectionKey || !compBulkRedesignTimers[selectionKey]) return;
+  compBulkRedesignTimers[selectionKey].forEach(clearTimeout);
+  delete compBulkRedesignTimers[selectionKey];
+}
+
+function startBulkRedesignPhaseTimers(selectionKey) {
+  clearCompBulkRedesignTimers(selectionKey);
+  var phases = [
+    { pct: '10%', text: 'Capturing selected-node context...', delay: 0 },
+    { pct: '28%', text: 'Planning coordinated redesign...', delay: 1800 },
+    { pct: '52%', text: 'Regenerating script nodes...', delay: 5500 },
+    { pct: '76%', text: 'Applying graph-wide updates...', delay: 10500 },
+    { pct: '92%', text: 'Finalizing lifecycle...', delay: 15500 },
+  ];
+  compBulkRedesignTimers[selectionKey] = phases.map(function(phase) {
+    return setTimeout(function() {
+      var state = getCompBulkRedesignState(selectionKey);
+      if (!state || state.completed) return;
+      state.statusText = phase.text;
+      state.progressPct = phase.pct;
+      var barEl = document.querySelector('#comp-bulk-redesign-bar');
+      var phaseEl = document.querySelector('#comp-bulk-redesign-phase');
+      if (barEl) barEl.style.width = phase.pct;
+      if (phaseEl) phaseEl.textContent = phase.text;
+    }, phase.delay);
+  });
+}
+
+function renderBulkRedesignTranscript(state) {
+  var transcript = state && Array.isArray(state.transcript) ? state.transcript : [];
+  var html = '';
+  html += '<div class="comp-props-section">';
+  html += '<div class="comp-props-label">Redesign Lifecycle</div>';
+  html += '<div class="comp-props-value" style="font-size:0.68rem;color:#64748b;margin-bottom:0.45rem;">This session is remembered for the currently selected node set so you can return to it while the redesign is running or after it completes.</div>';
+  if (transcript.length === 0) {
+    html += '<div style="color:#475569;font-size:0.72rem;">No redesign lifecycle recorded yet.</div>';
+  } else {
+    html += '<div style="display:flex;flex-direction:column;gap:0.5rem;max-height:280px;overflow:auto;">';
+    for (var i = 0; i < transcript.length; i++) {
+      var entry = transcript[i] || {};
+      html += '<details style="border:1px solid rgba(129,140,248,0.16);border-radius:10px;background:rgba(15,23,42,0.5);padding:0.15rem 0.2rem;"' + (i === transcript.length - 1 ? ' open' : '') + '>';
+      html += '<summary style="cursor:pointer;list-style:none;color:#dbe4ff;font-size:0.72rem;font-weight:600;padding:0.45rem 0.55rem;">' + compEscHtml(entry.title || ('Stage ' + (i + 1))) + '</summary>';
+      html += '<div style="padding:0 0.55rem 0.55rem 0.55rem;">';
+      if (entry.stage) {
+        html += '<div style="color:#818cf8;font-size:0.64rem;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:0.35rem;">' + compEscHtml(entry.stage) + '</div>';
+      }
+      html += '<pre style="margin:0;white-space:pre-wrap;word-break:break-word;font-size:0.69rem;line-height:1.45;color:#cbd5e1;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;">' + compEscHtml(entry.content || '') + '</pre>';
+      html += '</div>';
+      html += '</details>';
+    }
+    html += '</div>';
+  }
+  html += '</div>';
+  return html;
+}
+
+function getBulkRedesignNodeKind(node) {
+  if (!node) return 'unsupported';
+  if (node.workflowId === '__script__') return 'script';
+  if (node.workflowId === '__text__') return 'text';
+  if (node.workflowId === '__file_op__') return 'file_op';
+  return 'unsupported';
+}
+
+function summarizeBulkRedesignRuntimeMap(values, maxEntries) {
+  if (!values || typeof values !== 'object') return undefined;
+  var keys = Object.keys(values).filter(function(key) {
+    return key !== '__done__' && values[key] !== undefined;
+  }).slice(0, maxEntries || 4);
+  if (keys.length === 0) return undefined;
+  var summary = {};
+  keys.forEach(function(key) {
+    summary[key] = String(truncateForContext(values[key], 180));
+  });
+  return summary;
+}
+
+function getBulkRedesignNodePortNames(node, direction) {
+  if (!node) return [];
+  if (node.workflowId === '__script__') {
+    var ports = direction === 'input'
+      ? ((node.script && node.script.inputs) || [])
+      : ((node.script && node.script.outputs) || []);
+    return ports.map(function(port) {
+      return port && typeof port.name === 'string' ? port.name.trim() : '';
+    }).filter(Boolean);
+  }
+  return [];
+}
+
+function getBulkRedesignNodePortContracts(node, direction) {
+  if (!node) return [];
+  if (node.workflowId === '__script__') {
+    var scriptPorts = direction === 'input'
+      ? ((node.script && node.script.inputs) || [])
+      : ((node.script && node.script.outputs) || []);
+    return scriptPorts.filter(Boolean).map(function(port) {
+      return {
+        name: typeof port.name === 'string' ? port.name.trim() : '',
+        type: typeof port.type === 'string' && port.type.trim() ? port.type.trim() : 'string',
+        description: typeof port.description === 'string' ? port.description.trim() : '',
+      };
+    }).filter(function(port) {
+      return port.name;
+    });
+  }
+  if (node.workflowId === '__text__') {
+    return direction === 'output'
+      ? [{ name: 'text', type: 'string', description: 'Constant text value' }]
+      : [];
+  }
+  if (node.workflowId === '__output__') {
+    var outputPorts = (node.outputNode && node.outputNode.ports) || [];
+    return outputPorts.filter(Boolean).map(function(port) {
+      return {
+        name: typeof port.name === 'string' ? port.name.trim() : '',
+        type: typeof port.type === 'string' && port.type.trim() ? port.type.trim() : 'string',
+        description: typeof port.description === 'string' ? port.description.trim() : '',
+      };
+    }).filter(function(port) {
+      return port.name;
+    });
+  }
+  if (node.workflowId === '__file_op__') {
+    var operation = node.fileOp && node.fileOp.operation ? node.fileOp.operation : 'copy';
+    var fileOpContracts = {
+      copy: {
+        input: [
+          { name: 'sourcePath', type: 'string', description: 'Source path to copy from' },
+          { name: 'destinationPath', type: 'string', description: 'Destination path to copy to' },
+        ],
+        output: [
+          { name: 'outputPath', type: 'string', description: 'Copied file or folder path' },
+          { name: 'success', type: 'boolean', description: 'Whether the copy completed' },
+        ],
+      },
+      move: {
+        input: [
+          { name: 'sourcePath', type: 'string', description: 'Source path to move from' },
+          { name: 'destinationPath', type: 'string', description: 'Destination path to move to' },
+        ],
+        output: [
+          { name: 'outputPath', type: 'string', description: 'Moved file or folder path' },
+          { name: 'success', type: 'boolean', description: 'Whether the move completed' },
+        ],
+      },
+      delete: {
+        input: [{ name: 'filePath', type: 'string', description: 'Path to remove' }],
+        output: [{ name: 'success', type: 'boolean', description: 'Whether the delete completed' }],
+      },
+      mkdir: {
+        input: [{ name: 'folderPath', type: 'string', description: 'Folder path to create' }],
+        output: [
+          { name: 'outputPath', type: 'string', description: 'Created folder path' },
+          { name: 'success', type: 'boolean', description: 'Whether the folder was created' },
+        ],
+      },
+      list: {
+        input: [{ name: 'folderPath', type: 'string', description: 'Folder path to enumerate' }],
+        output: [
+          { name: 'files', type: 'string[]', description: 'Listed file paths' },
+          { name: 'count', type: 'number', description: 'Number of listed files' },
+        ],
+      },
+    };
+    var contractSet = fileOpContracts[operation] || fileOpContracts.copy;
+    return direction === 'input' ? contractSet.input.slice() : contractSet.output.slice();
+  }
+  return [];
+}
+
+function ensureBulkRedesignOutputTargetPort(connection) {
+  if (!compData || !Array.isArray(compData.nodes) || !connection || !connection.targetNodeId || !connection.targetPort) return false;
+  var targetNode = compData.nodes.find(function(candidate) { return candidate.id === connection.targetNodeId; });
+  if (!targetNode || targetNode.workflowId !== '__output__') return false;
+
+  targetNode.outputNode = targetNode.outputNode || { ports: [] };
+  var outputPorts = Array.isArray(targetNode.outputNode.ports) ? targetNode.outputNode.ports : [];
+  var hasPort = outputPorts.some(function(port) {
+    return port && typeof port.name === 'string' && port.name.trim() === connection.targetPort;
+  });
+  if (hasPort) return false;
+
+  var sourceNode = compData.nodes.find(function(candidate) { return candidate.id === connection.sourceNodeId; });
+  var sourcePortContract = null;
+  if (sourceNode) {
+    var sourceContracts = getBulkRedesignNodePortContracts(sourceNode, 'output');
+    sourcePortContract = sourceContracts.find(function(port) {
+      return port.name === connection.sourcePort;
+    }) || null;
+  }
+
+  outputPorts.push({
+    name: connection.targetPort,
+    type: sourcePortContract && sourcePortContract.type ? sourcePortContract.type : 'string',
+    description: sourcePortContract && sourcePortContract.description
+      ? sourcePortContract.description
+      : ('Pipeline output collected from ' + connection.sourcePort),
+  });
+  targetNode.outputNode.ports = outputPorts;
+  return true;
+}
+
+function reconcileBulkRedesignNodeEdges(nodeId) {
+  if (!compData || !Array.isArray(compData.edges)) return false;
+  var node = compData.nodes && compData.nodes.find(function(candidate) { return candidate.id === nodeId; });
+  if (!node) return false;
+
+  var inputNames = getBulkRedesignNodePortNames(node, 'input');
+  var outputNames = getBulkRedesignNodePortNames(node, 'output');
+  var inputSet = {};
+  var outputSet = {};
+  var inputLowerMap = {};
+  var outputLowerMap = {};
+
+  inputNames.forEach(function(name) {
+    inputSet[name] = true;
+    var lower = name.toLowerCase();
+    if (!inputLowerMap[lower]) inputLowerMap[lower] = [];
+    inputLowerMap[lower].push(name);
+  });
+  outputNames.forEach(function(name) {
+    outputSet[name] = true;
+    var lower = name.toLowerCase();
+    if (!outputLowerMap[lower]) outputLowerMap[lower] = [];
+    outputLowerMap[lower].push(name);
+  });
+
+  var changed = false;
+  compData.edges.forEach(function(edge) {
+    if (edge.targetNodeId === nodeId && typeof edge.targetPort === 'string' && !inputSet[edge.targetPort]) {
+      var targetMatches = inputLowerMap[edge.targetPort.toLowerCase()] || [];
+      if (targetMatches.length === 1) {
+        edge.targetPort = targetMatches[0];
+        changed = true;
+      }
+    }
+    if (edge.sourceNodeId === nodeId && typeof edge.sourcePort === 'string' && !outputSet[edge.sourcePort]) {
+      var sourceMatches = outputLowerMap[edge.sourcePort.toLowerCase()] || [];
+      if (sourceMatches.length === 1) {
+        edge.sourcePort = sourceMatches[0];
+        changed = true;
+      }
+    }
+  });
+
+  return changed;
+}
+
+function applyBulkRedesignConnectionUpdates(selectedNodeIds, connectionUpdates) {
+  if (!compData || !Array.isArray(compData.edges)) return false;
+  if (!Array.isArray(connectionUpdates) || connectionUpdates.length === 0) return false;
+
+  var selectedIdSet = {};
+  selectedNodeIds.forEach(function(nodeId) { selectedIdSet[nodeId] = true; });
+
+  var desiredConnections = connectionUpdates.filter(function(connection) {
+    return connection
+      && (selectedIdSet[connection.sourceNodeId] || selectedIdSet[connection.targetNodeId])
+      && typeof connection.sourcePort === 'string'
+      && connection.sourcePort.trim()
+      && typeof connection.targetPort === 'string'
+      && connection.targetPort.trim();
+  }).map(function(connection) {
+    return {
+      sourceNodeId: connection.sourceNodeId,
+      sourcePort: connection.sourcePort.trim(),
+      targetNodeId: connection.targetNodeId,
+      targetPort: connection.targetPort.trim(),
+    };
+  });
+
+  if (desiredConnections.length === 0) return false;
+
+  var touchedOutputPorts = false;
+  desiredConnections.forEach(function(connection) {
+    if (ensureBulkRedesignOutputTargetPort(connection)) touchedOutputPorts = true;
+  });
+
+  var existingUntouchedEdges = compData.edges.filter(function(edge) {
+    return !(selectedIdSet[edge.sourceNodeId] || selectedIdSet[edge.targetNodeId]);
+  });
+  var nextEdges = existingUntouchedEdges.slice();
+  desiredConnections.forEach(function(connection) {
+    var duplicate = nextEdges.some(function(edge) {
+      return edge.sourceNodeId === connection.sourceNodeId
+        && edge.sourcePort === connection.sourcePort
+        && edge.targetNodeId === connection.targetNodeId
+        && edge.targetPort === connection.targetPort;
+    });
+    if (duplicate) return;
+    nextEdges.push({
+      id: typeof genId === 'function' ? genId('edge') : ('edge_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8)),
+      sourceNodeId: connection.sourceNodeId,
+      sourcePort: connection.sourcePort,
+      targetNodeId: connection.targetNodeId,
+      targetPort: connection.targetPort,
+    });
+  });
+
+  var changed = nextEdges.length !== compData.edges.length;
+  if (!changed) {
+    for (var i = 0; i < nextEdges.length; i++) {
+      var current = compData.edges[i];
+      var next = nextEdges[i];
+      if (!current || !next || current.sourceNodeId !== next.sourceNodeId || current.sourcePort !== next.sourcePort || current.targetNodeId !== next.targetNodeId || current.targetPort !== next.targetPort) {
+        changed = true;
+        break;
+      }
+    }
+  }
+  if (changed) compData.edges = nextEdges;
+  return changed || touchedOutputPorts;
+}
+
+function collectBulkSelectionRedesignPayload(selectedNodeIds, instruction) {
+  if (!compData || !Array.isArray(compData.nodes)) return null;
+  var selectedIdSet = {};
+  selectedNodeIds.forEach(function(nodeId) { selectedIdSet[nodeId] = true; });
+
+  var redesignableNodes = compData.nodes
+    .filter(function(node) { return selectedIdSet[node.id] && getBulkRedesignNodeKind(node) !== 'unsupported'; })
+    .map(function(node) {
+      var runtime = lastNodeStates && lastNodeStates[node.id];
+      return {
+        nodeId: node.id,
+        workflowId: node.workflowId,
+        label: node.label || '',
+        script: node.workflowId === '__script__' ? {
+          description: (node.script && node.script.description) || '',
+          code: (node.script && node.script.code) || '',
+          inputs: (node.script && node.script.inputs) || [],
+          outputs: (node.script && node.script.outputs) || [],
+          chatHistory: (node.script && node.script.chatHistory) || [],
+        } : undefined,
+        textNode: node.workflowId === '__text__' ? {
+          value: node.textNode && typeof node.textNode.value === 'string' ? node.textNode.value : '',
+        } : undefined,
+        fileOp: node.workflowId === '__file_op__' ? {
+          operation: node.fileOp && node.fileOp.operation ? node.fileOp.operation : 'copy',
+        } : undefined,
+        latestInputs: runtime ? summarizeBulkRedesignRuntimeMap(runtime.inputVariables, 4) : undefined,
+        latestOutputs: runtime ? summarizeBulkRedesignRuntimeMap(runtime.outputVariables, 4) : undefined,
+      };
+    });
+
+  if (redesignableNodes.length === 0) return null;
+
+  var redesignableIdSet = {};
+  redesignableNodes.forEach(function(node) { redesignableIdSet[node.nodeId] = true; });
+  var relatedEdges = ((compData && compData.edges) || []).filter(function(edge) {
+    return redesignableIdSet[edge.sourceNodeId] || redesignableIdSet[edge.targetNodeId];
+  }).map(function(edge) {
+    return {
+      sourceNodeId: edge.sourceNodeId,
+      sourcePort: edge.sourcePort,
+      targetNodeId: edge.targetNodeId,
+      targetPort: edge.targetPort,
+    };
+  });
+
+  return {
+    description: instruction,
+    selectedNodes: redesignableNodes,
+    selectedEdges: relatedEdges,
+    graphContext: buildScriptGenerationContext(null, redesignableNodes.map(function(node) { return node.nodeId; })),
+  };
+}
+
+async function runBulkSelectionRedesign(requestDescription, triggerBtn, statusEl) {
+  var selectedNodeIds = Array.from(selectedNodes || []);
+  var selectionKey = getBulkRedesignSelectionKey(selectedNodeIds);
+  var payload = collectBulkSelectionRedesignPayload(selectedNodeIds, requestDescription);
+  if (!payload) {
+    toast('Select at least one script, text, or file-op node to redesign.', 'error');
+    return;
+  }
+
+  setCompBulkRedesignState(selectionKey, {
+    selectionKey: selectionKey,
+    nodeIds: selectedNodeIds.slice(),
+    message: requestDescription,
+    statusText: 'Capturing selected-node context...',
+    progressPct: '4%',
+    completed: false,
+    transcript: [
+      {
+        stage: 'request',
+        title: 'Redesign request',
+        content: requestDescription,
+      },
+      {
+        stage: 'selection',
+        title: 'Remembered node selection',
+        content: selectedNodeIds.join('\n'),
+      },
+    ],
+  });
+  startBulkRedesignPhaseTimers(selectionKey);
+
+  if (triggerBtn) {
+    triggerBtn.disabled = true;
+    triggerBtn.textContent = 'Redesigning...';
+  }
+  if (statusEl) statusEl.style.display = '';
+
+  try {
+    var res = await fetch('/api/compositions/redesign-selection', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    var data = await res.json();
+    if (!res.ok || data.error) throw new Error(data.error || 'Bulk redesign failed');
+    if (!Array.isArray(data.updates) || data.updates.length === 0) throw new Error('Agent did not return any node updates');
+
+    var bulkState = getCompBulkRedesignState(selectionKey);
+    if (bulkState) {
+      bulkState.statusText = 'Applying redesign to selected nodes...';
+      bulkState.progressPct = '88%';
+      if (Array.isArray(data.transcript) && data.transcript.length > 0) {
+        bulkState.transcript = bulkState.transcript.concat(data.transcript);
+      }
+    }
+
+    pushUndoSnapshot();
+    var updatedCount = 0;
+    var touchedNodeIds = {};
+    data.updates.forEach(function(update) {
+      var node = compData && compData.nodes && compData.nodes.find(function(candidate) { return candidate.id === update.nodeId; });
+      if (!node) return;
+      touchedNodeIds[update.nodeId] = true;
+      if (typeof update.label === 'string' && update.label.trim()) node.label = update.label.trim();
+      if (node.workflowId === '__script__' && update.script) {
+        node.script = node.script || {};
+        node.script.description = typeof update.script.description === 'string' ? update.script.description : (node.script.description || '');
+        node.script.code = typeof update.script.code === 'string' ? update.script.code : (node.script.code || '');
+        node.script.inputs = Array.isArray(update.script.inputs) ? update.script.inputs : (node.script.inputs || []);
+        node.script.outputs = Array.isArray(update.script.outputs) ? update.script.outputs : (node.script.outputs || []);
+        node.script.chatHistory = (node.script.chatHistory || []).concat([
+          { role: 'user', content: '[Bulk redesign] ' + requestDescription },
+          { role: 'assistant', content: typeof update.script.assistantMessage === 'string' ? update.script.assistantMessage : 'Applied coordinated redesign for this node.' },
+        ]);
+        if (Array.isArray(update.script.transcript)) {
+          node.script.generationTranscript = (node.script.generationTranscript || []).concat(update.script.transcript);
+        }
+        updatedCount += 1;
+        return;
+      }
+      if (node.workflowId === '__text__' && update.textNode) {
+        node.textNode = node.textNode || {};
+        node.textNode.value = typeof update.textNode.value === 'string' ? update.textNode.value : (node.textNode.value || '');
+        updatedCount += 1;
+        return;
+      }
+      if (node.workflowId === '__file_op__' && update.fileOp) {
+        node.fileOp = node.fileOp || {};
+        node.fileOp.operation = typeof update.fileOp.operation === 'string' ? update.fileOp.operation : (node.fileOp.operation || 'copy');
+        updatedCount += 1;
+      }
+    });
+
+    var connectionChanged = applyBulkRedesignConnectionUpdates(selectedNodeIds, data.connections);
+    Object.keys(touchedNodeIds).forEach(function(nodeId) {
+      reconcileBulkRedesignNodeEdges(nodeId);
+    });
+
+    renderNodes();
+    renderEdges();
+    wireUpCanvas();
+    clearCompBulkRedesignTimers(selectionKey);
+    bulkState = getCompBulkRedesignState(selectionKey);
+    if (bulkState) {
+      bulkState.statusText = 'Coordinated redesign completed.';
+      bulkState.progressPct = '100%';
+      bulkState.completed = true;
+      bulkState.transcript = (bulkState.transcript || []).concat([
+        {
+          stage: 'apply',
+          title: 'Applied updates',
+          content: 'Updated ' + updatedCount + ' node' + (updatedCount === 1 ? '' : 's') + '.' + (connectionChanged ? '\nRewired internal selected-node connections.' : '') + '\n\n' + (data.summary || 'Coordinated redesign applied.'),
+        },
+      ]);
+    }
+    updatePropertiesPanel();
+    immediateSave();
+    toast((data.summary || 'Bulk redesign applied') + ' Updated ' + updatedCount + ' node' + (updatedCount === 1 ? '' : 's') + '.', 'success');
+  } catch (err) {
+    clearCompBulkRedesignTimers(selectionKey);
+    var errorState = getCompBulkRedesignState(selectionKey);
+    if (errorState) {
+      errorState.statusText = 'Coordinated redesign failed.';
+      errorState.progressPct = errorState.progressPct || '0%';
+      errorState.completed = true;
+      errorState.transcript = (errorState.transcript || []).concat([
+        {
+          stage: 'error',
+          title: 'Redesign failed',
+          content: String(err && err.message ? err.message : err),
+        },
+      ]);
+    }
+    updatePropertiesPanel();
+    toast('Bulk redesign failed: ' + (err && err.message ? err.message : err), 'error');
+  } finally {
+    if (triggerBtn) {
+      triggerBtn.disabled = false;
+      triggerBtn.textContent = 'Redesign Selected';
+    }
+    if (statusEl) statusEl.style.display = 'none';
+  }
 }
 
 function renderNodeProperties(nodeId) {
@@ -3116,6 +3688,52 @@ function renderOutputProperties(body, node, nodeId) {
   var outputCfg = node.outputNode;
   var html = '';
 
+  function normalizeConnectedOutputPortName(rawName, fallbackName) {
+    var normalized = typeof rawName === 'string' ? rawName.trim().replace(/[^a-zA-Z0-9_]/g, '_') : '';
+    normalized = normalized.replace(/_+/g, '_').replace(/^_+|_+$/g, '');
+    if (!normalized) normalized = fallbackName || 'output';
+    if (/^[0-9]/.test(normalized)) normalized = 'output_' + normalized;
+    return normalized;
+  }
+
+  function renameOutputPortsFromConnections() {
+    if (!compData || !Array.isArray(compData.edges)) return { renamed: 0, connected: 0 };
+
+    var usedNames = {};
+    var renamed = 0;
+    var connected = 0;
+
+    outputCfg.ports.forEach(function(port, index) {
+      var edge = compData.edges.find(function(candidate) {
+        return candidate.targetNodeId === nodeId && candidate.targetPort === port.name;
+      });
+      if (!edge || !edge.sourcePort) return;
+
+      connected += 1;
+      var baseName = normalizeConnectedOutputPortName(edge.sourcePort, 'output_' + (index + 1));
+      var nextName = baseName;
+      var suffix = 2;
+      while (usedNames[nextName]) {
+        nextName = baseName + '_' + suffix;
+        suffix += 1;
+      }
+      usedNames[nextName] = true;
+
+      if (nextName === port.name) return;
+
+      var oldName = port.name;
+      port.name = nextName;
+      compData.edges.forEach(function(candidate) {
+        if (candidate.targetNodeId === nodeId && candidate.targetPort === oldName) {
+          candidate.targetPort = nextName;
+        }
+      });
+      renamed += 1;
+    });
+
+    return { renamed: renamed, connected: connected };
+  }
+
   // Display Name
   html += '<div class="comp-props-section">';
   html += '<div class="comp-props-label">Display Name</div>';
@@ -3161,6 +3779,7 @@ function renderOutputProperties(body, node, nodeId) {
 
   html += '<div style="display:flex;gap:6px;margin-top:6px;">';
   html += '<button class="comp-output-add-port" id="comp-output-add-port">+ Add Port</button>';
+  html += '<button class="comp-output-rename-connected-btn" id="comp-output-rename-connected" title="Rename each output port to match its connected source port">Use Connections</button>';
   html += '<button class="comp-output-suggest-btn" id="comp-output-suggest-names" title="Suggest names based on connected nodes">&#x2728; Suggest Names</button>';
   html += '</div>';
   html += '</div>';
@@ -3244,6 +3863,27 @@ function renderOutputProperties(body, node, nodeId) {
       wireUpCanvas();
       renderOutputProperties(body, node, nodeId);
       immediateSave();
+    });
+  }
+
+  var renameConnectedBtn = document.querySelector('#comp-output-rename-connected');
+  if (renameConnectedBtn) {
+    renameConnectedBtn.addEventListener('click', function() {
+      var result = renameOutputPortsFromConnections();
+      if (!result.connected) {
+        showToast('No connected output ports to rename', 'error');
+        return;
+      }
+      if (!result.renamed) {
+        showToast('Output ports already match their connections', 'success');
+        return;
+      }
+      renderNodes();
+      renderEdges();
+      wireUpCanvas();
+      renderOutputProperties(body, node, nodeId);
+      immediateSave();
+      showToast('Renamed ' + result.renamed + ' output port' + (result.renamed === 1 ? '' : 's') + ' from connections', 'success');
     });
   }
 
@@ -3503,6 +4143,7 @@ function validateWoodburyScriptCode(code) {
 }
 
 var compScriptGenerationUiState = Object.create(null);
+var compScriptGenerationTimers = Object.create(null);
 
 function getCompScriptGenerationState(nodeId) {
   return nodeId ? compScriptGenerationUiState[nodeId] || null : null;
@@ -3516,6 +4157,40 @@ function setCompScriptGenerationState(nodeId, state) {
 function clearCompScriptGenerationState(nodeId) {
   if (!nodeId) return;
   delete compScriptGenerationUiState[nodeId];
+  // Clear any phase timers
+  if (compScriptGenerationTimers[nodeId]) {
+    compScriptGenerationTimers[nodeId].forEach(clearTimeout);
+    delete compScriptGenerationTimers[nodeId];
+  }
+}
+
+function startScriptChatPhaseTimers(nodeId) {
+  // Clear any existing timers for this node
+  if (compScriptGenerationTimers[nodeId]) {
+    compScriptGenerationTimers[nodeId].forEach(clearTimeout);
+  }
+  var phases = [
+    { pct: '15%', text: 'Planning approach...', delay: 0 },
+    { pct: '35%', text: 'Generating script code...', delay: 3000 },
+    { pct: '60%', text: 'Validating code...', delay: 8000 },
+    { pct: '80%', text: 'Running tests and repairs...', delay: 14000 },
+    { pct: '90%', text: 'Finalizing...', delay: 22000 },
+  ];
+  var timers = [];
+  phases.forEach(function(phase) {
+    timers.push(setTimeout(function() {
+      var state = getCompScriptGenerationState(nodeId);
+      if (!state) return;
+      state.statusText = phase.text;
+      state.progressPct = phase.pct;
+      // Update DOM directly without re-rendering
+      var barEl = document.querySelector('#comp-script-chat-bar');
+      var phaseEl = document.querySelector('#comp-script-chat-phase');
+      if (barEl) barEl.style.width = phase.pct;
+      if (phaseEl) phaseEl.textContent = phase.text;
+    }, phase.delay));
+  });
+  compScriptGenerationTimers[nodeId] = timers;
 }
 
 function renderScriptGenerationTranscript(scriptCfg) {
@@ -3523,7 +4198,7 @@ function renderScriptGenerationTranscript(scriptCfg) {
   var html = '';
   html += '<div class="comp-props-section">';
   html += '<div class="comp-props-label">Generation Transcript</div>';
-  html += '<div class="comp-props-value" style="font-size:0.68rem;color:#64748b;margin-bottom:0.45rem;">Stored generation, repair, validation, and code-check passes for this script node.</div>';
+  html += '<div class="comp-props-value" style="font-size:0.68rem;color:#64748b;margin-bottom:0.45rem;">Stored planning, generation, repair, validation, and code-check passes for this script node.</div>';
   if (transcript.length === 0) {
     html += '<div style="color:#475569;font-size:0.72rem;">No transcript recorded yet.</div>';
   } else {
@@ -3534,7 +4209,8 @@ function renderScriptGenerationTranscript(scriptCfg) {
       html += '<summary style="cursor:pointer;list-style:none;color:#dbe4ff;font-size:0.72rem;font-weight:600;padding:0.45rem 0.55rem;">' + compEscHtml(entry.title || ('Step ' + (ti + 1))) + '</summary>';
       html += '<div style="padding:0 0.55rem 0.55rem 0.55rem;">';
       if (entry.stage) {
-        html += '<div style="color:#818cf8;font-size:0.64rem;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:0.35rem;">' + compEscHtml(entry.stage) + '</div>';
+        var stageColor = entry.stage === 'plan' ? '#f59e0b' : '#818cf8';
+        html += '<div style="color:' + stageColor + ';font-size:0.64rem;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:0.35rem;">' + compEscHtml(entry.stage) + '</div>';
       }
       html += '<pre style="margin:0;white-space:pre-wrap;word-break:break-word;font-size:0.69rem;line-height:1.45;color:#cbd5e1;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;">' + compEscHtml(entry.content || '') + '</pre>';
       html += '</div>';
@@ -3544,6 +4220,41 @@ function renderScriptGenerationTranscript(scriptCfg) {
   }
   html += '</div>';
   return html;
+}
+
+function renderScriptGenerationMetrics(scriptCfg) {
+  var metrics = scriptCfg && scriptCfg.generationMetrics ? scriptCfg.generationMetrics : null;
+  var html = '';
+  html += '<div class="comp-props-section">';
+  html += '<div class="comp-props-label">Generation Metrics</div>';
+  if (!metrics) {
+    html += '<div class="comp-props-value" style="font-size:0.68rem;color:#64748b;">No generation metrics recorded yet.</div>';
+    html += '</div>';
+    return html;
+  }
+  html += '<div class="comp-props-value" style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0.45rem;font-size:0.68rem;">';
+  html += '<div><strong>Path:</strong> ' + compEscHtml(metrics.generationPath || 'unknown') + '</div>';
+  html += '<div><strong>Candidates:</strong> ' + compEscHtml(String(metrics.candidateCount || 0)) + '</div>';
+  html += '<div><strong>Retrieved examples:</strong> ' + compEscHtml(String(metrics.retrievedExampleCount || 0)) + '</div>';
+  html += '<div><strong>Unit tests:</strong> ' + compEscHtml(String(metrics.unitTestCount || 0)) + '</div>';
+  html += '<div><strong>Smoke tests:</strong> ' + compEscHtml(String(metrics.smokeTestCount || 0)) + '</div>';
+  html += '<div><strong>Repair attempts:</strong> ' + compEscHtml(String(metrics.repairAttemptCount || 0)) + '</div>';
+  html += '<div><strong>Runtime evidence:</strong> ' + (metrics.runtimeEvidenceUsed ? 'yes' : 'no') + '</div>';
+  html += '<div><strong>Execution verified:</strong> ' + (metrics.executionVerified ? 'yes' : 'no') + '</div>';
+  html += '<div><strong>Bounded sample exec:</strong> ' + (metrics.sampleExecutionUsed ? 'yes' : 'no') + '</div>';
+  html += '<div><strong>Sample source:</strong> ' + compEscHtml(metrics.sampleExecutionSource || 'none') + '</div>';
+  html += '<div><strong>Manual edits:</strong> ' + compEscHtml(String(metrics.manualEditCount || 0)) + '</div>';
+  html += '</div>';
+  html += '</div>';
+  return html;
+}
+
+function incrementScriptManualEditMetrics(scriptCfg) {
+  if (!scriptCfg) return;
+  scriptCfg.generationMetrics = scriptCfg.generationMetrics || {};
+  scriptCfg.generationMetrics.manualEditCount = (Number(scriptCfg.generationMetrics.manualEditCount) || 0) + 1;
+  if (!scriptCfg.generationMetrics.generationPath) scriptCfg.generationMetrics.generationPath = 'direct';
+  if (!scriptCfg.generationMetrics.sampleExecutionSource) scriptCfg.generationMetrics.sampleExecutionSource = 'none';
 }
 
 function renderScriptProperties(body, node, nodeId) {
@@ -3634,11 +4345,17 @@ function renderScriptProperties(body, node, nodeId) {
   html += '<button class="comp-tb-btn comp-tb-btn-run" id="comp-script-chat-send" style="padding:0.3rem 0.6rem;font-size:0.72rem;"' + (pendingGeneration ? ' disabled' : '') + '>Send</button>';
   html += '</div>';
   html += '<div id="comp-script-chat-status" style="display:' + (pendingGeneration ? '' : 'none') + ';margin-top:4px;">';
-  html += '<div class="spinner" style="display:inline-block;width:12px;height:12px;margin-right:4px;vertical-align:middle;"></div>';
-  html += '<span style="color:#94a3b8;font-size:0.7rem;">' + compEscHtml((pendingGeneration && pendingGeneration.statusText) || 'Generating...') + '</span>';
+  html += '<div style="height:3px;background:#334155;border-radius:2px;overflow:hidden;">';
+  html += '<div id="comp-script-chat-bar" style="height:100%;background:linear-gradient(90deg,#7c3aed,#8b5cf6);width:' + ((pendingGeneration && pendingGeneration.progressPct) || '0%') + ';transition:width 0.4s;"></div>';
+  html += '</div>';
+  html += '<div style="display:flex;align-items:center;margin-top:4px;">';
+  html += '<div class="spinner" style="display:inline-block;width:10px;height:10px;margin-right:4px;flex-shrink:0;"></div>';
+  html += '<span id="comp-script-chat-phase" style="color:#94a3b8;font-size:0.7rem;">' + compEscHtml((pendingGeneration && pendingGeneration.statusText) || 'Planning approach...') + '</span>';
+  html += '</div>';
   html += '</div>';
   html += '</div>';
 
+  html += renderScriptGenerationMetrics(scriptCfg);
   html += renderScriptGenerationTranscript(scriptCfg);
 
   // Code Preview
@@ -3827,6 +4544,7 @@ function renderScriptProperties(body, node, nodeId) {
       node.script.code = nextCode;
       node.script.inputs = validation.ports.inputs;
       node.script.outputs = validation.ports.outputs;
+      incrementScriptManualEditMetrics(node.script);
 
       renderNodes();
       renderEdges();
@@ -3894,6 +4612,8 @@ function renderScriptProperties(body, node, nodeId) {
         description: message,
         chatHistory: history.slice(0, -1),
         currentCode: node.script.code || undefined,
+        currentNodeId: nodeId,
+        compositionSnapshot: compData,
         graphContext: buildScriptGenerationContext(nodeId, node.script.contextNodeIds || []),
       }),
     })
@@ -3907,6 +4627,7 @@ function renderScriptProperties(body, node, nodeId) {
         node.script.code = result.data.code;
         node.script.inputs = result.data.inputs;
         node.script.outputs = result.data.outputs;
+        node.script.generationMetrics = result.data.lifecycle && result.data.lifecycle.metrics ? result.data.lifecycle.metrics : node.script.generationMetrics;
         node.script.chatHistory = history.concat([
           { role: 'assistant', content: result.data.assistantMessage },
         ]);
@@ -3944,9 +4665,11 @@ function renderScriptProperties(body, node, nodeId) {
 
     setCompScriptGenerationState(nodeId, {
       message: message,
-      statusText: 'Generating...',
+      statusText: 'Planning approach...',
+      progressPct: '0%',
       requestStarted: false,
     });
+    startScriptChatPhaseTimers(nodeId);
 
     renderScriptProperties(body, node, nodeId);
   }

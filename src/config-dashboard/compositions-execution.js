@@ -277,6 +277,40 @@ function clientTopoSort() {
   return result;
 }
 
+function clientValidateRunGraph() {
+  if (!compData) return { order: null, error: null, message: '' };
+
+  var nodeIdSet = {};
+  compData.nodes.forEach(function(node) {
+    nodeIdSet[node.id] = true;
+  });
+
+  var invalidEdges = (compData.edges || []).filter(function(edge) {
+    return !nodeIdSet[edge.sourceNodeId] || !nodeIdSet[edge.targetNodeId];
+  });
+  if (invalidEdges.length > 0) {
+    var sample = invalidEdges.slice(0, 3).map(function(edge) {
+      return (edge.sourceNodeId || '?') + '.' + (edge.sourcePort || '?') + ' -> ' + (edge.targetNodeId || '?') + '.' + (edge.targetPort || '?');
+    }).join(', ');
+    return {
+      order: null,
+      error: 'invalid-connections',
+      message: 'Some connections point to missing steps: ' + sample,
+    };
+  }
+
+  var order = clientTopoSort();
+  if (!order) {
+    return {
+      order: null,
+      error: 'cycle',
+      message: 'These workflows form a loop — each step needs to run after the ones connected to it, but a loop makes that impossible',
+    };
+  }
+
+  return { order: order, error: null, message: '' };
+}
+
 var compRunFormValues = {};
 var compFormPreviewCache = {};
 var compFormPreviewInflight = {};
@@ -507,8 +541,9 @@ function renderCompositionRunFields(inputs) {
     var control = getCompositionInputControl(input);
     var savedVal = getCompositionRunValue(compData.id, input.key, getCompositionDefaultText(input));
     var sources = input.sources.length > 0 ? input.sources.join(', ') : '';
+    var fieldClassName = 'comp-run-field' + (control.isTextarea ? ' comp-run-field-wide' : '');
 
-    html += '<div class="comp-run-field">';
+    html += '<div class="' + fieldClassName + '">';
     html += '<div class="comp-run-field-header">';
     html += '<label class="comp-run-field-label" for="comp-run-input-' + compEscAttr(input.key) + '">' + compEscHtml(input.label || humanizeVarName(input.key)) + '</label>';
     html += input.required
@@ -656,6 +691,112 @@ function serializeCompositionResult(value) {
   }
 }
 
+function tryParseCompositionJsonString(value) {
+  if (typeof value !== 'string') return null;
+  var trimmed = value.trim();
+  if (!trimmed || (trimmed[0] !== '{' && trimmed[0] !== '[')) return null;
+  try {
+    return JSON.parse(trimmed);
+  } catch (err) {
+    return null;
+  }
+}
+
+function isCompositionScalarValue(value) {
+  return value === null || value === undefined || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean';
+}
+
+function renderCompositionStructuredScalar(value) {
+  if (value === null) return '<span class="comp-form-json-null">null</span>';
+  if (value === undefined) return '<span class="comp-form-json-null">undefined</span>';
+  if (typeof value === 'number') return '<span class="comp-form-json-number">' + compEscHtml(String(value)) + '</span>';
+  if (typeof value === 'boolean') return '<span class="comp-form-json-boolean">' + compEscHtml(String(value)) + '</span>';
+  return '<span class="comp-form-json-string">' + compEscHtml(JSON.stringify(String(value))) + '</span>';
+}
+
+function getCompositionStructureDepth(value, maxDepth) {
+  var limit = typeof maxDepth === 'number' ? maxDepth : 4;
+
+  function walk(input, depth) {
+    if (depth >= limit || isCompositionScalarValue(input)) return depth;
+    if (Array.isArray(input)) {
+      if (input.length === 0) return depth + 1;
+      return input.reduce(function(best, item) {
+        return Math.max(best, walk(item, depth + 1));
+      }, depth + 1);
+    }
+    var keys = Object.keys(input || {});
+    if (keys.length === 0) return depth + 1;
+    return keys.reduce(function(best, key) {
+      return Math.max(best, walk(input[key], depth + 1));
+    }, depth + 1);
+  }
+
+  return walk(value, 0);
+}
+
+function countCompositionComplexChildren(value) {
+  if (!value || typeof value !== 'object') return 0;
+  var count = 0;
+  Object.keys(value).forEach(function(key) {
+    var item = value[key];
+    if (item && typeof item === 'object') count++;
+  });
+  return count;
+}
+
+function shouldRenderCompositionDeepInspector(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  var keys = Object.keys(value);
+  if (keys.length < 2) return false;
+  return getCompositionStructureDepth(value, 5) >= 3 || countCompositionComplexChildren(value) >= 2 || keys.length >= 5;
+}
+
+function renderCompositionStructuredValue(value, runId, pathKey, depth) {
+  var nextDepth = depth || 0;
+  if (isCompositionScalarValue(value)) {
+    return '<div class="comp-form-json-leaf">' + renderCompositionStructuredScalar(value) + '</div>';
+  }
+
+  if (Array.isArray(value)) {
+    if (value.length === 0) {
+      return '<div class="comp-form-json-empty">Empty array</div>';
+    }
+    var arrayKey = pathKey + ':array';
+    var arrayHtml = '<details class="comp-form-json-node" data-comp-details-key="' + compEscAttr(arrayKey) + '"' + getCompositionDetailsOpenAttr(runId, arrayKey, nextDepth < 2) + '>';
+    arrayHtml += '<summary><span class="comp-form-json-type">Array</span><span class="comp-form-json-count">' + compEscHtml(String(value.length)) + ' items</span></summary>';
+    arrayHtml += '<div class="comp-form-json-children">';
+    value.forEach(function(item, index) {
+      arrayHtml += '<div class="comp-form-json-row">';
+      arrayHtml += '<div class="comp-form-json-key">[' + compEscHtml(String(index)) + ']</div>';
+      arrayHtml += '<div class="comp-form-json-value">' + renderCompositionStructuredValue(item, runId, pathKey + '[' + index + ']', nextDepth + 1) + '</div>';
+      arrayHtml += '</div>';
+    });
+    arrayHtml += '</div>';
+    arrayHtml += '</details>';
+    return arrayHtml;
+  }
+
+  var keys = Object.keys(value || {});
+  if (keys.length === 0) {
+    return '<div class="comp-form-json-empty">Empty object</div>';
+  }
+
+  var objectKey = pathKey + ':object';
+  var objectHtml = '<details class="comp-form-json-node" data-comp-details-key="' + compEscAttr(objectKey) + '"' + getCompositionDetailsOpenAttr(runId, objectKey, true) + '>';
+  objectHtml += '<summary><span class="comp-form-json-type">Object</span><span class="comp-form-json-count">' + compEscHtml(String(keys.length)) + ' fields</span></summary>';
+  objectHtml += '<div class="comp-form-json-children">';
+  keys.forEach(function(key) {
+    objectHtml += '<div class="comp-form-json-row">';
+    objectHtml += '<div class="comp-form-json-key">' + compEscHtml(key) + '</div>';
+    objectHtml += '<div class="comp-form-json-value">' + renderCompositionStructuredValue(value[key], runId, pathKey + '.' + key, nextDepth + 1) + '</div>';
+    objectHtml += '</div>';
+  });
+  objectHtml += '</div>';
+  objectHtml += '</details>';
+  return objectHtml;
+}
+
 function getCompositionArtifactKind(value) {
   if (!value || typeof value !== 'string') return 'other';
   var lower = value.toLowerCase();
@@ -678,6 +819,524 @@ function getCompositionOutputKind(value) {
   if (value === null || value === undefined) return 'scalar';
   if (typeof value === 'string' && looksLikeMarkdown(value)) return 'markdown';
   return 'scalar';
+}
+
+function normalizeCompositionDisplayValue(value) {
+  var parsed = tryParseCompositionJsonString(value);
+  return parsed !== null ? parsed : value;
+}
+
+function getCompositionOutputPortDefinition(outputKey) {
+  if (!compData || !Array.isArray(compData.nodes)) return null;
+  var outputNode = compData.nodes.find(function(node) {
+    return node && node.workflowId === '__output__';
+  });
+  if (!outputNode || !outputNode.outputNode || !Array.isArray(outputNode.outputNode.ports)) return null;
+  return outputNode.outputNode.ports.find(function(port) {
+    return port && port.name === outputKey;
+  }) || null;
+}
+
+function getCompositionOutputPresentation(outputKey) {
+  var port = getCompositionOutputPortDefinition(outputKey);
+  return port && port.presentation ? port.presentation : null;
+}
+
+function getCompositionPresentationField(obj, preferredField, candidates) {
+  if (!obj || typeof obj !== 'object') return null;
+  if (preferredField && obj[preferredField] !== undefined && obj[preferredField] !== null && obj[preferredField] !== '') {
+    return preferredField;
+  }
+  for (var i = 0; i < candidates.length; i++) {
+    var key = candidates[i];
+    if (obj[key] !== undefined && obj[key] !== null && obj[key] !== '') return key;
+  }
+  return null;
+}
+
+function getCompositionPresentationSectionConfig(presentation, sectionKey) {
+  if (!presentation || !presentation.sections || !sectionKey) return null;
+  var config = presentation.sections[sectionKey];
+  return config && typeof config === 'object' ? config : null;
+}
+
+function mergeCompositionPresentation(basePresentation, sectionConfig) {
+  if (!basePresentation && !sectionConfig) return null;
+  var merged = {};
+  if (basePresentation) {
+    Object.keys(basePresentation).forEach(function(key) {
+      if (key === 'sections' || key === 'sectionOrder' || key === 'tabStyle') return;
+      merged[key] = basePresentation[key];
+    });
+  }
+  if (sectionConfig) {
+    Object.keys(sectionConfig).forEach(function(key) {
+      merged[key] = sectionConfig[key];
+    });
+  }
+  return merged;
+}
+
+function orderCompositionSectionKeys(keys, presentation) {
+  var preferred = Array.isArray(presentation && presentation.sectionOrder) ? presentation.sectionOrder : [];
+  if (preferred.length === 0) return keys.slice();
+
+  var remaining = keys.slice();
+  var ordered = [];
+  preferred.forEach(function(key) {
+    var idx = remaining.indexOf(key);
+    if (idx >= 0) {
+      ordered.push(key);
+      remaining.splice(idx, 1);
+    }
+  });
+  return ordered.concat(remaining);
+}
+
+function getCompositionSectionLabel(sectionKey, presentation) {
+  var sectionConfig = getCompositionPresentationSectionConfig(presentation, sectionKey);
+  if (sectionConfig && sectionConfig.label) return String(sectionConfig.label);
+  return humanizeVarName(sectionKey);
+}
+
+function getCompositionMediaKindFromValue(value, forcedKind) {
+  if (!value || typeof value !== 'string') return null;
+  if (forcedKind && forcedKind !== 'auto') return forcedKind;
+  var kind = getCompositionArtifactKind(value);
+  if (kind === 'image' || kind === 'video' || kind === 'audio' || kind === 'pdf') return kind;
+  return null;
+}
+
+function getCompositionMediaSrc(value) {
+  if (!value || typeof value !== 'string') return '';
+  if (/^data:/i.test(value) || /^https?:\/\//i.test(value)) return value;
+  return '/api/file?path=' + encodeURIComponent(value);
+}
+
+function formatCompositionPreviewValue(value) {
+  if (value === null || value === undefined) return 'None';
+  if (Array.isArray(value)) return value.length + ' item' + (value.length === 1 ? '' : 's');
+  if (typeof value === 'object') {
+    var keyCount = Object.keys(value).length;
+    return keyCount + ' field' + (keyCount === 1 ? '' : 's');
+  }
+  var text = String(value);
+  return text.length > 220 ? text.slice(0, 217) + '...' : text;
+}
+
+function renderCompositionMediaPreview(value, mediaKind, title) {
+  var src = getCompositionMediaSrc(value);
+  if (!src) return '';
+  if (mediaKind === 'image') {
+    return '<img class="comp-form-rich-media comp-form-rich-media-image" src="' + compEscAttr(src) + '" alt="' + compEscAttr(title || 'Preview') + '">';
+  }
+  if (mediaKind === 'video') {
+    return '<video class="comp-form-rich-media comp-form-rich-media-video" src="' + compEscAttr(src) + '" controls preload="metadata"></video>';
+  }
+  if (mediaKind === 'audio') {
+    return '<div class="comp-form-rich-audio"><div class="comp-form-rich-audio-icon">Audio</div><audio class="comp-form-rich-media-audio" src="' + compEscAttr(src) + '" controls preload="metadata"></audio></div>';
+  }
+  if (mediaKind === 'pdf') {
+    return '<iframe class="comp-form-rich-media comp-form-rich-media-pdf" src="' + compEscAttr(src) + '"></iframe>';
+  }
+  return '';
+}
+
+function getCompositionFilterText(value, preferredFields) {
+  var parts = [];
+
+  function pushText(input) {
+    if (input === null || input === undefined) return;
+    if (Array.isArray(input)) {
+      input.forEach(pushText);
+      return;
+    }
+    if (typeof input === 'object') {
+      Object.keys(input).forEach(function(key) {
+        pushText(input[key]);
+      });
+      return;
+    }
+    parts.push(String(input));
+  }
+
+  if (value && typeof value === 'object' && !Array.isArray(value) && Array.isArray(preferredFields) && preferredFields.length > 0) {
+    preferredFields.forEach(function(field) {
+      if (value[field] !== undefined) pushText(value[field]);
+    });
+  } else {
+    pushText(value);
+  }
+
+  return parts.join(' ').trim().toLowerCase();
+}
+
+function getCompositionArraySearchPlaceholder(presentation, outputPathKey) {
+  var fallbackLabel = outputPathKey && outputPathKey.split('.').pop();
+  if (presentation && presentation.searchPlaceholder) return String(presentation.searchPlaceholder);
+  return 'Filter ' + humanizeVarName(fallbackLabel || 'items');
+}
+
+function shouldRenderCompositionArrayFilter(items, presentation) {
+  if (!Array.isArray(items)) return false;
+  if (items.length >= 6) return true;
+  return !!(presentation && Array.isArray(presentation.filterFields) && presentation.filterFields.length > 0);
+}
+
+function renderCompositionArrayScalarCard(item, index) {
+  var valueType = item === null ? 'null' : Array.isArray(item) ? 'array' : typeof item;
+  var displayValue = item === undefined ? 'undefined' : serializeCompositionResult(item);
+  var html = '<div class="comp-form-array-card" data-comp-filter-item data-comp-filter-text="' + compEscAttr(getCompositionFilterText(item)) + '">';
+  html += '<div class="comp-form-array-card-head">';
+  html += '<span class="comp-form-array-card-index">' + compEscHtml(String(index + 1)) + '</span>';
+  html += '<span class="comp-form-array-card-type">' + compEscHtml(valueType) + '</span>';
+  html += '</div>';
+  html += '<div class="comp-form-array-card-body">' + compEscHtml(displayValue) + '</div>';
+  html += '</div>';
+  return html;
+}
+
+function renderCompositionArraySummaryCard(item, index, outputPathKey, runId, presentation) {
+  if (item && typeof item === 'object' && !Array.isArray(item)) {
+    return renderCompositionObjectPreviewCard(item, presentation, outputPathKey + '[' + index + ']', runId || 'no-run');
+  }
+
+  var summary = Array.isArray(item)
+    ? String(item.length) + ' items'
+    : formatCompositionPreviewValue(item);
+  var typeLabel = Array.isArray(item) ? 'array' : (item === null ? 'null' : typeof item);
+  var html = '<div class="comp-form-array-card" data-comp-filter-item data-comp-filter-text="' + compEscAttr(getCompositionFilterText(item, presentation && presentation.filterFields)) + '">';
+  html += '<div class="comp-form-array-card-head">';
+  html += '<span class="comp-form-array-card-index">' + compEscHtml(String(index + 1)) + '</span>';
+  html += '<span class="comp-form-array-card-type">' + compEscHtml(typeLabel) + '</span>';
+  html += '</div>';
+  html += '<div class="comp-form-array-card-body">' + compEscHtml(summary) + '</div>';
+
+  if (Array.isArray(item)) {
+    var nestedDetailKey = outputPathKey + '[' + index + ']:nested';
+    html += '<details class="comp-form-rich-raw" data-comp-details-key="' + compEscAttr(nestedDetailKey) + '"' + getCompositionDetailsOpenAttr(runId || 'no-run', nestedDetailKey, false) + '>';
+    html += '<summary>Expand array</summary>';
+    html += '<div class="comp-form-json-viewer">' + renderCompositionStructuredValue(item, runId || 'no-run', outputPathKey + '[' + index + ']', 0) + '</div>';
+    html += '</details>';
+  }
+
+  html += '</div>';
+  return html;
+}
+
+function renderCompositionArrayPreview(items, presentation, runId, outputPathKey) {
+  if (!Array.isArray(items) || items.length === 0) return '';
+
+  var normalizedItems = items.map(function(item) {
+    return normalizeCompositionDisplayValue(item);
+  });
+  var objectItems = normalizedItems.filter(function(item) {
+    return item && typeof item === 'object' && !Array.isArray(item);
+  });
+  var scalarItems = normalizedItems.filter(function(item) {
+    return isCompositionScalarValue(item);
+  });
+
+  function wrapArrayContent(innerHtml) {
+    var shouldFilter = shouldRenderCompositionArrayFilter(normalizedItems, presentation);
+    if (!shouldFilter) return innerHtml;
+    var filterId = outputPathKey + ':filter';
+    var wrappedHtml = '<div class="comp-form-array-preview" data-comp-filter-group="' + compEscAttr(filterId) + '">';
+    wrappedHtml += '<div class="comp-form-array-toolbar">';
+    wrappedHtml += '<input class="comp-form-array-search" type="search" placeholder="' + compEscAttr(getCompositionArraySearchPlaceholder(presentation, outputPathKey)) + '" data-comp-filter-input data-comp-filter-group="' + compEscAttr(filterId) + '">';
+    wrappedHtml += '<div class="comp-form-array-count" data-comp-filter-count data-comp-filter-group="' + compEscAttr(filterId) + '">' + compEscHtml(String(normalizedItems.length)) + ' items</div>';
+    wrappedHtml += '</div>';
+    wrappedHtml += innerHtml;
+    wrappedHtml += '<div class="comp-form-results-empty comp-form-array-empty" data-comp-filter-empty data-comp-filter-group="' + compEscAttr(filterId) + '" style="display:none;">No matching items.</div>';
+    wrappedHtml += '</div>';
+    return wrappedHtml;
+  }
+
+  if (objectItems.length === normalizedItems.length) {
+    var objectGridHtml = '<div class="comp-form-rich-grid">';
+    normalizedItems.forEach(function(item, index) {
+      objectGridHtml += renderCompositionObjectPreviewCard(item, presentation, outputPathKey + '[' + index + ']', runId || 'no-run');
+    });
+    objectGridHtml += '</div>';
+    return wrapArrayContent(objectGridHtml);
+  }
+
+  if (scalarItems.length === normalizedItems.length) {
+    var scalarGridHtml = '<div class="comp-form-array-grid">';
+    normalizedItems.forEach(function(item, index) {
+      scalarGridHtml += renderCompositionArrayScalarCard(item, index);
+    });
+    scalarGridHtml += '</div>';
+    return wrapArrayContent(scalarGridHtml);
+  }
+
+  var mixedGridHtml = '<div class="comp-form-array-grid comp-form-array-grid-mixed">';
+  normalizedItems.forEach(function(item, index) {
+    mixedGridHtml += renderCompositionArraySummaryCard(item, index, outputPathKey, runId || 'no-run', presentation);
+  });
+  mixedGridHtml += '</div>';
+  return wrapArrayContent(mixedGridHtml);
+}
+
+function renderCompositionDeepScalarValue(value) {
+  return '<div class="comp-form-deep-value">' + compEscHtml(serializeCompositionResult(value)) + '</div>';
+}
+
+function renderCompositionDeepScalarGrid(value) {
+  var keys = Object.keys(value || {});
+  var html = '<div class="comp-form-deep-kv-grid">';
+  keys.forEach(function(key) {
+    html += '<div class="comp-form-deep-kv-card">';
+    html += '<div class="comp-form-deep-kv-key">' + compEscHtml(humanizeVarName(key)) + '</div>';
+    html += '<div class="comp-form-deep-kv-value">' + compEscHtml(formatCompositionPreviewValue(value[key])) + '</div>';
+    html += '</div>';
+  });
+  html += '</div>';
+  return html;
+}
+
+function renderCompositionDeepFieldSummary(value) {
+  if (Array.isArray(value)) return value.length + ' item' + (value.length === 1 ? '' : 's');
+  if (value && typeof value === 'object') return Object.keys(value).length + ' field' + (Object.keys(value).length === 1 ? '' : 's');
+  return typeof value;
+}
+
+function renderCompositionDeepSectionBody(value, presentation, runId, pathKey, depth) {
+  var nextDepth = depth || 0;
+  if (isCompositionScalarValue(value)) {
+    return renderCompositionDeepScalarValue(value);
+  }
+
+  if (Array.isArray(value)) {
+    var arrayHtml = renderCompositionArrayPreview(value, presentation, runId, pathKey);
+    if (arrayHtml) return arrayHtml;
+    return '<div class="comp-form-json-viewer">' + renderCompositionStructuredValue(value, runId || 'no-run', pathKey, nextDepth) + '</div>';
+  }
+
+  var keys = Object.keys(value || {});
+  if (keys.length === 0) {
+    return '<div class="comp-form-results-empty">Empty object</div>';
+  }
+
+  var allScalar = keys.every(function(key) {
+    return isCompositionScalarValue(value[key]);
+  });
+  if (allScalar) {
+    return renderCompositionDeepScalarGrid(value);
+  }
+
+  if (nextDepth >= 1) {
+    return '<div class="comp-form-json-viewer">' + renderCompositionStructuredValue(value, runId || 'no-run', pathKey, nextDepth) + '</div>';
+  }
+
+  var html = '<div class="comp-form-deep-card-grid">';
+  keys.forEach(function(key) {
+    var item = value[key];
+    var sectionPresentation = mergeCompositionPresentation(presentation, getCompositionPresentationSectionConfig(presentation, key));
+    html += '<article class="comp-form-deep-card">';
+    html += '<div class="comp-form-deep-card-head">';
+    html += '<div class="comp-form-deep-card-title">' + compEscHtml(getCompositionSectionLabel(key, presentation)) + '</div>';
+    html += '<div class="comp-form-deep-card-meta">' + compEscHtml(renderCompositionDeepFieldSummary(item)) + '</div>';
+    html += '</div>';
+    html += '<div class="comp-form-deep-card-body">' + renderCompositionDeepSectionBody(item, sectionPresentation, runId || 'no-run', pathKey + '.' + key, nextDepth + 1) + '</div>';
+    html += '</article>';
+  });
+  html += '</div>';
+  return html;
+}
+
+var compFormTabState = Object.create(null);
+
+function getCompositionTabStateKey(runId, groupKey) {
+  return String(runId || 'no-run') + '::tab::' + String(groupKey || 'group');
+}
+
+function getCompositionActiveTab(runId, groupKey, sections) {
+  var stateKey = getCompositionTabStateKey(runId, groupKey);
+  var current = compFormTabState[stateKey];
+  if (current && sections.some(function(section) { return section.id === current; })) {
+    return current;
+  }
+  return sections.length > 0 ? sections[0].id : null;
+}
+
+function renderCompositionDeepInspector(value, presentation, runId, outputPathKey) {
+  if (!shouldRenderCompositionDeepInspector(value)) return '';
+
+  var keys = orderCompositionSectionKeys(Object.keys(value || {}), presentation);
+  if (keys.length === 0) return '';
+  var useRailTabs = (presentation && presentation.tabStyle === 'rail') || (presentation && presentation.tabStyle !== 'top' && keys.length >= 6);
+
+  var sections = keys.map(function(key) {
+    var item = value[key];
+    var sectionPresentation = mergeCompositionPresentation(presentation, getCompositionPresentationSectionConfig(presentation, key));
+    return {
+      id: key,
+      label: getCompositionSectionLabel(key, presentation),
+      meta: renderCompositionDeepFieldSummary(item),
+      content: renderCompositionDeepSectionBody(item, sectionPresentation, runId || 'no-run', outputPathKey + '.' + key, 0),
+    };
+  });
+
+  var groupKey = outputPathKey + ':tabs';
+  var activeId = getCompositionActiveTab(runId || 'no-run', groupKey, sections);
+  var html = '<div class="comp-form-deep-inspector' + (useRailTabs ? ' comp-form-deep-inspector-rail' : '') + '" data-comp-tab-root data-comp-tab-group="' + compEscAttr(groupKey) + '">';
+  html += '<div class="comp-form-deep-tab-list" role="tablist" aria-label="Structured output sections">';
+  sections.forEach(function(section) {
+    var isActive = section.id === activeId;
+    html += '<button class="comp-form-deep-tab' + (isActive ? ' active' : '') + '" type="button" role="tab" aria-selected="' + (isActive ? 'true' : 'false') + '" data-comp-tab-button data-comp-tab-group="' + compEscAttr(groupKey) + '" data-comp-tab-id="' + compEscAttr(section.id) + '">';
+    html += '<span class="comp-form-deep-tab-label">' + compEscHtml(section.label) + '</span>';
+    html += '<span class="comp-form-deep-tab-meta">' + compEscHtml(section.meta) + '</span>';
+    html += '</button>';
+  });
+  html += '</div>';
+  html += '<div class="comp-form-deep-panels">';
+  sections.forEach(function(section) {
+    var isActive = section.id === activeId;
+    html += '<section class="comp-form-deep-panel' + (isActive ? ' active' : '') + '" role="tabpanel" data-comp-tab-panel data-comp-tab-group="' + compEscAttr(groupKey) + '" data-comp-tab-id="' + compEscAttr(section.id) + '">';
+    html += '<div class="comp-form-deep-panel-head">';
+    html += '<div class="comp-form-deep-panel-title">' + compEscHtml(section.label) + '</div>';
+    html += '<div class="comp-form-deep-panel-meta">' + compEscHtml(section.meta) + '</div>';
+    html += '</div>';
+    html += '<div class="comp-form-deep-panel-body">' + section.content + '</div>';
+    html += '</section>';
+  });
+  html += '</div>';
+  html += '</div>';
+  return html;
+}
+
+function renderCompositionObjectPreviewCard(item, presentation, itemPathKey, runId) {
+  if (!item || typeof item !== 'object' || Array.isArray(item)) return '';
+  var titleField = getCompositionPresentationField(item, presentation && presentation.titleField, ['title', 'name', 'scene_reference', 'sceneId', 'label', 'id']);
+  var subtitleField = getCompositionPresentationField(item, presentation && presentation.subtitleField, ['id', 'shot_type', 'genre', 'type', 'location_id']);
+  var descriptionField = getCompositionPresentationField(item, presentation && presentation.descriptionField, ['description', 'summary', 'prompt', 'visual_details', 'script_content']);
+  var mediaField = getCompositionPresentationField(item, presentation && presentation.mediaField, ['imagePath', 'image_path', 'headshot_image', 'thumbnail', 'previewImage', 'videoPath', 'audioPath', 'filePath', 'file_path', 'mediaPath', 'path', 'url']);
+  var mediaValue = mediaField ? item[mediaField] : null;
+  var mediaKind = getCompositionMediaKindFromValue(mediaValue, presentation && presentation.mediaType);
+
+  var visibleFields = Array.isArray(presentation && presentation.fields) && presentation.fields.length > 0
+    ? presentation.fields.slice(0, 6)
+    : Object.keys(item).filter(function(key) {
+      return key !== titleField && key !== subtitleField && key !== descriptionField && key !== mediaField;
+    }).slice(0, 6);
+
+  var html = '<article class="comp-form-rich-card" data-comp-filter-item data-comp-filter-text="' + compEscAttr(getCompositionFilterText(item, presentation && presentation.filterFields)) + '">';
+  if (mediaKind && mediaValue) {
+    html += '<div class="comp-form-rich-media-wrap">' + renderCompositionMediaPreview(mediaValue, mediaKind, titleField ? item[titleField] : 'Preview') + '</div>';
+  }
+  html += '<div class="comp-form-rich-card-body">';
+  if (titleField || subtitleField) {
+    html += '<div class="comp-form-rich-card-header">';
+    if (titleField) html += '<div class="comp-form-rich-card-title">' + compEscHtml(formatCompositionPreviewValue(item[titleField])) + '</div>';
+    if (subtitleField) html += '<div class="comp-form-rich-card-subtitle">' + compEscHtml(formatCompositionPreviewValue(item[subtitleField])) + '</div>';
+    html += '</div>';
+  }
+  if (descriptionField) {
+    html += '<div class="comp-form-rich-card-description">' + compEscHtml(formatCompositionPreviewValue(item[descriptionField])) + '</div>';
+  }
+  if (visibleFields.length > 0) {
+    html += '<div class="comp-form-rich-field-list">';
+    visibleFields.forEach(function(field) {
+      html += '<div class="comp-form-rich-field">';
+      html += '<div class="comp-form-rich-field-key">' + compEscHtml(humanizeVarName(field)) + '</div>';
+      html += '<div class="comp-form-rich-field-value">' + compEscHtml(formatCompositionPreviewValue(item[field])) + '</div>';
+      html += '</div>';
+    });
+    html += '</div>';
+  }
+  html += '</div>';
+  var rawDetailKey = itemPathKey + ':card-raw';
+  html += '<details class="comp-form-rich-raw" data-comp-details-key="' + compEscAttr(rawDetailKey) + '"' + getCompositionDetailsOpenAttr(runId, rawDetailKey, false) + '>';
+  html += '<summary>Raw item</summary>';
+  html += '<div class="comp-form-json-viewer">' + renderCompositionStructuredValue(item, runId || 'no-run', itemPathKey + '.raw', 0) + '</div>';
+  html += '</details>';
+  html += '</article>';
+  return html;
+}
+
+function renderCompositionRichValue(value, presentation, runId, outputPathKey) {
+  var normalized = normalizeCompositionDisplayValue(value);
+  if (normalized === null || normalized === undefined) return '';
+
+  if (normalized && typeof normalized === 'object' && !Array.isArray(normalized)) {
+    var deepInspectorHtml = renderCompositionDeepInspector(normalized, presentation, runId, outputPathKey);
+    if (deepInspectorHtml) return deepInspectorHtml;
+  }
+
+  if (typeof normalized === 'string') {
+    var mediaKind = getCompositionMediaKindFromValue(normalized, presentation && presentation.mediaType);
+    if (mediaKind) {
+      var mediaHtml = '<div class="comp-form-rich-single">';
+      mediaHtml += renderCompositionMediaPreview(normalized, mediaKind, presentation && presentation.title ? presentation.title : 'Output preview');
+      mediaHtml += '<a class="comp-form-artifact-link" href="' + compEscAttr(getCompositionMediaSrc(normalized)) + '" target="_blank" rel="noreferrer">' + compEscHtml(normalized) + '</a>';
+      mediaHtml += '</div>';
+      return mediaHtml;
+    }
+    if (looksLikeMarkdown(normalized)) {
+      return typeof marked !== 'undefined'
+        ? '<div class="comp-form-markdown-viewer comp-form-rich-document">' + marked.parse(normalized) + '</div>'
+        : '<pre class="comp-form-output-value comp-form-rich-document">' + compEscHtml(normalized) + '</pre>';
+    }
+    if (normalized.length > 240 || normalized.indexOf('\n') >= 0) {
+      return '<div class="comp-form-rich-document comp-form-rich-document-text">' + compEscHtml(normalized) + '</div>';
+    }
+    return '';
+  }
+
+  if (Array.isArray(normalized)) {
+    return renderCompositionArrayPreview(normalized, presentation, runId, outputPathKey);
+  }
+
+  if (normalized && typeof normalized === 'object' && !Array.isArray(normalized)) {
+    return '<div class="comp-form-rich-single-card">' + renderCompositionObjectPreviewCard(normalized, presentation, outputPathKey, runId || 'no-run') + '</div>';
+  }
+
+  return '';
+}
+
+function renderCompositionStructuredFallback(structuredValue, runId, outputPathKey, label) {
+  if (!structuredValue) return '';
+  var detailKey = outputPathKey + ':structured';
+  var html = '<details class="comp-form-output-raw" data-comp-details-key="' + compEscAttr(detailKey) + '"' + getCompositionDetailsOpenAttr(runId, detailKey, false) + '>';
+  html += '<summary>' + compEscHtml(label || 'Structured data') + '</summary>';
+  html += '<div class="comp-form-json-viewer">' + renderCompositionStructuredValue(structuredValue, runId || 'no-run', outputPathKey, 0) + '</div>';
+  html += '</details>';
+  return html;
+}
+
+var compFormDetailsState = Object.create(null);
+
+function getCompositionDetailsStateKey(runId, detailKey) {
+  return String(runId || 'no-run') + '::' + String(detailKey || 'detail');
+}
+
+function getCompositionDetailsOpenAttr(runId, detailKey, defaultOpen) {
+  var stateKey = getCompositionDetailsStateKey(runId, detailKey);
+  if (Object.prototype.hasOwnProperty.call(compFormDetailsState, stateKey)) {
+    return compFormDetailsState[stateKey] ? ' open' : '';
+  }
+  return defaultOpen ? ' open' : '';
+}
+
+function captureCompositionDetailsState(root, runId) {
+  if (!root) return;
+  root.querySelectorAll('details[data-comp-details-key]').forEach(function(detailsEl) {
+    var detailKey = detailsEl.getAttribute('data-comp-details-key');
+    if (!detailKey) return;
+    compFormDetailsState[getCompositionDetailsStateKey(runId, detailKey)] = !!detailsEl.open;
+  });
+}
+
+function wireCompositionDetailsState(root, runId) {
+  if (!root) return;
+  root.querySelectorAll('details[data-comp-details-key]').forEach(function(detailsEl) {
+    detailsEl.addEventListener('toggle', function() {
+      var detailKey = detailsEl.getAttribute('data-comp-details-key');
+      if (!detailKey) return;
+      compFormDetailsState[getCompositionDetailsStateKey(runId, detailKey)] = !!detailsEl.open;
+    });
+  });
 }
 
 function copyCompositionText(value, label) {
@@ -761,6 +1420,52 @@ function wireCompositionResultActions(root) {
         .catch(function(err) { toast('Failed to copy file content: ' + err.message, 'error'); });
     });
   });
+  root.querySelectorAll('[data-comp-tab-button]').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      var groupKey = btn.getAttribute('data-comp-tab-group');
+      var tabId = btn.getAttribute('data-comp-tab-id');
+      if (!groupKey || !tabId) return;
+      compFormTabState[getCompositionTabStateKey('no-run', groupKey)] = tabId;
+      Object.keys(compFormTabState).forEach(function(stateKey) {
+        if (stateKey.slice(stateKey.indexOf('::tab::') + 7) === groupKey) {
+          compFormTabState[stateKey] = tabId;
+        }
+      });
+      root.querySelectorAll('[data-comp-tab-button]').forEach(function(node) {
+        if (node.getAttribute('data-comp-tab-group') !== groupKey) return;
+        var active = node.getAttribute('data-comp-tab-id') === tabId;
+        node.classList.toggle('active', active);
+        node.setAttribute('aria-selected', active ? 'true' : 'false');
+      });
+      root.querySelectorAll('[data-comp-tab-panel]').forEach(function(node) {
+        if (node.getAttribute('data-comp-tab-group') !== groupKey) return;
+        node.classList.toggle('active', node.getAttribute('data-comp-tab-id') === tabId);
+      });
+    });
+  });
+  root.querySelectorAll('[data-comp-filter-input]').forEach(function(input) {
+    input.addEventListener('input', function() {
+      var groupKey = input.getAttribute('data-comp-filter-group');
+      var query = String(input.value || '').trim().toLowerCase();
+      if (!groupKey) return;
+      root.querySelectorAll('.comp-form-array-preview[data-comp-filter-group]').forEach(function(container) {
+        if (container.getAttribute('data-comp-filter-group') !== groupKey) return;
+        var visibleCount = 0;
+        container.querySelectorAll('[data-comp-filter-item]').forEach(function(item) {
+          var haystack = String(item.getAttribute('data-comp-filter-text') || '').toLowerCase();
+          var match = !query || haystack.indexOf(query) >= 0;
+          item.style.display = match ? '' : 'none';
+          if (match) visibleCount++;
+        });
+        var countEl = container.querySelector('[data-comp-filter-count]');
+        if (countEl) {
+          countEl.textContent = visibleCount + ' of ' + container.querySelectorAll('[data-comp-filter-item]').length + ' items';
+        }
+        var emptyEl = container.querySelector('[data-comp-filter-empty]');
+        if (emptyEl) emptyEl.style.display = visibleCount === 0 ? '' : 'none';
+      });
+    });
+  });
 }
 
 function collectCompositionArtifactsFromValue(value, sourceLabel, results, seen) {
@@ -819,22 +1524,46 @@ function collectCompositionArtifacts(data) {
   return results;
 }
 
-function renderCompositionOutputs(outputs) {
+function renderCompositionOutputs(outputs, runId, sectionKeyPrefix) {
   if (!outputs || Object.keys(outputs).length === 0) {
     return '<div class="comp-form-results-empty">No final outputs were produced by the pipeline output node.</div>';
   }
 
   var html = '<div class="comp-form-output-list">';
   Object.keys(outputs).forEach(function(key) {
-    var serialized = serializeCompositionResult(outputs[key]);
-    var kind = getCompositionOutputKind(outputs[key]);
+    var value = outputs[key];
+    var serialized = serializeCompositionResult(value);
+    var kind = getCompositionOutputKind(value);
+    var portDef = getCompositionOutputPortDefinition(key);
+    var presentation = getCompositionOutputPresentation(key);
+    var structuredValue = normalizeCompositionDisplayValue(value);
+    if (typeof structuredValue === 'string' && structuredValue === value) {
+      structuredValue = null;
+    }
+    var outputPathKey = (sectionKeyPrefix || 'outputs') + '.' + key;
+    var richValueHtml = renderCompositionRichValue(value, presentation, runId || 'no-run', outputPathKey);
     html += '<div class="comp-form-output-item">';
     html += '<div class="comp-form-output-head">';
+    html += '<div class="comp-form-output-title-wrap">';
     html += '<div class="comp-form-output-name">' + compEscHtml(humanizeVarName(key)) + '</div>';
+    if (portDef && portDef.description) {
+      html += '<div class="comp-form-output-description">' + compEscHtml(portDef.description) + '</div>';
+    }
+    html += '</div>';
+    html += '<div class="comp-form-output-actions">';
+    if (presentation && presentation.view && presentation.view !== 'auto') {
+      html += '<span class="comp-form-output-badge">' + compEscHtml(presentation.view) + '</span>';
+    }
     html += '<button class="comp-form-copy-btn" data-comp-copy-text="' + compEscAttr(serialized) + '" data-comp-copy-label="' + compEscAttr(humanizeVarName(key)) + '">Copy</button>';
     html += '</div>';
-    if (kind === 'markdown' && typeof outputs[key] === 'string' && typeof marked !== 'undefined') {
-      html += '<div class="comp-form-markdown-viewer">' + marked.parse(outputs[key]) + '</div>';
+    html += '</div>';
+    if (richValueHtml) {
+      html += '<div class="comp-form-output-rich">' + richValueHtml + '</div>';
+      html += renderCompositionStructuredFallback(structuredValue, runId || 'no-run', outputPathKey, 'Structured data');
+    } else if (kind === 'markdown' && typeof value === 'string' && typeof marked !== 'undefined') {
+      html += '<div class="comp-form-markdown-viewer">' + marked.parse(value) + '</div>';
+    } else if (structuredValue) {
+      html += '<div class="comp-form-json-viewer">' + renderCompositionStructuredValue(structuredValue, runId || 'no-run', outputPathKey, 0) + '</div>';
     } else {
       html += '<pre class="comp-form-output-value">' + compEscHtml(serialized) + '</pre>';
     }
@@ -904,16 +1633,17 @@ function collectCompositionArtifactsForOutputs(outputs, sourceLabel) {
   return results;
 }
 
-function renderCompositionStepOutputs(ns, depth) {
+function renderCompositionStepOutputs(ns, depth, runId, pathKey) {
   var outputs = getRenderableStepOutputs(ns && ns.outputVariables);
   var outputKeys = Object.keys(outputs);
   if (outputKeys.length === 0) return '';
 
   var artifacts = collectCompositionArtifactsForOutputs(outputs, ns.workflowName || 'Step output');
-  var html = '<details class="comp-form-step-output-block"' + ((depth || 0) === 0 ? '' : ' open') + '>';
+  var detailKey = pathKey + ':outputs';
+  var html = '<details class="comp-form-step-output-block" data-comp-details-key="' + compEscAttr(detailKey) + '"' + getCompositionDetailsOpenAttr(runId, detailKey, (depth || 0) > 0) + '>';
   html += '<summary>Outputs (' + compEscHtml(String(outputKeys.length)) + ')</summary>';
   html += '<div class="comp-form-step-output-inner">';
-  html += renderCompositionOutputs(outputs);
+  html += renderCompositionOutputs(outputs, runId, pathKey + '.outputs');
   if (artifacts.length > 0) {
     html += '<div class="comp-form-step-output-artifacts">';
     html += '<div class="comp-form-results-section-title">Formatted Previews</div>';
@@ -928,16 +1658,18 @@ function renderCompositionStepOutputs(ns, depth) {
 function renderCompositionStepResults(data) {
   var order = (data && data.executionOrder) || [];
   var nodeStates = (data && data.nodeStates) || {};
+  var runId = data && data.runId ? data.runId : 'no-run';
   if (order.length === 0) {
     return '<div class="comp-form-results-empty">No step data available yet.</div>';
   }
 
-  function renderStepList(stepOrder, states, depth) {
+  function renderStepList(stepOrder, states, depth, parentPath) {
     var html = '<div class="comp-form-step-list' + (depth > 0 ? ' comp-form-step-list-nested' : '') + '">';
     stepOrder.forEach(function(nodeId, index) {
       var ns = states[nodeId] || {};
       var status = ns.status || 'pending';
       var statusClass = status === 'completed' ? 'ok' : status === 'failed' ? 'fail' : status === 'skipped' ? 'skip' : 'run';
+      var pathKey = (parentPath ? parentPath + '>' : '') + nodeId;
       html += '<div class="comp-form-step-item comp-form-step-' + compEscAttr(statusClass) + (depth > 0 ? ' comp-form-step-item-nested' : '') + '">';
       html += '<div class="comp-form-step-head">';
       html += '<span class="comp-form-step-index">' + (index + 1) + '</span>';
@@ -964,16 +1696,18 @@ function renderCompositionStepResults(data) {
         }
       }
       if (ns.logs && ns.logs.length > 0) {
-        html += '<details class="comp-form-step-logs">';
+        var logsKey = pathKey + ':logs';
+        html += '<details class="comp-form-step-logs" data-comp-details-key="' + compEscAttr(logsKey) + '"' + getCompositionDetailsOpenAttr(runId, logsKey, false) + '>';
         html += '<summary>Logs (' + ns.logs.length + ')</summary>';
         html += '<pre class="comp-form-step-log-body">' + compEscHtml(ns.logs.join('\n')) + '</pre>';
         html += '</details>';
       }
-      html += renderCompositionStepOutputs(ns, depth);
+      html += renderCompositionStepOutputs(ns, depth, runId, pathKey);
       if (ns.subExecutionOrder && ns.subExecutionOrder.length > 0 && ns.subNodeStates) {
-        html += '<details class="comp-form-step-children"' + ((status === 'running' || status === 'failed') ? ' open' : '') + '>';
+        var childrenKey = pathKey + ':children';
+        html += '<details class="comp-form-step-children" data-comp-details-key="' + compEscAttr(childrenKey) + '"' + getCompositionDetailsOpenAttr(runId, childrenKey, status === 'running' || status === 'failed') + '>';
         html += '<summary>Sub-steps (' + compEscHtml(String(ns.stepsCompleted || 0)) + '/' + compEscHtml(String(ns.stepsTotal || ns.subExecutionOrder.length)) + ')</summary>';
-        html += renderStepList(ns.subExecutionOrder, ns.subNodeStates, depth + 1);
+        html += renderStepList(ns.subExecutionOrder, ns.subNodeStates, depth + 1, pathKey);
         html += '</details>';
       }
       html += '</div>';
@@ -982,12 +1716,14 @@ function renderCompositionStepResults(data) {
     return html;
   }
 
-  return renderStepList(order, nodeStates, 0);
+  return renderStepList(order, nodeStates, 0, 'root');
 }
 
 function updateCompositionFormResults(data) {
   var wrap = document.querySelector('#comp-form-results');
   if (!wrap) return;
+
+  captureCompositionDetailsState(wrap, data && data.runId ? data.runId : 'no-run');
 
   var statusTone = data.done ? (data.success ? 'ok' : 'fail') : 'run';
   var statusText = data.done
@@ -1007,13 +1743,15 @@ function updateCompositionFormResults(data) {
   if (data.error) {
     html += '<div class="comp-form-run-error">' + compEscHtml(data.error) + '</div>';
   }
+  html += '<div class="comp-form-results-grid">';
   html += '<div class="comp-form-results-section">';
   html += '<div class="comp-form-results-section-title">Final Outputs</div>';
-  html += renderCompositionOutputs(outputs);
+  html += renderCompositionOutputs(outputs, data && data.runId ? data.runId : 'no-run', 'finalOutputs');
   html += '</div>';
   html += '<div class="comp-form-results-section">';
   html += '<div class="comp-form-results-section-title">Generated Files and Links</div>';
   html += renderCompositionArtifacts(artifacts);
+  html += '</div>';
   html += '</div>';
   html += '<div class="comp-form-results-section">';
   html += '<div class="comp-form-results-section-title">Per-Step Status</div>';
@@ -1023,6 +1761,7 @@ function updateCompositionFormResults(data) {
 
   wrap.innerHTML = html;
   wireCompositionResultActions(wrap);
+  wireCompositionDetailsState(wrap, data && data.runId ? data.runId : 'no-run');
   hydrateCompositionArtifactPreviews(wrap);
 }
 
@@ -1061,6 +1800,35 @@ function parseCompositionRunInput(input, rawValue) {
 function closeCompositionRunForm() {
   var modal = document.querySelector('#comp-run-modal');
   if (modal) modal.remove();
+}
+
+function renderCompositionFormResultsPlaceholder(inputs) {
+  var inputCount = Array.isArray(inputs) ? inputs.length : 0;
+  var nodes = Array.isArray(compData && compData.nodes) ? compData.nodes : [];
+  var stepCount = nodes.length;
+  var outputCount = nodes.filter(function(node) {
+    return node && node.workflowId === '__output__';
+  }).length;
+
+  var html = '<div class="comp-form-results-card comp-form-results-card-empty">';
+  html += '<div class="comp-form-results-header">';
+  html += '<div>';
+  html += '<div class="comp-form-results-kicker">Run Results</div>';
+  html += '<div class="comp-form-results-title">Waiting to run</div>';
+  html += '</div>';
+  html += '<div class="comp-form-results-pill comp-form-results-pill-idle">Ready</div>';
+  html += '</div>';
+  html += '<div class="comp-form-results-summary">';
+  html += '<div class="comp-form-results-stat"><span class="comp-form-results-stat-value">' + compEscHtml(String(inputCount)) + '</span><span class="comp-form-results-stat-label">Inputs</span></div>';
+  html += '<div class="comp-form-results-stat"><span class="comp-form-results-stat-value">' + compEscHtml(String(stepCount)) + '</span><span class="comp-form-results-stat-label">Steps</span></div>';
+  html += '<div class="comp-form-results-stat"><span class="comp-form-results-stat-value">' + compEscHtml(String(outputCount)) + '</span><span class="comp-form-results-stat-label">Output Nodes</span></div>';
+  html += '</div>';
+  html += '<div class="comp-form-results-section">';
+  html += '<div class="comp-form-results-section-title">What Shows Up Here</div>';
+  html += '<div class="comp-form-results-empty">Run output, generated files, and per-step execution status stay in this panel so the form remains usable while the pipeline is active.</div>';
+  html += '</div>';
+  html += '</div>';
+  return html;
 }
 
 async function showCompositionRunForm() {
@@ -1157,20 +1925,23 @@ async function renderCompositionFormPage() {
   var html = '<div class="comp-form-page">';
   html += '<div class="comp-form-shell">';
   html += '<div class="comp-form-hero">';
+  html += '<div class="comp-form-hero-copy">';
   html += '<div class="comp-form-kicker">Pipeline Form</div>';
   html += '<h1 class="comp-form-title">' + compEscHtml(compData.name) + '</h1>';
   html += '<p class="comp-form-subtitle">' + compEscHtml(compData.description || 'Run this pipeline by filling in the fields below.') + '</p>';
+  html += '</div>';
   html += '<div class="comp-form-hero-actions">';
   html += '<button class="comp-tb-btn" id="comp-form-share-link">&#x1f517; Copy Form Link</button>';
   html += '<button class="comp-tb-btn" id="comp-form-open-editor">Open Editor</button>';
   html += '</div>';
   html += '</div>';
 
+  html += '<div class="comp-form-layout">';
+  html += '<div class="comp-form-main">';
   html += '<div class="comp-progress-bar-wrap comp-form-progress" id="comp-progress-wrap" style="display:none;">';
   html += '<div class="comp-progress-bar" id="comp-progress-bar" style="width:0%"></div>';
   html += '<span class="comp-progress-text" id="comp-progress-text"></span>';
   html += '</div>';
-
   html += '<div class="comp-form-card">';
   if (inputs.length === 0) {
     html += '<div class="comp-form-empty">This pipeline has no external inputs. You can run it directly.</div>';
@@ -1183,7 +1954,12 @@ async function renderCompositionFormPage() {
   html += '<button class="comp-approval-btn comp-approval-btn-reject" id="comp-cancel-btn" style="display:none;">Stop</button>';
   html += '</div>';
   html += '</div>';
-  html += '<div id="comp-form-results"></div>';
+  html += '</div>';
+  html += '</div>';
+  html += '<div class="comp-form-results-wrap">';
+  html += '<div id="comp-form-results">' + renderCompositionFormResultsPlaceholder(inputs) + '</div>';
+  html += '</div>';
+  html += '</div>';
   html += '</div>';
   html += '</div>';
 
@@ -1246,10 +2022,13 @@ async function renderCompositionFormPage() {
 function startCompositionRun(variables) {
   if (!compData) return;
 
-  // Client-side cycle detection
-  if (compData.nodes.length > 0 && !clientTopoSort()) {
-    toast('These workflows form a loop — each step needs to run after the ones connected to it, but a loop makes that impossible', 'error');
-    return;
+  // Client-side graph validation
+  if (compData.nodes.length > 0) {
+    var graphValidation = clientValidateRunGraph();
+    if (graphValidation.error) {
+      toast(graphValidation.message, 'error');
+      return;
+    }
   }
 
   if (compData.nodes.length === 0) {
@@ -2054,7 +2833,14 @@ async function repairScriptNode(node, nodeId) {
         description: repairDescription,
         chatHistory: node.script.chatHistory || [],
         currentCode: node.script.code || '',
+        currentNodeId: nodeId,
+        compositionSnapshot: compData,
         graphContext: repairGraphContext || undefined,
+        runtimeFailure: {
+          nodeId: nodeId,
+          nodeLabel: node.label || '',
+          message: nodeError,
+        },
       }),
     });
 
@@ -2068,6 +2854,7 @@ async function repairScriptNode(node, nodeId) {
     node.script.code = data.code;
     if (data.inputs) node.script.inputs = data.inputs;
     if (data.outputs) node.script.outputs = data.outputs;
+    if (data.lifecycle && data.lifecycle.metrics) node.script.generationMetrics = data.lifecycle.metrics;
     if (Array.isArray(data.transcript)) {
       node.script.generationTranscript = (node.script.generationTranscript || []).concat(data.transcript);
     }

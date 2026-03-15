@@ -1,9 +1,9 @@
 {
   "tasks": [
     {
-      "id": "task_mmpi26c5_pazyva",
+      "id": "task_mmr4edkm_m0fgfx",
       "subject": "task",
-      "description": "Repair the Scene Generator script to generate scenes one at a time with proper format validation and pass the failing unit tests",
+      "description": "Repair the Woodbury script-node JavaScript for generating pre-visualization images so it properly reports progress to pass deterministic unit tests",
       "status": "pending",
       "blockedBy": [],
       "blocks": [],
@@ -11,5 +11,5 @@
       "validators": []
     }
   ],
-  "updatedAt": "2026-03-13T23:00:10.517Z"
+  "updatedAt": "2026-03-15T02:13:17.495Z"
 }

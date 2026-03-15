@@ -806,7 +806,19 @@ export interface CompositionDocument {
     createdAt: string;
     updatedAt: string;
     viewport?: { panX: number; panY: number; zoom: number };
+    generatedPipelineDocs?: CompositionGeneratedPipelineDoc[];
   };
+}
+
+export interface CompositionGeneratedPipelineDoc {
+  id?: string;
+  title: string;
+  summary?: string;
+  markdown: string;
+  request?: string;
+  nodeIds?: string[];
+  edgeIds?: string[];
+  createdAt: string;
 }
 
 /** What to do when a pipeline node fails or its expectations are not met */
@@ -889,12 +901,50 @@ export interface ApprovalGateConfig {
 }
 
 /** Declaration of a script node input or output port */
+export interface PortPresentationConfig {
+  /** Preferred renderer in run results UI */
+  view?: 'auto' | 'document' | 'gallery' | 'media' | 'cards' | 'json' | 'markdown';
+  /** Force deep inspector tabs into a left rail instead of the top tab row */
+  tabStyle?: 'auto' | 'top' | 'rail';
+  /** Force a specific media type when the value is a file path or URL */
+  mediaType?: 'auto' | 'image' | 'video' | 'audio' | 'pdf' | 'text';
+  /** Field to promote as the card title for object/array outputs */
+  titleField?: string;
+  /** Field to promote as the card subtitle for object/array outputs */
+  subtitleField?: string;
+  /** Field to promote as the card description for object/array outputs */
+  descriptionField?: string;
+  /** Field containing the primary media path for object/array outputs */
+  mediaField?: string;
+  /** Ordered subset of object fields to surface in the rich preview */
+  fields?: string[];
+  /** Preferred ordering for top-level deep inspector sections */
+  sectionOrder?: string[];
+  /** Search fields to bias array filtering for object cards */
+  filterFields?: string[];
+  /** Optional custom placeholder for array filtering */
+  searchPlaceholder?: string;
+  /** Section-specific presentation overrides for deep inspector panels */
+  sections?: Record<string, {
+    label?: string;
+    titleField?: string;
+    subtitleField?: string;
+    descriptionField?: string;
+    mediaField?: string;
+    fields?: string[];
+    filterFields?: string[];
+    searchPlaceholder?: string;
+  }>;
+}
+
 export interface PortDeclaration {
   name: string;
   type: 'string' | 'number' | 'boolean' | 'string[]';
   description?: string;
   required?: boolean;
   default?: unknown;
+  /** Optional run-results presentation metadata for richer pipeline output rendering */
+  presentation?: PortPresentationConfig;
 }
 
 /** Configuration for a script node in a composition */
@@ -911,10 +961,25 @@ export interface ScriptNodeConfig {
   chatHistory?: Array<{ role: 'user' | 'assistant'; content: string }>;
   /** Persisted generation transcript for script creation/refinement/repair runs */
   generationTranscript?: Array<{
-    stage: 'request' | 'generation' | 'repair' | 'fallback' | 'validation' | 'tests' | 'verification';
+    stage: 'request' | 'plan' | 'generation' | 'repair' | 'fallback' | 'validation' | 'tests' | 'verification' | 'checks';
     title: string;
     content: string;
   }>;
+  /** Latest generation metrics captured for this node */
+  generationMetrics?: {
+    generationPath: 'direct' | 'agentic' | 'fallback';
+    candidateCount: number;
+    retrievedExampleCount: number;
+    unitTestCount: number;
+    smokeTestCount: number;
+    repairAttemptCount: number;
+    runtimeEvidenceUsed: boolean;
+    executionVerified: boolean;
+    sampleExecutionCount: number;
+    sampleExecutionUsed: boolean;
+    sampleExecutionSource: 'none' | 'data_context' | 'graph_context';
+    manualEditCount: number;
+  };
 }
 
 /** Configuration for an output node in a composition — collects pipeline results */

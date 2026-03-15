@@ -17,85 +17,154 @@
         <span id="bridge-text">Checking extension...</span>
       </div>
     </div>
-    <div class="nav-tabs">
-      <button class="nav-tab active" data-tab="home">Home</button>
-      <button class="nav-tab" data-tab="chat">Chat</button>
-      <button class="nav-tab" data-tab="workflows">Workflows</button>
-      <button class="nav-tab" data-tab="compositions">Pipelines</button>
-      <button class="nav-tab" data-tab="runs">Runs</button>
-      <button class="nav-tab" data-tab="training">Training</button>
-      <button class="nav-tab" data-tab="marketplace">Marketplace</button>
-      <button class="nav-tab" data-tab="social">Social</button>
-      <button class="nav-tab" data-tab="assets">Assets</button>
-      <button class="nav-tab" data-tab="memory">Memory</button>
-      <button class="nav-tab" data-tab="skills">Skills</button>
-      <button class="nav-tab" data-tab="storyboard">Storyboard</button>
-      <button class="nav-tab" data-tab="mcp">MCP</button>
-    </div>
-    <div id="update-banner" style="display:none;"></div>
-    <!-- Home sidebar content -->
-    <div class="ext-list" id="home-list" data-panel="home">
-      <div style="padding:1rem;color:#64748b;font-size:0.78rem;line-height:1.6;">
-        <div style="font-weight:600;color:#e2e8f0;font-size:0.82rem;margin-bottom:0.5rem;">Welcome</div>
-        Automate your content creation with AI-powered workflows and pipelines.
+    <div class="sidebar-body">
+      <nav class="nav-tabs" aria-label="Dashboard sections">
+        <button class="nav-tab active" data-tab="home" title="Home">
+          <span class="nav-tab-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 11.5 12 5l8 6.5"></path><path d="M6.5 10.8V19h11v-8.2"></path><path d="M10 19v-4.5h4V19"></path></svg>
+          </span>
+          <span class="nav-tab-label">Home</span>
+        </button>
+        <button class="nav-tab" data-tab="chat" title="Chat">
+          <span class="nav-tab-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 7.5h12a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H11l-4.5 3V17.5H6a2 2 0 0 1-2-2v-6a2 2 0 0 1 2-2Z"></path><path d="M8.5 11.5h7"></path><path d="M8.5 14.5h4.5"></path></svg>
+          </span>
+          <span class="nav-tab-label">Chat</span>
+        </button>
+        <button class="nav-tab" data-tab="workflows" title="Workflows">
+          <span class="nav-tab-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="6.5" cy="6.5" r="2"></circle><circle cx="17.5" cy="12" r="2"></circle><circle cx="6.5" cy="17.5" r="2"></circle><path d="M8.5 7.4h4.5l2.5 3.1"></path><path d="M8.5 16.6h4.5l2.5-3.1"></path></svg>
+          </span>
+          <span class="nav-tab-label">Flows</span>
+        </button>
+        <button class="nav-tab" data-tab="compositions" title="Pipelines">
+          <span class="nav-tab-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4.5" y="5" width="6" height="5" rx="1.2"></rect><rect x="13.5" y="5" width="6" height="5" rx="1.2"></rect><rect x="9" y="14" width="6" height="5" rx="1.2"></rect><path d="M10.5 7.5h3"></path><path d="M12 10v4"></path></svg>
+          </span>
+          <span class="nav-tab-label">Pipes</span>
+        </button>
+        <button class="nav-tab" data-tab="runs" title="Runs">
+          <span class="nav-tab-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8.5A7 7 0 1 0 19 12"></path><path d="M18 4.5v4h-4"></path><path d="M12 8.5V12l2.5 1.5"></path></svg>
+          </span>
+          <span class="nav-tab-label">Runs</span>
+        </button>
+        <button class="nav-tab" data-tab="training" title="Training">
+          <span class="nav-tab-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4 5 7.5 12 11l7-3.5L12 4Z"></path><path d="M5 12.5 12 16l7-3.5"></path><path d="M5 17.5 12 21l7-3.5"></path></svg>
+          </span>
+          <span class="nav-tab-label">Train</span>
+        </button>
+        <button class="nav-tab" data-tab="marketplace" title="Marketplace">
+          <span class="nav-tab-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5.5 9h13l-1 10h-11l-1-10Z"></path><path d="M8.5 9a3.5 3.5 0 1 1 7 0"></path><path d="M9 13h6"></path></svg>
+          </span>
+          <span class="nav-tab-label">Store</span>
+        </button>
+        <button class="nav-tab" data-tab="social" title="Social">
+          <span class="nav-tab-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="7" cy="12" r="2"></circle><circle cx="17" cy="7" r="2"></circle><circle cx="17" cy="17" r="2"></circle><path d="M8.8 11 15.2 8"></path><path d="M8.8 13 15.2 16"></path></svg>
+          </span>
+          <span class="nav-tab-label">Social</span>
+        </button>
+        <button class="nav-tab" data-tab="assets" title="Assets">
+          <span class="nav-tab-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 7.5A2.5 2.5 0 0 1 7.5 5h9A2.5 2.5 0 0 1 19 7.5v9a2.5 2.5 0 0 1-2.5 2.5h-9A2.5 2.5 0 0 1 5 16.5v-9Z"></path><path d="m8 15 2.5-2.5 2 2 2.5-3 1.5 2"></path><circle cx="9" cy="9" r="1"></circle></svg>
+          </span>
+          <span class="nav-tab-label">Assets</span>
+        </button>
+        <button class="nav-tab" data-tab="memory" title="Memory">
+          <span class="nav-tab-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6.5A2.5 2.5 0 0 1 10.5 4h3A2.5 2.5 0 0 1 16 6.5V8h1.5A2.5 2.5 0 0 1 20 10.5v3A2.5 2.5 0 0 1 17.5 16H16v1.5A2.5 2.5 0 0 1 13.5 20h-3A2.5 2.5 0 0 1 8 17.5V16H6.5A2.5 2.5 0 0 1 4 13.5v-3A2.5 2.5 0 0 1 6.5 8H8V6.5Z"></path><path d="M10 10h4v4h-4z"></path></svg>
+          </span>
+          <span class="nav-tab-label">Memory</span>
+        </button>
+        <button class="nav-tab" data-tab="skills" title="Skills">
+          <span class="nav-tab-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v16"></path><path d="M6 8.5 12 4l6 4.5"></path><path d="M6 15.5 12 20l6-4.5"></path><path d="M5 12h14"></path></svg>
+          </span>
+          <span class="nav-tab-label">Skills</span>
+        </button>
+        <button class="nav-tab" data-tab="storyboard" title="Storyboard">
+          <span class="nav-tab-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4.5" y="5" width="15" height="14" rx="1.8"></rect><path d="M9.5 5v14"></path><path d="M14.5 5v14"></path><path d="M4.5 10h15"></path><path d="M4.5 14h15"></path></svg>
+          </span>
+          <span class="nav-tab-label">Boards</span>
+        </button>
+        <button class="nav-tab" data-tab="mcp" title="MCP">
+          <span class="nav-tab-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 8.5 12 5l5 3.5v7L12 19l-5-3.5z"></path><path d="M12 5v14"></path><path d="M7 8.5 12 12l5-3.5"></path></svg>
+          </span>
+          <span class="nav-tab-label">MCP</span>
+        </button>
+      </nav>
+      <div class="sidebar-panels">
+        <div id="update-banner" style="display:none;"></div>
+        <!-- Home sidebar content -->
+        <div class="ext-list" id="home-list" data-panel="home">
+          <div style="padding:1rem;color:#64748b;font-size:0.78rem;line-height:1.6;">
+            <div style="font-weight:600;color:#e2e8f0;font-size:0.82rem;margin-bottom:0.5rem;">Welcome</div>
+            Automate your content creation with AI-powered workflows and pipelines.
+          </div>
+        </div>
+        <!-- Workflows sidebar content -->
+        <div class="ext-list" id="wf-list" data-panel="workflows" style="display:none;">
+          <div class="loading"><div class="spinner"></div> Loading...</div>
+        </div>
+        <!-- Compositions sidebar content -->
+        <div class="ext-list" id="comp-list" data-panel="compositions" style="display:none;">
+          <div class="loading"><div class="spinner"></div> Loading...</div>
+        </div>
+        <!-- Runs sidebar content -->
+        <div class="ext-list" id="runs-list" data-panel="runs" style="display:none;">
+          <div class="loading"><div class="spinner"></div> Loading...</div>
+        </div>
+        <!-- Training sidebar content -->
+        <div class="ext-list" id="training-list" data-panel="training" style="display:none;">
+        </div>
+        <!-- Marketplace sidebar content -->
+        <div class="ext-list" id="marketplace-list" data-panel="marketplace" style="display:none;">
+          <div class="loading"><div class="spinner"></div> Loading...</div>
+        </div>
+        <!-- Social sidebar content -->
+        <div class="ext-list" id="social-list" data-panel="social" style="display:none;">
+        </div>
+        <!-- Assets sidebar content -->
+        <div class="ext-list" id="assets-list" data-panel="assets" style="display:none;">
+        </div>
+        <!-- Memory sidebar content -->
+        <div class="ext-list" id="memory-list" data-panel="memory" style="display:none;">
+          <div style="padding:1rem;color:#64748b;font-size:0.78rem;line-height:1.6;">
+            <div style="font-weight:600;color:#e2e8f0;font-size:0.82rem;margin-bottom:0.5rem;">Memory</div>
+            Browse durable memories, search the semantic index, and prune stale entries.
+          </div>
+        </div>
+        <!-- Skills sidebar content -->
+        <div class="ext-list" id="skills-list" data-panel="skills" style="display:none;">
+          <div style="padding:1rem;color:#64748b;font-size:0.78rem;line-height:1.6;">
+            <div style="font-weight:600;color:#e2e8f0;font-size:0.82rem;margin-bottom:0.5rem;">Skills</div>
+            Build datasets, run optimization loops, and inspect version diffs.
+          </div>
+        </div>
+        <!-- Chat sidebar content -->
+        <div class="ext-list" id="chat-list" data-panel="chat" style="display:none;">
+          <div class="ext-list-header" style="display:flex;justify-content:space-between;align-items:center;padding:0.75rem;">
+            <span style="font-weight:600;color:#e2e8f0;font-size:0.82rem;">Conversations</span>
+            <button class="btn-sm" id="chat-new-btn" style="font-size:0.7rem;padding:0.25rem 0.5rem;background:#7c3aed;color:#fff;border:none;border-radius:4px;cursor:pointer;">+ New</button>
+          </div>
+          <div id="chat-sessions-list" style="padding:0 0.5rem;"></div>
+          <div style="padding:0.5rem;border-top:1px solid rgba(255,255,255,0.06);margin-top:auto;">
+            <button class="btn-sm" id="chat-logs-btn" style="font-size:0.7rem;padding:0.35rem 0.5rem;background:transparent;color:#94a3b8;border:1px solid rgba(255,255,255,0.1);border-radius:4px;cursor:pointer;width:100%;text-align:left;">View Chat Logs</button>
+          </div>
+        </div>
+        <!-- Storyboard sidebar content -->
+        <div class="ext-list" id="storyboard-list" data-panel="storyboard" style="display:none;">
+        </div>
+        <!-- MCP sidebar content -->
+        <div class="ext-list" id="mcp-list" data-panel="mcp" style="display:none;">
+          <div style="padding:1rem;color:#64748b;font-size:0.78rem;">Loading...</div>
+        </div>
       </div>
-    </div>
-    <!-- Workflows sidebar content -->
-    <div class="ext-list" id="wf-list" data-panel="workflows" style="display:none;">
-      <div class="loading"><div class="spinner"></div> Loading...</div>
-    </div>
-    <!-- Compositions sidebar content -->
-    <div class="ext-list" id="comp-list" data-panel="compositions" style="display:none;">
-      <div class="loading"><div class="spinner"></div> Loading...</div>
-    </div>
-    <!-- Runs sidebar content -->
-    <div class="ext-list" id="runs-list" data-panel="runs" style="display:none;">
-      <div class="loading"><div class="spinner"></div> Loading...</div>
-    </div>
-    <!-- Training sidebar content -->
-    <div class="ext-list" id="training-list" data-panel="training" style="display:none;">
-    </div>
-    <!-- Marketplace sidebar content -->
-    <div class="ext-list" id="marketplace-list" data-panel="marketplace" style="display:none;">
-      <div class="loading"><div class="spinner"></div> Loading...</div>
-    </div>
-    <!-- Social sidebar content -->
-    <div class="ext-list" id="social-list" data-panel="social" style="display:none;">
-    </div>
-    <!-- Assets sidebar content -->
-    <div class="ext-list" id="assets-list" data-panel="assets" style="display:none;">
-    </div>
-    <!-- Memory sidebar content -->
-    <div class="ext-list" id="memory-list" data-panel="memory" style="display:none;">
-      <div style="padding:1rem;color:#64748b;font-size:0.78rem;line-height:1.6;">
-        <div style="font-weight:600;color:#e2e8f0;font-size:0.82rem;margin-bottom:0.5rem;">Memory</div>
-        Browse durable memories, search the semantic index, and prune stale entries.
-      </div>
-    </div>
-    <!-- Skills sidebar content -->
-    <div class="ext-list" id="skills-list" data-panel="skills" style="display:none;">
-      <div style="padding:1rem;color:#64748b;font-size:0.78rem;line-height:1.6;">
-        <div style="font-weight:600;color:#e2e8f0;font-size:0.82rem;margin-bottom:0.5rem;">Skills</div>
-        Build datasets, run optimization loops, and inspect version diffs.
-      </div>
-    </div>
-    <!-- Chat sidebar content -->
-    <div class="ext-list" id="chat-list" data-panel="chat" style="display:none;">
-      <div class="ext-list-header" style="display:flex;justify-content:space-between;align-items:center;padding:0.75rem;">
-        <span style="font-weight:600;color:#e2e8f0;font-size:0.82rem;">Conversations</span>
-        <button class="btn-sm" id="chat-new-btn" style="font-size:0.7rem;padding:0.25rem 0.5rem;background:#7c3aed;color:#fff;border:none;border-radius:4px;cursor:pointer;">+ New</button>
-      </div>
-      <div id="chat-sessions-list" style="padding:0 0.5rem;"></div>
-      <div style="padding:0.5rem;border-top:1px solid rgba(255,255,255,0.06);margin-top:auto;">
-        <button class="btn-sm" id="chat-logs-btn" style="font-size:0.7rem;padding:0.35rem 0.5rem;background:transparent;color:#94a3b8;border:1px solid rgba(255,255,255,0.1);border-radius:4px;cursor:pointer;width:100%;text-align:left;">View Chat Logs</button>
-      </div>
-    </div>
-    <!-- Storyboard sidebar content -->
-    <div class="ext-list" id="storyboard-list" data-panel="storyboard" style="display:none;">
-    </div>
-    <!-- MCP sidebar content -->
-    <div class="ext-list" id="mcp-list" data-panel="mcp" style="display:none;">
-      <div style="padding:1rem;color:#64748b;font-size:0.78rem;">Loading...</div>
     </div>
   </div>
 
@@ -174,7 +243,9 @@
   <script src="workflows.js"></script>
   <script src="compositions-core.js"></script>
   <script src="compositions-canvas.js"></script>
+  <script src="compositions-generation.js"></script>
   <script src="monaco-editor.js"></script>
+  <script src="compositions-overview.js"></script>
   <script src="compositions-properties.js"></script>
   <script src="compositions-execution.js"></script>
   <script src="runs.js"></script>

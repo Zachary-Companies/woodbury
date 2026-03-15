@@ -405,50 +405,59 @@ function buildScriptGenerationContext(currentNodeId, contextNodeIds) {
 
   if (selectedIds.length === 0) return '';
 
-  var lines = ['Selected pipeline context nodes:'];
+  var selectedNodes = [];
   selectedIds.forEach(function(nodeId) {
     var node = nodeById[nodeId];
-    lines.push('- ' + getCompositionNodeDisplayName(node) + ' (' + describeScriptGenerationNode(node) + ')');
     var runtime = lastNodeStates && lastNodeStates[nodeId];
+    var latestOutputs = {};
     if (runtime && runtime.outputVariables) {
-      var keys = Object.keys(runtime.outputVariables).filter(function(key) {
+      Object.keys(runtime.outputVariables).filter(function(key) {
         return key !== '__done__' && runtime.outputVariables[key] !== undefined;
-      }).slice(0, 4);
-      if (keys.length > 0) {
-        lines.push('  Latest outputs: ' + keys.map(function(key) {
-          return key + '=' + truncateForContext(runtime.outputVariables[key], 140);
-        }).join('; '));
-      }
+      }).slice(0, 4).forEach(function(key) {
+        latestOutputs[key] = runtime.outputVariables[key];
+      });
     }
+    selectedNodes.push({
+      nodeId: nodeId,
+      label: getCompositionNodeDisplayName(node),
+      kind: describeScriptGenerationNode(node),
+      workflowId: node.workflowId,
+      description: node.script && node.script.description ? node.script.description : '',
+      inputs: node.script && Array.isArray(node.script.inputs) ? node.script.inputs : [],
+      outputs: node.script && Array.isArray(node.script.outputs) ? node.script.outputs : [],
+      latestOutputs: latestOutputs,
+    });
   });
 
   var relevantIds = {};
   selectedIds.forEach(function(nodeId) { relevantIds[nodeId] = true; });
   if (currentNodeId) relevantIds[currentNodeId] = true;
 
+  var relevantConnections = [];
   var relevantEdges = (compData.edges || []).filter(function(edge) {
     return relevantIds[edge.sourceNodeId] && relevantIds[edge.targetNodeId];
   });
-  if (relevantEdges.length > 0) {
-    lines.push('Relevant connections:');
-    relevantEdges.slice(0, 12).forEach(function(edge) {
-      var sourceNode = nodeById[edge.sourceNodeId];
-      var targetNode = nodeById[edge.targetNodeId];
-      lines.push('  - ' +
-        getCompositionNodeDisplayName(sourceNode) + '.' + edge.sourcePort +
-        ' -> ' +
-        getCompositionNodeDisplayName(targetNode) + '.' + edge.targetPort);
-      lines.push('    Expected contract: source {' + formatNodePortExpectation(sourceNode, edge.sourcePort, 'out') + '} -> target {' + formatNodePortExpectation(targetNode, edge.targetPort, 'in') + '}');
-
-      var sourceRuntime = lastNodeStates && lastNodeStates[edge.sourceNodeId];
-      if (sourceRuntime && sourceRuntime.outputVariables && sourceRuntime.outputVariables[edge.sourcePort] !== undefined) {
-        lines.push('    Latest source value: ' + truncateForContext(sourceRuntime.outputVariables[edge.sourcePort], 180));
-      }
+  relevantEdges.slice(0, 12).forEach(function(edge) {
+    var sourceNode = nodeById[edge.sourceNodeId];
+    var targetNode = nodeById[edge.targetNodeId];
+    var sourceRuntime = lastNodeStates && lastNodeStates[edge.sourceNodeId];
+    relevantConnections.push({
+      sourceNodeId: edge.sourceNodeId,
+      sourceNodeLabel: getCompositionNodeDisplayName(sourceNode),
+      sourcePort: edge.sourcePort,
+      targetNodeId: edge.targetNodeId,
+      targetNodeLabel: getCompositionNodeDisplayName(targetNode),
+      targetPort: edge.targetPort,
+      expectedContract: 'source {' + formatNodePortExpectation(sourceNode, edge.sourcePort, 'out') + '} -> target {' + formatNodePortExpectation(targetNode, edge.targetPort, 'in') + '}',
+      latestValue: sourceRuntime && sourceRuntime.outputVariables ? sourceRuntime.outputVariables[edge.sourcePort] : undefined,
     });
-  }
+  });
 
+  var currentNode = null;
+  var upstream = [];
+  var downstream = [];
   if (currentNodeId && nodeById[currentNodeId]) {
-    var currentNode = nodeById[currentNodeId];
+    currentNode = nodeById[currentNodeId];
     var incomingEdges = (compData.edges || []).filter(function(edge) {
       return edge.targetNodeId === currentNodeId && relevantIds[edge.sourceNodeId];
     });
@@ -456,22 +465,64 @@ function buildScriptGenerationContext(currentNodeId, contextNodeIds) {
       return edge.sourceNodeId === currentNodeId && relevantIds[edge.targetNodeId];
     });
 
-    if (incomingEdges.length > 0) {
-      lines.push('What the current node is expected to receive:');
-      incomingEdges.slice(0, 8).forEach(function(edge) {
-        lines.push('  - ' + edge.targetPort + ' expects {' + formatNodePortExpectation(currentNode, edge.targetPort, 'in') + '} from ' + getCompositionNodeDisplayName(nodeById[edge.sourceNodeId]) + '.' + edge.sourcePort);
+    incomingEdges.slice(0, 8).forEach(function(edge) {
+      var sourceRuntime = lastNodeStates && lastNodeStates[edge.sourceNodeId];
+      upstream.push({
+        fromPort: edge.sourcePort,
+        toPort: edge.targetPort,
+        node: {
+          nodeId: edge.sourceNodeId,
+          label: getCompositionNodeDisplayName(nodeById[edge.sourceNodeId]),
+        },
+        expectedContract: formatNodePortExpectation(currentNode, edge.targetPort, 'in'),
+        latestValue: sourceRuntime && sourceRuntime.outputVariables ? sourceRuntime.outputVariables[edge.sourcePort] : undefined,
       });
-    }
+    });
 
-    if (outgoingEdges.length > 0) {
-      lines.push('What downstream nodes expect from the current node:');
-      outgoingEdges.slice(0, 8).forEach(function(edge) {
-        lines.push('  - ' + getCompositionNodeDisplayName(nodeById[edge.targetNodeId]) + '.' + edge.targetPort + ' expects {' + formatNodePortExpectation(nodeById[edge.targetNodeId], edge.targetPort, 'in') + '} from current output ' + edge.sourcePort + ' {' + formatNodePortExpectation(currentNode, edge.sourcePort, 'out') + '}');
+    outgoingEdges.slice(0, 8).forEach(function(edge) {
+      downstream.push({
+        fromPort: edge.sourcePort,
+        toPort: edge.targetPort,
+        node: {
+          nodeId: edge.targetNodeId,
+          label: getCompositionNodeDisplayName(nodeById[edge.targetNodeId]),
+        },
+        expectedContract: formatNodePortExpectation(nodeById[edge.targetNodeId], edge.targetPort, 'in'),
       });
-    }
+    });
   }
 
-  return lines.join('\n');
+  return {
+    currentNodeId: currentNodeId || undefined,
+    currentNode: currentNode ? {
+      nodeId: currentNode.id,
+      label: getCompositionNodeDisplayName(currentNode),
+      type: currentNode.workflowId,
+      description: currentNode.script && currentNode.script.description ? currentNode.script.description : '',
+      inputs: currentNode.script && Array.isArray(currentNode.script.inputs) ? currentNode.script.inputs : [],
+      outputs: currentNode.script && Array.isArray(currentNode.script.outputs) ? currentNode.script.outputs : [],
+    } : undefined,
+    selectedNodes: selectedNodes,
+    connections: relevantConnections,
+    upstream: upstream,
+    downstream: downstream,
+    composition: {
+      id: compData.id,
+      name: compData.name || '',
+      description: compData.description || '',
+    },
+    generatedPipelineDocs: typeof getGeneratedPipelineDocs === 'function'
+      ? getGeneratedPipelineDocs().slice(0, 3).map(function(entry) {
+          return {
+            id: entry.id,
+            title: entry.title,
+            summary: entry.summary,
+            markdown: entry.markdown,
+            nodeIds: entry.nodeIds,
+          };
+        })
+      : [],
+  };
 }
 
 // ── API ──────────────────────────────────────────────────────
@@ -511,13 +562,61 @@ function getToolDef(toolName) {
   return null;
 }
 
+function normalizeLegacyVariableNodeConfig(raw) {
+  var cfg = raw && typeof raw === 'object' ? Object.assign({}, raw) : {};
+  var normalizedType = typeof cfg.type === 'string' && cfg.type.trim()
+    ? cfg.type.trim()
+    : 'string';
+  var initialValue;
+  if (typeof cfg.initialValue === 'string') {
+    initialValue = cfg.initialValue;
+  } else if (cfg.value !== undefined && cfg.value !== null) {
+    initialValue = typeof cfg.value === 'string' ? cfg.value : JSON.stringify(cfg.value);
+  } else {
+    initialValue = normalizedType === 'boolean' ? 'false' : '';
+  }
+
+  return {
+    type: normalizedType,
+    initialValue: initialValue,
+    exposeAsInput: cfg.exposeAsInput === true,
+    inputName: typeof cfg.inputName === 'string' ? cfg.inputName : '',
+    description: typeof cfg.description === 'string' ? cfg.description : '',
+    required: cfg.required === true,
+    generationPrompt: typeof cfg.generationPrompt === 'string' ? cfg.generationPrompt : '',
+  };
+}
+
+function normalizeCompositionDocument(comp) {
+  if (!comp || typeof comp !== 'object') return comp;
+
+  var normalized = JSON.parse(JSON.stringify(comp));
+  if (!Array.isArray(normalized.nodes)) normalized.nodes = [];
+  if (!Array.isArray(normalized.edges)) normalized.edges = [];
+
+  normalized.nodes = normalized.nodes.map(function(node) {
+    if (!node || typeof node !== 'object') return node;
+    if (node.workflowId === '__variable__') {
+      node.variableNode = normalizeLegacyVariableNodeConfig(node.variableNode);
+    }
+    return node;
+  });
+
+  return normalized;
+}
+
 async function fetchCompositionDetail(id) {
   var res = await fetch('/api/compositions/' + encodeURIComponent(id));
   if (!res.ok) throw new Error('Pipeline not found');
-  return res.json();
+  var data = await res.json();
+  if (data && data.composition) {
+    data.composition = normalizeCompositionDocument(data.composition);
+  }
+  return data;
 }
 
 async function saveComposition(comp) {
+  comp = normalizeCompositionDocument(comp);
   var res = await fetch('/api/compositions/' + encodeURIComponent(comp.id), {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
@@ -739,12 +838,35 @@ function computeValidationWarnings() {
 
 // ── Sidebar ──────────────────────────────────────────────────
 
+function formatRelativeTime(isoStr) {
+  if (!isoStr) return '';
+  var d = new Date(isoStr);
+  if (isNaN(d.getTime())) return '';
+  var now = Date.now();
+  var diffMs = now - d.getTime();
+  var diffMin = Math.floor(diffMs / 60000);
+  if (diffMin < 1) return 'just now';
+  if (diffMin < 60) return diffMin + 'm ago';
+  var diffHr = Math.floor(diffMin / 60);
+  if (diffHr < 24) return diffHr + 'h ago';
+  var diffDay = Math.floor(diffHr / 24);
+  if (diffDay < 7) return diffDay + 'd ago';
+  var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  return months[d.getMonth()] + ' ' + d.getDate();
+}
+
 function renderTreeItem(c, indent) {
   var active = selectedComposition === c.id ? ' active' : '';
   var pad = indent || 0;
+  var ts = (c.metadata && (c.metadata.updatedAt || c.metadata.createdAt)) || '';
+  var timeLabel = formatRelativeTime(ts);
+  var fullDate = ts ? new Date(ts).toLocaleString() : '';
   return '<div class="tree-item' + active + '" data-comp-id="' + compEscAttr(c.id) + '" draggable="true" style="padding-left:' + (8 + pad * 16) + 'px;">' +
-    '<svg class="tree-icon" width="16" height="16" viewBox="0 0 16 16"><path d="M4 3h8a1 1 0 011 1v1H3V4a1 1 0 011-1zm-1 3h10v6a1 1 0 01-1 1H4a1 1 0 01-1-1V6z" fill="#94a3b8" opacity="0.5"/></svg>' +
-    '<span class="tree-item-name">' + compEscHtml(c.name) + '</span>' +
+    '<svg class="tree-icon" width="16" height="16" viewBox="0 0 16 16" style="flex-shrink:0;align-self:flex-start;margin-top:2px;"><path d="M4 3h8a1 1 0 011 1v1H3V4a1 1 0 011-1zm-1 3h10v6a1 1 0 01-1 1H4a1 1 0 01-1-1V6z" fill="#94a3b8" opacity="0.5"/></svg>' +
+    '<div style="display:flex;flex-direction:column;min-width:0;flex:1;">' +
+      '<span class="tree-item-name">' + compEscHtml(c.name) + '</span>' +
+      (timeLabel ? '<span style="font-size:0.6rem;color:#64748b;line-height:1;margin-top:1px;" title="' + compEscAttr(fullDate) + '">' + timeLabel + '</span>' : '') +
+    '</div>' +
   '</div>';
 }
 

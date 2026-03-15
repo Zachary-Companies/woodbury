@@ -197,3 +197,48 @@ Avoid language like:
 - [pipeline-lifecycle-contract.md](pipeline-lifecycle-contract.md)
 - [composition-schema-and-validation.md](composition-schema-and-validation.md)
 - [chat-api-and-sse-contract.md](chat-api-and-sse-contract.md)
+
+## 10. Script Generation Rollout Controls
+
+The script-generation path can now be rolled out in layers instead of only flipping one global switch.
+
+Global policy:
+
+- `WOODBURY_SCRIPT_GENERATION_POLICY=legacy|mixed|agentic|direct`
+
+Per-mode overrides:
+
+- `WOODBURY_SCRIPT_GENERATION_MODE_GENERATE=inherit|direct|agentic`
+- `WOODBURY_SCRIPT_GENERATION_MODE_EDIT=inherit|direct|agentic`
+- `WOODBURY_SCRIPT_GENERATION_MODE_REPAIR=inherit|direct|agentic`
+- `WOODBURY_SCRIPT_GENERATION_MODE_VERIFY=inherit|direct|agentic`
+
+Feature flags:
+
+- `WOODBURY_SCRIPT_AGENTIC_REPAIR_VERIFY`
+- `WOODBURY_SCRIPT_EXAMPLE_RETRIEVAL`
+- `WOODBURY_SCRIPT_SEMANTIC_GRAPH_CONTEXT`
+- `WOODBURY_SCRIPT_CANDIDATE_RANKING`
+- `WOODBURY_SCRIPT_SMOKE_TESTS`
+- `WOODBURY_SCRIPT_GENERATE_EXECUTION`
+- `WOODBURY_SCRIPT_GENERATE_EXECUTION_UNSAFE`
+
+Recommended staged rollout:
+
+1. Start with `mixed` and keep only `repair` and `verify` agentic.
+2. Turn on retrieval, semantic graph context, and candidate ranking.
+3. Enable bounded generate execution only for requests with concrete data or graph context.
+4. Override `generate=agentic` once benchmark fixtures and real usage metrics look stable.
+5. Use `direct` globally or per mode as the emergency fallback if regressions appear.
+
+## 11. Benchmark Expectations
+
+Representative benchmark coverage now lives in the focused Jest suite for script-generation fixtures. Use it as the minimum guardrail before changing rollout policy:
+
+- `src/__tests__/script-generation-benchmark.test.ts`
+
+Before promoting rollout:
+
+1. Run the benchmark suite and the focused generation route tests.
+2. Confirm fallback, repair, and sample-execution rates in the dashboard metrics panel.
+3. Confirm manual-edit churn is not rising after the rollout change.

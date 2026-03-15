@@ -1,16 +1,18 @@
 {
-  "objective": "Repair the Scene Generator script to generate scenes one at a time with proper format validation and pass the failing unit tests",
+  "objective": "Repair the Woodbury script-node JavaScript for generating pre-visualization images so it properly reports progress to pass deterministic unit tests",
   "successCriteria": [
-    "Generate scenes individually in a loop rather than all at once",
-    "Pass handles_malformed_script_plan test with correct fallback format",
-    "Pass fixes_scene_format_issues test with proper scene validation",
-    "Maintain existing structure and error handling patterns"
+    "Script calls context.progress.start() with total count and description",
+    "Script calls context.progress.increment() for each processed shot",
+    "Script calls context.progress.complete() when finished",
+    "All progress calls are properly executed and observable by unit tests",
+    "Script maintains existing functionality for generating pre-vis assets"
   ],
   "constraints": [
-    "Must preserve existing input/output annotations and function signature",
-    "Must implement explicit per-scene iteration as requested",
-    "Must return properly formatted JSON string output"
+    "Return only a single repaired JavaScript code block",
+    "Honor exact port names unless validation error exists",
+    "Use Woodbury-native asset and collection functions",
+    "Maintain deterministic behavior for unit testing"
   ],
-  "createdAt": "2026-03-13T23:00:05.093Z",
-  "updatedAt": "2026-03-13T23:00:05.093Z"
+  "createdAt": "2026-03-15T02:13:11.332Z",
+  "updatedAt": "2026-03-15T02:13:11.332Z"
 }

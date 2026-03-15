@@ -172,6 +172,14 @@ function topoSort(
   const adj = new Map<string, string[]>();
   const inDeg = new Map<string, number>();
   for (const n of nodes) { adj.set(n.id, []); inDeg.set(n.id, 0); }
+  const nodeIds = new Set(nodes.map((node) => node.id));
+  const invalidEdges = edges.filter((edge) => !nodeIds.has(edge.sourceNodeId) || !nodeIds.has(edge.targetNodeId));
+  if (invalidEdges.length > 0) {
+    const sample = invalidEdges.slice(0, 3)
+      .map((edge) => `${edge.sourceNodeId || '?'} -> ${edge.targetNodeId || '?'}`)
+      .join(', ');
+    throw new Error(`These workflows have invalid connections to missing steps. Check your connections: ${sample}`);
+  }
   for (const e of edges) {
     adj.get(e.sourceNodeId)?.push(e.targetNodeId);
     inDeg.set(e.targetNodeId, (inDeg.get(e.targetNodeId) || 0) + 1);
@@ -193,6 +201,10 @@ function topoSort(
   }
   return result;
 }
+
+export const __testOnly = {
+  topoSort,
+};
 
 function gatherInputVariables(
   nodeId: string,
@@ -1297,8 +1309,13 @@ function executeVariableNode(
     currentValue = initialVariables[exposedInputName];
   }
   if (currentValue === undefined) {
-    try { currentValue = JSON.parse(cfg.initialValue); }
-    catch { currentValue = cfg.initialValue; }
+    const serializedDefault = typeof cfg?.initialValue === 'string'
+      ? cfg.initialValue
+      : (cfg?.value !== undefined && cfg?.value !== null
+        ? (typeof cfg.value === 'string' ? cfg.value : JSON.stringify(cfg.value))
+        : '');
+    try { currentValue = JSON.parse(serializedDefault); }
+    catch { currentValue = serializedDefault; }
   }
 
   if ('set' in edgeInputs) {
