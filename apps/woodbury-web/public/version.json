@@ -1,10 +1,10 @@
 {
-  "version": "1.2.2",
-  "releaseDate": "2026-03-07",
+  "version": "1.2.3",
+  "releaseDate": "2026-03-14",
   "downloadUrls": {
-    "mac": "https://github.com/Zachary-Companies/woodbury/releases/latest/download/Woodbury-1.2.2-arm64.dmg",
-    "windows": "https://github.com/Zachary-Companies/woodbury/releases/latest/download/Woodbury-Setup-1.2.2.exe"
+    "mac": "https://github.com/Zachary-Companies/woodbury/releases/latest/download/Woodbury-1.2.3-arm64.dmg",
+    "windows": "https://github.com/Zachary-Companies/woodbury/releases/latest/download/Woodbury-Setup-1.2.3.exe"
   },
-  "releaseNotes": "Tool node for pipelines, chat tab, MCP server integration, asset management with Finder/Explorer support, extension loading reliability fix.",
+  "releaseNotes": "Contract-driven pipeline decomposition, per-node script pre-planning, generation progress indicators, pipeline sidebar timestamps, auto-generated pipeline documentation, rich port presentation metadata.",
   "releaseUrl": "https://github.com/Zachary-Companies/woodbury/releases/latest"
 }
