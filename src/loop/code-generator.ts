@@ -21,7 +21,7 @@ export class CodeGenerator {
       model: config.model || 'gpt-4',
       apiKey: config.apiKey,
       systemPrompt: this.getSystemPrompt(),
-      maxTokens: 4000,
+      maxTokens: 32768,
       temperature: 0.1, // Low temperature for consistent code generation
     };
 

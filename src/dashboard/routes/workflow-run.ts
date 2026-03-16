@@ -295,7 +295,7 @@ Rules:
               const llmResponse = await runPrompt(
                 [{ role: 'user', content: genPrompt }],
                 model,
-                { maxTokens: 2048, temperature: 0.9 }
+                { maxTokens: 32768, temperature: 0.9 }
               );
               mergedVars[v.name] = llmResponse.content.trim();
               debugLog.info('dashboard-run', `Generated "${v.name}" (${String(mergedVars[v.name]).length} chars)`);

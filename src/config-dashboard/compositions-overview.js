@@ -183,4 +183,175 @@ function renderCompositionOverviewProperties(panel, body) {
   }
 
   loadScriptGenerationOverviewMetrics(body);
+
+  // v2 pipeline: Git section
+  if (compData && compData.version === '2.0') {
+    var gitSection = document.createElement('div');
+    gitSection.className = 'comp-props-section';
+    gitSection.innerHTML =
+      '<div class="comp-props-label">&#x1f4c4; v2 File-Backed Pipeline</div>' +
+      '<div id="comp-git-status" style="font-size:0.72rem;color:#94a3b8;margin-bottom:0.5rem;">Loading git status...</div>' +
+      '<div id="comp-git-actions" style="display:flex;flex-direction:column;gap:0.35rem;"></div>';
+    body.appendChild(gitSection);
+    loadGitStatus(compData.id);
+  }
+}
+
+function loadGitStatus(compId) {
+  fetch('/api/compositions/' + encodeURIComponent(compId) + '/git-status')
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      var statusEl = document.getElementById('comp-git-status');
+      var actionsEl = document.getElementById('comp-git-actions');
+      if (!statusEl || !actionsEl) return;
+
+      if (!data.isRepo) {
+        statusEl.innerHTML =
+          '<span style="color:#f59e0b;">Not a git repository.</span><br>' +
+          '<span style="color:#64748b;font-size:0.68rem;">Initialize git to track changes and share this pipeline.</span>';
+        actionsEl.innerHTML =
+          '<button class="comp-tb-btn" id="comp-git-init" style="width:100%;">&#x1f680; Initialize Git Repository</button>';
+        var initBtn = document.getElementById('comp-git-init');
+        if (initBtn) {
+          initBtn.addEventListener('click', function() {
+            initBtn.disabled = true;
+            initBtn.textContent = 'Initializing...';
+            fetch('/api/compositions/' + encodeURIComponent(compId) + '/git-init', { method: 'POST' })
+              .then(function(r) { return r.json(); })
+              .then(function(res) {
+                if (res.initialized) {
+                  toast('Git repository initialized with initial commit', 'success');
+                } else {
+                  toast(res.message || 'Already initialized', 'info');
+                }
+                loadGitStatus(compId);
+              })
+              .catch(function(err) {
+                toast('Git init failed: ' + err.message, 'error');
+                initBtn.disabled = false;
+                initBtn.textContent = '\uD83D\uDE80 Initialize Git Repository';
+              });
+          });
+        }
+      } else {
+        var statusColor = data.dirty ? '#f59e0b' : '#10b981';
+        var statusText = data.dirty ? 'Uncommitted changes' : 'Clean';
+        statusEl.innerHTML =
+          '<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">' +
+          '<span style="color:' + statusColor + ';">● ' + statusText + '</span>' +
+          '<span style="color:#64748b;">on ' + compEscHtml(data.branch || 'main') + '</span>' +
+          '</div>' +
+          (data.recentCommits && data.recentCommits.length > 0 ?
+            '<div style="font-size:0.66rem;color:#64748b;margin-top:4px;">' +
+            '<div style="margin-bottom:2px;color:#94a3b8;">Recent commits:</div>' +
+            data.recentCommits.slice(0, 3).map(function(c) {
+              return '<div style="font-family:monospace;padding:1px 0;">' + compEscHtml(c) + '</div>';
+            }).join('') +
+            '</div>' : '') +
+          (data.remotes && data.remotes !== '(none)' ?
+            '<div style="font-size:0.66rem;color:#64748b;margin-top:4px;">Remote: ' + compEscHtml(data.remotes.split('\n')[0]) + '</div>' : '');
+
+        var actionsHtml = '';
+        if (data.dirty) {
+          actionsHtml += '<div style="display:flex;gap:6px;">' +
+            '<input type="text" class="comp-props-input" id="comp-git-commit-msg" placeholder="Commit message..." style="flex:1;font-size:0.72rem;">' +
+            '<button class="comp-tb-btn" id="comp-git-commit" style="white-space:nowrap;">Commit</button>' +
+            '</div>';
+        }
+        if (!data.remotes || data.remotes === '(none)') {
+          actionsHtml += '<div style="display:flex;gap:6px;">' +
+            '<input type="text" class="comp-props-input" id="comp-git-remote-url" placeholder="https://github.com/user/repo.git" style="flex:1;font-size:0.72rem;">' +
+            '<button class="comp-tb-btn" id="comp-git-add-remote" style="white-space:nowrap;">Add Remote</button>' +
+            '</div>';
+        } else {
+          actionsHtml += '<button class="comp-tb-btn" id="comp-git-push" style="width:100%;">&#x2B06; Push to Remote</button>';
+        }
+        actionsEl.innerHTML = actionsHtml;
+
+        // Wire commit
+        var commitBtn = document.getElementById('comp-git-commit');
+        if (commitBtn) {
+          commitBtn.addEventListener('click', function() {
+            var msgInput = document.getElementById('comp-git-commit-msg');
+            var msg = msgInput ? msgInput.value.trim() : '';
+            if (!msg) { toast('Enter a commit message', 'error'); return; }
+            commitBtn.disabled = true;
+            fetch('/api/compositions/' + encodeURIComponent(compId) + '/git-commit', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ message: msg }),
+            }).then(function(r) { return r.json(); }).then(function(res) {
+              if (res.committed) {
+                toast('Committed!', 'success');
+                loadGitStatus(compId);
+              } else {
+                toast('Commit failed: ' + (res.error || 'unknown'), 'error');
+              }
+              commitBtn.disabled = false;
+            }).catch(function(err) {
+              toast('Commit failed: ' + err.message, 'error');
+              commitBtn.disabled = false;
+            });
+          });
+        }
+
+        // Wire add remote
+        var addRemoteBtn = document.getElementById('comp-git-add-remote');
+        if (addRemoteBtn) {
+          addRemoteBtn.addEventListener('click', function() {
+            var urlInput = document.getElementById('comp-git-remote-url');
+            var url = urlInput ? urlInput.value.trim() : '';
+            if (!url) { toast('Enter a remote URL', 'error'); return; }
+            addRemoteBtn.disabled = true;
+            fetch('/api/compositions/' + encodeURIComponent(compId) + '/git-remote', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ url: url }),
+            }).then(function(r) { return r.json(); }).then(function(res) {
+              if (res.added) {
+                toast('Remote added: ' + res.remote, 'success');
+                loadGitStatus(compId);
+              } else {
+                toast('Failed: ' + (res.error || 'unknown'), 'error');
+              }
+              addRemoteBtn.disabled = false;
+            }).catch(function(err) {
+              toast('Failed: ' + err.message, 'error');
+              addRemoteBtn.disabled = false;
+            });
+          });
+        }
+
+        // Wire push
+        var pushBtn = document.getElementById('comp-git-push');
+        if (pushBtn) {
+          pushBtn.addEventListener('click', function() {
+            pushBtn.disabled = true;
+            pushBtn.textContent = 'Pushing...';
+            fetch('/api/compositions/' + encodeURIComponent(compId) + '/git-push', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({}),
+            }).then(function(r) { return r.json(); }).then(function(res) {
+              if (res.pushed) {
+                toast('Pushed to ' + res.remote + '/' + res.branch, 'success');
+              } else {
+                toast('Push failed: ' + (res.error || 'unknown'), 'error');
+              }
+              pushBtn.disabled = false;
+              pushBtn.textContent = '\u2B06 Push to Remote';
+              loadGitStatus(compId);
+            }).catch(function(err) {
+              toast('Push failed: ' + err.message, 'error');
+              pushBtn.disabled = false;
+              pushBtn.textContent = '\u2B06 Push to Remote';
+            });
+          });
+        }
+      }
+    })
+    .catch(function() {
+      var statusEl = document.getElementById('comp-git-status');
+      if (statusEl) statusEl.textContent = 'Could not load git status';
+    });
 }

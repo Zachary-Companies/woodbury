@@ -13,6 +13,15 @@ export interface CompositionInterfaceInput {
   required: boolean;
   default?: unknown;
   generationPrompt?: string;
+  inputControl?: 'text' | 'textarea' | 'select' | 'combobox';
+  options?: string[];
+  objectFields?: Array<{
+    key: string;
+    label?: string;
+    type?: string;
+    default?: string;
+    options?: string[];
+  }>;
 }
 
 export interface CompositionInterfaceOutput {
@@ -205,6 +214,20 @@ export function inferCompositionInputs(
     } else if (node.workflowId === '__variable__' && node.variableNode?.exposeAsInput) {
       const inputName = String(node.variableNode.inputName || '').trim();
       if (!inputName) continue;
+      // Use explicit inputControl/options, or auto-infer from description
+      let varInputControl = node.variableNode.inputControl;
+      let varOptions = node.variableNode.options;
+      if (!varInputControl && (!varOptions || varOptions.length === 0) && (node.variableNode.type || 'string') === 'string') {
+        const desc = String(node.variableNode.description || '').trim();
+        const lbl = String(node.label || '').trim();
+        const inferred = inferOptionsFromVariableDescription(desc, lbl);
+        if (inferred.length >= 2) {
+          varOptions = inferred;
+          const hasEtc = /\betc\.?\b|\.{2,}|\band more\b|\bother\b/i.test(desc);
+          varInputControl = hasEtc ? 'combobox' : 'select';
+        }
+      }
+
       result.push({
         name: inputName,
         label: String(node.label || inputName).trim() || inputName,
@@ -218,6 +241,9 @@ export function inferCompositionInputs(
         required: node.variableNode.required === true,
         default: parseVariableDefault(node),
         generationPrompt: node.variableNode.generationPrompt,
+        inputControl: varInputControl,
+        options: varOptions,
+        objectFields: node.variableNode.type === 'object' ? node.variableNode.objectFields : undefined,
       });
       continue;
     } else if (node.workflowId === '__branch__' || node.workflowId === '__delay__' || node.workflowId === '__gate__' || node.workflowId === '__for_each__' || node.workflowId === '__switch__') {
@@ -329,4 +355,48 @@ export async function resolveCompositionInterface(workDir: string, comp: any): P
     inputs: inferCompositionInputs(comp, wfMap, compMap, new Set([String(comp.id || '')])),
     outputs: inferCompositionOutputs(comp),
   };
+}
+
+/**
+ * Extract option values from a variable node's description.
+ * Matches patterns like:
+ *   "Type of script (feature, short, pilot, etc.)"
+ *   "Genre: drama, comedy, sci-fi, horror"
+ *   "Style — cinematic / documentary / animated"
+ *   "e.g. drama, comedy, sci-fi"
+ */
+function inferOptionsFromVariableDescription(description: string, _label: string): string[] {
+  if (!description) return [];
+
+  // Pattern 1: parenthesized list — "something (opt1, opt2, opt3, etc.)"
+  const parenMatch = description.match(/\(([^)]{4,})\)/);
+  if (parenMatch) {
+    const items = splitVariableOptionList(parenMatch[1]);
+    if (items.length >= 2) return items;
+  }
+
+  // Pattern 2: colon/dash/em-dash separated — "Genre: drama, comedy, sci-fi"
+  const colonMatch = description.match(/(?::|—|--|=>)\s*(.{4,})$/);
+  if (colonMatch) {
+    const items = splitVariableOptionList(colonMatch[1]);
+    if (items.length >= 2) return items;
+  }
+
+  // Pattern 3: "e.g." or "such as" — "e.g. drama, comedy, sci-fi"
+  const egMatch = description.match(/(?:e\.g\.?|such as|like|including)\s+(.{4,})/i);
+  if (egMatch) {
+    const items = splitVariableOptionList(egMatch[1]);
+    if (items.length >= 2) return items;
+  }
+
+  return [];
+}
+
+/** Split a comma / slash / "or" delimited string into trimmed option values, filtering noise words. */
+function splitVariableOptionList(raw: string): string[] {
+  const parts = raw.split(/\s*[,\/]\s*|\s+or\s+/i);
+  const noiseWords = new Set(['etc', 'etc.', '...', 'more', 'other', 'others', 'and more']);
+  return parts
+    .map(p => p.trim().replace(/^["']+|["']+$/g, '').replace(/\.{2,}$/, '').trim())
+    .filter(p => p.length > 0 && !noiseWords.has(p.toLowerCase()));
 }

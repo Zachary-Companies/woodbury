@@ -194,12 +194,36 @@ const COMPOSITION_TOOLS = new Set([
 
 /**
  * Auto-save a CompositionDocument returned by an MCP intelligence tool.
- * Writes to ~/.woodbury/workflows/{id}.composition.json so the dashboard can find it.
+ * Handles two formats:
+ *   - v1: Inline CompositionDocument JSON → writes to .composition.json
+ *   - v2: File-backed pipeline → already written to disk by the tool, just invalidate cache
  */
 export function autoSaveComposition(toolName: string, output: string): void {
   try {
     const parsed = JSON.parse(output);
-    // Validate it looks like a CompositionDocument
+
+    // v2 file-backed pipeline: the intelligence tool already wrote files to disk
+    if (parsed.format === 'v2' && parsed.pipelineDir) {
+      invalidateCompositionCache();
+      debugLog.info('closure-engine', `v2 pipeline already saved to disk: ${parsed.pipelineDir}`, {
+        id: parsed.pipelineId || parsed.manifest?.id,
+        name: parsed.name,
+        scriptFiles: parsed.scriptFiles,
+      });
+      return;
+    }
+
+    // v2 manifest wrapper: extract the inner manifest
+    if (parsed.manifest && parsed.manifest.version === '2.0') {
+      invalidateCompositionCache();
+      debugLog.info('closure-engine', `v2 pipeline manifest detected, cache invalidated`, {
+        id: parsed.manifest.id,
+        name: parsed.manifest.name,
+      });
+      return;
+    }
+
+    // v1: Validate it looks like a CompositionDocument
     if (!parsed.version || !parsed.id || !Array.isArray(parsed.nodes) || !Array.isArray(parsed.edges)) {
       debugLog.warn('closure-engine', 'MCP intelligence tool result is not a valid composition', { toolName });
       return;
@@ -235,7 +259,7 @@ export function validateComposition(composition: any, availableWorkflowIds: Set<
 
   // Built-in node types that don't need a workflow file
   const builtInTypes = new Set([
-    '__script__', '__output__', '__for_each__',
+    '__script__', '__script_file__', '__output__', '__for_each__',
     '__approval_gate__', '__branch__', '__delay__',
     '__variable__', '__get_variable__', '__switch__',
     '__text__', '__file_op__', '__json_keys__',
@@ -389,7 +413,7 @@ export function validateComposition(composition: any, availableWorkflowIds: Set<
 /**
  * Get available workflow IDs from disk for validation.
  */
-function getAvailableWorkflowIds(workingDirectory: string): Set<string> {
+export function getAvailableWorkflowIds(workingDirectory: string): Set<string> {
   const ids = new Set<string>();
   const dirs = [
     join(homedir(), '.woodbury', 'workflows'),
@@ -592,6 +616,20 @@ export class ClosureEngine {
     this.stateManager.startNewTurn();
     this.totalToolCalls = 0;
     this.currentUserMessage = userMessage;
+
+    // Extract the raw user message for goal extraction — strip any system preamble
+    // injected by compressed prompt building (conversation_summary, recent_turns, <important> tags)
+    let rawUserMessage = userMessage;
+    const importantEndIdx = userMessage.lastIndexOf('</important>');
+    if (importantEndIdx !== -1) {
+      rawUserMessage = userMessage.slice(importantEndIdx + '</important>'.length).trim();
+      // Also strip pipeline_context wrapper if present
+      const pipelineCtxMatch = rawUserMessage.match(/^<pipeline_context>[\s\S]*?<\/pipeline_context>\s*([\s\S]*)$/);
+      if (pipelineCtxMatch) {
+        rawUserMessage = pipelineCtxMatch[1].trim();
+      }
+    }
+
     this.currentCarryoverContext = this.buildCarryoverContext();
     const goalInput = this.currentCarryoverContext
       ? `${userMessage}\n\n<prior_session_state>\n${this.currentCarryoverContext}\n</prior_session_state>`
@@ -638,7 +676,9 @@ export class ClosureEngine {
           taskCount: taskGraph?.nodes.length || 0,
         });
       } else {
-        goal = await this.createGoalFromMessage(goalInput);
+        // Use raw user message for goal extraction — strip system preamble
+        // (conversation_summary, recent_turns, <important> instructions)
+        goal = await this.createGoalFromMessage(rawUserMessage);
         this.stateManager.setGoal(goal);
         debugLog.info('closure-engine', 'Goal created', { objective: goal.objective });
 
@@ -908,6 +948,11 @@ export class ClosureEngine {
       `## Current Task`,
       `${task.description}`,
       '',
+      // Include the full original user message so the task has complete context
+      // (e.g., TypeScript contracts, schemas, or detailed specifications)
+      this.currentUserMessage && this.currentUserMessage !== task.description
+        ? `## Original User Request\n${this.currentUserMessage}\n`
+        : '',
       `## Selected Skill`,
       `Name: ${skillExecution.skill.name}`,
       `When to use: ${skillExecution.skill.whenToUse}`,
@@ -968,7 +1013,7 @@ export class ClosureEngine {
             ...messages,
           ],
           tools: tools as any,
-          maxTokens: 4096,
+          maxTokens: 32768,
           temperature: this.config.temperature,
         });
       } catch (error) {
@@ -1136,9 +1181,9 @@ export class ClosureEngine {
         } else if (this.shouldGatherEvidence(tc.name, tc.input)) {
           // M5A: Confidence check — warn but still execute
           debugLog.info('closure-engine', `Low confidence execution: ${tc.name}`);
-          // MCP tools get a longer timeout (120s) since they call external AI providers
+          // MCP tools get a longer timeout (300s) since they call external AI providers
           const isMcpTool = tc.name.startsWith('mcp__');
-          const effectiveTimeout = isMcpTool ? Math.max(this.config.toolTimeout, 120000) : this.config.toolTimeout;
+          const effectiveTimeout = isMcpTool ? Math.max(this.config.toolTimeout, 600000) : this.config.toolTimeout;
           const context: ToolExecutionContext = {
             workingDirectory: this.config.workingDirectory,
             timeoutMs: effectiveTimeout,
@@ -1152,9 +1197,9 @@ export class ClosureEngine {
             success = false;
           }
         } else {
-          // MCP tools get a longer timeout (120s) since they call external AI providers
+          // MCP tools get a longer timeout (300s) since they call external AI providers
           const isMcpTool = tc.name.startsWith('mcp__');
-          const effectiveTimeout = isMcpTool ? Math.max(this.config.toolTimeout, 120000) : this.config.toolTimeout;
+          const effectiveTimeout = isMcpTool ? Math.max(this.config.toolTimeout, 600000) : this.config.toolTimeout;
           const context: ToolExecutionContext = {
             workingDirectory: this.config.workingDirectory,
             timeoutMs: effectiveTimeout,
@@ -1180,9 +1225,11 @@ export class ClosureEngine {
           // Validate the generated composition
           try {
             const comp = JSON.parse(output);
-            if (comp.nodes && comp.edges) {
+            // For v2 pipelines, validate the inner manifest
+            const toValidate = (comp.format === 'v2' && comp.manifest) ? comp.manifest : comp;
+            if (toValidate.nodes && toValidate.edges) {
               const knownIds = getAvailableWorkflowIds(this.config.workingDirectory);
-              const issues = validateComposition(comp, knownIds);
+              const issues = validateComposition(toValidate, knownIds);
               if (issues.length > 0) {
                 debugLog.warn('closure-engine', `Composition has ${issues.length} issue(s)`, { issues });
                 // Append validation feedback to the tool output so the model sees it
@@ -1295,10 +1342,10 @@ export class ClosureEngine {
           },
           {
             role: 'user',
-            content: `Extract a goal from this request:\n\n"${message}"\n\nJSON format:\n{\n  "objective": "clear one-sentence goal",\n  "successCriteria": ["criterion 1", "criterion 2"],\n  "constraints": ["optional constraints"],\n  "priority": "normal"\n}`,
+            content: `Extract a goal from this request. If the request includes large code blocks, type definitions, or schemas, summarize the intent — do NOT include the raw code/types in the objective. The objective should be a short, clear sentence.\n\n"${message.length > 2000 ? message.slice(0, 2000) + '\n\n[... truncated for goal extraction — full content will be passed to task execution]' : message}"\n\nJSON format:\n{\n  "objective": "clear one-sentence goal",\n  "successCriteria": ["criterion 1", "criterion 2"],\n  "constraints": ["optional constraints"],\n  "priority": "normal"\n}`,
           },
         ],
-        maxTokens: 500,
+        maxTokens: 32768,
         temperature: 0.1,
       });
 
@@ -1594,7 +1641,7 @@ export class ClosureEngine {
             content: `I've completed the following tasks:\n\n${taskSummary}\n\nNow answer the user directly using the completed task outputs. Preserve any already-correct user-facing wording from the work above. Do not collapse the answer into a meta-summary unless the user explicitly asked for a summary, recap, or status update.`,
           },
         ],
-        maxTokens: 1000,
+        maxTokens: 32768,
         temperature: 0.3,
       });
 

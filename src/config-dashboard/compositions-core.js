@@ -56,6 +56,10 @@ var MAX_UNDO = 50;
 // Folder collapse state
 var collapsedFolders = {};
 
+// Sidebar multi-select (Finder-like Cmd/Ctrl+click & Shift+click)
+var selectedCompositions = new Set(); // Set of comp IDs highlighted for batch ops
+var lastClickedCompId = null;         // Anchor for Shift+click range select
+
 // Tools cache for Tool nodes
 var toolsCache = [];
 
@@ -527,9 +531,9 @@ function buildScriptGenerationContext(currentNodeId, contextNodeIds) {
 
 // ── API ──────────────────────────────────────────────────────
 
-async function fetchCompositions() {
+async function fetchCompositions(forceRefresh) {
   try {
-    var res = await fetch('/api/compositions');
+    var res = await fetch('/api/compositions' + (forceRefresh ? '?refresh=1' : ''));
     var data = await res.json();
     compositions = data.compositions || [];
     // Clean up empty folder placeholders that now have compositions
@@ -576,7 +580,7 @@ function normalizeLegacyVariableNodeConfig(raw) {
     initialValue = normalizedType === 'boolean' ? 'false' : '';
   }
 
-  return {
+  var result = {
     type: normalizedType,
     initialValue: initialValue,
     exposeAsInput: cfg.exposeAsInput === true,
@@ -585,6 +589,13 @@ function normalizeLegacyVariableNodeConfig(raw) {
     required: cfg.required === true,
     generationPrompt: typeof cfg.generationPrompt === 'string' ? cfg.generationPrompt : '',
   };
+  if (cfg.inputControl && typeof cfg.inputControl === 'string') {
+    result.inputControl = cfg.inputControl;
+  }
+  if (Array.isArray(cfg.options) && cfg.options.length > 0) {
+    result.options = cfg.options;
+  }
+  return result;
 }
 
 function normalizeCompositionDocument(comp) {
@@ -855,13 +866,50 @@ function formatRelativeTime(isoStr) {
   return months[d.getMonth()] + ' ' + d.getDate();
 }
 
+// ── Multi-select helpers ─────────────────────────────────────
+/** Update .selected and .active classes on sidebar items without full re-render */
+function updateSidebarSelection() {
+  document.querySelectorAll('#comp-list .tree-item[data-comp-id]').forEach(function(el) {
+    el.classList.toggle('selected', selectedCompositions.has(el.dataset.compId));
+    el.classList.toggle('active', el.dataset.compId === selectedComposition);
+  });
+}
+
+/** Return visible sidebar comp IDs in DOM order (for Shift+click range) */
+function getOrderedCompIds() {
+  var ids = [];
+  document.querySelectorAll('#comp-list .tree-item[data-comp-id]').forEach(function(el) {
+    if (el.offsetParent !== null) ids.push(el.dataset.compId);
+  });
+  return ids;
+}
+
+/** Move one or more compositions to a folder via API, then refresh sidebar */
+function moveCompositionsToFolder(compIds, targetFolder) {
+  if (!compIds || compIds.length === 0) return Promise.resolve();
+  var promises = compIds.map(function(id) {
+    // Skip items already in this folder
+    var comp = compositions.find(function(c) { return c.id === id; });
+    if (comp && comp.folder === targetFolder) return Promise.resolve();
+    return fetch('/api/compositions/' + encodeURIComponent(id) + '/move', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ folder: targetFolder }),
+    });
+  });
+  return Promise.all(promises).then(function() {
+    return fetchCompositions();
+  });
+}
+
 function renderTreeItem(c, indent) {
   var active = selectedComposition === c.id ? ' active' : '';
+  var selected = selectedCompositions.has(c.id) ? ' selected' : '';
   var pad = indent || 0;
   var ts = (c.metadata && (c.metadata.updatedAt || c.metadata.createdAt)) || '';
   var timeLabel = formatRelativeTime(ts);
   var fullDate = ts ? new Date(ts).toLocaleString() : '';
-  return '<div class="tree-item' + active + '" data-comp-id="' + compEscAttr(c.id) + '" draggable="true" style="padding-left:' + (8 + pad * 16) + 'px;">' +
+  return '<div class="tree-item' + active + selected + '" data-comp-id="' + compEscAttr(c.id) + '" draggable="true" style="padding-left:' + (8 + pad * 16) + 'px;">' +
     '<svg class="tree-icon" width="16" height="16" viewBox="0 0 16 16" style="flex-shrink:0;align-self:flex-start;margin-top:2px;"><path d="M4 3h8a1 1 0 011 1v1H3V4a1 1 0 011-1zm-1 3h10v6a1 1 0 01-1 1H4a1 1 0 01-1-1V6z" fill="#94a3b8" opacity="0.5"/></svg>' +
     '<div style="display:flex;flex-direction:column;min-width:0;flex:1;">' +
       '<span class="tree-item-name">' + compEscHtml(c.name) + '</span>' +
@@ -897,6 +945,8 @@ function renderCompSidebar() {
   html += '<div class="comp-sidebar-toolbar-actions">';
   // New Pipeline
   html += '<button class="comp-toolbar-btn" id="btn-new-comp" title="New Pipeline"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></button>';
+  // Clone from Git
+  html += '<button class="comp-toolbar-btn" id="btn-clone-git" title="Clone from Git"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 1v10M4.5 7.5L8 11l3.5-3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M2.5 13.5h11" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></button>';
   // New Folder
   html += '<button class="comp-toolbar-btn" id="btn-new-folder" title="New Folder"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M1.5 2h4l1 1.5H14a.5.5 0 01.5.5v9a.5.5 0 01-.5.5H2a.5.5 0 01-.5-.5V2z" fill="none" stroke="currentColor" stroke-width="1" opacity="0.9"/><path d="M8 6.5v5M5.5 9h5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg></button>';
   // Refresh
@@ -916,7 +966,7 @@ function renderCompSidebar() {
     for (var fi = 0; fi < folders.length; fi++) {
       var folder = folders[fi];
       var folderComps = compositions.filter(function(c) { return c.folder === folder; });
-      var isCollapsed = !!collapsedFolders[folder];
+      var isCollapsed = collapsedFolders[folder] !== false;
       html += '<div class="tree-folder" data-folder="' + compEscAttr(folder) + '">';
       html += '<div class="tree-folder-row" data-folder="' + compEscAttr(folder) + '">';
       html += '<svg class="tree-chevron' + (isCollapsed ? ' collapsed' : '') + '" width="16" height="16" viewBox="0 0 16 16"><path d="M6 4l4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
@@ -960,20 +1010,66 @@ function renderCompSidebar() {
       showNewFolderModal();
     });
   }
+  var cloneGitBtn = document.querySelector('#btn-clone-git');
+  if (cloneGitBtn) {
+    cloneGitBtn.addEventListener('click', function() {
+      showCloneFromGitModal();
+    });
+  }
   var refreshBtn = document.querySelector('#btn-refresh-comps');
   if (refreshBtn) {
     refreshBtn.addEventListener('click', function() {
-      fetchCompositions();
+      fetchCompositions(true);
     });
   }
 
   list.querySelectorAll('.tree-item[data-comp-id]').forEach(function(el) {
-    el.addEventListener('click', function() {
-      selectComposition(el.dataset.compId);
+    el.addEventListener('click', function(e) {
+      var id = el.dataset.compId;
+      var isMeta = e.metaKey || e.ctrlKey; // Cmd on Mac, Ctrl on Windows/Linux
+      var isShift = e.shiftKey;
+
+      if (isMeta) {
+        // Cmd/Ctrl+click: toggle this item in/out of multi-select, don't change canvas
+        if (selectedCompositions.has(id)) {
+          selectedCompositions.delete(id);
+        } else {
+          selectedCompositions.add(id);
+        }
+        lastClickedCompId = id;
+        updateSidebarSelection();
+      } else if (isShift && lastClickedCompId) {
+        // Shift+click: range select from anchor to this item
+        var ordered = getOrderedCompIds();
+        var anchorIdx = ordered.indexOf(lastClickedCompId);
+        var targetIdx = ordered.indexOf(id);
+        if (anchorIdx !== -1 && targetIdx !== -1) {
+          var lo = Math.min(anchorIdx, targetIdx);
+          var hi = Math.max(anchorIdx, targetIdx);
+          for (var i = lo; i <= hi; i++) {
+            selectedCompositions.add(ordered[i]);
+          }
+        }
+        updateSidebarSelection();
+      } else {
+        // Normal click: clear multi-select, select + load in canvas
+        selectedCompositions.clear();
+        selectedCompositions.add(id);
+        lastClickedCompId = id;
+        selectComposition(id);
+      }
     });
     el.addEventListener('contextmenu', function(e) {
       e.preventDefault();
-      showCompContextMenu(e.clientX, e.clientY, el.dataset.compId);
+      var id = el.dataset.compId;
+      // If right-clicking a non-selected item, select only it
+      if (!selectedCompositions.has(id)) {
+        selectedCompositions.clear();
+        selectedCompositions.add(id);
+        lastClickedCompId = id;
+        updateSidebarSelection();
+      }
+      showCompContextMenu(e.clientX, e.clientY, id);
     });
   });
 
@@ -981,7 +1077,7 @@ function renderCompSidebar() {
   list.querySelectorAll('.tree-folder-row').forEach(function(row) {
     row.addEventListener('click', function() {
       var folder = row.dataset.folder;
-      collapsedFolders[folder] = !collapsedFolders[folder];
+      collapsedFolders[folder] = collapsedFolders[folder] === false;
       // Re-render to update folder icon (open vs closed)
       renderCompSidebar();
     });
@@ -1014,7 +1110,7 @@ function renderCompSidebar() {
           grp.style.display = anyVisible ? '' : 'none';
         } else {
           grp.style.display = '';
-          if (collapsedFolders[folder]) {
+          if (collapsedFolders[folder] !== false) {
             children.style.display = 'none';
             if (chevron) chevron.classList.add('collapsed');
           }
@@ -1023,20 +1119,64 @@ function renderCompSidebar() {
     });
   }
 
+  // ── Escape clears multi-select ──────────────────────────
+  // Only clear when sidebar is focused (not during canvas editing)
+  list.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape' && selectedCompositions.size > 0) {
+      selectedCompositions.clear();
+      updateSidebarSelection();
+    }
+  });
+
   // ── Drag & Drop ──────────────────────────────────────────
-  // Drag start on tree items
+  // Drag start on tree items (multi-select aware)
   list.querySelectorAll('.tree-item[data-comp-id]').forEach(function(el) {
     el.addEventListener('dragstart', function(e) {
-      e.dataTransfer.setData('text/plain', el.dataset.compId);
+      var dragId = el.dataset.compId;
+
+      // If dragging an item NOT in multi-select, clear selection and select only it
+      if (!selectedCompositions.has(dragId)) {
+        selectedCompositions.clear();
+        selectedCompositions.add(dragId);
+        lastClickedCompId = dragId;
+        updateSidebarSelection();
+      }
+
+      // Serialize all selected IDs into dataTransfer
+      var ids = Array.from(selectedCompositions);
+      e.dataTransfer.setData('application/x-woodbury-comp-ids', JSON.stringify(ids));
+      e.dataTransfer.setData('text/plain', dragId); // fallback for single ID
       e.dataTransfer.effectAllowed = 'move';
-      el.classList.add('tree-item-dragging');
-      // Expand collapsed folders after a short delay while dragging
-      window._dragCompId = el.dataset.compId;
+
+      // Mark all selected items as dragging
+      list.querySelectorAll('.tree-item[data-comp-id]').forEach(function(item) {
+        if (selectedCompositions.has(item.dataset.compId)) {
+          item.classList.add('tree-item-multi-dragging');
+        }
+      });
+
+      // Custom drag image badge for multi-drag
+      if (ids.length > 1) {
+        var badge = document.createElement('div');
+        badge.className = 'tree-drag-badge';
+        badge.textContent = ids.length + ' pipelines';
+        document.body.appendChild(badge);
+        e.dataTransfer.setDragImage(badge, 0, 0);
+        // Clean up the badge element after a tick
+        setTimeout(function() { badge.remove(); }, 0);
+      }
+
+      window._dragCompId = dragId;
     });
     el.addEventListener('dragend', function() {
-      el.classList.remove('tree-item-dragging');
       window._dragCompId = null;
-      // Clear all drag-over highlights
+      // Clear all dragging + drag-over highlights
+      list.querySelectorAll('.tree-item-multi-dragging').forEach(function(d) {
+        d.classList.remove('tree-item-multi-dragging');
+      });
+      list.querySelectorAll('.tree-item-dragging').forEach(function(d) {
+        d.classList.remove('tree-item-dragging');
+      });
       list.querySelectorAll('.tree-drag-over').forEach(function(d) {
         d.classList.remove('tree-drag-over');
       });
@@ -1051,7 +1191,7 @@ function renderCompSidebar() {
       row.classList.add('tree-drag-over');
       // Auto-expand collapsed folder on hover
       var folder = row.dataset.folder;
-      if (collapsedFolders[folder]) {
+      if (collapsedFolders[folder] !== false) {
         if (!row._expandTimer) {
           row._expandTimer = setTimeout(function() {
             collapsedFolders[folder] = false;
@@ -1071,20 +1211,17 @@ function renderCompSidebar() {
       e.preventDefault();
       row.classList.remove('tree-drag-over');
       if (row._expandTimer) { clearTimeout(row._expandTimer); row._expandTimer = null; }
-      var compId = e.dataTransfer.getData('text/plain');
       var targetFolder = row.dataset.folder;
-      if (!compId || !targetFolder) return;
-      // Don't move if already in this folder
-      var comp = compositions.find(function(c) { return c.id === compId; });
-      if (comp && comp.folder === targetFolder) return;
-      // Move via API
-      fetch('/api/compositions/' + encodeURIComponent(compId) + '/move', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ folder: targetFolder }),
-      }).then(function() {
-        return fetchCompositions();
-      });
+      if (!targetFolder) return;
+      // Read multi-select IDs, fall back to single ID
+      var idsJson = e.dataTransfer.getData('application/x-woodbury-comp-ids');
+      var compIds = idsJson ? JSON.parse(idsJson) : [];
+      if (compIds.length === 0) {
+        var single = e.dataTransfer.getData('text/plain');
+        if (single) compIds = [single];
+      }
+      if (compIds.length === 0) return;
+      moveCompositionsToFolder(compIds, targetFolder);
     });
   });
 
@@ -1106,18 +1243,16 @@ function renderCompSidebar() {
       e.preventDefault();
       e.stopPropagation();
       folderEl.querySelector('.tree-folder-row').classList.remove('tree-drag-over');
-      var compId = e.dataTransfer.getData('text/plain');
       var targetFolder = folderEl.dataset.folder;
-      if (!compId || !targetFolder) return;
-      var comp = compositions.find(function(c) { return c.id === compId; });
-      if (comp && comp.folder === targetFolder) return;
-      fetch('/api/compositions/' + encodeURIComponent(compId) + '/move', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ folder: targetFolder }),
-      }).then(function() {
-        return fetchCompositions();
-      });
+      if (!targetFolder) return;
+      var idsJson = e.dataTransfer.getData('application/x-woodbury-comp-ids');
+      var compIds = idsJson ? JSON.parse(idsJson) : [];
+      if (compIds.length === 0) {
+        var single = e.dataTransfer.getData('text/plain');
+        if (single) compIds = [single];
+      }
+      if (compIds.length === 0) return;
+      moveCompositionsToFolder(compIds, targetFolder);
     });
   });
 
@@ -1137,17 +1272,14 @@ function renderCompSidebar() {
     rootDrop.addEventListener('drop', function(e) {
       e.preventDefault();
       rootDrop.classList.remove('tree-drag-over');
-      var compId = e.dataTransfer.getData('text/plain');
-      if (!compId) return;
-      var comp = compositions.find(function(c) { return c.id === compId; });
-      if (comp && !comp.folder) return; // already unfiled
-      fetch('/api/compositions/' + encodeURIComponent(compId) + '/move', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ folder: '' }),
-      }).then(function() {
-        return fetchCompositions();
-      });
+      var idsJson = e.dataTransfer.getData('application/x-woodbury-comp-ids');
+      var compIds = idsJson ? JSON.parse(idsJson) : [];
+      if (compIds.length === 0) {
+        var single = e.dataTransfer.getData('text/plain');
+        if (single) compIds = [single];
+      }
+      if (compIds.length === 0) return;
+      moveCompositionsToFolder(compIds, '');
     });
   }
 }
@@ -1232,14 +1364,24 @@ function showCompContextMenu(x, y, compId) {
   menu.style.left = x + 'px';
   menu.style.top = y + 'px';
 
+  var isMulti = selectedCompositions.size > 1;
   var comp = compositions.find(function(c) { return c.id === compId; });
   var compName = comp ? comp.name : compId;
+  var count = selectedCompositions.size;
 
-  menu.innerHTML =
-    '<div class="comp-context-item" data-action="move">Move to Folder...</div>' +
-    '<div class="comp-context-item" data-action="rename">Rename</div>' +
-    '<div class="comp-context-item" data-action="duplicate">Duplicate</div>' +
-    '<div class="comp-context-item comp-context-danger" data-action="delete">Delete</div>';
+  if (isMulti) {
+    // Multi-select context menu: batch operations only
+    menu.innerHTML =
+      '<div class="comp-context-item" data-action="move">Move ' + count + ' to Folder...</div>' +
+      '<div class="comp-context-item comp-context-danger" data-action="delete">Delete ' + count + ' Pipelines</div>';
+  } else {
+    // Single-item context menu: all operations
+    menu.innerHTML =
+      '<div class="comp-context-item" data-action="move">Move to Folder...</div>' +
+      '<div class="comp-context-item" data-action="rename">Rename</div>' +
+      '<div class="comp-context-item" data-action="duplicate">Duplicate</div>' +
+      '<div class="comp-context-item comp-context-danger" data-action="delete">Delete</div>';
+  }
 
   document.body.appendChild(menu);
 
@@ -1252,7 +1394,11 @@ function showCompContextMenu(x, y, compId) {
     var action = e.target.dataset.action;
     dismissCompContextMenu();
     if (action === 'move') {
-      showMoveToFolderModal(compId);
+      if (isMulti) {
+        showMoveToFolderModal(Array.from(selectedCompositions));
+      } else {
+        showMoveToFolderModal([compId]);
+      }
     } else if (action === 'rename') {
       var newName = prompt('Rename pipeline:', compName);
       if (newName && newName.trim() && newName.trim() !== compName) {
@@ -1268,17 +1414,38 @@ function showCompContextMenu(x, y, compId) {
         .then(function() { return fetchCompositions(); })
         .catch(function(err) { toast('Duplicate failed: ' + err.message, 'error'); });
     } else if (action === 'delete') {
-      if (confirm('Delete "' + compName + '"? This cannot be undone.')) {
-        deleteComposition(compId).then(function() {
-          if (selectedComposition === compId) {
-            selectedComposition = null;
-            compData = null;
-            document.querySelector('#main').innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#64748b;">Select a pipeline or create a new one</div>';
-          }
-          return fetchCompositions();
-        }).catch(function(err) {
-          toast('Delete failed: ' + err.message, 'error');
-        });
+      if (isMulti) {
+        if (confirm('Delete ' + count + ' pipelines? This cannot be undone.')) {
+          var deleteIds = Array.from(selectedCompositions);
+          Promise.all(deleteIds.map(function(id) {
+            return deleteComposition(id);
+          })).then(function() {
+            // Clear canvas if active pipeline was in the deleted set
+            if (selectedCompositions.has(selectedComposition)) {
+              selectedComposition = null;
+              compData = null;
+              document.querySelector('#main').innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#64748b;">Select a pipeline or create a new one</div>';
+            }
+            selectedCompositions.clear();
+            return fetchCompositions();
+          }).catch(function(err) {
+            toast('Delete failed: ' + err.message, 'error');
+          });
+        }
+      } else {
+        if (confirm('Delete "' + compName + '"? This cannot be undone.')) {
+          deleteComposition(compId).then(function() {
+            if (selectedComposition === compId) {
+              selectedComposition = null;
+              compData = null;
+              document.querySelector('#main').innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#64748b;">Select a pipeline or create a new one</div>';
+            }
+            selectedCompositions.clear();
+            return fetchCompositions();
+          }).catch(function(err) {
+            toast('Delete failed: ' + err.message, 'error');
+          });
+        }
       }
     }
   });
@@ -1344,9 +1511,16 @@ function showNewFolderModal() {
   });
 }
 
-function showMoveToFolderModal(compId) {
-  var comp = compositions.find(function(c) { return c.id === compId; });
-  if (!comp) return;
+function showMoveToFolderModal(compIds) {
+  // compIds is an array of composition IDs
+  if (!compIds || compIds.length === 0) return;
+  var isMulti = compIds.length > 1;
+  var firstComp = compositions.find(function(c) { return c.id === compIds[0]; });
+  if (!firstComp) return;
+
+  var movingLabel = isMulti
+    ? (compIds.length + ' pipelines')
+    : compEscHtml(firstComp.name);
 
   var folders = getUniqueFolders();
   var overlay = document.createElement('div');
@@ -1354,11 +1528,11 @@ function showMoveToFolderModal(compId) {
   overlay.innerHTML =
     '<div class="comp-modal" style="width:320px;">' +
       '<h3 style="margin:0 0 16px;font-size:16px;color:#e2e8f0;">Move to Folder</h3>' +
-      '<div style="font-size:12px;color:#94a3b8;margin-bottom:12px;">Moving: <strong style="color:#e2e8f0;">' + compEscHtml(comp.name) + '</strong></div>' +
+      '<div style="font-size:12px;color:#94a3b8;margin-bottom:12px;">Moving: <strong style="color:#e2e8f0;">' + movingLabel + '</strong></div>' +
       '<div id="folder-options" style="max-height:200px;overflow:auto;margin-bottom:12px;">' +
-        '<div class="folder-option' + (!comp.folder ? ' selected' : '') + '" data-folder="" style="padding:8px 12px;border-radius:6px;cursor:pointer;font-size:13px;color:#94a3b8;">No Folder (Unfiled)</div>' +
+        '<div class="folder-option' + (!isMulti && !firstComp.folder ? ' selected' : '') + '" data-folder="" style="padding:8px 12px;border-radius:6px;cursor:pointer;font-size:13px;color:#94a3b8;">No Folder (Unfiled)</div>' +
         folders.map(function(f) {
-          return '<div class="folder-option' + (comp.folder === f ? ' selected' : '') + '" data-folder="' + compEscAttr(f) + '" style="padding:8px 12px;border-radius:6px;cursor:pointer;font-size:13px;color:#e2e8f0;">' + compEscHtml(f) + '</div>';
+          return '<div class="folder-option' + (!isMulti && firstComp.folder === f ? ' selected' : '') + '" data-folder="' + compEscAttr(f) + '" style="padding:8px 12px;border-radius:6px;cursor:pointer;font-size:13px;color:#e2e8f0;">' + compEscHtml(f) + '</div>';
         }).join('') +
       '</div>' +
       '<div style="display:flex;gap:8px;margin-bottom:16px;">' +
@@ -1373,7 +1547,7 @@ function showMoveToFolderModal(compId) {
 
   document.body.appendChild(overlay);
 
-  var chosenFolder = comp.folder || '';
+  var chosenFolder = (!isMulti && firstComp.folder) ? firstComp.folder : '';
 
   // Wire folder option clicks
   overlay.querySelectorAll('.folder-option').forEach(function(opt) {
@@ -1423,17 +1597,13 @@ function showMoveToFolderModal(compId) {
 
   // Move
   overlay.querySelector('#folder-move-btn').addEventListener('click', function() {
-    fetch('/api/compositions/' + encodeURIComponent(compId) + '/move', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ folder: chosenFolder }),
-    })
-      .then(function(r) { return r.json(); })
-      .then(function(data) {
-        if (data.error) throw new Error(data.error);
+    moveCompositionsToFolder(compIds, chosenFolder)
+      .then(function() {
         overlay.remove();
-        toast('Moved to ' + (chosenFolder || 'Unfiled'), 'success');
-        return fetchCompositions();
+        var label = isMulti
+          ? ('Moved ' + compIds.length + ' pipelines to ' + (chosenFolder || 'Unfiled'))
+          : ('Moved to ' + (chosenFolder || 'Unfiled'));
+        toast(label, 'success');
       })
       .catch(function(err) {
         toast('Move failed: ' + err.message, 'error');
@@ -1519,6 +1689,71 @@ function showCreateForm() {
   });
 }
 
+// ── Clone from Git Modal ─────────────────────────────────────
+
+function showCloneFromGitModal() {
+  var main = document.querySelector('#main');
+  main.innerHTML =
+    '<div class="comp-create-form">' +
+      '<h2>Clone Pipeline from Git</h2>' +
+      '<label>Git Repository URL</label>' +
+      '<input type="text" id="clone-git-url" placeholder="https://github.com/user/my-pipeline.git" style="width:100%;padding:0.5rem;background:#0f172a;border:1px solid #334155;color:#e2e8f0;border-radius:6px;margin-bottom:0.75rem;font-size:13px;">' +
+      '<label>Local Name (optional — derived from URL if blank)</label>' +
+      '<input type="text" id="clone-git-name" placeholder="e.g. my-pipeline" style="width:100%;padding:0.5rem;background:#0f172a;border:1px solid #334155;color:#e2e8f0;border-radius:6px;margin-bottom:1rem;font-size:13px;">' +
+      '<p style="color:#94a3b8;font-size:0.8rem;margin-bottom:1rem;">The repository must contain a <code style="background:#1e293b;padding:2px 6px;border-radius:4px;">pipeline.json</code> at its root (v2 pipeline format).</p>' +
+      '<div style="display:flex;gap:0.5rem;">' +
+        '<button id="clone-git-btn" style="padding:0.5rem 1.5rem;background:#7c3aed;color:white;border:none;border-radius:6px;cursor:pointer;">Clone</button>' +
+        '<button id="clone-git-cancel" style="padding:0.5rem 1rem;background:#334155;color:#e2e8f0;border:none;border-radius:6px;cursor:pointer;">Cancel</button>' +
+      '</div>' +
+      '<div id="clone-git-status" style="margin-top:0.75rem;font-size:0.85rem;"></div>' +
+    '</div>';
+
+  document.querySelector('#clone-git-btn').addEventListener('click', async function() {
+    var urlInput = document.querySelector('#clone-git-url');
+    var nameInput = document.querySelector('#clone-git-name');
+    var statusEl = document.querySelector('#clone-git-status');
+    var cloneBtn = document.querySelector('#clone-git-btn');
+    var gitUrl = urlInput.value.trim();
+    if (!gitUrl) { toast('Enter a git repository URL', 'error'); return; }
+
+    cloneBtn.disabled = true;
+    cloneBtn.textContent = 'Cloning...';
+    statusEl.innerHTML = '<span style="color:#94a3b8;">Cloning repository...</span>';
+
+    try {
+      var payload = { url: gitUrl };
+      var customName = nameInput.value.trim();
+      if (customName) payload.name = customName;
+
+      var resp = await fetch('/api/compositions/v2/clone', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      var data = await resp.json();
+      if (!resp.ok) {
+        throw new Error(data.error || 'Clone failed');
+      }
+      toast('Pipeline cloned: ' + (data.name || data.id), 'success');
+      await fetchCompositions();
+      selectComposition(data.id);
+    } catch (err) {
+      statusEl.innerHTML = '<span style="color:#f87171;">' + compEscHtml(err.message) + '</span>';
+      cloneBtn.disabled = false;
+      cloneBtn.textContent = 'Clone';
+    }
+  });
+
+  document.querySelector('#clone-git-cancel').addEventListener('click', function() {
+    main.innerHTML =
+      '<div class="empty-state">' +
+      '<div class="empty-state-icon">&#x1f517;</div>' +
+      '<h2>Pipelines</h2>' +
+      '<p>Select a pipeline from the sidebar or create a new one.</p>' +
+      '</div>';
+  });
+}
+
 // ── Select & Load Composition ────────────────────────────────
 
 async function selectComposition(id, viewOverride) {
@@ -1537,10 +1772,8 @@ async function selectComposition(id, viewOverride) {
     updateHash('compositions', id, compView);
   }
 
-  // Update sidebar active state
-  document.querySelectorAll('#comp-list .tree-item').forEach(function(el) {
-    el.classList.toggle('active', el.dataset.compId === id);
-  });
+  // Update sidebar active + selected state
+  updateSidebarSelection();
 
   var main = document.querySelector('#main');
   main.innerHTML = '<div class="loading"><div class="spinner"></div> Loading...</div>';

@@ -19,6 +19,8 @@ import { sendJson, readBody } from '../utils.js';
 import {
   discoverWorkflows,
   discoverCompositions,
+  readScriptFileCode,
+  writeScriptFileCode,
 } from '../../workflow/loader.js';
 import type {
   WorkflowDocument,
@@ -37,6 +39,10 @@ import {
   summarizeAutoFixValue,
 } from '../script-autofix-context.js';
 import { proposeScriptNodeEdgeRepairs } from '../script-edge-repair.js';
+import {
+  validateComposition,
+  getAvailableWorkflowIds,
+} from '../../loop/v3/closure-engine.js';
 
 // ────────────────────────────────────────────────────────────────
 //  Constants
@@ -48,6 +54,15 @@ const MAX_RUNS = 500;
 const SCRIPT_TOOL_DOCS_PATH = join(homedir(), '.woodbury', 'data', 'script-tool-docs.json');
 
 let runsCache: RunRecord[] | null = null;
+
+/** Read user's saved temperature preference from ~/.woodbury/chat-config.json */
+async function getSavedTemperature(): Promise<number | undefined> {
+  try {
+    const raw = await readFile(join(homedir(), '.woodbury', 'chat-config.json'), 'utf-8');
+    const config = JSON.parse(raw);
+    return typeof config.temperature === 'number' ? config.temperature : undefined;
+  } catch { return undefined; }
+}
 
 // ────────────────────────────────────────────────────────────────
 //  Run record helpers
@@ -538,18 +553,20 @@ function makeScriptExecutionContext(
   return {
     llm: {
       generate: async (prompt: string, opts?: { temperature?: number; maxTokens?: number; model?: string }) => {
+        const savedTemp = await getSavedTemperature();
         const resp = await scriptRunPrompt(
           [{ role: 'user', content: prompt }],
           opts?.model || scriptModel,
-          { maxTokens: opts?.maxTokens || 4096, temperature: opts?.temperature ?? 0.9 }
+          { maxTokens: opts?.maxTokens || 32768, temperature: opts?.temperature ?? savedTemp ?? 0.9 }
         );
         return resp.content.trim();
       },
       generateJSON: async (prompt: string, _schema?: any, opts?: { temperature?: number; maxTokens?: number; model?: string }) => {
+        const savedTemp = await getSavedTemperature();
         const resp = await scriptRunPrompt(
           [{ role: 'user', content: prompt + '\n\nRespond with valid JSON only.' }],
           opts?.model || scriptModel,
-          { maxTokens: opts?.maxTokens || 4096, temperature: opts?.temperature ?? 0.7 }
+          { maxTokens: opts?.maxTokens || 32768, temperature: opts?.temperature ?? savedTemp ?? 0.7 }
         );
         const text = resp.content.trim();
         const jsonMatch = text.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
@@ -573,8 +590,23 @@ function extractScriptFnBody(code: string): string {
 
 function normalizeScriptCode(code: string): string {
   const trimmed = String(code || '').trim();
-  const fenceMatch = trimmed.match(/^```(?:javascript|js)?\s*\n([\s\S]*?)\n```$/i);
-  return fenceMatch ? fenceMatch[1].trim() : trimmed;
+  // Try explicit javascript/js fence
+  const jsFenceMatch = trimmed.match(/```(?:javascript|js)\s*\n([\s\S]*?)\n```/i);
+  if (jsFenceMatch) return jsFenceMatch[1].trim();
+  // Handle LLM wrapping response in ```json { "code": "..." } ```
+  const jsonFenceMatch = trimmed.match(/```json\s*\n([\s\S]*?)\n```/i);
+  if (jsonFenceMatch) {
+    try {
+      const parsed = JSON.parse(jsonFenceMatch[1]);
+      if (typeof parsed.code === 'string' && parsed.code.includes('function execute')) {
+        return parsed.code.trim();
+      }
+    } catch { /* not valid JSON, fall through */ }
+  }
+  // Try any generic code fence
+  const genericFenceMatch = trimmed.match(/```\s*\n([\s\S]*?)\n```/);
+  if (genericFenceMatch) return genericFenceMatch[1].trim();
+  return trimmed;
 }
 
 async function executeScriptCode(
@@ -598,6 +630,57 @@ async function executeScriptCode(
   const fnBody = extractScriptFnBody(normalizedCode);
   const fn = new AsyncFunction('inputs', 'context', 'require', fnBody);
   return (await fn(inputs, context, require)) || {};
+}
+
+/**
+ * Transpile TypeScript source to JavaScript using the TypeScript compiler.
+ * Strips type annotations, interfaces, generics etc. so the code can be eval'd.
+ * Falls back to returning the original code if TypeScript is unavailable.
+ */
+function transpileTypeScript(tsCode: string): string {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const ts = require('typescript');
+    const result = ts.transpileModule(tsCode, {
+      compilerOptions: {
+        module: ts.ModuleKind.ESNext,
+        target: ts.ScriptTarget.ESNext,
+        removeComments: false,
+        esModuleInterop: true,
+      },
+    });
+    return result.outputText;
+  } catch {
+    // TypeScript compiler not available — return as-is and let executeScriptCode handle it
+    debugLog.warn('comp-run', 'TypeScript compiler not available, executing .ts file as-is');
+    return tsCode;
+  }
+}
+
+/**
+ * Execute a v2 file-backed script node by reading its .ts file from disk.
+ * Transpiles TypeScript to JavaScript first, then evaluates.
+ * The file must export an `async function execute(inputs, context)`.
+ */
+async function executeScriptFile(
+  pipelineDir: string,
+  fileName: string,
+  inputs: Record<string, unknown>,
+  context: any,
+): Promise<Record<string, unknown>> {
+  const tsCode = await readScriptFileCode(pipelineDir, { file: fileName } as any);
+
+  // Transpile TS → JS (strips type annotations, interfaces, etc.)
+  let jsCode = tsCode;
+  if (fileName.endsWith('.ts')) {
+    jsCode = transpileTypeScript(tsCode);
+  }
+
+  // Strip `export` keywords — executeScriptCode expects bare function declarations
+  jsCode = jsCode.replace(/^export\s+/gm, '');
+
+  // Delegate to the existing executeScriptCode
+  return executeScriptCode(jsCode, inputs, context);
 }
 
 class ScriptNodeExecutionError extends Error {
@@ -808,7 +891,7 @@ Return JSON only.`;
             { role: 'user', content: analysisUserMessage },
           ],
           scriptModel,
-          { maxTokens: 1400, temperature: 0.2 },
+          { maxTokens: 32768, temperature: 0.2 },
         );
         analysisResult = parseJsonModelResponse(analysisResponse.content);
         analysisSummary = JSON.stringify(analysisResult, null, 2);
@@ -910,7 +993,7 @@ Fix the bug and return the corrected code. Do not change the @input/@output anno
           { role: 'user', content: fixUserMessage },
         ],
         scriptModel,
-        { maxTokens: 4096, temperature: 0.3 },
+        { maxTokens: 32768, temperature: 0.3 },
       );
 
       const fixedCode = normalizeScriptCode(fixResponse.content);
@@ -1860,6 +1943,35 @@ export const handleCompositionRunRoutes: RouteHandler = async (req, res, pathnam
         return true;
       }
 
+      // ── Pre-flight structural validation ──
+      try {
+        const knownIds = getAvailableWorkflowIds(ctx.workDir);
+        const preFlightIssues = validateComposition(comp, knownIds);
+        const blockingIssues = preFlightIssues.filter(issue =>
+          issue.includes('has empty code')
+          || issue.includes('does not define an execute()')
+          || issue.includes('has no execute()')
+          || issue.includes('references non-existent node')
+          || issue.includes('has invalid JavaScript')
+          || issue.includes('contains markdown fences')
+          || issue.includes('contains a serialized JSON blob')
+        );
+        if (blockingIssues.length > 0) {
+          sendJson(res, 400, {
+            error: 'Pipeline has structural issues that must be fixed before running',
+            issues: blockingIssues,
+          });
+          return true;
+        }
+        if (preFlightIssues.length > 0) {
+          debugLog.warn('dashboard', `Composition "${id}" has non-blocking issues`, {
+            issues: preFlightIssues.slice(0, 5),
+          });
+        }
+      } catch (err) {
+        debugLog.warn('dashboard', 'Pre-flight validation failed (non-blocking)', { error: String(err) });
+      }
+
       // Ensure all extensions (and their tools) are fully loaded before running
       await ctx.extensionManager?.whenReady();
 
@@ -2072,6 +2184,92 @@ export const handleCompositionRunRoutes: RouteHandler = async (req, res, pathnam
                   return;
                 }
               }
+            }
+
+            // ── Script File Node (v2 file-backed) ──────────────
+            if (node?.workflowId === '__script_file__' && (node as any).scriptFile) {
+              const scriptFileConfig = (node as any).scriptFile as { file: string; description: string; inputs: any[]; outputs: any[] };
+              const pipelineDir = (comp as any).pipelineDir;
+
+              if (!pipelineDir) {
+                ns.status = 'failed';
+                ns.error = 'Script file node requires a v2 pipeline directory (pipelineDir not set)';
+                const downstream = getDownstreamNodes(nodeId, comp.edges);
+                for (const downId of downstream) {
+                  if (run.nodeStates[downId]) run.nodeStates[downId].status = 'skipped';
+                }
+                run.done = true;
+                run.success = false;
+                run.error = ns.error;
+                run.durationMs = Date.now() - run.startedAt;
+                await finalizeCompRunRecord(compRunId, run, executionOrder);
+                return;
+              }
+
+              ns.status = 'running';
+              ns.currentStep = `Running ${scriptFileConfig.file}...`;
+              run.currentNodeId = nodeId;
+              const scriptStart = Date.now();
+
+              const edgeInputs = gatherInputVariables(nodeId, comp.edges, nodeOutputs);
+              const mergedInputs: Record<string, unknown> = { ...initialVariables, ...edgeInputs };
+              ns.inputVariables = { ...mergedInputs };
+
+              try {
+                // Build script context (same as inline script nodes)
+                const { scriptRunPrompt, scriptModel, scriptTools } = await buildScriptContext(ctx);
+                const scriptLogs: string[] = [];
+                const context = makeScriptExecutionContext(scriptRunPrompt, scriptModel, scriptTools, scriptLogs, {
+                  setProgress: (completed: number, total?: number, label?: string) => {
+                    ns.stepsCompleted = completed;
+                    if (total != null) ns.stepsTotal = total;
+                    if (label) ns.currentStep = label;
+                  },
+                });
+                const result = await executeScriptFile(pipelineDir, scriptFileConfig.file, mergedInputs, context);
+
+                ns.durationMs = Date.now() - scriptStart;
+                ns.status = 'completed';
+                ns.stepsTotal = 1;
+                ns.stepsCompleted = 1;
+                ns.logs = scriptLogs;
+                ns.inputVariables = { ...mergedInputs };
+                ns.outputVariables = result || {};
+                run.nodesCompleted++;
+                nodeOutputs[nodeId] = result || {};
+
+                debugLog.info('comp-run', `Script file node "${nodeId}" (${scriptFileConfig.file}) completed`, {
+                  outputKeys: Object.keys(result || {}),
+                  durationMs: ns.durationMs,
+                });
+              } catch (scriptErr: any) {
+                ns.durationMs = Date.now() - scriptStart;
+                ns.status = 'failed';
+                ns.error = scriptErr?.message || String(scriptErr);
+                ns.logs = Array.isArray(scriptErr?.logs) ? scriptErr.logs : [];
+                debugLog.error('comp-run', `Script file node "${nodeId}" (${scriptFileConfig.file}) failed`, {
+                  error: ns.error,
+                });
+
+                const scriptPolicy = node.onFailure || { action: 'stop' as const };
+                if (scriptPolicy.action === 'skip') {
+                  ns.status = 'skipped';
+                  continue;
+                } else {
+                  const downstream = getDownstreamNodes(nodeId, comp.edges);
+                  for (const downId of downstream) {
+                    if (run.nodeStates[downId]) run.nodeStates[downId].status = 'skipped';
+                  }
+                  run.done = true;
+                  run.success = false;
+                  run.error = ns.error;
+                  run.durationMs = Date.now() - run.startedAt;
+                  await finalizeCompRunRecord(compRunId, run, executionOrder);
+                  return;
+                }
+              }
+              if (isIdempotent && ns.status === 'completed') await saveIdempotencyCache(id, idempotencyHash, nodeOutputs[nodeId]);
+              continue;
             }
 
             // ── Script Node ─────────────────────────────────────
@@ -3167,7 +3365,7 @@ export const handleCompositionRunRoutes: RouteHandler = async (req, res, pathnam
                       const llmResponse = await runPrompt(
                         [{ role: 'user', content: genPrompt }],
                         model,
-                        { maxTokens: 2048, temperature: 0.9 }
+                        { maxTokens: 32768, temperature: 0.9 }
                       );
                       mergedVars[v.name] = llmResponse.content.trim();
                     } catch { /* non-fatal */ }

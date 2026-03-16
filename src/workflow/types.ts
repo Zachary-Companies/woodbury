@@ -807,6 +807,7 @@ export interface CompositionDocument {
     updatedAt: string;
     viewport?: { panX: number; panY: number; zoom: number };
     generatedPipelineDocs?: CompositionGeneratedPipelineDoc[];
+    projectNotes?: string;
   };
 }
 
@@ -1110,6 +1111,16 @@ export interface VariableNodeConfig {
   required?: boolean;
   /** Optional AI generation prompt for the generated pipeline form */
   generationPrompt?: string;
+  /**
+   * Form control mode for the pipeline form UI.
+   *   - 'text'     (default) — plain text input, or textarea via label heuristic
+   *   - 'textarea' — force multi-line text area
+   *   - 'select'   — fixed dropdown; user must pick from `options`
+   *   - 'combobox' — dropdown with suggestions from `options`, but also allows freeform typing
+   */
+  inputControl?: 'text' | 'textarea' | 'select' | 'combobox';
+  /** Option values for 'select' and 'combobox' controls */
+  options?: string[];
 }
 
 /** Configuration for a Get Variable node — reads a Variable node's value by reference */
@@ -1182,6 +1193,65 @@ export interface CompositionEdge {
   sourcePort: string;
   targetNodeId: string;
   targetPort: string;
+}
+
+// ────────────────────────────────────────────────────────────────
+//  v2 File-Backed Pipeline Types
+// ────────────────────────────────────────────────────────────────
+
+/** Edge kind for v2 pipelines — distinguishes data flow, imports, and control flow */
+export type PipelineEdgeKind = 'data' | 'import' | 'trigger';
+
+/** A v2 composition edge with optional kind field (backward compat: absent = 'data') */
+export interface PipelineEdge extends CompositionEdge {
+  /** Edge kind: 'data' = value flow (default), 'import' = code reference, 'trigger' = control only */
+  kind?: PipelineEdgeKind;
+}
+
+/** Configuration for a file-backed script node (v2) */
+export interface ScriptFileNodeConfig {
+  /** Relative path to the .ts file within the pipeline directory */
+  file: string;
+  /** Natural language description of what this node does */
+  description: string;
+  /** Declared input ports */
+  inputs: PortDeclaration[];
+  /** Declared output ports */
+  outputs: PortDeclaration[];
+  /** Agent conversation history for iterative refinement */
+  chatHistory?: Array<{ role: 'user' | 'assistant'; content: string }>;
+  /** Persisted generation transcript */
+  generationTranscript?: ScriptNodeConfig['generationTranscript'];
+  /** Latest generation metrics */
+  generationMetrics?: ScriptNodeConfig['generationMetrics'];
+}
+
+/** v2 pipeline document — file-backed composition where script nodes are real .ts files */
+export interface PipelineDocument {
+  version: '2.0';
+  id: string;
+  name: string;
+  description?: string;
+  folder?: string;
+  /** Pipeline directory path (set at load time, not persisted) */
+  pipelineDir?: string;
+  nodes: PipelineNode[];
+  edges: PipelineEdge[];
+  metadata?: CompositionDocument['metadata'];
+}
+
+/** A node in a v2 pipeline — extends CompositionNode with file-backed script support */
+export interface PipelineNode extends CompositionNode {
+  /** File-backed script config (only when workflowId is '__script_file__') */
+  scriptFile?: ScriptFileNodeConfig;
+}
+
+/** Union type for both v1 and v2 composition documents */
+export type AnyCompositionDocument = CompositionDocument | PipelineDocument;
+
+/** Type guard: is this a v2 file-backed pipeline? */
+export function isPipelineDocument(doc: AnyCompositionDocument): doc is PipelineDocument {
+  return doc.version === '2.0';
 }
 
 // ────────────────────────────────────────────────────────────────

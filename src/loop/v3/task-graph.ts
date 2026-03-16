@@ -175,7 +175,7 @@ Respond ONLY with valid JSON — no markdown fences, no explanation.`;
         { role: 'system', content: systemPrompt },
         { role: 'user', content: decompositionPrompt },
       ],
-      maxTokens: 2000,
+      maxTokens: 32768,
       temperature: 0.2,
     });
 

@@ -712,8 +712,8 @@
     html += '</div>';
 
     // Resize handle
-    html += '<div id="asset-detail-resizer" class="asset-resizer" style="flex:0 0 6px;cursor:col-resize;background:transparent;position:relative;margin:0 8px;">';
-    html += '<div style="position:absolute;top:0;bottom:0;left:2px;width:2px;background:#334155;border-radius:1px;transition:background 0.15s;"></div>';
+    html += '<div id="asset-detail-resizer" class="resize-handle" style="margin:0 8px;">';
+    html += '<div class="resize-bar-inner"></div>';
     html += '</div>';
 
     // Right: Details
@@ -873,39 +873,19 @@
       });
     })();
 
-    // Wire resize handle
-    (function () {
-      var resizer = document.getElementById('asset-detail-resizer');
-      var previewCol = document.getElementById('asset-detail-preview');
-      var splitContainer = document.getElementById('asset-detail-split');
-      if (!resizer || !previewCol || !splitContainer) return;
-
-      var startX, startWidth;
-      var innerBar = resizer.querySelector('div');
-
-      resizer.addEventListener('mousedown', function (e) {
-        e.preventDefault();
-        startX = e.clientX;
-        startWidth = previewCol.getBoundingClientRect().width;
-        if (innerBar) innerBar.style.background = '#7c3aed';
-
-        function onMouseMove(e) {
-          var newWidth = startWidth + (e.clientX - startX);
-          var containerWidth = splitContainer.getBoundingClientRect().width;
-          var minW = 200;
-          var maxW = containerWidth * 0.8;
-          newWidth = Math.max(minW, Math.min(maxW, newWidth));
-          previewCol.style.flex = '0 0 ' + newWidth + 'px';
-        }
-        function onMouseUp() {
-          document.removeEventListener('mousemove', onMouseMove);
-          document.removeEventListener('mouseup', onMouseUp);
-          if (innerBar) innerBar.style.background = '#334155';
-        }
-        document.addEventListener('mousemove', onMouseMove);
-        document.addEventListener('mouseup', onMouseUp);
+    // Wire resize handle (shared utility)
+    if (typeof initResizeHandle === 'function') {
+      initResizeHandle({
+        storageKey: 'woodbury-resize-asset-detail',
+        resizer: document.getElementById('asset-detail-resizer'),
+        targetPanel: document.getElementById('asset-detail-preview'),
+        container: document.getElementById('asset-detail-split'),
+        defaultWidth: 480,
+        minWidth: 200,
+        maxWidth: function(cw) { return Math.round(cw * 0.8); },
+        direction: 'left'
       });
-    })();
+    }
 
     // Wire events
     document.getElementById('assets-back-btn').addEventListener('click', function () {

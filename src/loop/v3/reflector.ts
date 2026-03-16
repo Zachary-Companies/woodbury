@@ -69,7 +69,7 @@ export class Reflector {
           },
           { role: 'user', content: context },
         ],
-        maxTokens: 500,
+        maxTokens: 32768,
         temperature: 0.3,
       });
 

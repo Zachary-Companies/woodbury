@@ -116,6 +116,10 @@ function updatePropertiesPanel() {
     renderCompositionOverviewProperties(panel, body);
   }
 
+  // Sync resize handle visibility with panel
+  var propsResizer = document.getElementById('comp-props-resizer');
+  if (propsResizer) propsResizer.style.display = panel.style.display;
+
   // After showing/hiding panel, update edge positions (canvas resize)
   setTimeout(function() { updateEdgePositions(); updateMinimap(); }, 0);
 }
@@ -123,6 +127,8 @@ function updatePropertiesPanel() {
 function hidePropertiesPanel() {
   var panel = document.querySelector('#comp-props-panel');
   if (panel) panel.style.display = 'none';
+  var propsResizer = document.getElementById('comp-props-resizer');
+  if (propsResizer) propsResizer.style.display = 'none';
   setTimeout(function() { updateEdgePositions(); updateMinimap(); }, 0);
 }
 
@@ -678,6 +684,12 @@ function renderNodeProperties(nodeId) {
   if (node.workflowId === '__script__') {
     renderScriptProperties(body, node, nodeId);
     // Error display is built into renderScriptProperties
+    return;
+  }
+
+  // ── Script File Node Properties (v2) ──
+  if (node.workflowId === '__script_file__') {
+    renderScriptFileProperties(body, node, nodeId);
     return;
   }
 
@@ -2180,9 +2192,123 @@ function renderForEachProperties(body, node, nodeId) {
 
 // ── Variable Node Properties ──────────────────────────────────
 
+function inferVariableOptionsFromDescription(description) {
+  if (!description) return [];
+  var text = '';
+  // Pattern 1: parenthesized list — "something (opt1, opt2, opt3, etc.)"
+  var parenMatch = description.match(/\(([^)]{4,})\)/);
+  if (parenMatch) text = parenMatch[1];
+  // Pattern 2: colon/dash — "Genre: drama, comedy, sci-fi"
+  if (!text) {
+    var colonMatch = description.match(/(?::|—|--|=>)\s*(.{4,})$/);
+    if (colonMatch) text = colonMatch[1];
+  }
+  // Pattern 3: "e.g." or "such as"
+  if (!text) {
+    var egMatch = description.match(/(?:e\.g\.?|such as|like|including)\s+(.{4,})/i);
+    if (egMatch) text = egMatch[1];
+  }
+  if (!text) return [];
+  var noiseWords = { 'etc': 1, 'etc.': 1, '...': 1, 'more': 1, 'other': 1, 'others': 1, 'and more': 1 };
+  return text.split(/\s*[,\/]\s*|\s+or\s+/i)
+    .map(function(p) { return p.trim().replace(/^["']+|["']+$/g, '').replace(/\.{2,}$/, '').trim(); })
+    .filter(function(p) { return p.length > 0 && !noiseWords[p.toLowerCase()]; });
+}
+
+async function generateVariableOptions(node, nodeId, cfg, optionsTextarea, btn) {
+  var label = node.label || '';
+  var description = cfg.description || '';
+  var pipelineName = compData ? (compData.name || '') : '';
+  var pipelineDesc = compData ? (compData.description || '') : '';
+  var currentOptions = (Array.isArray(cfg.options) ? cfg.options : []).join(', ');
+  var controlType = cfg.inputControl || 'combobox';
+
+  btn.disabled = true;
+  btn.textContent = 'Generating...';
+
+  try {
+    // Build context from sibling variable nodes
+    var neighborLabels = [];
+    if (compData && compData.nodes) {
+      compData.nodes.forEach(function(n) {
+        if (n.id !== nodeId && n.workflowId === '__variable__' && n.variableNode && n.variableNode.exposeAsInput) {
+          var optsPart = n.variableNode.options && n.variableNode.options.length > 0
+            ? ' [' + n.variableNode.options.join(', ') + ']'
+            : '';
+          neighborLabels.push((n.label || n.variableNode.inputName || '') + ': ' + (n.variableNode.description || '') + optsPart);
+        }
+      });
+    }
+
+    var genPrompt = 'Generate a list of options for a form field in a pipeline called "' + pipelineName + '"'
+      + (pipelineDesc ? ' (' + pipelineDesc + ')' : '') + '.\n\n'
+      + 'Field: "' + label + '"\n'
+      + 'Description: ' + description + '\n'
+      + 'Control type: ' + controlType + (controlType === 'combobox' ? ' (user can also type custom values)' : ' (fixed choices)') + '\n'
+      + (currentOptions ? 'Current options: ' + currentOptions + '\n' : '')
+      + (neighborLabels.length > 0 ? '\nOther inputs in this pipeline:\n' + neighborLabels.join('\n') + '\n' : '')
+      + '\nReturn ONLY a JSON array of strings, e.g. ["option1", "option2", "option3"]. '
+      + 'Include 5-12 common, practical options. No explanation.';
+
+    var res = await fetch('/api/generate-variable', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        variableName: label || 'options',
+        generationPrompt: genPrompt,
+        workflowName: pipelineName,
+        variableType: 'string',
+      }),
+    });
+
+    var data = await res.json();
+    if (!res.ok || data.error) throw new Error(data.error || 'Generation failed');
+
+    var rawValue = data.value || data.generated || '';
+
+    // Parse — response might be a JSON array or comma-separated
+    var options;
+    try {
+      options = JSON.parse(rawValue);
+    } catch (e) {
+      // Try to find embedded array
+      var arrayMatch = rawValue.match(/\[[\s\S]*?\]/);
+      if (arrayMatch) {
+        options = JSON.parse(arrayMatch[0]);
+      } else {
+        // Fall back to comma-separated
+        options = rawValue.split(/\s*,\s*/).filter(Boolean);
+      }
+    }
+    if (!Array.isArray(options) || options.length === 0) throw new Error('No options generated');
+
+    var cleaned = options.map(function(o) { return String(o).trim(); }).filter(Boolean);
+    cfg.options = cleaned;
+    optionsTextarea.value = cleaned.join('\n');
+    immediateSave();
+    toast('Generated ' + cleaned.length + ' options', 'success');
+  } catch (err) {
+    toast('Failed to generate options: ' + (err.message || err), 'error');
+  }
+  btn.disabled = false;
+  btn.innerHTML = '&#x2728; Generate';
+}
+
 function renderVariableProperties(body, node, nodeId) {
-  if (!node.variableNode) node.variableNode = { type: 'string', initialValue: '', exposeAsInput: false, inputName: '', description: '', required: false, generationPrompt: '' };
+  if (!node.variableNode) node.variableNode = { type: 'string', initialValue: '', exposeAsInput: false, inputName: '', description: '', required: false, generationPrompt: '', inputControl: '', options: [] };
   var cfg = node.variableNode;
+
+  // Auto-infer inputControl and options from description when not explicitly set
+  if (!cfg.inputControl && (!cfg.options || cfg.options.length === 0) && (cfg.type || 'string') === 'string' && cfg.description) {
+    var inferred = inferVariableOptionsFromDescription(cfg.description);
+    if (inferred.length >= 2) {
+      var hasEtc = /\betc\.?\b|\.{2,}|\band more\b|\bother\b/i.test(cfg.description);
+      cfg.inputControl = hasEtc ? 'combobox' : 'select';
+      cfg.options = inferred;
+      immediateSave();
+    }
+  }
+
   var html = '';
 
   // Display Name
@@ -2195,8 +2321,8 @@ function renderVariableProperties(body, node, nodeId) {
   html += '<div class="comp-props-section">';
   html += '<div class="comp-props-label">Type</div>';
   html += '<select id="comp-props-var-type" style="width:100%;padding:6px 8px;border-radius:6px;border:1px solid rgba(255,255,255,0.1);background:rgba(0,0,0,0.3);color:#fff;font-size:13px;">';
-  var varTypes = ['string', 'number', 'array', 'boolean'];
-  var varTypeLabels = { string: 'String', number: 'Number', array: 'Array', boolean: 'Boolean' };
+  var varTypes = ['string', 'number', 'array', 'boolean', 'object'];
+  var varTypeLabels = { string: 'String', number: 'Number', array: 'Array', boolean: 'Boolean', object: 'Object (sub-form)' };
   for (var i = 0; i < varTypes.length; i++) {
     html += '<option value="' + varTypes[i] + '"' + (cfg.type === varTypes[i] ? ' selected' : '') + '>' + varTypeLabels[varTypes[i]] + '</option>';
   }
@@ -2235,6 +2361,70 @@ function renderVariableProperties(body, node, nodeId) {
     html += '<div class="comp-props-label">AI Generation Prompt</div>';
     html += '<textarea id="comp-props-var-gen-prompt" style="width:100%;min-height:70px;padding:8px;border-radius:6px;border:1px solid rgba(255,255,255,0.1);background:rgba(0,0,0,0.2);color:#fff;font-size:13px;outline:none;resize:vertical;" placeholder="Describe how AI should generate this field for the run form...">' + compEscHtml(cfg.generationPrompt || '') + '</textarea>';
     html += '</div>';
+
+    // Input Control selector
+    html += '<div class="comp-props-section">';
+    html += '<div class="comp-props-label">Input Control</div>';
+    var currentControl = cfg.inputControl || '';
+    html += '<select id="comp-props-var-input-control" style="width:100%;padding:6px 8px;border-radius:6px;border:1px solid rgba(255,255,255,0.1);background:rgba(0,0,0,0.3);color:#fff;font-size:13px;">';
+    html += '<option value=""' + (!currentControl ? ' selected' : '') + '>Auto (text or textarea)</option>';
+    html += '<option value="text"' + (currentControl === 'text' ? ' selected' : '') + '>Text (single line)</option>';
+    html += '<option value="textarea"' + (currentControl === 'textarea' ? ' selected' : '') + '>Textarea (multi-line)</option>';
+    html += '<option value="select"' + (currentControl === 'select' ? ' selected' : '') + '>Select (fixed dropdown)</option>';
+    html += '<option value="combobox"' + (currentControl === 'combobox' ? ' selected' : '') + '>Combobox (dropdown + freeform)</option>';
+    html += '</select>';
+    html += '<div style="font-size:0.6rem;color:#64748b;margin-top:2px;">How this field appears in the pipeline run form.</div>';
+    html += '</div>';
+
+    // Options editor (only for select and combobox)
+    if (currentControl === 'select' || currentControl === 'combobox') {
+      html += '<div class="comp-props-section">';
+      html += '<div style="display:flex;justify-content:space-between;align-items:center;">';
+      html += '<div class="comp-props-label" style="margin-bottom:0;">Options</div>';
+      html += '<button id="comp-props-var-gen-options" style="padding:2px 8px;border:1px solid rgba(139,92,246,0.4);border-radius:4px;background:rgba(139,92,246,0.15);color:#c4b5fd;font-size:0.65rem;cursor:pointer;">&#x2728; Generate</button>';
+      html += '</div>';
+      html += '<textarea id="comp-props-var-options" style="width:100%;min-height:80px;padding:8px;border-radius:6px;border:1px solid rgba(255,255,255,0.1);background:rgba(0,0,0,0.2);color:#fff;font-size:13px;outline:none;resize:vertical;margin-top:4px;" placeholder="One option per line...">' + compEscHtml((Array.isArray(cfg.options) ? cfg.options : []).join('\n')) + '</textarea>';
+      html += '<div style="font-size:0.6rem;color:#64748b;margin-top:2px;">' + (currentControl === 'select' ? 'User must pick one of these values.' : 'Suggested values \u2014 user can also type a custom value.') + '</div>';
+      html += '</div>';
+    }
+  }
+
+  // Object fields editor (when type is object)
+  if (cfg.type === 'object') {
+    if (!cfg.objectFields) cfg.objectFields = [];
+    html += '<div class="comp-props-section">';
+    html += '<div style="display:flex;justify-content:space-between;align-items:center;">';
+    html += '<div class="comp-props-label" style="margin-bottom:0;">Object Fields</div>';
+    html += '<button id="comp-props-obj-add-field" style="padding:2px 8px;border:1px solid rgba(139,92,246,0.4);border-radius:4px;background:rgba(139,92,246,0.15);color:#c4b5fd;font-size:0.65rem;cursor:pointer;">+ Add Field</button>';
+    html += '</div>';
+    html += '<div style="font-size:0.6rem;color:#64748b;margin-top:2px;margin-bottom:8px;">Define the fields that appear in the sub-form. Each field becomes an input in the run form.</div>';
+    html += '<div id="comp-props-obj-fields-list">';
+    for (var fi = 0; fi < cfg.objectFields.length; fi++) {
+      var field = cfg.objectFields[fi];
+      html += '<div class="comp-props-obj-field" data-field-idx="' + fi + '" style="padding:8px;border:1px solid rgba(255,255,255,0.08);border-radius:6px;background:rgba(0,0,0,0.15);margin-bottom:6px;">';
+      html += '<div style="display:flex;gap:6px;align-items:center;margin-bottom:4px;">';
+      html += '<input type="text" class="comp-props-input comp-props-obj-field-key" data-field-idx="' + fi + '" value="' + compEscAttr(field.key || '') + '" placeholder="fieldName" style="flex:1;font-size:12px;">';
+      html += '<select class="comp-props-obj-field-type" data-field-idx="' + fi + '" style="width:90px;padding:4px 6px;border-radius:4px;border:1px solid rgba(255,255,255,0.1);background:rgba(0,0,0,0.3);color:#fff;font-size:11px;">';
+      var fieldTypes = ['string', 'number', 'boolean', 'select'];
+      var fieldTypeLabels = { string: 'String', number: 'Number', boolean: 'Boolean', select: 'Select' };
+      for (var fti = 0; fti < fieldTypes.length; fti++) {
+        html += '<option value="' + fieldTypes[fti] + '"' + ((field.type || 'string') === fieldTypes[fti] ? ' selected' : '') + '>' + fieldTypeLabels[fieldTypes[fti]] + '</option>';
+      }
+      html += '</select>';
+      html += '<button class="comp-props-obj-field-remove" data-field-idx="' + fi + '" style="padding:2px 6px;border:1px solid rgba(239,68,68,0.3);border-radius:4px;background:rgba(239,68,68,0.1);color:#fca5a5;font-size:11px;cursor:pointer;" title="Remove field">✕</button>';
+      html += '</div>';
+      html += '<input type="text" class="comp-props-input comp-props-obj-field-label" data-field-idx="' + fi + '" value="' + compEscAttr(field.label || '') + '" placeholder="Display Label" style="width:100%;font-size:11px;margin-bottom:3px;">';
+      html += '<input type="text" class="comp-props-input comp-props-obj-field-default" data-field-idx="' + fi + '" value="' + compEscAttr(field.default || '') + '" placeholder="Default value" style="width:100%;font-size:11px;">';
+      if ((field.type || 'string') === 'select') {
+        html += '<input type="text" class="comp-props-input comp-props-obj-field-options" data-field-idx="' + fi + '" value="' + compEscAttr((field.options || []).join(', ')) + '" placeholder="option1, option2, option3" style="width:100%;font-size:11px;margin-top:3px;">';
+      }
+      html += '</div>';
+    }
+    if (cfg.objectFields.length === 0) {
+      html += '<div style="font-size:0.65rem;color:#475569;text-align:center;padding:12px;">No fields defined. Click "+ Add Field" to start.</div>';
+    }
+    html += '</div>';
+    html += '</div>';
   }
 
   // Initial/default value
@@ -2248,6 +2438,9 @@ function renderVariableProperties(body, node, nodeId) {
     html += '<option value="false"' + (cfg.initialValue !== 'true' ? ' selected' : '') + '>false</option>';
     html += '<option value="true"' + (cfg.initialValue === 'true' ? ' selected' : '') + '>true</option>';
     html += '</select>';
+  } else if (cfg.type === 'object') {
+    html += '<textarea id="comp-props-var-init" style="width:100%;min-height:80px;padding:8px;border-radius:6px;border:1px solid rgba(255,255,255,0.1);background:rgba(0,0,0,0.2);color:#fff;font-size:13px;font-family:monospace;outline:none;resize:vertical;">' + compEscHtml(cfg.initialValue || '{}') + '</textarea>';
+    html += '<div style="font-size:0.6rem;color:#64748b;margin-top:2px;">JSON fallback — the sub-form fields above override these values in the run form.</div>';
   } else {
     html += '<input type="text" class="comp-props-input" id="comp-props-var-init" value="' + compEscAttr(cfg.initialValue) + '" placeholder="' + (cfg.type === 'number' ? '0' : '') + '">';
   }
@@ -2285,8 +2478,12 @@ function renderVariableProperties(body, node, nodeId) {
     typeSelect.addEventListener('change', function() {
       cfg.type = typeSelect.value;
       // Reset initial value to sensible default when type changes
-      var defaults = { string: '', number: '0', array: '[]', boolean: 'false' };
+      var defaults = { string: '', number: '0', array: '[]', boolean: 'false', object: '{}' };
       cfg.initialValue = defaults[cfg.type] || '';
+      // Initialize objectFields for object type
+      if (cfg.type === 'object' && !cfg.objectFields) {
+        cfg.objectFields = [];
+      }
       immediateSave();
       renderNodes(); renderEdges(); wireUpCanvas();
       renderVariableProperties(body, node, nodeId);
@@ -2343,6 +2540,36 @@ function renderVariableProperties(body, node, nodeId) {
     });
   }
 
+  // Wire input control selector
+  var inputControlSelect = document.querySelector('#comp-props-var-input-control');
+  if (inputControlSelect) {
+    inputControlSelect.addEventListener('change', function() {
+      cfg.inputControl = inputControlSelect.value || undefined;
+      if (cfg.inputControl !== 'select' && cfg.inputControl !== 'combobox') {
+        cfg.options = undefined;
+      }
+      immediateSave();
+      renderVariableProperties(body, node, nodeId);
+    });
+  }
+
+  // Wire options textarea
+  var optionsInput = document.querySelector('#comp-props-var-options');
+  if (optionsInput) {
+    optionsInput.addEventListener('input', function() {
+      cfg.options = optionsInput.value.split('\n').map(function(l) { return l.trim(); }).filter(Boolean);
+      immediateSave();
+    });
+  }
+
+  // Wire generate options button
+  var genOptionsBtn = document.querySelector('#comp-props-var-gen-options');
+  if (genOptionsBtn && optionsInput) {
+    genOptionsBtn.addEventListener('click', function() {
+      generateVariableOptions(node, nodeId, cfg, optionsInput, genOptionsBtn);
+    });
+  }
+
   // Wire initial value
   var initInput = document.querySelector('#comp-props-var-init');
   if (initInput) {
@@ -2357,6 +2584,68 @@ function renderVariableProperties(body, node, nodeId) {
         immediateSave();
       });
     }
+  }
+
+  // Wire object fields editor
+  if (cfg.type === 'object') {
+    var addFieldBtn = document.querySelector('#comp-props-obj-add-field');
+    if (addFieldBtn) {
+      addFieldBtn.addEventListener('click', function() {
+        if (!cfg.objectFields) cfg.objectFields = [];
+        cfg.objectFields.push({ key: '', label: '', type: 'string', default: '', options: [] });
+        immediateSave();
+        renderVariableProperties(body, node, nodeId);
+      });
+    }
+
+    // Wire field inputs
+    document.querySelectorAll('.comp-props-obj-field-key').forEach(function(el) {
+      el.addEventListener('input', function() {
+        var idx = parseInt(el.getAttribute('data-field-idx'));
+        if (cfg.objectFields[idx]) { cfg.objectFields[idx].key = el.value; immediateSave(); }
+      });
+    });
+    document.querySelectorAll('.comp-props-obj-field-label').forEach(function(el) {
+      el.addEventListener('input', function() {
+        var idx = parseInt(el.getAttribute('data-field-idx'));
+        if (cfg.objectFields[idx]) { cfg.objectFields[idx].label = el.value; immediateSave(); }
+      });
+    });
+    document.querySelectorAll('.comp-props-obj-field-default').forEach(function(el) {
+      el.addEventListener('input', function() {
+        var idx = parseInt(el.getAttribute('data-field-idx'));
+        if (cfg.objectFields[idx]) { cfg.objectFields[idx].default = el.value; immediateSave(); }
+      });
+    });
+    document.querySelectorAll('.comp-props-obj-field-type').forEach(function(el) {
+      el.addEventListener('change', function() {
+        var idx = parseInt(el.getAttribute('data-field-idx'));
+        if (cfg.objectFields[idx]) {
+          cfg.objectFields[idx].type = el.value;
+          immediateSave();
+          renderVariableProperties(body, node, nodeId);
+        }
+      });
+    });
+    document.querySelectorAll('.comp-props-obj-field-options').forEach(function(el) {
+      el.addEventListener('input', function() {
+        var idx = parseInt(el.getAttribute('data-field-idx'));
+        if (cfg.objectFields[idx]) {
+          cfg.objectFields[idx].options = el.value.split(',').map(function(o) { return o.trim(); }).filter(Boolean);
+          immediateSave();
+        }
+      });
+    });
+    document.querySelectorAll('.comp-props-obj-field-remove').forEach(function(el) {
+      el.addEventListener('click', function() {
+        var idx = parseInt(el.getAttribute('data-field-idx'));
+        if (cfg.objectFields[idx]) {
+          cfg.objectFields.splice(idx, 1);
+          immediateSave();
+          renderVariableProperties(body, node, nodeId);
+        }
+      });
+    });
   }
 }
 
@@ -4687,6 +4976,230 @@ function renderScriptProperties(body, node, nodeId) {
         e.preventDefault();
         sendScriptChat();
       }
+    });
+  }
+}
+
+function renderScriptFileProperties(body, node, nodeId) {
+  var sf = node.scriptFile || { file: '', description: '', inputs: [], outputs: [] };
+  var html = '';
+
+  // Error display
+  var nodeError = lastNodeStates && lastNodeStates[nodeId] && lastNodeStates[nodeId].error;
+  if (nodeError) {
+    html += '<div class="comp-props-error-box" id="comp-props-error-box">';
+    html += '<div class="comp-props-error-header">';
+    html += '<span class="comp-props-error-title">&#x26A0; Execution Error</span>';
+    html += '<span class="comp-props-error-clear" id="comp-props-error-clear">Clear</span>';
+    html += '</div>';
+    html += compEscHtml(nodeError);
+    html += '</div>';
+  }
+
+  // Display Name
+  html += '<div class="comp-props-section">';
+  html += '<div class="comp-props-label">Display Name</div>';
+  html += '<input type="text" class="comp-props-input" id="comp-props-node-label" value="' + compEscAttr(node.label || '') + '" placeholder="Script File Node">';
+  html += '</div>';
+
+  // Type indicator
+  html += '<div class="comp-props-section">';
+  html += '<div class="comp-props-label">Type</div>';
+  html += '<div class="comp-props-value" style="color:#a78bfa;">&#x1f4c4; Script File Node (v2)</div>';
+  html += '<div class="comp-props-value" style="font-size:0.68rem;color:#64748b;">Real TypeScript file on disk. The agentic loop can edit this file directly.</div>';
+  html += '</div>';
+
+  // File info
+  html += '<div class="comp-props-section">';
+  html += '<div class="comp-props-label">File</div>';
+  if (sf.file) {
+    html += '<div class="comp-props-value" style="font-family:monospace;color:#e2e8f0;font-size:0.78rem;">' + compEscHtml(sf.file) + '</div>';
+  } else {
+    html += '<div class="comp-props-value" style="color:#475569;font-size:0.72rem;">No file assigned yet.</div>';
+  }
+  html += '</div>';
+
+  // Description
+  html += '<div class="comp-props-section">';
+  html += '<div class="comp-props-label">Description</div>';
+  html += '<textarea class="comp-props-input" id="comp-props-sf-description" rows="3" placeholder="Describe what this node does...">' + compEscHtml(sf.description || '') + '</textarea>';
+  html += '</div>';
+
+  // Open in Monaco button
+  html += '<div class="comp-props-section">';
+  html += '<button class="comp-script-open-editor-btn" id="comp-sf-open-editor" style="width:100%;">Open in Monaco</button>';
+  html += '</div>';
+
+  // Code Preview (loaded from file)
+  html += '<div class="comp-props-section">';
+  html += '<div class="comp-props-label">Code Preview</div>';
+  html += '<pre class="comp-script-code-preview" id="comp-sf-code-preview" style="max-height:300px;overflow:auto;">Loading...</pre>';
+  html += '</div>';
+
+  // Ports Summary
+  if (sf.inputs.length > 0 || sf.outputs.length > 0) {
+    html += '<div class="comp-props-section">';
+    html += '<div class="comp-props-label">Ports</div>';
+    if (sf.inputs.length > 0) {
+      html += '<div style="margin-bottom:6px;">';
+      html += '<div style="color:#64748b;font-size:0.68rem;margin-bottom:2px;">Inputs</div>';
+      for (var pi = 0; pi < sf.inputs.length; pi++) {
+        var pIn = sf.inputs[pi];
+        html += '<div style="font-size:0.72rem;color:#e2e8f0;padding:2px 0;">';
+        html += '<span style="color:#06b6d4;">' + compEscHtml(pIn.name) + '</span>';
+        html += '<span style="color:#64748b;margin-left:4px;">: ' + compEscHtml(pIn.type || 'string') + '</span>';
+        if (pIn.description) html += '<span style="color:#475569;margin-left:4px;">&mdash; ' + compEscHtml(pIn.description) + '</span>';
+        html += '</div>';
+      }
+      html += '</div>';
+    }
+    if (sf.outputs.length > 0) {
+      html += '<div>';
+      html += '<div style="color:#64748b;font-size:0.68rem;margin-bottom:2px;">Outputs</div>';
+      for (var po = 0; po < sf.outputs.length; po++) {
+        var pOut = sf.outputs[po];
+        html += '<div style="font-size:0.72rem;color:#e2e8f0;padding:2px 0;">';
+        html += '<span style="color:#a78bfa;">' + compEscHtml(pOut.name) + '</span>';
+        html += '<span style="color:#64748b;margin-left:4px;">: ' + compEscHtml(pOut.type || 'string') + '</span>';
+        if (pOut.description) html += '<span style="color:#475569;margin-left:4px;">&mdash; ' + compEscHtml(pOut.description) + '</span>';
+        html += '</div>';
+      }
+      html += '</div>';
+    }
+    html += '</div>';
+  }
+
+  // Sync button
+  html += '<div class="comp-props-section">';
+  html += '<button class="comp-tb-btn" id="comp-sf-sync" style="width:100%;">&#x1f504; Sync File &harr; Graph</button>';
+  html += '<div class="comp-props-value" style="font-size:0.64rem;color:#64748b;margin-top:4px;">Reads @input/@output annotations from the file and updates the graph ports.</div>';
+  html += '</div>';
+
+  // Migrate / Delete section
+  html += '<div class="comp-props-section">';
+  html += '<button class="comp-tb-btn comp-tb-btn-danger" id="comp-sf-delete" style="width:100%;">Delete Node &amp; File</button>';
+  html += '</div>';
+
+  body.innerHTML = html;
+
+  // Wire up label changes
+  var labelInput = body.querySelector('#comp-props-node-label');
+  if (labelInput) {
+    labelInput.addEventListener('change', function() {
+      node.label = labelInput.value.trim();
+      renderCanvasNodes();
+      saveComposition();
+    });
+  }
+
+  // Wire up description changes
+  var descInput = body.querySelector('#comp-props-sf-description');
+  if (descInput) {
+    descInput.addEventListener('change', function() {
+      if (!node.scriptFile) node.scriptFile = { file: '', description: '', inputs: [], outputs: [] };
+      node.scriptFile.description = descInput.value;
+      saveComposition();
+    });
+  }
+
+  // Load code from file
+  var codePreview = body.querySelector('#comp-sf-code-preview');
+  if (codePreview && sf.file && compData && compData.id) {
+    fetch('/api/compositions/' + encodeURIComponent(compData.id) + '/script-file/' + encodeURIComponent(nodeId))
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        if (data.code) {
+          codePreview.textContent = data.code;
+        } else if (data.error) {
+          codePreview.textContent = '// Error loading file: ' + data.error;
+        }
+      })
+      .catch(function() {
+        codePreview.textContent = '// Could not load file';
+      });
+  }
+
+  // Wire up Monaco editor
+  var openEditorBtn = body.querySelector('#comp-sf-open-editor');
+  if (openEditorBtn) {
+    openEditorBtn.addEventListener('click', function() {
+      if (!sf.file || !compData || !compData.id) return;
+      // First fetch the code
+      fetch('/api/compositions/' + encodeURIComponent(compData.id) + '/script-file/' + encodeURIComponent(nodeId))
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+          if (!data.code && data.code !== '') { toast('Could not load file', 'error'); return; }
+          if (window.WoodburyMonaco && window.WoodburyMonaco.openScriptEditor) {
+            window.WoodburyMonaco.openScriptEditor(data.code, sf.file, function(newCode) {
+              // Save back to file via API
+              fetch('/api/compositions/' + encodeURIComponent(compData.id) + '/script-file/' + encodeURIComponent(nodeId), {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ code: newCode }),
+              }).then(function(r) { return r.json(); }).then(function(res) {
+                if (res.updated) {
+                  toast('File saved', 'success');
+                  // Re-render to pick up changes
+                  renderScriptFileProperties(body, node, nodeId);
+                } else {
+                  toast('Save failed: ' + (res.error || 'unknown'), 'error');
+                }
+              }).catch(function(err) {
+                toast('Save failed: ' + err.message, 'error');
+              });
+            });
+          } else {
+            toast('Monaco editor not available', 'error');
+          }
+        });
+    });
+  }
+
+  // Wire up sync
+  var syncBtn = body.querySelector('#comp-sf-sync');
+  if (syncBtn) {
+    syncBtn.addEventListener('click', function() {
+      if (!compData || !compData.id) return;
+      syncBtn.disabled = true;
+      syncBtn.textContent = 'Syncing...';
+      fetch('/api/compositions/' + encodeURIComponent(compData.id) + '/sync', { method: 'POST' })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+          if (data.changed) {
+            toast('Synced — graph updated from file', 'success');
+            // Reload the composition to pick up changes
+            loadComposition(compData.id);
+          } else {
+            toast('Already in sync', 'info');
+          }
+          syncBtn.disabled = false;
+          syncBtn.textContent = '\uD83D\uDD04 Sync File \u2194 Graph';
+        })
+        .catch(function(err) {
+          toast('Sync failed: ' + err.message, 'error');
+          syncBtn.disabled = false;
+          syncBtn.textContent = '\uD83D\uDD04 Sync File \u2194 Graph';
+        });
+    });
+  }
+
+  // Wire up delete
+  var deleteBtn = body.querySelector('#comp-sf-delete');
+  if (deleteBtn) {
+    deleteBtn.addEventListener('click', function() {
+      if (!confirm('Delete this node and its .ts file? This cannot be undone.')) return;
+      deleteSelected();
+    });
+  }
+
+  // Wire up error clear
+  var clearBtn = body.querySelector('#comp-props-error-clear');
+  if (clearBtn) {
+    clearBtn.addEventListener('click', function() {
+      if (lastNodeStates && lastNodeStates[nodeId]) {
+        lastNodeStates[nodeId].error = '';
+      }
+      renderScriptFileProperties(body, node, nodeId);
     });
   }
 }

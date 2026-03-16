@@ -225,7 +225,7 @@ async function streamOpenAI(
   const stream = await client.chat.completions.create({
     model,
     messages: messages.map(m => ({ role: m.role, content: m.content })),
-    max_tokens: options?.maxTokens || 4096,
+    max_tokens: options?.maxTokens || 32768,
     temperature: options?.temperature ?? 0.7,
     stream: true
   });
@@ -269,7 +269,7 @@ async function streamAnthropic(
 
   const stream = client.messages.stream({
     model,
-    max_tokens: options?.maxTokens || 4096,
+    max_tokens: options?.maxTokens || 32768,
     system: systemMessage?.content || undefined,
     messages: conversationMessages.map(m => ({
       role: m.role as 'user' | 'assistant',
@@ -322,7 +322,7 @@ async function streamGroq(
   const stream = await client.chat.completions.create({
     model,
     messages: messages.map(m => ({ role: m.role, content: m.content })),
-    max_tokens: options?.maxTokens || 4096,
+    max_tokens: options?.maxTokens || 32768,
     temperature: options?.temperature ?? 0.7,
     stream: true
   });
@@ -610,7 +610,7 @@ async function runOpenAI(messages: ChatMessage[], model: string, options?: Parti
       role: m.role,
       content: m.content
     })),
-    max_tokens: options?.maxTokens || 4096,
+    max_tokens: options?.maxTokens || 32768,
     temperature: options?.temperature ?? 0.7
   });
 
@@ -636,15 +636,19 @@ async function runAnthropic(messages: ChatMessage[], model: string, options?: Pa
   // Ensure first message is from user (Anthropic requirement)
   conversationMessages = ensureUserFirst(conversationMessages);
 
-  const response = await client.messages.create({
+  // Use streaming to avoid "Streaming is required for operations that may
+  // take longer than 10 minutes" errors with large maxTokens values.
+  const stream = client.messages.stream({
     model,
-    max_tokens: options?.maxTokens || 4096,
+    max_tokens: options?.maxTokens || 32768,
     system: systemMessage?.content || undefined,
     messages: conversationMessages.map(m => ({
       role: m.role as 'user' | 'assistant',
       content: m.content
     }))
   });
+
+  const response = await stream.finalMessage();
 
   // Extract text content
   const textContent = response.content
@@ -671,7 +675,7 @@ async function runGroq(messages: ChatMessage[], model: string, options?: Partial
       role: m.role,
       content: m.content
     })),
-    max_tokens: options?.maxTokens || 4096,
+    max_tokens: options?.maxTokens || 32768,
     temperature: options?.temperature ?? 0.7
   });
 

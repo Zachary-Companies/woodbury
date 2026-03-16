@@ -674,6 +674,32 @@ document.addEventListener('DOMContentLoaded', () => {
     setTimeout(function() { clearInterval(checkCompReady); }, 5000);
   }
 
+  // ── Sidebar resize ───────────────────────────────
+  if (typeof initResizeHandle === 'function') {
+    initResizeHandle({
+      storageKey: 'woodbury-resize-sidebar',
+      resizer: document.getElementById('sidebar-resizer'),
+      targetPanel: document.querySelector('.sidebar'),
+      container: document.body,
+      defaultWidth: 352,
+      minWidth: 220,
+      maxWidth: 600,
+      direction: 'left',
+      flexProperty: 'width'
+    });
+    // Clear inline styles at small breakpoint so CSS media queries take over
+    var mqSidebar = window.matchMedia('(max-width: 900px)');
+    mqSidebar.addEventListener('change', function(e) {
+      var sb = document.querySelector('.sidebar');
+      if (e.matches) {
+        sb.style.width = '';
+        sb.style.minWidth = '';
+      } else {
+        restoreResizeWidth('woodbury-resize-sidebar', sb, 220, 'width');
+      }
+    });
+  }
+
   // Check for app updates
   checkForUpdates();
 });

@@ -12,10 +12,16 @@ import { promises as fs } from 'fs';
 import { join, resolve, basename } from 'path';
 import { homedir } from 'os';
 import { existsSync } from 'fs';
-import type { WorkflowDocument, CompositionDocument } from './types.js';
+import type { WorkflowDocument, CompositionDocument, PipelineDocument, AnyCompositionDocument, PipelineNode, ScriptFileNodeConfig } from './types.js';
+import { isPipelineDocument } from './types.js';
 
 const EXTENSIONS_DIR = join(homedir(), '.woodbury', 'extensions');
 const GLOBAL_WORKFLOWS_DIR = join(homedir(), '.woodbury', 'workflows');
+
+/** Bundled extensions shipped with Woodbury (same logic as extension-loader.ts) */
+const BUNDLED_EXTENSIONS_DIR = existsSync(join(__dirname, 'extensions'))
+  ? join(__dirname, 'extensions')
+  : join(__dirname, '..', 'extensions');
 
 // ── In-memory registry ───────────────────────────────────────
 // Loaded once on first access, then kept in memory permanently.
@@ -253,7 +259,12 @@ export async function loadWorkflowsFromDir(dir: string): Promise<WorkflowDocumen
 export interface DiscoveredComposition {
   path: string;
   composition: CompositionDocument;
-  source: 'project' | 'global';
+  source: 'project' | 'global' | 'extension';
+  extensionName?: string;
+  /** True if this is a v2 file-backed pipeline directory */
+  isV2Pipeline?: boolean;
+  /** For v2 pipelines, the directory containing the .ts files */
+  pipelineDir?: string;
 }
 
 /**
@@ -274,6 +285,43 @@ export async function loadComposition(filePath: string): Promise<CompositionDocu
 }
 
 /**
+ * Load a v2 file-backed pipeline from a directory containing pipeline.json.
+ * Reads each script file node's code from its .ts file on disk.
+ */
+export async function loadPipeline(dirPath: string): Promise<PipelineDocument> {
+  const manifestPath = join(dirPath, 'pipeline.json');
+  const content = await fs.readFile(manifestPath, 'utf-8');
+  const doc: PipelineDocument = JSON.parse(content);
+
+  if (!doc.version || doc.version !== '2.0') throw new Error(`Pipeline missing version 2.0: ${manifestPath}`);
+  if (!doc.id) throw new Error(`Pipeline missing "id": ${manifestPath}`);
+  if (!doc.name) throw new Error(`Pipeline missing "name": ${manifestPath}`);
+  if (!Array.isArray(doc.nodes)) throw new Error(`Pipeline missing "nodes": ${manifestPath}`);
+  if (!Array.isArray(doc.edges)) throw new Error(`Pipeline missing "edges": ${manifestPath}`);
+
+  // Set the pipeline directory path (not persisted, runtime only)
+  doc.pipelineDir = resolve(dirPath);
+
+  return doc;
+}
+
+/**
+ * Read the TypeScript source code for a file-backed script node.
+ */
+export async function readScriptFileCode(pipelineDir: string, scriptFile: ScriptFileNodeConfig): Promise<string> {
+  const filePath = join(pipelineDir, scriptFile.file);
+  return await fs.readFile(filePath, 'utf-8');
+}
+
+/**
+ * Write TypeScript source code for a file-backed script node.
+ */
+export async function writeScriptFileCode(pipelineDir: string, fileName: string, code: string): Promise<void> {
+  const filePath = join(pipelineDir, fileName);
+  await fs.writeFile(filePath, code, 'utf-8');
+}
+
+/**
  * Discover all .composition.json files from project-local and global locations.
  */
 export async function discoverCompositions(
@@ -288,17 +336,69 @@ export async function discoverCompositions(
 
   const results: DiscoveredComposition[] = [];
 
-  // 1. Project-local compositions
+  // 1. Extension compositions (user-installed + bundled)
+  results.push(...await discoverExtensionCompositions());
+
+  // 2. Project-local compositions
   if (workingDirectory) {
     const projectDir = join(workingDirectory, '.woodbury-work', 'workflows');
     results.push(...await discoverCompositionsFromDir(projectDir, 'project'));
   }
 
-  // 2. Global user compositions
+  // 3. Global user compositions
   results.push(...await discoverCompositionsFromDir(GLOBAL_WORKFLOWS_DIR, 'global'));
 
   // Store in registry — stays until explicitly invalidated
   compositionRegistry = { data: results, key: regKey };
+
+  return results;
+}
+
+/**
+ * Discover compositions from extension directories (user-installed + bundled).
+ * Scans both the extension root and a `workflows/` subdirectory for .composition.json files.
+ */
+async function discoverExtensionCompositions(): Promise<DiscoveredComposition[]> {
+  const results: DiscoveredComposition[] = [];
+  const seen = new Set<string>(); // Deduplicate by composition ID
+
+  for (const extDir of [EXTENSIONS_DIR, BUNDLED_EXTENSIONS_DIR]) {
+    if (!existsSync(extDir)) continue;
+
+    try {
+      const entries = await fs.readdir(extDir, { withFileTypes: true });
+
+      for (const entry of entries) {
+        if (entry.name === 'node_modules') continue;
+        if (!entry.isDirectory()) continue;
+
+        const extRoot = join(extDir, entry.name);
+
+        // Scan the extension root directory for .composition.json files
+        const rootComps = await discoverCompositionsFromDir(extRoot, 'extension');
+        for (const comp of rootComps) {
+          if (!seen.has(comp.composition.id)) {
+            comp.extensionName = entry.name;
+            seen.add(comp.composition.id);
+            results.push(comp);
+          }
+        }
+
+        // Also scan a workflows/ subdirectory if it exists
+        const wfDir = join(extRoot, 'workflows');
+        const wfComps = await discoverCompositionsFromDir(wfDir, 'extension');
+        for (const comp of wfComps) {
+          if (!seen.has(comp.composition.id)) {
+            comp.extensionName = entry.name;
+            seen.add(comp.composition.id);
+            results.push(comp);
+          }
+        }
+      }
+    } catch {
+      // Extensions dir not readable
+    }
+  }
 
   return results;
 }
@@ -311,14 +411,39 @@ async function discoverCompositionsFromDir(
   if (!existsSync(dir)) return results;
 
   try {
-    const files = await fs.readdir(dir);
-    for (const file of files) {
-      if (!file.endsWith('.composition.json')) continue;
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+
+    // Scan for v1 .composition.json files
+    for (const entry of entries) {
+      if (!entry.isFile()) continue;
+      if (!entry.name.endsWith('.composition.json')) continue;
       try {
-        const composition = await loadComposition(join(dir, file));
-        results.push({ path: join(dir, file), composition, source });
+        const composition = await loadComposition(join(dir, entry.name));
+        results.push({ path: join(dir, entry.name), composition, source });
       } catch {
         // Skip invalid
+      }
+    }
+
+    // Also scan for v2 pipeline directories (contain pipeline.json)
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      if (entry.name === 'node_modules' || entry.name === '.git') continue;
+      const pipelineJsonPath = join(dir, entry.name, 'pipeline.json');
+      if (!existsSync(pipelineJsonPath)) continue;
+      try {
+        const pipeline = await loadPipeline(join(dir, entry.name));
+        // Wrap as DiscoveredComposition — the composition field accepts the pipeline doc
+        // since PipelineDocument shares the same shape
+        results.push({
+          path: pipelineJsonPath,
+          composition: pipeline as unknown as CompositionDocument,
+          source,
+          isV2Pipeline: true,
+          pipelineDir: pipeline.pipelineDir,
+        });
+      } catch {
+        // Skip invalid pipeline directories
       }
     }
   } catch {

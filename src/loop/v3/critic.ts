@@ -70,7 +70,7 @@ export class Critic {
           { role: 'system', content: 'You are a plan critique assistant. Respond ONLY with valid JSON.' },
           { role: 'user', content: prompt },
         ],
-        maxTokens: 800,
+        maxTokens: 32768,
         temperature: 0.3,
       });
 

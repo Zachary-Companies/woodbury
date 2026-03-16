@@ -41,7 +41,7 @@ export class Subagent {
         model: this.config.model || 'gpt-4',
         apiKey: this.config.apiKey,
         systemPrompt: this.getSystemPrompt(),
-        maxTokens: 4000,
+        maxTokens: 32768,
         temperature: 0.1,
         timeout: this.config.timeout,
         maxRetries: this.config.maxRetries,

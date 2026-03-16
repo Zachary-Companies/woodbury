@@ -8,21 +8,44 @@
  * - POST /api/compositions/generate-pipeline — AI-powered pipeline decomposition
  */
 
-import { appendFile, mkdir, readFile } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+import { existsSync } from 'node:fs';
 import type { DashboardContext, RouteHandler, ScriptToolDoc } from '../types.js';
-import { sendJson, readBody } from '../utils.js';
+import { sendJson, readBody, atomicWriteFile } from '../utils.js';
 import type { ToolDefinition } from '../../loop/types.js';
 import { debugLog } from '../../debug-log.js';
 import { resolveCompositionInterface } from '../composition-interface.js';
 import { buildGeneratedPipelineDocumentation } from '../pipeline-documentation.js';
 import { formatPublishedSkillsPromptSection } from '../../skill-builder/storage.js';
-import { discoverCompositions } from '../../workflow/loader.js';
+import { discoverCompositions, loadPipeline, readScriptFileCode, writeScriptFileCode } from '../../workflow/loader.js';
+import { scaffoldPipeline, savePipelineManifest } from '../pipeline-sync.js';
+import { generateNodeTestFile, runPipelineTests, ensureTestHelpers, generateAllNodeTests } from '../pipeline-test-gen.js';
 import {
   runGeneratedScriptUnitTests,
   type ScriptGenerationTestCase,
 } from '../script-generation-tests.js';
+import {
+  validateComposition,
+  getAvailableWorkflowIds,
+} from '../../loop/v3/closure-engine.js';
+import {
+  proposeScriptNodeEdgeRepairs,
+  type ScriptEdgeRepairCandidate,
+} from '../script-edge-repair.js';
+
+/**
+ * Read the user's saved temperature from ~/.woodbury/chat-config.json.
+ * Returns undefined if not set, so callers fall back to their own defaults.
+ */
+async function getSavedTemperature(): Promise<number | undefined> {
+  try {
+    const raw = await readFile(join(homedir(), '.woodbury', 'chat-config.json'), 'utf-8');
+    const config = JSON.parse(raw);
+    return typeof config.temperature === 'number' ? config.temperature : undefined;
+  } catch { return undefined; }
+}
 
 interface ScriptGenerationTranscriptEntry {
   stage: 'request' | 'plan' | 'generation' | 'repair' | 'fallback' | 'validation' | 'tests' | 'verification' | 'checks';
@@ -55,6 +78,70 @@ interface ScriptPrePlan {
   approach: string[];
   /** Edge cases, validation needs, or data handling notes */
   edgeCases: string[];
+}
+
+// ── Error Explanation contracts ──────────────────────────────
+
+/** Request body for POST /api/compositions/explain-error */
+interface ExplainErrorRequest {
+  /** The raw error message from the failed node */
+  error: string;
+  /** Human-readable label of the node that failed */
+  nodeLabel?: string;
+  /** The node's workflowId (e.g. '__script__', '__text__') */
+  nodeType?: string;
+}
+
+/** Response from POST /api/compositions/explain-error */
+interface ExplainErrorResponse {
+  /** One-sentence plain-English summary of what went wrong */
+  summary: string;
+  /** One-sentence suggestion for what to try next */
+  suggestion: string;
+}
+
+// ── Add Node contracts ───────────────────────────────────────
+
+/** Request body for POST /api/compositions/:id/add-node */
+interface AddNodeRequest {
+  /** Natural-language description of what this step should do */
+  description: string;
+  /** ID of the node to insert after. If omitted, appends at end. */
+  afterNodeId?: string;
+}
+
+/** Successful response from POST /api/compositions/:id/add-node */
+interface AddNodeResponse {
+  success: true;
+  /** The full updated composition document */
+  composition: import('../../workflow/types.js').CompositionDocument;
+  /** ID of the newly created node */
+  newNodeId: string;
+  /** File path where the composition was saved */
+  path: string;
+  /** Validation results (present when post-insertion validation was run) */
+  validation?: CompositionValidationResult;
+}
+
+// ── Composition validation contracts ─────────────────────────
+
+/** Result of validating and optionally repairing a composition */
+interface CompositionValidationResult {
+  /** Whether the composition passed all checks (possibly after repairs) */
+  valid: boolean;
+  /** Repairs that were automatically applied */
+  repairs: string[];
+  /** Issues that could not be auto-fixed */
+  remainingIssues: string[];
+  /** Per-node smoke test results (only for script nodes) */
+  smokeTests: Array<{
+    nodeId: string;
+    nodeLabel: string;
+    passed: boolean;
+    error?: string;
+  }>;
+  /** Number of repair iterations performed */
+  iterations: number;
 }
 
 // ── Pipeline decomposition types ─────────────────────────────
@@ -809,20 +896,30 @@ async function generatePipelineDecompositionPlan(
 
     const systemContent = `You are a pipeline decomposition planner for a visual automation platform.
 
-Given a task description, identify the TARGET OUTPUT STRUCTURE first, then decompose it into sub-contracts at interface boundaries.
+Given a task description, identify the TARGET OUTPUT STRUCTURE first, then decompose it into sub-contracts at interface boundaries. Each sub-contract becomes one pipeline node.
 
 CRITICAL RULES:
 1. Start from the OUTPUT STRUCTURE, not from procedural steps
 2. Each sub-contract owns a specific sub-structure of the output
-3. Simple tasks get 1-2 sub-contracts, complex tasks get many
+3. GRANULARITY IS KEY:
+   - Simple tasks: 2-4 sub-contracts
+   - Moderate tasks: 5-10 sub-contracts
+   - Complex tasks (rich interfaces, nested structures): 8-20+ sub-contracts
+   - When the user provides TypeScript interfaces/types, create ONE sub-contract per major interface — do NOT combine multiple interfaces into a single contract
 4. Decompose at INTERFACE BOUNDARIES — where one data shape ends and another begins
-5. If the task has no complex output structure, decompose by functional boundaries
-6. Every sub-contract must have clearly typed input and output ports
-7. Port types must be one of: string, number, boolean, object, string[], number[], object[]
-8. Port names must use snake_case
-9. Each sub-contract's inputContract.source must reference another sub-contract name or "user_input"
-10. dependsOn must list sub-contract names that produce data this contract needs
-11. Avoid circular dependencies — the graph must be a DAG
+5. If the user provides TypeScript interfaces, EACH interface is a natural boundary:
+   - One contract generates ScriptMetadata, another generates CharacterDefinition[], another generates SceneSection[], etc.
+   - Use for_each/loop contracts when producing arrays of complex objects (e.g. iterate over characters to generate headshots)
+   - A final assembly contract stitches the parts into the top-level interface
+6. If the task has no complex output structure, decompose by functional boundaries
+7. Side-effect operations (saving files, generating images, creating assets) MUST be separate contracts — never combine generation + file I/O in one contract
+8. Every sub-contract must have clearly typed input and output ports
+9. Port types must be one of: string, number, boolean, object, string[], number[], object[]
+10. Port names must use snake_case
+11. Each sub-contract's inputContract.source must reference another sub-contract name or "user_input"
+12. dependsOn must list sub-contract names that produce data this contract needs
+13. Avoid circular dependencies — the graph must be a DAG
+14. Prefer MANY small contracts over FEW large ones — a contract should do ONE thing
 
 ${toolDocs ? `Available tools that script nodes can use:\n${toolDocs}\n` : ''}
 ${publishedSkillsSection ? `${publishedSkillsSection}\n` : ''}
@@ -857,17 +954,30 @@ Return ONLY a JSON object (no explanation, no markdown fences) with this exact s
       { role: 'user', content: description.trim() },
     ];
 
-    const resp = await runPrompt(messages, providerAndModel.model, {
-      maxTokens: 4096,
-      temperature: 0.3,
-    });
+    // Try up to 2 attempts — decomposition quality is critical for good pipelines
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const resp = await runPrompt(messages, providerAndModel.model, {
+          maxTokens: 32768,
+          temperature: 0.3,
+        });
 
-    let jsonStr = resp.content.trim();
-    const fenceMatch = jsonStr.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
-    if (fenceMatch) jsonStr = fenceMatch[1].trim();
+        let jsonStr = resp.content.trim();
+        const fenceMatch = jsonStr.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
+        if (fenceMatch) jsonStr = fenceMatch[1].trim();
 
-    const parsed = JSON.parse(jsonStr);
-    return validateDecompositionPlan(parsed);
+        const parsed = JSON.parse(jsonStr);
+        const validated = validateDecompositionPlan(parsed);
+        if (validated) return validated;
+
+        lastError = new Error('Decomposition plan failed validation (returned null)');
+      } catch (err) {
+        lastError = err;
+      }
+      debugLog.info('dashboard', `Pipeline decomposition plan attempt ${attempt + 1} failed, ${attempt < 1 ? 'retrying...' : 'giving up'}`, { error: String(lastError) });
+    }
+    return null;
   } catch (err) {
     debugLog.info('dashboard', 'Pipeline decomposition plan failed (non-fatal, falling through)', { error: String(err) });
     return null;
@@ -1452,8 +1562,37 @@ function parseScriptPorts(code: string): { inputs: Array<{ name: string; type: s
 }
 
 function extractCodeBlock(content: string): string {
-  const codeBlockMatch = content.match(/```(?:javascript|js)?\s*\n([\s\S]*?)\n```/);
-  return codeBlockMatch ? codeBlockMatch[1].trim() : content.trim();
+  // Try explicit javascript/js fence first
+  const jsFenceMatch = content.match(/```(?:javascript|js)\s*\n([\s\S]*?)\n```/);
+  if (jsFenceMatch) return jsFenceMatch[1].trim();
+
+  // Handle LLM wrapping response in ```json { "code": "..." } ```
+  const jsonFenceMatch = content.match(/```json\s*\n([\s\S]*?)\n```/);
+  if (jsonFenceMatch) {
+    try {
+      const parsed = JSON.parse(jsonFenceMatch[1]);
+      if (typeof parsed.code === 'string' && parsed.code.includes('function execute')) {
+        return parsed.code.trim();
+      }
+    } catch { /* not valid JSON, fall through */ }
+  }
+
+  // Handle bare JSON wrapper (no fences) — { "code": "..." }
+  const trimmed = content.trim();
+  if (trimmed.startsWith('{') && trimmed.includes('"code"')) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (typeof parsed.code === 'string' && parsed.code.includes('function execute')) {
+        return parsed.code.trim();
+      }
+    } catch { /* not valid JSON, fall through */ }
+  }
+
+  // Try any generic code fence
+  const genericFenceMatch = content.match(/```\s*\n([\s\S]*?)\n```/);
+  if (genericFenceMatch) return genericFenceMatch[1].trim();
+
+  return trimmed;
 }
 
 function requiresWoodburyCollectionToolUsage(userMessage: string): boolean {
@@ -1686,7 +1825,7 @@ async function generateScriptPrePlan(
       { role: 'system', content: systemContent },
       { role: 'user', content: userContent },
     ], providerAndModel.model, {
-      maxTokens: 800,
+      maxTokens: 32768,
       temperature: 0.1,
     });
 
@@ -1741,7 +1880,7 @@ async function generateScriptUnitTestCases(
         role: 'user',
         content: `Request:\n${userMessage}\n\nDeclared inputs:\n${JSON.stringify(inputs, null, 2)}\n\nDeclared outputs:\n${JSON.stringify(outputs, null, 2)}\n\nCode:\n\`\`\`javascript\n${code}\n\`\`\``,
       },
-    ], providerAndModel.model, { maxTokens: 1200, temperature: 0.1 });
+    ], providerAndModel.model, { maxTokens: 32768, temperature: 0.1 });
 
     const raw = response.content.trim();
     const match = raw.match(/```(?:json)?\s*([\s\S]*?)```/) || [null, raw];
@@ -2022,7 +2161,7 @@ async function runStrictScriptGenerationFallback(
       role: 'system',
       content: [
         'You generate JavaScript for a Woodbury pipeline script node.',
-        'Return ONLY a single fenced ```javascript code block. Do not include any prose before or after the block.',
+        'Return ONLY a single fenced ```javascript code block. Do not include any prose before or after the block. NEVER wrap the response in ```json or return a JSON object with a "code" field — return the raw JavaScript code in a ```javascript fence.',
         'The code must include a JSDoc block with at least one @input and at least one @output annotation.',
         'The code must define async function execute(inputs, context).',
         'The execute function must return an object containing all declared outputs.',
@@ -2050,7 +2189,7 @@ async function runStrictScriptGenerationFallback(
         toolDocs ? `Runtime tool documentation for generated code:\n${toolDocs}` : '',
       ].filter(Boolean).join('\n\n'),
     },
-  ], providerAndModel.model, { maxTokens: 2600, temperature: options?.temperature ?? 0.1 });
+  ], providerAndModel.model, { maxTokens: 32768, temperature: options?.temperature ?? (await getSavedTemperature()) ?? 0.1 });
 
   return response.content.trim();
 }
@@ -2109,7 +2248,7 @@ async function runScriptGenerationWithClosureEngine(
   const generationObjective = [
     'Generate JavaScript for a Woodbury pipeline script node.',
     'Use the dedicated script-node generation skill and validate the result before finishing.',
-    'Final answer format: return ONLY a single JavaScript code block.',
+    'Final answer format: return ONLY a single ```javascript code block. NEVER wrap the response in ```json or return a JSON object with a "code" field.',
     'The code must include a JSDoc block with @input and @output annotations.',
     'The code must define async function execute(inputs, context).',
     'The function must return an object containing all declared outputs.',
@@ -2671,6 +2810,50 @@ function normalizeVariableType(raw: unknown): 'string' | 'number' | 'array' | 'b
   return raw === 'number' || raw === 'array' || raw === 'boolean' ? raw : 'string';
 }
 
+/**
+ * Extract option values from a variable node description.
+ * Matches patterns like:
+ *   "Type of script (feature, short, pilot, etc.)"
+ *   "Genre: drama, comedy, sci-fi, horror"
+ *   "Style — cinematic / documentary / animated"
+ */
+function inferOptionsFromDescription(description: string, label: string): string[] {
+  if (!description) return [];
+
+  // Pattern 1: parenthesized list — "something (opt1, opt2, opt3, etc.)"
+  const parenMatch = description.match(/\(([^)]{4,})\)/);
+  if (parenMatch) {
+    const items = splitOptionList(parenMatch[1]);
+    if (items.length >= 2) return items;
+  }
+
+  // Pattern 2: colon/dash/em-dash separated — "Genre: drama, comedy, sci-fi"
+  const colonMatch = description.match(/(?::|—|--|=>)\s*(.{4,})$/);
+  if (colonMatch) {
+    const items = splitOptionList(colonMatch[1]);
+    if (items.length >= 2) return items;
+  }
+
+  // Pattern 3: "e.g." or "such as" — "e.g. drama, comedy, sci-fi"
+  const egMatch = description.match(/(?:e\.g\.?|such as|like|including)\s+(.{4,})/i);
+  if (egMatch) {
+    const items = splitOptionList(egMatch[1]);
+    if (items.length >= 2) return items;
+  }
+
+  return [];
+}
+
+/** Split a comma / slash / "or" delimited string into trimmed option values, filtering noise words. */
+function splitOptionList(raw: string): string[] {
+  // Normalize separators: comma, slash, " or "
+  const parts = raw.split(/\s*[,\/]\s*|\s+or\s+/i);
+  const noiseWords = new Set(['etc', 'etc.', '...', 'more', 'other', 'others', 'and more']);
+  return parts
+    .map(p => p.trim().replace(/^["']+|["']+$/g, '').replace(/\.{2,}$/, '').trim())
+    .filter(p => p.length > 0 && !noiseWords.has(p.toLowerCase()));
+}
+
 function normalizeAssetMode(raw: unknown): 'pick' | 'save' | 'list' | 'remove' | 'generate_path' {
   return raw === 'save' || raw === 'list' || raw === 'remove' || raw === 'generate_path' ? raw : 'pick';
 }
@@ -2751,7 +2934,10 @@ function buildPipelineGenerationNodeTypeGuidance(toolDocs: string): string {
     '',
     '"variable" — shared state and top-level pipeline form inputs',
     '  Input ports: "set", "push". Output ports: "value", "length".',
-    '  Config: { "type": "variable", "label": "...", "variableNode": { "type": "string|number|array|boolean", "initialValue": "", "exposeAsInput": true|false, "inputName": "prompt", "description": "...", "required": true|false, "generationPrompt": "..." } }',
+    '  Config: { "type": "variable", "label": "...", "variableNode": { "type": "string|number|array|boolean", "initialValue": "", "exposeAsInput": true|false, "inputName": "prompt", "description": "...", "required": true|false, "generationPrompt": "...", "inputControl": "text|textarea|select|combobox", "options": ["opt1", "opt2"] } }',
+    '  inputControl: "text" = single-line (default), "textarea" = multi-line, "select" = fixed dropdown (user must pick one), "combobox" = dropdown + freeform typing.',
+    '  Use "select" for finite known choices (e.g. output format, script kind). Use "combobox" for curated suggestions that still allow creative input (e.g. genre, tone). Omit or use "text" for freeform fields (e.g. title).',
+    '  When inputControl is "select" or "combobox", you MUST include a non-empty "options" array. Set "initialValue" to the best default option.',
     '',
     '"get_variable" — read a Variable node by id',
     '  Output ports: "value", "length".',
@@ -2915,6 +3101,28 @@ function materializeGeneratedPipelineNode(
   } else if (workflowId === '__variable__') {
     const variableNode = normalizePlainRecord(rawNode.variableNode);
     const variableType = normalizeVariableType(variableNode.type);
+
+    let rawControl = typeof variableNode.inputControl === 'string' ? variableNode.inputControl.trim().toLowerCase() : '';
+    const validControls = ['text', 'textarea', 'select', 'combobox'];
+    let inputControl = validControls.includes(rawControl) ? rawControl : undefined;
+
+    let rawOptions = Array.isArray(variableNode.options) ? variableNode.options : [];
+    let options = rawOptions.map((o: unknown) => typeof o === 'string' ? o.trim() : '').filter((o: string) => o.length > 0);
+
+    // Auto-infer inputControl and options from description when the AI didn't set them explicitly.
+    // Descriptions like "Type of script (feature, short, pilot, etc.)" contain the valid values.
+    if (!inputControl && options.length === 0 && variableType === 'string') {
+      const desc = typeof variableNode.description === 'string' ? variableNode.description : '';
+      const label = typeof rawNode.label === 'string' ? rawNode.label : '';
+      const inferredOptions = inferOptionsFromDescription(desc, label);
+      if (inferredOptions.length >= 2) {
+        options = inferredOptions;
+        // Use combobox (allows freeform) if description says "etc." or "...", otherwise select
+        const hasEtc = /\betc\.?\b|\.{2,}|\band more\b|\bother\b/i.test(desc);
+        inputControl = hasEtc ? 'combobox' : 'select';
+      }
+    }
+
     node.variableNode = {
       type: variableType,
       initialValue: typeof variableNode.initialValue === 'string'
@@ -2925,6 +3133,8 @@ function materializeGeneratedPipelineNode(
       description: typeof variableNode.description === 'string' ? variableNode.description : '',
       required: normalizeBooleanValue(variableNode.required, false),
       generationPrompt: typeof variableNode.generationPrompt === 'string' ? variableNode.generationPrompt : '',
+      ...(inputControl ? { inputControl } : {}),
+      ...(options.length > 0 ? { options } : {}),
     };
   } else if (workflowId === '__get_variable__') {
     const getVariableNode = normalizePlainRecord(rawNode.getVariableNode);
@@ -3283,7 +3493,7 @@ CRITICAL RULES:
     const resp = await runPrompt([
       { role: 'system', content: systemContent },
       { role: 'user', content: userContent },
-    ], providerAndModel.model, { maxTokens: 4096, temperature: 0.3 });
+    ], providerAndModel.model, { maxTokens: 32768, temperature: 0.3 });
 
     const jsonStr = extractJsonObjectCandidate(resp.content);
     const validatedPlan = validateSelectionRedesignPlan(JSON.parse(jsonStr), selectedNodes);
@@ -3436,12 +3646,13 @@ Example output:
             ? 'llama-3.1-70b-versatile'
             : 'claude-sonnet-4-20250514'; // default, will error if no key
 
+      const savedTemp = await getSavedTemperature();
       const llmResponse = await runPrompt(
         [
           { role: 'user', content: prompt },
         ],
         model,
-        { maxTokens: 1024, temperature: 0.8 }
+        { maxTokens: 32768, temperature: savedTemp ?? 0.8 }
       );
 
       // Parse the JSON from the response
@@ -3502,10 +3713,11 @@ Rules:
 
       const { runPrompt } = await import('../../loop/llm-service.js');
 
+      const savedTemp = await getSavedTemperature();
       const llmResponse = await runPrompt(
         [{ role: 'user', content: prompt }],
         model,
-        { maxTokens: 2048, temperature: 0.9 }
+        { maxTokens: 32768, temperature: savedTemp ?? 0.9 }
       );
 
       const value = llmResponse.content.trim();
@@ -3588,6 +3800,54 @@ Rules:
         retrievedExampleCount: lifecycleResult.lifecycle.metrics.retrievedExampleCount,
       });
 
+      // Auto-persist to .ts file for v2 file-backed nodes
+      let v2TestResults: any = null;
+      if (currentNode?.workflowId === '__script_file__' && (currentNode as any).scriptFile?.file) {
+        const compositionId = compositionRecord && typeof compositionRecord.id === 'string' ? compositionRecord.id : undefined;
+        if (compositionId) {
+          try {
+            const discovered = await discoverCompositions(ctx.workDir);
+            const compEntry = discovered.find(c => c.composition.id === compositionId);
+            if (compEntry?.pipelineDir) {
+              const scriptFileName = (currentNode as any).scriptFile.file;
+              await writeScriptFileCode(compEntry.pipelineDir, scriptFileName, lifecycleResult.code);
+              debugLog.info('generation', 'Auto-persisted v2 script file', { compositionId, file: scriptFileName });
+
+              // Generate and run tests for this node
+              try {
+                const testFileName = scriptFileName.replace(/\.ts$/, '.test.ts');
+                const testCode = generateNodeTestFile(
+                  scriptFileName,
+                  lifecycleResult.code,
+                  lifecycleResult.inputs as any[],
+                  lifecycleResult.outputs as any[],
+                  { nodeLabel: currentNode.label, description: (currentNode as any).scriptFile.description },
+                );
+                await writeScriptFileCode(compEntry.pipelineDir, testFileName, testCode);
+                await ensureTestHelpers(compEntry.pipelineDir);
+
+                const testResult = await runPipelineTests(compEntry.pipelineDir, {
+                  nodeFilter: testFileName,
+                  timeout: 30000,
+                });
+                v2TestResults = testResult;
+                debugLog.info('generation', 'V2 node tests completed', {
+                  compositionId,
+                  file: scriptFileName,
+                  passed: testResult.passed,
+                  failed: testResult.failed,
+                  total: testResult.totalTests,
+                });
+              } catch (testErr) {
+                debugLog.warn('generation', 'Failed to generate/run v2 tests', { error: String(testErr) });
+              }
+            }
+          } catch (err) {
+            debugLog.warn('generation', 'Failed to write v2 script file', { error: String(err) });
+          }
+        }
+      }
+
       sendJson(res, 200, {
         code: lifecycleResult.code,
         inputs: lifecycleResult.inputs,
@@ -3595,6 +3855,7 @@ Rules:
         assistantMessage: lifecycleResult.assistantMessage,
         lifecycle: lifecycleResult.lifecycle,
         transcript: lifecycleResult.lifecycle.transcript,
+        ...(v2TestResults ? { v2TestResults } : {}),
       });
     } catch (err) {
       debugLog.error('dashboard', 'Script generation failed', { error: String(err) });
@@ -3787,15 +4048,272 @@ Rules:
     return true;
   }
 
+  // ── Composition Validation & Repair Engine ─────────────────
+
+  /**
+   * Build sample inputs for a script node based on its declared @input ports.
+   * Used for smoke-testing generated code without real data.
+   */
+  function buildSampleInputs(
+    node: { script?: { code?: string; inputs?: Array<{ name: string; type?: string }> } },
+  ): Record<string, unknown> {
+    const inputs: Record<string, unknown> = {};
+    const portDefs = node.script?.inputs;
+    if (!Array.isArray(portDefs)) return inputs;
+
+    // Also parse type annotations from code if available
+    const code = String(node.script?.code || '');
+    const typeMap = new Map<string, string>();
+    const typeRegex = /@input\s+\{([^}]+)\}\s+([A-Za-z0-9_]+)/g;
+    for (const match of code.matchAll(typeRegex)) {
+      typeMap.set(match[2], match[1].trim().toLowerCase());
+    }
+
+    for (const port of portDefs) {
+      const name = port.name;
+      if (!name) continue;
+      const type = typeMap.get(name) || (port.type || 'string').toLowerCase();
+      switch (type) {
+        case 'number':
+        case 'int':
+        case 'float':
+          inputs[name] = 0;
+          break;
+        case 'boolean':
+        case 'bool':
+          inputs[name] = false;
+          break;
+        case 'array':
+        case 'string[]':
+        case 'number[]':
+          inputs[name] = [];
+          break;
+        case 'object':
+          inputs[name] = {};
+          break;
+        default:
+          inputs[name] = 'sample';
+          break;
+      }
+    }
+    return inputs;
+  }
+
+  /**
+   * Validate and optionally repair a composition by:
+   *   1. Running structural validation (validateComposition)
+   *   2. Proposing and applying edge repairs (proposeScriptNodeEdgeRepairs)
+   *   3. Regenerating broken script node code (runScriptGenerationWithClosureEngine)
+   *   4. Smoke-testing each script node with sample inputs
+   *
+   * Runs up to 3 iterations. Non-blocking — returns results alongside the composition.
+   * The composition object is mutated in-place when repairs are applied.
+   */
+  async function validateAndRepairComposition(
+    ctx: DashboardContext,
+    comp: { nodes: any[]; edges: any[]; [key: string]: unknown },
+  ): Promise<CompositionValidationResult> {
+    const MAX_ITERATIONS = 3;
+    const result: CompositionValidationResult = {
+      valid: false,
+      repairs: [],
+      remainingIssues: [],
+      smokeTests: [],
+      iterations: 0,
+    };
+
+    const knownWorkflowIds = getAvailableWorkflowIds(ctx.workDir);
+    let previousIssueCount = Infinity;
+
+    for (let iteration = 1; iteration <= MAX_ITERATIONS; iteration++) {
+      result.iterations = iteration;
+
+      // ── Step 1: Structural validation ──
+      const issues = validateComposition(comp, knownWorkflowIds);
+
+      // ── Step 2: Edge repair ──
+      let edgeRepairsApplied = 0;
+      const scriptNodes = comp.nodes.filter((n: any) => n.workflowId === '__script__');
+      for (const scriptNode of scriptNodes) {
+        const repairs = proposeScriptNodeEdgeRepairs({
+          nodeId: scriptNode.id,
+          nodes: comp.nodes,
+          edges: comp.edges,
+          nodeOutputs: {},
+        });
+        for (const repair of repairs) {
+          const edge = comp.edges.find((e: any) => e.id === repair.edgeId);
+          if (edge) {
+            const oldValue = edge[repair.field];
+            edge[repair.field] = repair.toPort;
+            result.repairs.push(
+              `Edge "${repair.edgeId}": ${repair.field} "${oldValue}" → "${repair.toPort}" (${repair.reason})`
+            );
+            edgeRepairsApplied++;
+          }
+        }
+      }
+
+      // ── Step 3: Re-validate after edge repairs ──
+      const postRepairIssues = edgeRepairsApplied > 0
+        ? validateComposition(comp, knownWorkflowIds)
+        : issues;
+
+      // ── Step 4: Code repair for broken script nodes ──
+      const codeIssuePatterns = [
+        'has empty code',
+        'has no execute()',
+        'does not define an execute()',
+        'has invalid JavaScript',
+        'contains markdown fences',
+        'contains a serialized JSON blob',
+      ];
+      const codeIssueNodes = new Set<string>();
+      for (const issue of postRepairIssues) {
+        for (const pattern of codeIssuePatterns) {
+          if (issue.includes(pattern)) {
+            // Extract node label/id from the issue string: Script node "X" ...
+            const match = issue.match(/Script node "([^"]+)"/);
+            if (match) codeIssueNodes.add(match[1]);
+          }
+        }
+      }
+
+      if (codeIssueNodes.size > 0) {
+        for (const scriptNode of scriptNodes) {
+          const nodeLabel = scriptNode.label || scriptNode.id;
+          if (!codeIssueNodes.has(nodeLabel)) continue;
+
+          try {
+            const toolDocs = await generateScriptToolDocs(ctx);
+            const nodeDescription = scriptNode.script?.description || scriptNode.label || 'Script node';
+
+            // Build graph context from composition format (nodes + edges)
+            const incoming = comp.edges.filter((e: any) => e.targetNodeId === scriptNode.id);
+            const outgoing = comp.edges.filter((e: any) => e.sourceNodeId === scriptNode.id);
+            const nodeById = new Map(comp.nodes.map((n: any) => [n.id, n]));
+            const graphCtx: Record<string, unknown> = {
+              composition: { name: (comp as any).name, description: (comp as any).description },
+              upstream: incoming.map((e: any) => {
+                const src = nodeById.get(e.sourceNodeId);
+                return {
+                  node: { label: src?.label, type: src?.workflowId },
+                  fromPort: e.sourcePort,
+                  toPort: e.targetPort,
+                };
+              }),
+              downstream: outgoing.map((e: any) => {
+                const tgt = nodeById.get(e.targetNodeId);
+                return {
+                  node: { label: tgt?.label, type: tgt?.workflowId },
+                  fromPort: e.sourcePort,
+                  toPort: e.targetPort,
+                };
+              }),
+            };
+
+            const compositionInterface = await resolveCompositionInterface(ctx.workDir, comp);
+            const userMessage = buildScriptRequestMessage(nodeDescription, undefined, undefined, undefined);
+
+            const regenerated = await runScriptGenerationWithClosureEngine(
+              ctx,
+              userMessage,
+              toolDocs,
+              undefined,
+              'generate',
+              undefined,
+              undefined,
+              { graphContext: graphCtx, compositionInterface },
+            );
+
+            // Replace the node's code and ports
+            scriptNode.script = scriptNode.script || {};
+            scriptNode.script.code = regenerated.code;
+            scriptNode.script.inputs = regenerated.inputs;
+            scriptNode.script.outputs = regenerated.outputs;
+            result.repairs.push(`Regenerated code for script node "${nodeLabel}"`);
+          } catch (err) {
+            debugLog.warn('dashboard', `Code repair failed for node "${nodeLabel}"`, { error: String(err) });
+          }
+        }
+      }
+
+      // ── Step 5: Final validation pass ──
+      const finalIssues = (codeIssueNodes.size > 0 || edgeRepairsApplied > 0)
+        ? validateComposition(comp, knownWorkflowIds)
+        : postRepairIssues;
+
+      // ── Step 6: Check for progress ──
+      if (finalIssues.length >= previousIssueCount && edgeRepairsApplied === 0) {
+        // No progress — stop iterating
+        result.remainingIssues = finalIssues;
+        break;
+      }
+
+      previousIssueCount = finalIssues.length;
+
+      if (finalIssues.length === 0) {
+        result.remainingIssues = [];
+        break;
+      }
+
+      result.remainingIssues = finalIssues;
+    }
+
+    // ── Step 7: Smoke test each script node ──
+    result.smokeTests = [];
+    for (const scriptNode of comp.nodes.filter((n: any) => n.workflowId === '__script__')) {
+      if (!scriptNode.script?.code) continue;
+
+      const sampleInputs = buildSampleInputs(scriptNode);
+      const testCase: ScriptGenerationTestCase = {
+        name: 'smoke-test',
+        inputs: sampleInputs,
+      };
+
+      try {
+        const testResults = await runGeneratedScriptUnitTests(
+          scriptNode.script.code,
+          [testCase],
+        );
+        const testResult = testResults[0];
+        result.smokeTests.push({
+          nodeId: scriptNode.id,
+          nodeLabel: scriptNode.label || scriptNode.id,
+          passed: testResult?.passed ?? false,
+          error: testResult?.error || (testResult?.failures?.length ? testResult.failures.join('; ') : undefined),
+        });
+      } catch (err) {
+        result.smokeTests.push({
+          nodeId: scriptNode.id,
+          nodeLabel: scriptNode.label || scriptNode.id,
+          passed: false,
+          error: `Smoke test execution failed: ${(err as Error).message}`,
+        });
+      }
+    }
+
+    result.valid = result.remainingIssues.length === 0
+      && result.smokeTests.every(t => t.passed);
+
+    return result;
+  }
+
   if (req.method === 'POST' && pathname === '/api/compositions/generate-pipeline') {
     try {
       const body = await readBody(req);
-      const { description, graphContext, selectedPublishedSkillIds } = body || {};
+      const { description, graphContext, selectedPublishedSkillIds, temperature: requestTemperature } = body || {};
 
       if (!description || !String(description).trim()) {
         sendJson(res, 400, { error: 'description is required' });
         return true;
       }
+
+      // Use request temperature, then saved preference, then hardcoded default
+      const savedTemp = await getSavedTemperature();
+      const pipelineTemperature = typeof requestTemperature === 'number'
+        ? requestTemperature
+        : (savedTemp ?? 0.4);
 
       const toolDocs = await generateScriptToolDocs(ctx);
       const publishedSkillsSection = await formatPublishedSkillsPromptSection(ctx.workDir, {
@@ -3817,7 +4335,7 @@ Rules:
       const pipelineSystemPrompt = `You are a pipeline architect for a visual automation platform. The user describes a task, and you decompose it into multiple small, focused steps — each becoming a node in a pipeline graph.
 
 IMPORTANT RULES:
-1. Each script node should do ONE thing and be under 20 lines of code
+1. Each script node should do ONE thing and be under 20 lines of code. NEVER create a monolithic node that does multiple things.
 2. Use the simplest node type for each step:
    - prefer specialized built-in nodes when they fit cleanly
    - use "script" for custom logic, LLM calls, transformations, or orchestration that cannot be expressed with built-ins
@@ -3827,6 +4345,14 @@ IMPORTANT RULES:
 6. For script nodes, describe the intent and declare ports only. Do NOT write JavaScript code. The backend will generate the code in a separate pass.
 7. Use a single "output" node when the pipeline should publish final outputs.
 8. Use "variable" nodes for shared user-provided inputs that should feed multiple downstream nodes.
+
+DECOMPOSITION STRATEGY — CRITICAL:
+- If the user provides TypeScript interfaces or types, create ONE node per major interface. For example, if the output has fields like metadata, cast, locations, and sections, each should be its own node.
+- When producing arrays of complex objects (characters, scenes, shots), use a generator node + for_each node pattern: one node generates the list, a for_each iterates, and inner nodes process each item.
+- Side-effect operations (image generation, file saving, asset creation) MUST be separate nodes from the data generation nodes.
+- A final "assemble" node should stitch sub-results into the complete output object.
+- Prefer 5-15 nodes for moderate tasks, 10-25 for complex tasks. A pipeline with only 1-3 nodes for a complex task is WRONG.
+- NEVER put an entire complex generation (e.g. a full script with characters, locations, scenes, and shots) into a single node.
 
 ${buildPipelineGenerationNodeTypeGuidance(toolDocs)}
 
@@ -3862,7 +4388,7 @@ RESPONSE FORMAT — respond with ONLY a JSON object (no explanation, no markdown
       "branchNode": { "condition": "{{count}} > 0" },
       "delayNode": { "delayMs": 1000 },
       "gateNode": { "defaultOpen": true, "onClosed": "skip|stop|fail" },
-      "variableNode": { "type": "string|number|array|boolean", "initialValue": "", "exposeAsInput": false, "inputName": "", "description": "", "required": false, "generationPrompt": "" },
+      "variableNode": { "type": "string|number|array|boolean", "initialValue": "", "exposeAsInput": false, "inputName": "", "description": "", "required": false, "generationPrompt": "", "inputControl": "text|textarea|select|combobox", "options": ["opt1", "opt2"] },
       "getVariableNode": { "targetNodeId": "var_123" },
       "jsonKeysNode": { "defaultPath": "items.0" },
       "toolNode": { "selectedTool": "tool_name", "paramDefaults": {} },
@@ -3896,6 +4422,11 @@ EXAMPLE — "Generate a poem about a theme and save it to a file":
       "type": "text",
       "label": "Theme",
       "textNode": { "value": "autumn leaves" }
+    },
+    {
+      "type": "script",
+      "label": "Generate Poem",
+      "description": "Generate a poem from a theme using AI. Use context.llm.generateJSON to create a poem with a title.",
       "inputs": [
         { "name": "theme", "type": "string", "description": "The theme to write about" }
       ],
@@ -3903,11 +4434,11 @@ EXAMPLE — "Generate a poem about a theme and save it to a file":
         { "name": "poem", "type": "string", "description": "The generated poem" },
         { "name": "title", "type": "string", "description": "A title for the poem" }
       ]
+    },
     {
       "type": "script",
-      "label": "Generate Poem",
-      "description": "Generate a poem from a theme using AI",
-      "code": "/**\\n * @input theme string \\"The theme to write about\\"\\n * @output poem string \\"The generated poem\\"\\n * @output title string \\"A title for the poem\\"\\n */\\nasync function execute(inputs, context) {\\n  const { theme } = inputs;\\n  const result = await context.llm.generateJSON(\\n    \`Write a poem about \\"\${theme}\\". Return JSON: { \\"title\\": \\"...\\\", \\"poem\\": \\"...\\" }\`\\n  );\\n  return { poem: result.poem, title: result.title };\\n}"
+      "label": "Save to File",
+      "description": "Write text content to a file on disk using Node.js fs module.",
       "inputs": [
         { "name": "content", "type": "string", "description": "Text to save" },
         { "name": "filename", "type": "string", "description": "File name" }
@@ -3915,11 +4446,6 @@ EXAMPLE — "Generate a poem about a theme and save it to a file":
       "outputs": [
         { "name": "file_path", "type": "string", "description": "Path where saved" }
       ]
-    {
-      "type": "script",
-      "label": "Save to File",
-      "description": "Write text content to a file",
-      "code": "/**\\n * @input content string \\"Text to save\\"\\n * @input filename string \\"File name\\"\\n * @output file_path string \\"Path where saved\\"\\n */\\nasync function execute(inputs, context) {\\n  const fs = require('fs');\\n  const path = require('path');\\n  const { content, filename } = inputs;\\n  const dir = path.join(require('os').homedir(), 'Documents', 'outputs');\\n  fs.mkdirSync(dir, { recursive: true });\\n  const fp = path.join(dir, filename + '.txt');\\n  fs.writeFileSync(fp, content, 'utf-8');\\n  return { file_path: fp };\\n}"
     }
   ],
   "connections": [
@@ -3928,6 +4454,8 @@ EXAMPLE — "Generate a poem about a theme and save it to a file":
     { "from": 1, "fromPort": "title", "to": 2, "toPort": "filename" }
   ]
 }
+
+CRITICAL: Script nodes must NEVER include a "code" field. Only include "description", "inputs", and "outputs". The code is generated separately in a second pass.
 
 Remember: respond with ONLY the JSON object.`;
 
@@ -3946,7 +4474,7 @@ Remember: respond with ONLY the JSON object.`;
         { role: 'user', content: description.trim() },
       ];
 
-      const llmResp = await runPrompt(pipelineMessages, pipelineModel, { maxTokens: 8192, temperature: 0.7 });
+      const llmResp = await runPrompt(pipelineMessages, pipelineModel, { maxTokens: 32768, temperature: pipelineTemperature });
       const rawResponse = llmResp.content.trim();
 
       // Extract JSON — may be wrapped in ```json ... ```
@@ -3969,18 +4497,41 @@ Remember: respond with ONLY the JSON object.`;
         return true;
       }
 
+      // Warn if the decomposition plan expected many nodes but the LLM collapsed them
+      if (decompositionPlan && decompositionPlan.subContracts.length >= 4) {
+        const scriptCount = pipeline.nodes.filter((n: any) => {
+          const t = normalizeGeneratedPipelineNodeType(n?.type || n?.workflowId) || 'script';
+          return t === 'script';
+        }).length;
+        if (scriptCount <= 2) {
+          debugLog.info('dashboard', `Pipeline generation collapsed ${decompositionPlan.subContracts.length} sub-contracts into only ${scriptCount} script nodes — pipeline may be too monolithic`);
+        }
+      }
+
       const realNodes: any[] = [];
       const idByIndex: string[] = [];
       const scriptNodeResults = new Map<number, PipelineScriptNodeGenerationResult>();
       let outputNodeCount = 0;
 
+      // Generate all script node code in parallel — contracts are already defined
+      const scriptNodePromises: Array<{ index: number; promise: Promise<PipelineScriptNodeGenerationResult> }> = [];
       for (let i = 0; i < pipeline.nodes.length; i++) {
         const pNode = pipeline.nodes[i];
         const nodeType = normalizeGeneratedPipelineNodeType(pNode?.type || pNode?.workflowId) || 'script';
         if (nodeType !== 'script') continue;
-
-        const scriptNodeResult = await ensurePipelineScriptNodeCode(ctx, pipeline, i, toolDocs);
-        scriptNodeResults.set(i, scriptNodeResult);
+        scriptNodePromises.push({ index: i, promise: ensurePipelineScriptNodeCode(ctx, pipeline, i, toolDocs) });
+      }
+      const scriptNodeSettled = await Promise.allSettled(scriptNodePromises.map(p => p.promise));
+      for (let j = 0; j < scriptNodePromises.length; j++) {
+        const result = scriptNodeSettled[j];
+        if (result.status === 'fulfilled') {
+          scriptNodeResults.set(scriptNodePromises[j].index, result.value);
+        } else {
+          debugLog.warn('dashboard', `Script node ${scriptNodePromises[j].index} generation failed`, { error: String(result.reason) });
+          // Fall back to sequential retry
+          const fallback = await ensurePipelineScriptNodeCode(ctx, pipeline, scriptNodePromises[j].index, toolDocs);
+          scriptNodeResults.set(scriptNodePromises[j].index, fallback);
+        }
       }
 
       for (let i = 0; i < pipeline.nodes.length; i++) {
@@ -4012,11 +4563,19 @@ Remember: respond with ONLY the JSON object.`;
           const tgtId = idByIndex[conn.to];
           if (!srcId || !tgtId) continue;
 
-          // Auto-correct text node output port
+          // Auto-correct output port names for nodes with fixed port sets
           const srcNode = realNodes.find((n: any) => n.id === srcId);
           let sourcePort = conn.fromPort;
           if (srcNode?.workflowId === '__text__' && sourcePort !== 'text') {
             sourcePort = 'text';
+          }
+          // Variable nodes only have "value" and "length" output ports
+          if (srcNode?.workflowId === '__variable__' && sourcePort !== 'value' && sourcePort !== 'length') {
+            sourcePort = 'value';
+          }
+          // Get Variable nodes also only have "value" and "length" output ports
+          if (srcNode?.workflowId === '__get_variable__' && sourcePort !== 'value' && sourcePort !== 'length') {
+            sourcePort = 'value';
           }
 
           realEdges.push({
@@ -4037,6 +4596,28 @@ Remember: respond with ONLY the JSON object.`;
         description: description.slice(0, 100),
       });
 
+      // ── Post-generation validation & repair ──
+      const tempComp = {
+        nodes: realNodes,
+        edges: realEdges,
+        version: '1',
+        id: pipeline.name || 'generated-pipeline',
+      };
+      let validation: CompositionValidationResult | undefined;
+      try {
+        validation = await validateAndRepairComposition(ctx, tempComp);
+        debugLog.info('dashboard', 'Pipeline validation complete', {
+          valid: validation.valid,
+          repairs: validation.repairs.length,
+          remainingIssues: validation.remainingIssues.length,
+          smokeTestsPassed: validation.smokeTests.filter(t => t.passed).length,
+          smokeTestsFailed: validation.smokeTests.filter(t => !t.passed).length,
+          iterations: validation.iterations,
+        });
+      } catch (err) {
+        debugLog.warn('dashboard', 'Pipeline validation failed (non-blocking)', { error: String(err) });
+      }
+
       const documentation = buildGeneratedPipelineDocumentation(
         description.trim(),
         pipeline.name || 'Generated Pipeline',
@@ -4050,14 +4631,126 @@ Remember: respond with ONLY the JSON object.`;
         }),
       );
 
-      sendJson(res, 200, {
-        success: true,
-        name: pipeline.name || 'Generated Pipeline',
-        nodes: realNodes,
-        edges: realEdges,
-        documentation,
-        ...(decompositionPlan ? { decompositionPlan } : {}),
-      });
+      // ── v2 file-backed pipeline format ──
+      if (body.format === 'v2') {
+        const pipelineName = pipeline.name || 'Generated Pipeline';
+        let pipelineId = pipelineName
+          .toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+        const pipelineDescription = description.trim();
+        const parentDir = join(homedir(), '.woodbury', 'workflows');
+        const candidateDir = join(parentDir, pipelineId);
+
+        // ── Conflict detection ───────────────────────────────
+        if (existsSync(candidateDir)) {
+          let existingScriptFiles: string[] = [];
+          try {
+            existingScriptFiles = (await readdir(candidateDir)).filter(f =>
+              f.endsWith('.ts') && !f.endsWith('.d.ts') && !f.endsWith('.test.ts') && !f.startsWith('_')
+            );
+          } catch { /* empty */ }
+
+          if (existingScriptFiles.length > 0 && !body.conflictResolution) {
+            // Return conflict info so the UI can ask the user
+            let existingManifest: any = null;
+            try {
+              existingManifest = JSON.parse(await readFile(join(candidateDir, 'pipeline.json'), 'utf-8'));
+            } catch { /* no manifest */ }
+
+            sendJson(res, 409, {
+              conflict: true,
+              pipelineId,
+              pipelineDir: candidateDir,
+              existingFiles: existingScriptFiles,
+              existingName: existingManifest?.name || pipelineId,
+              existingDescription: existingManifest?.description || '',
+              existingNodeCount: existingManifest?.nodes?.length || 0,
+              message: `A pipeline already exists at "${pipelineId}" with ${existingScriptFiles.length} script file(s). How would you like to proceed?`,
+              options: [
+                { value: 'overwrite', label: 'Overwrite — replace the existing pipeline entirely' },
+                { value: 'new-folder', label: 'New folder — create a new pipeline with a different name' },
+                { value: 'edit', label: 'Edit — keep existing files and merge new nodes into the pipeline' },
+              ],
+            });
+            return true;
+          }
+
+          if (body.conflictResolution === 'new-folder') {
+            const suffix = Date.now().toString(36);
+            pipelineId = `${pipelineId}-${suffix}`;
+          }
+          // 'overwrite' falls through to normal scaffold (which overwrites)
+          // 'edit' is handled below after scaffold
+        }
+
+        const { pipelineDir } = await scaffoldPipeline(parentDir, pipelineId, pipelineName, pipelineDescription);
+        const v2Pipeline = await loadPipeline(pipelineDir);
+
+        // Convert each __script__ node to __script_file__ and write .ts files
+        for (const node of realNodes) {
+          if (node.workflowId === '__script__' && node.script?.code) {
+            const fileName = (node.label || node.id)
+              .toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') + '.ts';
+            await writeScriptFileCode(pipelineDir, fileName, node.script.code);
+
+            v2Pipeline.nodes.push({
+              ...node,
+              workflowId: '__script_file__',
+              scriptFile: {
+                file: fileName,
+                description: node.script.description || '',
+                inputs: node.script.inputs || [],
+                outputs: node.script.outputs || [],
+              },
+            } as any);
+          } else {
+            v2Pipeline.nodes.push(node as any);
+          }
+        }
+
+        v2Pipeline.edges = realEdges;
+        await savePipelineManifest(pipelineDir, v2Pipeline);
+
+        // Generate test files for all nodes and run them
+        let pipelineTestResults: any = null;
+        try {
+          const testFiles = await generateAllNodeTests(pipelineDir, v2Pipeline.nodes as any[]);
+          if (testFiles.length > 0) {
+            await ensureTestHelpers(pipelineDir);
+            pipelineTestResults = await runPipelineTests(pipelineDir, { timeout: 60000 });
+            debugLog.info('generation', 'V2 pipeline tests completed', {
+              pipelineId,
+              testFiles: testFiles.length,
+              passed: pipelineTestResults.passed,
+              failed: pipelineTestResults.failed,
+            });
+          }
+        } catch (testErr) {
+          debugLog.warn('generation', 'Failed to generate/run v2 pipeline tests', { error: String(testErr) });
+        }
+
+        sendJson(res, 200, {
+          success: true,
+          format: 'v2',
+          pipelineDir,
+          name: pipelineName,
+          nodes: v2Pipeline.nodes,
+          edges: v2Pipeline.edges,
+          documentation,
+          ...(decompositionPlan ? { decompositionPlan } : {}),
+          ...(validation ? { validation } : {}),
+          ...(pipelineTestResults ? { testResults: pipelineTestResults } : {}),
+        });
+      } else {
+        sendJson(res, 200, {
+          success: true,
+          name: pipeline.name || 'Generated Pipeline',
+          nodes: realNodes,
+          edges: realEdges,
+          documentation,
+          ...(decompositionPlan ? { decompositionPlan } : {}),
+          ...(validation ? { validation } : {}),
+        });
+      }
     } catch (err) {
       debugLog.error('dashboard', 'Pipeline generation failed', { error: String(err) });
       sendJson(res, 500, { error: `Pipeline generation failed: ${(err as Error).message}` });
@@ -4098,6 +4791,361 @@ Remember: respond with ONLY the JSON object.`;
     } catch (err) {
       debugLog.error('dashboard', 'Pipeline documentation generation failed', { error: String(err) });
       sendJson(res, 500, { error: `Pipeline documentation generation failed: ${(err as Error).message}` });
+    }
+    return true;
+  }
+
+  // ── Plain-English Error Explanation ───────────────────────
+
+  // In-memory cache for error explanations (keyed by error hash)
+  const _errorExplainCache: Map<string, ExplainErrorResponse> = (globalThis as any).__woodburyErrorExplainCache ??
+    ((globalThis as any).__woodburyErrorExplainCache = new Map<string, ExplainErrorResponse>());
+
+  if (req.method === 'POST' && pathname === '/api/compositions/explain-error') {
+    try {
+      const body = await readBody(req);
+      const { error: errorMsg, nodeLabel, nodeType } = (body || {}) as ExplainErrorRequest;
+      if (!errorMsg) {
+        sendJson(res, 400, { error: 'error field is required' });
+        return true;
+      }
+
+      // Simple hash for caching
+      const cacheKey = `${String(nodeType)}:${String(errorMsg).slice(0, 500)}`;
+      const cached = _errorExplainCache.get(cacheKey);
+      if (cached) {
+        sendJson(res, 200, cached);
+        return true;
+      }
+
+      const { runPrompt } = await import('../../loop/llm-service.js');
+      const providerAndModel = getScriptGenerationProviderAndModel('repair');
+
+      const resp = await runPrompt(
+        [
+          {
+            role: 'system' as const,
+            content: `You translate technical error messages into plain English for non-technical users. Be brief and helpful.
+Return ONLY a JSON object with two keys:
+- "summary": one sentence explaining what went wrong in simple language (no technical jargon, no code references)
+- "suggestion": one sentence suggesting what to try next
+Do NOT include markdown fences or any text outside the JSON.`,
+          },
+          {
+            role: 'user' as const,
+            content: `Error in the "${nodeLabel || 'a pipeline step'}" step (${nodeType || 'unknown'}):\n${String(errorMsg).slice(0, 800)}`,
+          },
+        ],
+        providerAndModel.model,
+        { maxTokens: 32768, temperature: 0.1 },
+      );
+
+      try {
+        const cleaned = (resp.content || '').replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+        const parsed = JSON.parse(cleaned);
+        const result: ExplainErrorResponse = {
+          summary: String(parsed.summary || '').slice(0, 300),
+          suggestion: String(parsed.suggestion || '').slice(0, 300),
+        };
+        _errorExplainCache.set(cacheKey, result);
+        // Keep cache bounded
+        if (_errorExplainCache.size > 200) {
+          const firstKey = _errorExplainCache.keys().next().value;
+          if (firstKey) _errorExplainCache.delete(firstKey);
+        }
+        sendJson(res, 200, result);
+      } catch {
+        const fallback: ExplainErrorResponse = { summary: '', suggestion: '' };
+        sendJson(res, 200, fallback);
+      }
+    } catch (err) {
+      debugLog.error('dashboard', 'Error explanation failed', { error: String(err) });
+      const fallback: ExplainErrorResponse = { summary: '', suggestion: '' };
+      sendJson(res, 200, fallback); // graceful fallback
+    }
+    return true;
+  }
+
+  // ── Add a Step ─────────────────────────────────────────────
+
+  const addNodeMatch = pathname.match(/^\/api\/compositions\/([^/]+)\/add-node$/);
+  if (req.method === 'POST' && addNodeMatch) {
+    const compId = decodeURIComponent(addNodeMatch[1]);
+    try {
+      const body = await readBody(req);
+      const { description, afterNodeId } = (body || {}) as AddNodeRequest;
+
+      if (!description || typeof description !== 'string' || !description.trim()) {
+        sendJson(res, 400, { error: 'description is required' });
+        return true;
+      }
+
+      // Load composition
+      const discovered = await discoverCompositions(ctx.workDir);
+      const found = discovered.find(d => d.composition.id === compId);
+      if (!found) {
+        sendJson(res, 404, { error: `Composition "${compId}" not found` });
+        return true;
+      }
+
+      const comp = JSON.parse(JSON.stringify(found.composition));
+      const nodes: any[] = Array.isArray(comp.nodes) ? comp.nodes : [];
+      const edges: any[] = Array.isArray(comp.edges) ? comp.edges : [];
+
+      // Build graph context around the insertion point
+      const afterNode = afterNodeId ? nodes.find((n: any) => n.id === afterNodeId) : null;
+      const afterNodeIndex = afterNode ? nodes.indexOf(afterNode) : nodes.length - 1;
+
+      // Find downstream node (the node the afterNode feeds into)
+      const downstreamEdge = afterNodeId
+        ? edges.find((e: any) => e.sourceNodeId === afterNodeId && e.sourcePort === '__done__')
+        : null;
+      const downstreamNode = downstreamEdge
+        ? nodes.find((n: any) => n.id === downstreamEdge.targetNodeId)
+        : null;
+
+      // Build context about neighboring nodes for the AI
+      const neighborContext: string[] = [];
+      if (afterNode) {
+        neighborContext.push(`Previous step: "${afterNode.label || 'Unnamed'}" (${afterNode.workflowId})`);
+        if (afterNode.script?.outputs?.length) {
+          neighborContext.push('Available outputs from previous step:');
+          for (const out of afterNode.script.outputs) {
+            neighborContext.push(`  - ${out.name} (${out.type}): ${out.description || ''}`);
+          }
+        }
+      }
+      if (downstreamNode) {
+        neighborContext.push(`Next step: "${downstreamNode.label || 'Unnamed'}" (${downstreamNode.workflowId})`);
+        if (downstreamNode.script?.inputs?.length) {
+          neighborContext.push('Expected inputs for next step:');
+          for (const inp of downstreamNode.script.inputs) {
+            neighborContext.push(`  - ${inp.name} (${inp.type}): ${inp.description || ''}`);
+          }
+        }
+      }
+
+      // Build the graph context object for the closure engine
+      const graphContext: Record<string, unknown> = {
+        composition: { name: comp.name, description: comp.description },
+        upstream: afterNode ? [{
+          node: { label: afterNode.label, type: afterNode.workflowId },
+          fromPort: '__done__',
+          toPort: '__trigger__',
+        }] : [],
+        downstream: downstreamNode ? [{
+          node: { label: downstreamNode.label, type: downstreamNode.workflowId },
+          fromPort: '__done__',
+          toPort: '__trigger__',
+        }] : [],
+      };
+
+      // Add output contracts from the afterNode as upstream data ports
+      if (afterNode?.script?.outputs?.length) {
+        for (const out of afterNode.script.outputs) {
+          (graphContext.upstream as any[]).push({
+            node: { label: afterNode.label, type: afterNode.workflowId },
+            fromPort: out.name,
+            toPort: out.name,
+            expectedContract: `${out.type}: ${out.description || ''}`,
+          });
+        }
+      }
+
+      // Generate the script node code
+      const toolDocs = await generateScriptToolDocs(ctx);
+      const fullDescription = [
+        description.trim(),
+        '',
+        neighborContext.length > 0 ? 'Context:\n' + neighborContext.join('\n') : '',
+      ].filter(Boolean).join('\n');
+
+      const userMessage = buildScriptRequestMessage(fullDescription, undefined, undefined, undefined);
+
+      const compositionInterface = await resolveCompositionInterface(ctx.workDir, comp);
+
+      const lifecycleResult = await runScriptGenerationWithClosureEngine(
+        ctx,
+        userMessage,
+        toolDocs,
+        undefined, // no chat history
+        'generate',
+        undefined, // no current code
+        undefined, // no request scope message
+        { graphContext, compositionInterface },
+      );
+
+      // Create the new node
+      const nodeId = 'script-' + Math.random().toString(36).slice(2, 9);
+      // Determine position: place 350px to the right of the afterNode, or at (100, 100)
+      let posX = 100;
+      let posY = 100;
+      if (afterNode) {
+        posX = (afterNode.position?.x || 0) + 350;
+        posY = afterNode.position?.y || 0;
+      } else if (nodes.length > 0) {
+        // Place to the right of the rightmost node
+        let maxX = 0;
+        for (const n of nodes) {
+          if (n.position?.x > maxX) maxX = n.position.x;
+        }
+        posX = maxX + 350;
+        posY = 100;
+      }
+
+      const newNode: Record<string, unknown> = {
+        id: nodeId,
+        workflowId: '__script__',
+        position: { x: posX, y: posY },
+        label: lifecycleResult.assistantMessage
+          ? description.trim().slice(0, 50)
+          : description.trim().slice(0, 50),
+        script: {
+          description: description.trim(),
+          code: lifecycleResult.code,
+          inputs: lifecycleResult.inputs,
+          outputs: lifecycleResult.outputs,
+          chatHistory: lifecycleResult.assistantMessage
+            ? [
+              { role: 'user', content: description.trim() },
+              { role: 'assistant', content: lifecycleResult.assistantMessage },
+            ]
+            : [],
+          generationTranscript: lifecycleResult.lifecycle.transcript || [],
+        },
+      };
+
+      // Add node to composition
+      nodes.push(newNode);
+
+      // Edge splicing: connect the new node into the graph
+      const newEdges: any[] = [];
+
+      if (afterNodeId && downstreamEdge) {
+        // Remove the old direct edge between afterNode and downstream
+        const oldEdgeIndex = edges.indexOf(downstreamEdge);
+        if (oldEdgeIndex >= 0) edges.splice(oldEdgeIndex, 1);
+
+        // Connect afterNode → new node (flow)
+        newEdges.push({
+          id: 'edge-' + Math.random().toString(36).slice(2, 9),
+          sourceNodeId: afterNodeId,
+          sourcePort: '__done__',
+          targetNodeId: nodeId,
+          targetPort: '__trigger__',
+        });
+
+        // Connect new node → downstream (flow)
+        newEdges.push({
+          id: 'edge-' + Math.random().toString(36).slice(2, 9),
+          sourceNodeId: nodeId,
+          sourcePort: '__done__',
+          targetNodeId: downstreamEdge.targetNodeId,
+          targetPort: '__trigger__',
+        });
+
+        // Wire data ports: connect afterNode outputs to matching new node inputs
+        if (afterNode?.script?.outputs && lifecycleResult.inputs) {
+          for (const inp of lifecycleResult.inputs) {
+            const matchingOutput = afterNode.script.outputs.find(
+              (o: any) => o.name === inp.name || o.name.toLowerCase() === inp.name.toLowerCase()
+            );
+            if (matchingOutput) {
+              newEdges.push({
+                id: 'edge-' + Math.random().toString(36).slice(2, 9),
+                sourceNodeId: afterNodeId,
+                sourcePort: matchingOutput.name,
+                targetNodeId: nodeId,
+                targetPort: inp.name,
+              });
+            }
+          }
+        }
+
+        // Wire data ports: connect new node outputs to matching downstream inputs
+        if (downstreamNode?.script?.inputs && lifecycleResult.outputs) {
+          for (const out of lifecycleResult.outputs) {
+            const matchingInput = downstreamNode.script.inputs.find(
+              (i: any) => i.name === out.name || i.name.toLowerCase() === out.name.toLowerCase()
+            );
+            if (matchingInput) {
+              newEdges.push({
+                id: 'edge-' + Math.random().toString(36).slice(2, 9),
+                sourceNodeId: nodeId,
+                sourcePort: out.name,
+                targetNodeId: downstreamNode.id,
+                targetPort: matchingInput.name,
+              });
+            }
+          }
+        }
+      } else if (afterNodeId) {
+        // No downstream node — just connect afterNode → new node
+        newEdges.push({
+          id: 'edge-' + Math.random().toString(36).slice(2, 9),
+          sourceNodeId: afterNodeId,
+          sourcePort: '__done__',
+          targetNodeId: nodeId,
+          targetPort: '__trigger__',
+        });
+
+        // Wire data ports from afterNode
+        if (afterNode?.script?.outputs && lifecycleResult.inputs) {
+          for (const inp of lifecycleResult.inputs) {
+            const matchingOutput = afterNode.script.outputs.find(
+              (o: any) => o.name === inp.name || o.name.toLowerCase() === inp.name.toLowerCase()
+            );
+            if (matchingOutput) {
+              newEdges.push({
+                id: 'edge-' + Math.random().toString(36).slice(2, 9),
+                sourceNodeId: afterNodeId,
+                sourcePort: matchingOutput.name,
+                targetNodeId: nodeId,
+                targetPort: inp.name,
+              });
+            }
+          }
+        }
+      }
+
+      edges.push(...newEdges);
+      comp.nodes = nodes;
+      comp.edges = edges;
+      comp.metadata = comp.metadata || {};
+      comp.metadata.updatedAt = new Date().toISOString();
+
+      // ── Post-insertion validation & repair ──
+      let validation: CompositionValidationResult | undefined;
+      try {
+        validation = await validateAndRepairComposition(ctx, comp);
+        debugLog.info('dashboard', `Add-node validation complete for "${compId}"`, {
+          valid: validation.valid,
+          repairs: validation.repairs.length,
+          remainingIssues: validation.remainingIssues.length,
+        });
+      } catch (err) {
+        debugLog.warn('dashboard', 'Add-node validation failed (non-blocking)', { error: String(err) });
+      }
+
+      // Save (after any repairs were applied)
+      await atomicWriteFile(found.path, JSON.stringify(comp, null, 2));
+      found.composition = comp;
+      debugLog.info('dashboard', `Added node "${nodeId}" to composition "${compId}"`, {
+        afterNodeId,
+        description: description.trim().slice(0, 100),
+      });
+
+      const response: AddNodeResponse = {
+        success: true,
+        composition: comp,
+        newNodeId: nodeId,
+        path: found.path,
+        validation,
+      };
+      sendJson(res, 200, response);
+    } catch (err) {
+      debugLog.error('dashboard', 'Add node failed', { error: String(err) });
+      sendJson(res, 500, { error: `Add node failed: ${(err as Error).message}` });
     }
     return true;
   }

@@ -49,6 +49,11 @@ function showGeneratePipelineModal() {
           'placeholder="e.g. Take a photo from the asset library, generate a cartoon version with nanobanana, then copy the result to ~/Gallery/cartoons"></textarea>' +
         publishedSkillsSectionHtml +
         contextSectionHtml +
+        '<div style="display:flex;align-items:center;gap:0.5rem;margin-top:0.75rem;">' +
+          '<label style="color:#94a3b8;font-size:0.75rem;white-space:nowrap;">Temperature:</label>' +
+          '<input type="range" id="comp-pipeline-gen-temp" min="0" max="2" step="0.1" value="0.4" style="flex:1;accent-color:#7c3aed;">' +
+          '<span id="comp-pipeline-gen-temp-val" style="color:#e2e8f0;font-size:0.75rem;min-width:24px;">0.4</span>' +
+        '</div>' +
         '<div style="display:flex;gap:0.5rem;margin-top:1rem;">' +
           '<button class="comp-tb-btn comp-tb-btn-run" id="comp-pipeline-gen-go" style="flex:1;">Generate Pipeline</button>' +
           '<button class="comp-tb-btn" id="comp-pipeline-gen-cancel" style="flex:0;">Cancel</button>' +
@@ -102,6 +107,25 @@ function showGeneratePipelineModal() {
   overlay.querySelector('#comp-pipeline-gen-cancel').addEventListener('click', function() { overlay.remove(); });
   overlay.addEventListener('click', function(e) { if (e.target === overlay) overlay.remove(); });
 
+  // Wire up temperature slider
+  var tempSlider = overlay.querySelector('#comp-pipeline-gen-temp');
+  var tempVal = overlay.querySelector('#comp-pipeline-gen-temp-val');
+  if (tempSlider && tempVal) {
+    tempSlider.addEventListener('input', function() {
+      tempVal.textContent = parseFloat(tempSlider.value).toFixed(1);
+    });
+    // Pre-fill from saved config
+    fetch('/api/mcp/chat-provider')
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        if (typeof data.temperature === 'number') {
+          tempSlider.value = data.temperature;
+          tempVal.textContent = data.temperature.toFixed(1);
+        }
+      })
+      .catch(function() { /* silent */ });
+  }
+
   overlay.querySelector('#comp-pipeline-gen-go').addEventListener('click', async function() {
     var desc = overlay.querySelector('#comp-pipeline-gen-desc').value.trim();
     if (!desc) { toast('Please describe the pipeline you want to create', 'error'); return; }
@@ -145,6 +169,7 @@ function showGeneratePipelineModal() {
           graphContext: chosenContextNodeIds.length > 0
             ? buildScriptGenerationContext(null, chosenContextNodeIds)
             : undefined,
+          temperature: tempSlider ? parseFloat(tempSlider.value) : undefined,
         }),
       });
       var data = await res.json();
@@ -157,7 +182,21 @@ function showGeneratePipelineModal() {
       addGeneratedPipeline(data.nodes, data.edges, data.name, data.documentation);
 
       overlay.remove();
-      toast('Pipeline generated with ' + data.nodes.length + ' nodes!', 'success');
+
+      // Show validation results
+      if (data.validation) {
+        var v = data.validation;
+        if (v.repairs && v.repairs.length > 0) {
+          toast('Pipeline generated with ' + data.nodes.length + ' nodes (' + v.repairs.length + ' auto-repaired)', 'success');
+        } else {
+          toast('Pipeline generated with ' + data.nodes.length + ' nodes!', 'success');
+        }
+        if (!v.valid) {
+          showValidationWarnings(v);
+        }
+      } else {
+        toast('Pipeline generated with ' + data.nodes.length + ' nodes!', 'success');
+      }
     } catch (err) {
       phaseTimers.forEach(clearTimeout);
       if (barEl) barEl.style.width = '0%';
@@ -229,4 +268,82 @@ function addGeneratedPipeline(nodes, edges, pipelineName, documentation) {
   updatePropertiesPanel();
   immediateSave();
   fetchCompositions();
+}
+
+/**
+ * @typedef {Object} CompositionValidationResult
+ * @property {boolean} valid
+ * @property {string[]} repairs
+ * @property {string[]} remainingIssues
+ * @property {Array<{nodeId: string, nodeLabel: string, passed: boolean, error?: string}>} smokeTests
+ * @property {number} iterations
+ */
+
+/**
+ * Show a warning banner for validation issues after pipeline generation or add-node.
+ * @param {CompositionValidationResult} validation
+ */
+function showValidationWarnings(validation) {
+  if (!validation || validation.valid) return;
+
+  var issues = validation.remainingIssues || [];
+  var failedTests = (validation.smokeTests || []).filter(function(t) { return !t.passed; });
+
+  if (issues.length === 0 && failedTests.length === 0) return;
+
+  var existing = document.querySelector('#comp-validation-banner');
+  if (existing) existing.remove();
+
+  var banner = document.createElement('div');
+  banner.id = 'comp-validation-banner';
+  banner.style.cssText = 'position:fixed;top:60px;right:20px;max-width:400px;background:rgba(30,30,40,0.96);border:1px solid rgba(251,191,36,0.4);border-radius:10px;padding:14px 18px;z-index:10000;color:#fbbf24;font-size:0.78rem;box-shadow:0 4px 20px rgba(0,0,0,0.4);';
+
+  var title = document.createElement('div');
+  title.style.cssText = 'font-weight:600;font-size:0.82rem;margin-bottom:8px;display:flex;align-items:center;gap:6px;';
+  title.textContent = '⚠️ Pipeline has ' + (issues.length + failedTests.length) + ' warning' + (issues.length + failedTests.length === 1 ? '' : 's');
+  banner.appendChild(title);
+
+  var list = document.createElement('ul');
+  list.style.cssText = 'margin:0;padding-left:16px;color:#cbd5e1;font-size:0.72rem;max-height:200px;overflow:auto;';
+
+  for (var i = 0; i < Math.min(issues.length, 5); i++) {
+    var li = document.createElement('li');
+    li.style.marginBottom = '4px';
+    li.textContent = issues[i].length > 120 ? issues[i].slice(0, 120) + '…' : issues[i];
+    list.appendChild(li);
+  }
+  for (var j = 0; j < Math.min(failedTests.length, 3); j++) {
+    var testLi = document.createElement('li');
+    testLi.style.marginBottom = '4px';
+    testLi.textContent = 'Smoke test failed: "' + failedTests[j].nodeLabel + '"' + (failedTests[j].error ? ' — ' + failedTests[j].error.slice(0, 80) : '');
+    list.appendChild(testLi);
+  }
+  banner.appendChild(list);
+
+  // Actions row
+  var actions = document.createElement('div');
+  actions.style.cssText = 'margin-top:10px;display:flex;gap:8px;';
+
+  var fixBtn = document.createElement('button');
+  fixBtn.textContent = 'Fix in Chat';
+  fixBtn.style.cssText = 'background:rgba(251,191,36,0.2);border:1px solid rgba(251,191,36,0.3);color:#fbbf24;padding:4px 12px;border-radius:6px;cursor:pointer;font-size:0.72rem;';
+  fixBtn.addEventListener('click', function() {
+    banner.remove();
+    if (typeof switchToTab === 'function') switchToTab('chat');
+  });
+  actions.appendChild(fixBtn);
+
+  var dismissBtn = document.createElement('button');
+  dismissBtn.textContent = 'Dismiss';
+  dismissBtn.style.cssText = 'background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);color:#94a3b8;padding:4px 12px;border-radius:6px;cursor:pointer;font-size:0.72rem;';
+  dismissBtn.addEventListener('click', function() { banner.remove(); });
+  actions.appendChild(dismissBtn);
+
+  banner.appendChild(actions);
+  document.body.appendChild(banner);
+
+  // Auto-dismiss after 20 seconds
+  setTimeout(function() {
+    if (banner.parentNode) banner.remove();
+  }, 20000);
 }

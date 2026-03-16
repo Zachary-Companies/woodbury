@@ -77,10 +77,10 @@ function socialRenderCompose() {
     '</div>' +
 
     // -- Two-column layout --
-    '<div style="display:flex;flex:1;overflow:hidden;">' +
+    '<div id="social-compose-split" style="display:flex;flex:1;overflow:hidden;">' +
 
     // ==== LEFT COLUMN -- Editor (60%) ====
-    '<div style="flex:0 0 60%;display:flex;flex-direction:column;overflow-y:auto;border-right:1px solid #1e293b;padding:20px;">' +
+    '<div id="social-compose-editor" style="flex:0 0 60%;display:flex;flex-direction:column;overflow-y:auto;border-right:1px solid #1e293b;padding:20px;">' +
 
     // -- Platform Selection Row --
     '<div style="margin-bottom:20px;">' +
@@ -168,8 +168,11 @@ function socialRenderCompose() {
 
     '</div>' + // end left column
 
-    // ==== RIGHT COLUMN -- Preview (40%) ====
-    '<div style="flex:0 0 40%;overflow-y:auto;padding:20px;background:#0a0f1a;">' +
+    // Resize handle
+    '<div class="resize-handle" id="social-compose-resizer"><div class="resize-bar-inner"></div></div>' +
+
+    // ==== RIGHT COLUMN -- Preview (flex:1) ====
+    '<div id="social-compose-preview" style="flex:1;min-width:200px;overflow-y:auto;padding:20px;background:#0a0f1a;">' +
     '<label style="display:block;font-size:0.7rem;text-transform:uppercase;letter-spacing:0.05em;color:#64748b;margin-bottom:12px;font-weight:600;">Preview</label>' +
     socialComposePreviewPanels(data) +
     '</div>' + // end right column
@@ -179,6 +182,28 @@ function socialRenderCompose() {
 
   main.innerHTML = html;
   socialWireComposeEvents();
+
+  // Wire up social compose resize handle
+  if (typeof initResizeHandle === 'function') {
+    (function() {
+      var split = document.getElementById('social-compose-split');
+      var editor = document.getElementById('social-compose-editor');
+      var resizer = document.getElementById('social-compose-resizer');
+      if (split && editor && resizer) {
+        var cw = split.getBoundingClientRect().width;
+        initResizeHandle({
+          storageKey: 'woodbury-resize-social-compose',
+          resizer: resizer,
+          targetPanel: editor,
+          container: split,
+          defaultWidth: Math.round(cw * 0.6),
+          minWidth: Math.round(cw * 0.35),
+          maxWidth: function(containerWidth) { return Math.round(containerWidth * 0.75); },
+          direction: 'left'
+        });
+      }
+    })();
+  }
 }
 
 function socialComposePlatformToggles(data) {

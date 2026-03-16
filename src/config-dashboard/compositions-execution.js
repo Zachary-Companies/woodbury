@@ -26,41 +26,85 @@
  *   - initCompositions (entry point, window.initCompositions)
  */
 
+// ── Cross-Module Contracts ────────────────────────────────────
+//    These typedefs define the data shapes passed to chat.js
+//    via window.notifyChatOfPipelineFailure(). They must match
+//    the FailedNodeInfo / PipelineFailure typedefs in chat.js.
+
+/**
+ * A single failed node within a pipeline run.
+ * @typedef {Object} FailedNodeInfo
+ * @property {string} nodeId      - Composition node ID
+ * @property {string} nodeLabel   - Human-readable node label
+ * @property {string} error       - Raw error message
+ * @property {boolean} isScript   - Whether this is a script node
+ * @property {string} nodeType    - The node's workflowId (e.g. '__script__')
+ */
+
+/**
+ * Failure payload passed to chat.js via window.notifyChatOfPipelineFailure().
+ * @typedef {Object} PipelineFailure
+ * @property {string} compositionId
+ * @property {string} compositionName
+ * @property {FailedNodeInfo[]} failedNodes
+ * @property {number} timestamp   - Date.now() when the failure occurred
+ */
+
+/**
+ * JSON returned by POST /api/compositions/explain-error.
+ * @typedef {Object} ExplainErrorResponse
+ * @property {string} summary    - One-sentence plain-English explanation
+ * @property {string} suggestion - One-sentence suggested next step
+ */
 
 // ── Auto-Layout ──────────────────────────────────────────────
 
-function layoutNodesInternal() {
-  if (!compData || compData.nodes.length === 0) return;
+// ── Layout Algorithms ──────────────────────────────────────────
+//
+// All layered algorithms use the Sugiyama framework:
+//   1. Assign layers (longest-path)
+//   2. Order nodes within layers (barycenter heuristic, multi-sweep)
+//   3. Position nodes (place at barycenter of neighbors, push apart to avoid overlap)
+//
+// The multi-sweep barycenter ordering is the key to reducing edge crossings.
+// We do alternating forward/backward sweeps, each time placing nodes at the
+// weighted average position of their connected neighbors in the adjacent layer.
 
-  // Step 1: Build adjacency
+var currentLayoutAlgorithm = 'layered-lr';
+
+// ── Shared helpers ──
+
+function layoutBuildAdjacency() {
   var adj = {};
-  compData.nodes.forEach(function(n) { adj[n.id] = []; });
+  var inAdj = {};
+  compData.nodes.forEach(function(n) { adj[n.id] = []; inAdj[n.id] = []; });
   compData.edges.forEach(function(e) {
     if (adj[e.sourceNodeId]) adj[e.sourceNodeId].push(e.targetNodeId);
+    if (inAdj[e.targetNodeId]) inAdj[e.targetNodeId].push(e.sourceNodeId);
   });
+  return { adj: adj, inAdj: inAdj };
+}
 
-  // Step 2: Assign layers via longest path from roots (DFS)
+function layoutAssignLayers() {
+  var graph = layoutBuildAdjacency();
   var layers = {};
   var visited = {};
 
   function assignLayer(nodeId) {
     if (visited[nodeId]) return layers[nodeId];
     visited[nodeId] = true;
-
     var maxPredLayer = -1;
     compData.edges.forEach(function(e) {
-      if (e.targetNodeId === nodeId && adj[e.sourceNodeId]) {
+      if (e.targetNodeId === nodeId && graph.adj[e.sourceNodeId]) {
         maxPredLayer = Math.max(maxPredLayer, assignLayer(e.sourceNodeId));
       }
     });
-
     layers[nodeId] = maxPredLayer + 1;
     return layers[nodeId];
   }
 
   compData.nodes.forEach(function(n) { assignLayer(n.id); });
 
-  // Step 3: Group nodes by layer
   var layerGroups = {};
   var maxLayer = 0;
   compData.nodes.forEach(function(n) {
@@ -70,45 +114,554 @@ function layoutNodesInternal() {
     maxLayer = Math.max(maxLayer, layer);
   });
 
-  // Step 4: Order within layers by median of predecessor Y positions
-  for (var l = 1; l <= maxLayer; l++) {
-    var group = layerGroups[l] || [];
-    group.forEach(function(node) {
-      var predPositions = [];
-      compData.edges.forEach(function(e) {
-        if (e.targetNodeId === node.id) {
-          var predNode = compData.nodes.find(function(n) { return n.id === e.sourceNodeId; });
-          if (predNode) predPositions.push(predNode.position.y);
-        }
-      });
-      node._medianPredY = predPositions.length > 0
-        ? predPositions.sort(function(a, b) { return a - b; })[Math.floor(predPositions.length / 2)]
-        : 0;
-    });
-    group.sort(function(a, b) { return (a._medianPredY || 0) - (b._medianPredY || 0); });
-    layerGroups[l] = group;
+  return { layers: layers, layerGroups: layerGroups, maxLayer: maxLayer, graph: graph };
+}
+
+/** Count edge crossings between two adjacent layers */
+function countCrossings(layerA, layerB, edges) {
+  // Build ordered pairs: for each edge from layerA[i] to layerB[j], record (i, j)
+  var posA = {};
+  var posB = {};
+  layerA.forEach(function(n, i) { posA[n.id] = i; });
+  layerB.forEach(function(n, i) { posB[n.id] = i; });
+
+  var pairs = [];
+  edges.forEach(function(e) {
+    if (posA[e.sourceNodeId] !== undefined && posB[e.targetNodeId] !== undefined) {
+      pairs.push([posA[e.sourceNodeId], posB[e.targetNodeId]]);
+    }
+    // Also check reverse (target in A, source in B) for bidirectional counting
+    if (posA[e.targetNodeId] !== undefined && posB[e.sourceNodeId] !== undefined) {
+      pairs.push([posA[e.targetNodeId], posB[e.sourceNodeId]]);
+    }
+  });
+
+  // Count inversions: crossing happens when (a1 < a2 but b1 > b2) or vice versa
+  var crossings = 0;
+  for (var i = 0; i < pairs.length; i++) {
+    for (var j = i + 1; j < pairs.length; j++) {
+      if ((pairs[i][0] < pairs[j][0] && pairs[i][1] > pairs[j][1]) ||
+          (pairs[i][0] > pairs[j][0] && pairs[i][1] < pairs[j][1])) {
+        crossings++;
+      }
+    }
+  }
+  return crossings;
+}
+
+/**
+ * Barycenter ordering: multi-sweep crossing reduction.
+ * For each layer, compute the barycenter (average position of neighbors in the
+ * adjacent fixed layer) and sort by it. Alternating forward/backward sweeps
+ * progressively reduce crossings.
+ *
+ * @param {object} info - from layoutAssignLayers()
+ * @param {'x'|'y'} axis - which axis the layers are spread along
+ * @param {number} spacing - node spacing within a layer
+ */
+function barycentricOrdering(info, axis, spacing) {
+  var SWEEPS = 24;  // more sweeps = fewer crossings (diminishing returns after ~20)
+  var otherAxis = axis === 'x' ? 'y' : 'x';
+
+  // Initial assignment: give each node a position index within its layer
+  for (var l = 0; l <= info.maxLayer; l++) {
+    var grp = info.layerGroups[l] || [];
+    for (var gi = 0; gi < grp.length; gi++) {
+      grp[gi]._layerPos = gi;
+    }
   }
 
-  // Step 5: Assign positions
-  var layerSpacing = 350;
-  var nodeSpacing = 160;
-  var startX = 100;
-  var startY = 100;
+  for (var sweep = 0; sweep < SWEEPS; sweep++) {
+    var forward = sweep % 2 === 0;
+    var start = forward ? 1 : info.maxLayer - 1;
+    var end = forward ? info.maxLayer + 1 : -1;
+    var step = forward ? 1 : -1;
 
-  for (var layer = 0; layer <= maxLayer; layer++) {
-    var grp = layerGroups[layer] || [];
+    for (var layer = start; layer !== end; layer += step) {
+      var group = info.layerGroups[layer] || [];
+      if (group.length === 0) continue;
+
+      // Compute barycenter for each node from the fixed adjacent layer
+      group.forEach(function(node) {
+        var neighborPositions = [];
+
+        compData.edges.forEach(function(e) {
+          var neighborId = null;
+          if (e.targetNodeId === node.id) neighborId = e.sourceNodeId;
+          else if (e.sourceNodeId === node.id) neighborId = e.targetNodeId;
+          if (!neighborId) return;
+
+          // Check if neighbor is in an adjacent layer
+          var neighborLayer = info.layers[neighborId];
+          if (neighborLayer === undefined) return;
+          var adjLayer = forward ? layer - 1 : layer + 1;
+          if (neighborLayer !== adjLayer) return;
+
+          var neighborNode = compData.nodes.find(function(n) { return n.id === neighborId; });
+          if (neighborNode) neighborPositions.push(neighborNode._layerPos);
+        });
+
+        if (neighborPositions.length > 0) {
+          // Use barycenter (mean) — more stable than median for crossing reduction
+          var sum = 0;
+          for (var np = 0; np < neighborPositions.length; np++) sum += neighborPositions[np];
+          node._barycenter = sum / neighborPositions.length;
+        } else {
+          node._barycenter = node._layerPos; // Keep current position
+        }
+      });
+
+      // Sort by barycenter
+      group.sort(function(a, b) { return a._barycenter - b._barycenter; });
+
+      // Update layer positions
+      for (var gi2 = 0; gi2 < group.length; gi2++) {
+        group[gi2]._layerPos = gi2;
+      }
+      info.layerGroups[layer] = group;
+    }
+  }
+
+  // Clean up temp properties
+  compData.nodes.forEach(function(n) {
+    delete n._layerPos;
+    delete n._barycenter;
+  });
+}
+
+/**
+ * After barycenter ordering, position nodes to minimize edge length
+ * while keeping minimum spacing. Uses priority placement: nodes with
+ * more edges get positioned closer to the barycenter of their neighbors.
+ */
+function positionNodesInLayer(layerGroup, layerIndex, axis, spacing, info) {
+  if (!layerGroup || layerGroup.length === 0) return;
+  var otherAxis = axis === 'x' ? 'y' : 'x';
+
+  // Compute ideal position for each node (barycenter of connected neighbors)
+  layerGroup.forEach(function(node) {
+    var neighborCoords = [];
+    compData.edges.forEach(function(e) {
+      var neighborId = null;
+      if (e.targetNodeId === node.id) neighborId = e.sourceNodeId;
+      else if (e.sourceNodeId === node.id) neighborId = e.targetNodeId;
+      if (!neighborId) return;
+
+      var neighborNode = compData.nodes.find(function(n) { return n.id === neighborId; });
+      if (neighborNode && neighborNode.position[otherAxis] !== undefined) {
+        neighborCoords.push(neighborNode.position[otherAxis]);
+      }
+    });
+
+    if (neighborCoords.length > 0) {
+      var sum = 0;
+      for (var nc = 0; nc < neighborCoords.length; nc++) sum += neighborCoords[nc];
+      node._idealPos = sum / neighborCoords.length;
+    } else {
+      node._idealPos = null;
+    }
+  });
+
+  // Place nodes respecting order and minimum spacing
+  // Start from the top, pushing down as needed
+  var positions = [];
+  for (var i = 0; i < layerGroup.length; i++) {
+    var ideal = layerGroup[i]._idealPos;
+    var minPos = i === 0 ? 100 : positions[i - 1] + spacing;
+
+    if (ideal !== null && ideal >= minPos) {
+      positions.push(ideal);
+    } else {
+      positions.push(minPos);
+    }
+  }
+
+  // Compact pass: pull nodes up toward their ideal positions
+  // (backward sweep to close gaps)
+  for (var j = positions.length - 2; j >= 0; j--) {
+    var ideal2 = layerGroup[j]._idealPos;
+    var maxPos = positions[j + 1] - spacing;
+    if (ideal2 !== null && ideal2 <= maxPos && ideal2 >= (j === 0 ? 100 : positions[j - 1] + spacing)) {
+      positions[j] = ideal2;
+    }
+  }
+
+  // Apply positions
+  for (var k = 0; k < layerGroup.length; k++) {
+    layerGroup[k].position[otherAxis] = Math.round(positions[k]);
+    delete layerGroup[k]._idealPos;
+  }
+}
+
+// ── Layered Left-to-Right (Sugiyama with crossing reduction) ──
+function layoutLayeredLR() {
+  if (!compData || compData.nodes.length === 0) return;
+  var info = layoutAssignLayers();
+
+  var layerSpacing = 350;
+  var nodeSpacing = 140;
+
+  // Phase 1: Assign X based on layer
+  for (var layer = 0; layer <= info.maxLayer; layer++) {
+    var grp = info.layerGroups[layer] || [];
     for (var idx = 0; idx < grp.length; idx++) {
-      grp[idx].position.x = startX + layer * layerSpacing;
-      grp[idx].position.y = startY + idx * nodeSpacing;
-      delete grp[idx]._medianPredY;
+      grp[idx].position.x = 100 + layer * layerSpacing;
+      grp[idx].position.y = 100 + idx * nodeSpacing; // initial Y
+    }
+  }
+
+  // Phase 2: Multi-sweep barycentric ordering (reduces crossings)
+  barycentricOrdering(info, 'x', nodeSpacing);
+
+  // Phase 3: Position nodes within layers at ideal Y coordinates
+  // Do two passes (forward then backward) for better results
+  for (var pass = 0; pass < 2; pass++) {
+    for (var l2 = 0; l2 <= info.maxLayer; l2++) {
+      var grp2 = info.layerGroups[l2] || [];
+      // Assign X (stays fixed)
+      for (var g2 = 0; g2 < grp2.length; g2++) {
+        grp2[g2].position.x = 100 + l2 * layerSpacing;
+      }
+      positionNodesInLayer(grp2, l2, 'x', nodeSpacing, info);
     }
   }
 }
 
-function autoLayoutNodes() {
+// ── Layered Top-to-Bottom (Sugiyama with crossing reduction) ──
+function layoutLayeredTB() {
+  if (!compData || compData.nodes.length === 0) return;
+  var info = layoutAssignLayers();
+
+  var layerSpacing = 220;
+  var nodeSpacing = 280;
+
+  // Phase 1: Assign Y based on layer, initial X
+  for (var layer = 0; layer <= info.maxLayer; layer++) {
+    var grp = info.layerGroups[layer] || [];
+    for (var idx = 0; idx < grp.length; idx++) {
+      grp[idx].position.y = 100 + layer * layerSpacing;
+      grp[idx].position.x = 100 + idx * nodeSpacing;
+    }
+  }
+
+  // Phase 2: Multi-sweep barycentric ordering
+  barycentricOrdering(info, 'y', nodeSpacing);
+
+  // Phase 3: Position nodes at ideal X coordinates
+  for (var pass = 0; pass < 2; pass++) {
+    for (var l2 = 0; l2 <= info.maxLayer; l2++) {
+      var grp2 = info.layerGroups[l2] || [];
+      for (var g2 = 0; g2 < grp2.length; g2++) {
+        grp2[g2].position.y = 100 + l2 * layerSpacing;
+      }
+      positionNodesInLayer(grp2, l2, 'y', nodeSpacing, info);
+    }
+  }
+}
+
+// ── Compact Grid ──
+function layoutCompactGrid() {
+  if (!compData || compData.nodes.length === 0) return;
+  var cols = Math.ceil(Math.sqrt(compData.nodes.length));
+  var nodeSpacingX = 320;
+  var nodeSpacingY = 200;
+
+  // Sort nodes by topological order for better visual flow
+  var info = layoutAssignLayers();
+  var ordered = [];
+  for (var layer = 0; layer <= info.maxLayer; layer++) {
+    var grp = info.layerGroups[layer] || [];
+    for (var gi = 0; gi < grp.length; gi++) ordered.push(grp[gi]);
+  }
+
+  for (var i = 0; i < ordered.length; i++) {
+    var col = i % cols;
+    var row = Math.floor(i / cols);
+    ordered[i].position.x = 100 + col * nodeSpacingX;
+    ordered[i].position.y = 100 + row * nodeSpacingY;
+  }
+}
+
+// ── Force-Directed (spring model with directional bias + edge routing) ──
+function layoutForceDirected() {
+  if (!compData || compData.nodes.length === 0) return;
+  var nodes = compData.nodes;
+  var edges = compData.edges;
+
+  // Use layered assignment to seed initial positions (better than circular)
+  var info = layoutAssignLayers();
+  for (var l = 0; l <= info.maxLayer; l++) {
+    var grp = info.layerGroups[l] || [];
+    for (var gi = 0; gi < grp.length; gi++) {
+      grp[gi].position.x = 200 + l * 300 + (Math.random() - 0.5) * 40;
+      grp[gi].position.y = 200 + gi * 150 + (Math.random() - 0.5) * 40;
+    }
+  }
+
+  var nodeMap = {};
+  nodes.forEach(function(n) { nodeMap[n.id] = n; });
+
+  var repulsion = 120000;
+  var attraction = 0.004;
+  var damping = 0.85;
+  var iterations = 300;
+  var dirBias = 0.6; // bias for downstream nodes to be to the right
+
+  // Velocity storage
+  var vx = {}, vy = {};
+  nodes.forEach(function(n) { vx[n.id] = 0; vy[n.id] = 0; });
+
+  for (var iter = 0; iter < iterations; iter++) {
+    var temp = 1.0 - (iter / iterations) * 0.7; // simulated annealing
+
+    // Repulsion between all node pairs
+    for (var i = 0; i < nodes.length; i++) {
+      for (var j = i + 1; j < nodes.length; j++) {
+        var dx = nodes[j].position.x - nodes[i].position.x;
+        var dy = nodes[j].position.y - nodes[i].position.y;
+        var dist = Math.sqrt(dx * dx + dy * dy) || 1;
+        var force = repulsion / (dist * dist);
+        var fx = (dx / dist) * force * temp;
+        var fy = (dy / dist) * force * temp;
+        vx[nodes[i].id] -= fx;
+        vy[nodes[i].id] -= fy;
+        vx[nodes[j].id] += fx;
+        vy[nodes[j].id] += fy;
+      }
+    }
+
+    // Attraction along edges + directional bias
+    for (var k = 0; k < edges.length; k++) {
+      var src = nodeMap[edges[k].sourceNodeId];
+      var tgt = nodeMap[edges[k].targetNodeId];
+      if (!src || !tgt) continue;
+      var edx = tgt.position.x - src.position.x;
+      var edy = tgt.position.y - src.position.y;
+      var eDist = Math.sqrt(edx * edx + edy * edy) || 1;
+      var eForce = eDist * attraction * temp;
+      vx[src.id] += (edx / eDist) * eForce;
+      vy[src.id] += (edy / eDist) * eForce;
+      vx[tgt.id] -= (edx / eDist) * eForce;
+      vy[tgt.id] -= (edy / eDist) * eForce;
+
+      // Directional bias: target should be to the right of source
+      if (edx < 100) {
+        var push = dirBias * temp * (100 - edx) * 0.01;
+        vx[src.id] -= push;
+        vx[tgt.id] += push;
+      }
+    }
+
+    // Edge-edge repulsion: push nodes apart when their edges would overlap
+    for (var e1 = 0; e1 < edges.length; e1++) {
+      for (var e2 = e1 + 1; e2 < edges.length; e2++) {
+        var s1 = nodeMap[edges[e1].sourceNodeId];
+        var t1 = nodeMap[edges[e1].targetNodeId];
+        var s2 = nodeMap[edges[e2].sourceNodeId];
+        var t2 = nodeMap[edges[e2].targetNodeId];
+        if (!s1 || !t1 || !s2 || !t2) continue;
+
+        // Check if edges share a node — skip (they'll diverge naturally)
+        if (s1 === s2 || s1 === t2 || t1 === s2 || t1 === t2) continue;
+
+        // Check if midpoints are close
+        var mid1x = (s1.position.x + t1.position.x) / 2;
+        var mid1y = (s1.position.y + t1.position.y) / 2;
+        var mid2x = (s2.position.x + t2.position.x) / 2;
+        var mid2y = (s2.position.y + t2.position.y) / 2;
+        var mdx = mid2x - mid1x;
+        var mdy = mid2y - mid1y;
+        var midDist = Math.sqrt(mdx * mdx + mdy * mdy) || 1;
+
+        if (midDist < 200) {
+          var edgeRepulse = 3000 / (midDist * midDist) * temp;
+          // Push the target nodes apart vertically
+          var pushY = (mdy / midDist) * edgeRepulse;
+          if (Math.abs(pushY) < 0.5) pushY = mdy >= 0 ? edgeRepulse : -edgeRepulse;
+          vy[t1.id] -= pushY * 0.5;
+          vy[t2.id] += pushY * 0.5;
+        }
+      }
+    }
+
+    // Apply velocities with damping
+    nodes.forEach(function(n) {
+      vx[n.id] *= damping;
+      vy[n.id] *= damping;
+      // Clamp max velocity
+      var maxV = 50 * temp;
+      vx[n.id] = Math.max(-maxV, Math.min(maxV, vx[n.id]));
+      vy[n.id] = Math.max(-maxV, Math.min(maxV, vy[n.id]));
+      n.position.x += vx[n.id];
+      n.position.y += vy[n.id];
+    });
+  }
+
+  // Normalize positions so top-left starts at (100, 100)
+  var minX = Infinity, minY = Infinity;
+  nodes.forEach(function(n) {
+    minX = Math.min(minX, n.position.x);
+    minY = Math.min(minY, n.position.y);
+  });
+  nodes.forEach(function(n) {
+    n.position.x = Math.round(n.position.x - minX + 100);
+    n.position.y = Math.round(n.position.y - minY + 100);
+  });
+}
+
+// ── Orthogonal (right-angle edges, grid-aligned) ──
+function layoutOrthogonal() {
+  if (!compData || compData.nodes.length === 0) return;
+  var info = layoutAssignLayers();
+
+  // Use wider spacing to leave room for orthogonal edge channels
+  var layerSpacing = 400;
+  var nodeSpacing = 180;
+  var channelGap = 30; // gap between parallel edge channels
+
+  // Phase 1: Use barycentric ordering
+  for (var layer = 0; layer <= info.maxLayer; layer++) {
+    var grp = info.layerGroups[layer] || [];
+    for (var idx = 0; idx < grp.length; idx++) {
+      grp[idx].position.x = 100 + layer * layerSpacing;
+      grp[idx].position.y = 100 + idx * nodeSpacing;
+    }
+  }
+
+  barycentricOrdering(info, 'x', nodeSpacing);
+
+  // Phase 2: Position at barycenters
+  for (var pass = 0; pass < 3; pass++) {
+    for (var l2 = 0; l2 <= info.maxLayer; l2++) {
+      var grp2 = info.layerGroups[l2] || [];
+      for (var g2 = 0; g2 < grp2.length; g2++) {
+        grp2[g2].position.x = 100 + l2 * layerSpacing;
+      }
+      positionNodesInLayer(grp2, l2, 'x', nodeSpacing, info);
+    }
+  }
+
+  // Phase 3: Identify edges that span multiple layers (long edges)
+  // and add extra vertical spacing to avoid overlaps
+  var edgeChannels = {}; // layer -> number of long edges passing through
+  compData.edges.forEach(function(e) {
+    var srcLayer = info.layers[e.sourceNodeId] || 0;
+    var tgtLayer = info.layers[e.targetNodeId] || 0;
+    var minL = Math.min(srcLayer, tgtLayer);
+    var maxL = Math.max(srcLayer, tgtLayer);
+    if (maxL - minL > 1) {
+      for (var ml = minL + 1; ml < maxL; ml++) {
+        edgeChannels[ml] = (edgeChannels[ml] || 0) + 1;
+      }
+    }
+  });
+
+  // Widen layers that have many pass-through edges
+  var xOffset = 100;
+  for (var layer3 = 0; layer3 <= info.maxLayer; layer3++) {
+    var grp3 = info.layerGroups[layer3] || [];
+    for (var g3 = 0; g3 < grp3.length; g3++) {
+      grp3[g3].position.x = xOffset;
+    }
+    var channels = edgeChannels[layer3] || 0;
+    xOffset += layerSpacing + channels * channelGap;
+  }
+}
+
+// ── Radial (concentric circles from roots) ──
+function layoutRadial() {
+  if (!compData || compData.nodes.length === 0) return;
+  var info = layoutAssignLayers();
+
+  var centerX = 600;
+  var centerY = 500;
+  var ringSpacing = 200;
+  var minArcSpacing = 120; // min arc distance between nodes in same ring
+
+  for (var layer = 0; layer <= info.maxLayer; layer++) {
+    var grp = info.layerGroups[layer] || [];
+    if (grp.length === 0) continue;
+
+    if (layer === 0) {
+      // Root nodes at center (or slightly spread if multiple)
+      if (grp.length === 1) {
+        grp[0].position.x = centerX;
+        grp[0].position.y = centerY;
+      } else {
+        var rootSpread = Math.min(80, 200 / grp.length);
+        for (var ri = 0; ri < grp.length; ri++) {
+          var rootAngle = (2 * Math.PI * ri) / grp.length - Math.PI / 2;
+          grp[ri].position.x = Math.round(centerX + Math.cos(rootAngle) * rootSpread);
+          grp[ri].position.y = Math.round(centerY + Math.sin(rootAngle) * rootSpread);
+        }
+      }
+      continue;
+    }
+
+    var radius = layer * ringSpacing;
+    var circumference = 2 * Math.PI * radius;
+    var arcPerNode = Math.max(minArcSpacing, circumference / grp.length);
+    var totalArc = arcPerNode * grp.length;
+    var arcFraction = Math.min(1, totalArc / circumference);
+    var startAngle = -Math.PI / 2 - (arcFraction * Math.PI); // start from top
+
+    // Sort by barycenter angle of parents
+    grp.forEach(function(node) {
+      var parentAngles = [];
+      compData.edges.forEach(function(e) {
+        if (e.targetNodeId === node.id) {
+          var parent = compData.nodes.find(function(n) { return n.id === e.sourceNodeId; });
+          if (parent) {
+            parentAngles.push(Math.atan2(parent.position.y - centerY, parent.position.x - centerX));
+          }
+        }
+      });
+      if (parentAngles.length > 0) {
+        var sum = 0;
+        for (var pa = 0; pa < parentAngles.length; pa++) sum += parentAngles[pa];
+        node._parentAngle = sum / parentAngles.length;
+      } else {
+        node._parentAngle = 0;
+      }
+    });
+    grp.sort(function(a, b) { return a._parentAngle - b._parentAngle; });
+
+    var angleStep = (2 * Math.PI * arcFraction) / Math.max(1, grp.length - 1);
+    for (var gi = 0; gi < grp.length; gi++) {
+      var angle = startAngle + gi * angleStep;
+      grp[gi].position.x = Math.round(centerX + Math.cos(angle) * radius);
+      grp[gi].position.y = Math.round(centerY + Math.sin(angle) * radius);
+      delete grp[gi]._parentAngle;
+    }
+  }
+}
+
+// ── Layout dispatch ──
+
+var layoutAlgorithms = {
+  'layered-lr': { fn: layoutLayeredLR, label: 'Left → Right', icon: '→' },
+  'layered-tb': { fn: layoutLayeredTB, label: 'Top → Bottom', icon: '↓' },
+  'orthogonal': { fn: layoutOrthogonal, label: 'Orthogonal', icon: '⊞' },
+  'force': { fn: layoutForceDirected, label: 'Force-Directed', icon: '⚛' },
+  'radial': { fn: layoutRadial, label: 'Radial', icon: '◎' },
+  'compact': { fn: layoutCompactGrid, label: 'Compact Grid', icon: '▦' },
+};
+
+function layoutNodesInternal(algorithm) {
+  var algo = algorithm || currentLayoutAlgorithm;
+  var entry = layoutAlgorithms[algo];
+  if (entry) {
+    currentLayoutAlgorithm = algo;
+    entry.fn();
+  } else {
+    layoutLayeredLR();
+  }
+}
+
+function autoLayoutNodes(algorithm) {
   if (!compData || compData.nodes.length === 0) return;
   pushUndoSnapshot();
-  layoutNodesInternal();
+  layoutNodesInternal(algorithm);
   renderNodes();
   renderEdges();
   wireUpCanvas();
@@ -470,6 +1023,11 @@ function getCompositionInputControl(input) {
     inputType: 'text',
     isTextarea: false,
     isBoolean: false,
+    isSelect: false,
+    isCombobox: false,
+    isObject: false,
+    objectFields: [],
+    options: [],
     placeholder: defaultValue !== undefined && defaultValue !== null ? String(defaultValue) : 'Enter value...',
   };
 
@@ -477,6 +1035,33 @@ function getCompositionInputControl(input) {
     config.isBoolean = true;
     return config;
   }
+
+  if (type === 'object') {
+    config.isObject = true;
+    config.objectFields = input.objectFields || [];
+    return config;
+  }
+
+  // Explicit input control from variable metadata
+  var explicitControl = String(input.inputControl || '').toLowerCase();
+  var opts = Array.isArray(input.options) ? input.options : [];
+
+  if (explicitControl === 'select' && opts.length > 0) {
+    config.isSelect = true;
+    config.options = opts;
+    return config;
+  }
+  if (explicitControl === 'combobox' && opts.length > 0) {
+    config.isCombobox = true;
+    config.options = opts;
+    config.placeholder = defaultValue !== undefined && defaultValue !== null ? String(defaultValue) : 'Select or type a value...';
+    return config;
+  }
+  if (explicitControl === 'textarea') {
+    config.isTextarea = true;
+    return config;
+  }
+
   if (type === 'string[]') {
     config.isTextarea = true;
     config.placeholder = Array.isArray(defaultValue) ? defaultValue.join('\n') : 'One value per line';
@@ -512,6 +1097,9 @@ function normalizeCompositionRunInputs(inputs) {
         required: input.required === true,
         default: input.default,
         generationPrompt: input.generationPrompt,
+        inputControl: input.inputControl || '',
+        options: Array.isArray(input.options) ? input.options : [],
+        objectFields: Array.isArray(input.objectFields) ? input.objectFields : [],
         sources: [],
       };
     }
@@ -519,6 +1107,8 @@ function normalizeCompositionRunInputs(inputs) {
     if (!groups[key].generationPrompt && input.generationPrompt) groups[key].generationPrompt = input.generationPrompt;
     if (groups[key].default === undefined && input.default !== undefined) groups[key].default = input.default;
     if (input.required === true) groups[key].required = true;
+    if (!groups[key].inputControl && input.inputControl) groups[key].inputControl = input.inputControl;
+    if (groups[key].options.length === 0 && Array.isArray(input.options) && input.options.length > 0) groups[key].options = input.options;
 
     var displayLabel = String(input.label || input.name || key).trim();
     if (displayLabel && groups[key].label === key && displayLabel !== key) {
@@ -541,7 +1131,7 @@ function renderCompositionRunFields(inputs) {
     var control = getCompositionInputControl(input);
     var savedVal = getCompositionRunValue(compData.id, input.key, getCompositionDefaultText(input));
     var sources = input.sources.length > 0 ? input.sources.join(', ') : '';
-    var fieldClassName = 'comp-run-field' + (control.isTextarea ? ' comp-run-field-wide' : '');
+    var fieldClassName = 'comp-run-field' + ((control.isTextarea || control.isSelect || control.isCombobox || control.isObject) ? ' comp-run-field-wide' : '');
 
     html += '<div class="' + fieldClassName + '">';
     html += '<div class="comp-run-field-header">';
@@ -557,13 +1147,66 @@ function renderCompositionRunFields(inputs) {
       html += '<div class="comp-run-field-source">Used by ' + compEscHtml(sources) + '</div>';
     }
 
-    if (control.isBoolean) {
+    if (control.isObject && control.objectFields.length > 0) {
+      // Parse saved value as object for field defaults
+      var savedObj = {};
+      try { savedObj = typeof savedVal === 'object' && savedVal ? savedVal : JSON.parse(savedVal || '{}'); } catch(e) { savedObj = {}; }
+
+      html += '<div class="comp-run-subform" data-comp-run-key="' + compEscAttr(input.key) + '" data-comp-run-type="object">';
+      for (var ofi = 0; ofi < control.objectFields.length; ofi++) {
+        var oField = control.objectFields[ofi];
+        var oKey = oField.key || ('field' + ofi);
+        var oLabel = oField.label || humanizeVarName(oKey);
+        var oDefault = savedObj[oKey] !== undefined ? String(savedObj[oKey]) : (oField.default || '');
+        var oType = oField.type || 'string';
+
+        html += '<div class="comp-run-subform-field">';
+        html += '<label class="comp-run-subform-label" for="comp-run-obj-' + compEscAttr(input.key) + '-' + compEscAttr(oKey) + '">' + compEscHtml(oLabel) + '</label>';
+
+        if (oType === 'boolean') {
+          html += '<select class="comp-props-input comp-run-obj-input" id="comp-run-obj-' + compEscAttr(input.key) + '-' + compEscAttr(oKey) + '" data-obj-parent="' + compEscAttr(input.key) + '" data-obj-field="' + compEscAttr(oKey) + '">';
+          html += '<option value="">— default —</option>';
+          html += '<option value="true"' + (oDefault === 'true' ? ' selected' : '') + '>True</option>';
+          html += '<option value="false"' + (oDefault === 'false' ? ' selected' : '') + '>False</option>';
+          html += '</select>';
+        } else if (oType === 'number') {
+          html += '<input type="number" class="comp-props-input comp-run-obj-input" id="comp-run-obj-' + compEscAttr(input.key) + '-' + compEscAttr(oKey) + '" data-obj-parent="' + compEscAttr(input.key) + '" data-obj-field="' + compEscAttr(oKey) + '" value="' + compEscAttr(oDefault) + '" placeholder="0">';
+        } else if (oType === 'select' && Array.isArray(oField.options) && oField.options.length > 0) {
+          html += '<select class="comp-props-input comp-run-obj-input" id="comp-run-obj-' + compEscAttr(input.key) + '-' + compEscAttr(oKey) + '" data-obj-parent="' + compEscAttr(input.key) + '" data-obj-field="' + compEscAttr(oKey) + '">';
+          html += '<option value="">Choose...</option>';
+          for (var soi = 0; soi < oField.options.length; soi++) {
+            html += '<option value="' + compEscAttr(oField.options[soi]) + '"' + (oDefault === oField.options[soi] ? ' selected' : '') + '>' + compEscHtml(oField.options[soi]) + '</option>';
+          }
+          html += '</select>';
+        } else {
+          html += '<input type="text" class="comp-props-input comp-run-obj-input" id="comp-run-obj-' + compEscAttr(input.key) + '-' + compEscAttr(oKey) + '" data-obj-parent="' + compEscAttr(input.key) + '" data-obj-field="' + compEscAttr(oKey) + '" value="' + compEscAttr(oDefault) + '" placeholder="' + compEscAttr(oField.default || '') + '">';
+        }
+        html += '</div>';
+      }
+      html += '</div>';
+    } else if (control.isBoolean) {
       var boolVal = savedVal === true || savedVal === 'true' ? 'true' : (savedVal === false || savedVal === 'false' ? 'false' : '');
       html += '<select class="comp-props-input comp-run-input" id="comp-run-input-' + compEscAttr(input.key) + '" data-comp-run-key="' + compEscAttr(input.key) + '">';
       html += '<option value="">Choose...</option>';
       html += '<option value="true"' + (boolVal === 'true' ? ' selected' : '') + '>True</option>';
       html += '<option value="false"' + (boolVal === 'false' ? ' selected' : '') + '>False</option>';
       html += '</select>';
+    } else if (control.isSelect) {
+      html += '<select class="comp-props-input comp-run-input" id="comp-run-input-' + compEscAttr(input.key) + '" data-comp-run-key="' + compEscAttr(input.key) + '">';
+      html += '<option value="">Choose...</option>';
+      for (var oi = 0; oi < control.options.length; oi++) {
+        var optVal = control.options[oi];
+        html += '<option value="' + compEscAttr(optVal) + '"' + (String(savedVal) === optVal ? ' selected' : '') + '>' + compEscHtml(optVal) + '</option>';
+      }
+      html += '</select>';
+    } else if (control.isCombobox) {
+      var listId = 'comp-run-list-' + compEscAttr(input.key);
+      html += '<input type="text" class="comp-props-input comp-run-input" list="' + listId + '" id="comp-run-input-' + compEscAttr(input.key) + '" data-comp-run-key="' + compEscAttr(input.key) + '" value="' + compEscAttr(savedVal) + '" placeholder="' + compEscAttr(control.placeholder) + '">';
+      html += '<datalist id="' + listId + '">';
+      for (var ci = 0; ci < control.options.length; ci++) {
+        html += '<option value="' + compEscAttr(control.options[ci]) + '">';
+      }
+      html += '</datalist>';
     } else if (control.isTextarea) {
       html += '<textarea class="comp-props-input comp-run-input comp-run-textarea" id="comp-run-input-' + compEscAttr(input.key) + '" data-comp-run-key="' + compEscAttr(input.key) + '" placeholder="' + compEscAttr(control.placeholder) + '">' + compEscHtml(savedVal) + '</textarea>';
     } else {
@@ -589,6 +1232,40 @@ function collectCompositionRunValues(root, inputs) {
 
   for (var i = 0; i < inputs.length; i++) {
     var input = inputs[i];
+
+    // Handle object sub-form: collect individual fields into an object
+    var subform = root.querySelector('.comp-run-subform[data-comp-run-key="' + input.key + '"]');
+    if (subform) {
+      var objValue = {};
+      var hasAnyValue = false;
+      var subInputs = subform.querySelectorAll('.comp-run-obj-input');
+      for (var si = 0; si < subInputs.length; si++) {
+        var fieldKey = subInputs[si].getAttribute('data-obj-field');
+        var fieldVal = subInputs[si].value;
+        if (fieldKey && fieldVal !== '' && fieldVal !== null && fieldVal !== undefined) {
+          // Type coerce based on field type
+          var fieldDef = (input.objectFields || []).find(function(f) { return f.key === fieldKey; });
+          if (fieldDef && fieldDef.type === 'number') {
+            objValue[fieldKey] = Number(fieldVal) || 0;
+          } else if (fieldDef && fieldDef.type === 'boolean') {
+            objValue[fieldKey] = fieldVal === 'true';
+          } else {
+            objValue[fieldKey] = fieldVal;
+          }
+          hasAnyValue = true;
+        }
+      }
+      if (hasAnyValue) {
+        variables[input.key] = objValue;
+        rawValues[input.key] = JSON.stringify(objValue);
+      } else if (input.default !== undefined) {
+        variables[input.key] = input.default;
+      } else if (input.required) {
+        missing.push(input.label || humanizeVarName(input.key));
+      }
+      continue;
+    }
+
     var el = root.querySelector('[data-comp-run-key="' + input.key + '"]');
     if (!el) continue;
     var rawValue = el.value;
@@ -1403,6 +2080,12 @@ function hydrateCompositionArtifactPreviews(root) {
 }
 
 function wireCompositionResultActions(root) {
+  root.querySelectorAll('.comp-form-step-fix-btn').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      var nodeId = btn.getAttribute('data-comp-fix-node');
+      if (nodeId) fixAndRerunFromStepCard(nodeId, btn);
+    });
+  });
   root.querySelectorAll('[data-comp-copy-text]').forEach(function(btn) {
     btn.addEventListener('click', function() {
       var value = btn.getAttribute('data-comp-copy-text') || '';
@@ -1686,6 +2369,9 @@ function renderCompositionStepResults(data) {
       if (ns.error) {
         html += '<div class="comp-form-step-error">' + compEscHtml(ns.error) + '</div>';
       }
+      if (status === 'failed' && ns.error && ns.workflowId === '__script__') {
+        html += '<button class="comp-form-step-fix-btn" data-comp-fix-node="' + compEscAttr(nodeId) + '">&#x26A1; Fix &amp; Re-run</button>';
+      }
       if (ns.currentStep) {
         html += '<div class="comp-form-step-meta">Current: ' + compEscHtml(ns.currentStep) + '</div>';
       }
@@ -1792,6 +2478,16 @@ function parseCompositionRunInput(input, rawValue) {
       isEmpty: false,
       value: stringValue.split('\n').map(function(line) { return line.trim(); }).filter(function(line) { return line; }),
     };
+  }
+
+  if (input.type === 'object') {
+    try {
+      var parsed2 = JSON.parse(trimmed);
+      if (typeof parsed2 === 'object' && parsed2 !== null) {
+        return { isEmpty: false, value: parsed2 };
+      }
+    } catch(e) { /* not valid JSON, treat as string */ }
+    return { isEmpty: false, value: trimmed };
   }
 
   return { isEmpty: false, value: stringValue };
@@ -2060,7 +2756,21 @@ function startCompositionRun(variables) {
         if (ttip) ttip.classList.remove('visible');
         startCompRunPolling();
       } else {
-        toast(data.error || 'Failed to start', 'error');
+        // Show structural issues if pre-flight validation failed
+        if (data.issues && Array.isArray(data.issues) && data.issues.length > 0) {
+          toast(data.error || 'Failed to start', 'error');
+          if (typeof showValidationWarnings === 'function') {
+            showValidationWarnings({
+              valid: false,
+              repairs: [],
+              remainingIssues: data.issues,
+              smokeTests: [],
+              iterations: 0,
+            });
+          }
+        } else {
+          toast(data.error || 'Failed to start', 'error');
+        }
       }
     })
     .catch(function(err) { toast('Run failed: ' + err.message, 'error'); });
@@ -2247,6 +2957,33 @@ function pollCompRunStatus() {
         } else {
           toast('Pipeline failed: ' + (viewData.error || 'Something went wrong'), 'error');
           if (progressBar) progressBar.style.background = '#ef4444';
+
+          // Notify chat of pipeline failure
+          /** @type {FailedNodeInfo[]} */
+          var failedNodes = [];
+          if (viewData.nodeStates) {
+            for (var failNodeId in viewData.nodeStates) {
+              var failNs = viewData.nodeStates[failNodeId];
+              if (failNs.status === 'failed' && failNs.error) {
+                var failNodeData = compData && compData.nodes ? compData.nodes.find(function(n) { return n.id === failNodeId; }) : null;
+                failedNodes.push({
+                  nodeId: failNodeId,
+                  nodeLabel: failNodeData ? (failNodeData.label || failNodeId) : failNodeId,
+                  error: failNs.error,
+                  isScript: failNodeData ? failNodeData.workflowId === '__script__' : false,
+                  nodeType: failNodeData ? failNodeData.workflowId : 'unknown',
+                });
+              }
+            }
+          }
+          if (failedNodes.length > 0 && typeof window.notifyChatOfPipelineFailure === 'function') {
+            window.notifyChatOfPipelineFailure({
+              compositionId: compData ? compData.id : '',
+              compositionName: compData ? (compData.name || compData.id) : '',
+              failedNodes: failedNodes,
+              timestamp: Date.now(),
+            });
+          }
         }
 
         // Re-render nodes so image viewers pick up runtime file paths
@@ -2891,6 +3628,124 @@ async function repairScriptNode(node, nodeId) {
   }
 }
 
+async function fixAndRerunFromStepCard(nodeId, btn) {
+  // Find node in composition data
+  var node = compData && compData.nodes
+    ? compData.nodes.find(function(n) { return n.id === nodeId; })
+    : null;
+  if (!node || !node.script) { toast('Not a script node', 'error'); return; }
+
+  // Get error + runtime context from last run state
+  var ns = lastNodeStates && lastNodeStates[nodeId];
+  var nodeError = ns && ns.error;
+  if (!nodeError) { toast('No error to fix', 'error'); return; }
+
+  // Show loading state
+  btn.disabled = true;
+  btn.textContent = 'Fixing...';
+
+  try {
+    // Build neighbor context (same pattern as repairScriptNode)
+    var neighborContextIds = [];
+    var seenContextIds = {};
+    function pushCtx(id) {
+      if (!id || id === nodeId || seenContextIds[id]) return;
+      seenContextIds[id] = true;
+      neighborContextIds.push(id);
+    }
+    (node.script.contextNodeIds || []).forEach(pushCtx);
+    ((compData && compData.edges) || []).forEach(function(edge) {
+      if (!edge) return;
+      if (edge.targetNodeId === nodeId) pushCtx(edge.sourceNodeId);
+      if (edge.sourceNodeId === nodeId) pushCtx(edge.targetNodeId);
+    });
+
+    // Build description with full runtime context
+    var repairDescription = 'Fix this script node. It failed during execution with the following error:\n\n'
+      + nodeError + '\n\nPlease fix the bug in the code. Do NOT change the @input/@output annotations — only fix the implementation.';
+
+    // Include runtime inputs for better diagnosis
+    if (ns.inputVariables && Object.keys(ns.inputVariables).length > 0) {
+      var inputSnippet = JSON.stringify(ns.inputVariables, null, 2);
+      if (inputSnippet.length > 3000) inputSnippet = inputSnippet.slice(0, 3000) + '...';
+      repairDescription += '\n\nRuntime inputs at the time of failure:\n' + inputSnippet;
+    }
+
+    // Include recent logs for context
+    if (ns.logs && ns.logs.length > 0) {
+      var recentLogs = ns.logs.slice(-20).join('\n');
+      repairDescription += '\n\nRecent logs:\n' + recentLogs;
+    }
+
+    // Call repair API
+    var res = await fetch('/api/compositions/generate-script', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        mode: 'repair',
+        description: repairDescription,
+        chatHistory: node.script.chatHistory || [],
+        currentCode: node.script.code || '',
+        currentNodeId: nodeId,
+        compositionSnapshot: compData,
+        graphContext: neighborContextIds.length > 0
+          ? buildScriptGenerationContext(nodeId, neighborContextIds)
+          : undefined,
+        runtimeFailure: {
+          nodeId: nodeId,
+          nodeLabel: node.label || '',
+          message: nodeError,
+        },
+      }),
+    });
+
+    var data = await res.json();
+    if (!res.ok || data.error) throw new Error(data.error || 'Repair failed');
+
+    // Apply fix
+    pushUndoSnapshot();
+    node.script.code = data.code;
+    if (data.inputs) node.script.inputs = data.inputs;
+    if (data.outputs) node.script.outputs = data.outputs;
+    if (data.lifecycle && data.lifecycle.metrics) node.script.generationMetrics = data.lifecycle.metrics;
+    if (Array.isArray(data.transcript)) {
+      node.script.generationTranscript = (node.script.generationTranscript || []).concat(data.transcript);
+    }
+
+    // Add to chat history
+    if (!node.script.chatHistory) node.script.chatHistory = [];
+    node.script.chatHistory.push(
+      { role: 'user', content: '[Repair] Error: ' + nodeError },
+      { role: 'assistant', content: '```javascript\n' + data.code + '\n```' }
+    );
+
+    // Clear error state and update canvas
+    clearNodeError(nodeId);
+    renderNodes(); renderEdges(); wireUpCanvas();
+    debouncedSave();
+
+    // Re-run pipeline with the same inputs
+    btn.textContent = 'Re-running...';
+    toast('Code fixed — re-running pipeline', 'success');
+
+    // Short delay to let save complete, then trigger run via the Run button
+    setTimeout(function() {
+      var runBtn = document.querySelector('#comp-run-btn');
+      if (runBtn && runBtn.style.display !== 'none') {
+        runBtn.click();
+      } else {
+        // Fallback: start with empty variables (form values still stored)
+        startCompositionRun({});
+      }
+    }, 600);
+
+  } catch (err) {
+    toast('Fix failed: ' + (err.message || err), 'error');
+    btn.disabled = false;
+    btn.innerHTML = '&#x26A1; Fix &amp; Re-run';
+  }
+}
+
 function injectNodeErrorDisplay(body, nodeId) {
   // Inject error box at the top of the properties panel body for any failed node
   var nodeError = lastNodeStates && lastNodeStates[nodeId] && lastNodeStates[nodeId].error;
@@ -2912,8 +3767,40 @@ function injectNodeErrorDisplay(body, nodeId) {
     errorDiv.innerHTML = '<div class="comp-props-error-header">' +
       '<span class="comp-props-error-title">&#x26A0; Execution Error</span>' +
       buttonsHtml +
-      '</div>' + compEscHtml(nodeError);
+      '</div>' +
+      '<div class="comp-props-error-explain" id="comp-props-error-explain-' + nodeId + '">' +
+        '<span style="color:#64748b;font-size:0.68rem;font-style:italic;">Understanding error...</span>' +
+      '</div>' +
+      '<div style="color:#94a3b8;font-size:0.68rem;margin-top:4px;">' + compEscHtml(nodeError) + '</div>';
     body.insertBefore(errorDiv, body.firstChild);
+
+    // Fetch plain-English explanation from POST /api/compositions/explain-error
+    (function(nId, nErr) {
+      /** @type {import('./chat.js').ExplainErrorResponse} — see ExplainErrorResponse typedef */
+      fetch('/api/compositions/explain-error', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          error: nErr,
+          nodeLabel: theNode ? (theNode.label || '') : '',
+          nodeType: theNode ? theNode.workflowId : 'unknown',
+        }),
+      })
+      .then(function(r) { return r.json(); })
+      .then(/** @param {ExplainErrorResponse} data */ function(data) {
+        var el = document.getElementById('comp-props-error-explain-' + nId);
+        if (el && data.summary) {
+          el.innerHTML = '<div class="comp-props-error-summary">' + compEscHtml(data.summary) + '</div>' +
+            (data.suggestion ? '<div class="comp-props-error-suggestion">' + compEscHtml(data.suggestion) + '</div>' : '');
+        } else if (el) {
+          el.remove();
+        }
+      })
+      .catch(function() {
+        var el = document.getElementById('comp-props-error-explain-' + nId);
+        if (el) el.remove();
+      });
+    })(nodeId, nodeError);
 
     var clearBtn = errorDiv.querySelector('#comp-props-error-clear');
     if (clearBtn) {

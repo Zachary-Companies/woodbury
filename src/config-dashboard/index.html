@@ -168,6 +168,19 @@
     </div>
   </div>
 
+  <div class="resize-handle" id="sidebar-resizer"><div class="resize-bar-inner"></div></div>
+  <script>
+  // Inline FOUC prevention — restore sidebar width before paint
+  (function(){
+    var w=localStorage.getItem('woodbury-resize-sidebar');
+    if(w&&window.innerWidth>900){
+      var s=document.querySelector('.sidebar');
+      var pw=parseInt(w,10);
+      if(s&&!isNaN(pw)&&pw>=220&&pw<=600){s.style.width=pw+'px';s.style.minWidth=pw+'px';}
+    }
+  })();
+  </script>
+
   <div class="main" id="main">
     <!-- Chrome Extension Setup Banner -->
     <div id="setup-banner" class="setup-banner hidden">
@@ -239,6 +252,7 @@
   </div>
 
   <script src="app.js"></script>
+  <script src="resize-panels.js"></script>
   <script src="home.js"></script>
   <script src="workflows.js"></script>
   <script src="compositions-core.js"></script>

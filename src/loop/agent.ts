@@ -36,7 +36,7 @@ export class Agent {
       name: config.name || 'DefaultAgent',
       description: config.description || 'A helpful AI agent',
       systemPrompt: config.systemPrompt || '',
-      maxTokens: config.maxTokens || 16384,
+      maxTokens: config.maxTokens || 32768,
       temperature: config.temperature || 0.7,
       tools: config.tools || [],
       workingDirectory: config.workingDirectory || process.cwd(),
@@ -262,7 +262,7 @@ export class Agent {
         provider: this.config.provider,
         apiKey: this.config.apiKey,
         baseURL: this.config.baseURL,
-        maxTokens: 4096,
+        maxTokens: 32768,
         temperature: 0.3
       });
 

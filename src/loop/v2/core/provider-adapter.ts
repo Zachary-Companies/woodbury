@@ -248,7 +248,10 @@ export class ProviderAdapter {
       });
     }
 
-    const response = await client.messages.create(requestParams);
+    // Use streaming to avoid "Streaming is required for operations that may
+    // take longer than 10 minutes" errors with large maxTokens values.
+    const stream = client.messages.stream(requestParams);
+    const response = await stream.finalMessage();
 
     debugLog.info('provider-adapter', 'Anthropic response received', {
       stopReason: response.stop_reason,

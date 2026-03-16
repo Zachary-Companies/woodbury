@@ -8,7 +8,7 @@ const DEFAULT_CONFIG: AgentConfig = {
   name: 'default',
   provider: 'openai',
   model: 'gpt-4',
-  maxTokens: 4000,
+  maxTokens: 32768,
   temperature: 0.7,
   workingDirectory: process.cwd(),
   toolTimeout: 30000,

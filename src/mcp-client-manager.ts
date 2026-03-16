@@ -188,8 +188,8 @@ export class McpClientManager {
 
     const handler: ToolHandler = async (params: any, context?: any) => {
       try {
-        // Use context timeout if available, otherwise 120s for MCP tools
-        const timeoutMs = context?.timeoutMs || 120000;
+        // Use context timeout if available, otherwise 600s for MCP tools (they call external AI providers)
+        const timeoutMs = context?.timeoutMs || 600000;
         const result = await client.callTool({
           name: mcpTool.name,
           arguments: params || {},

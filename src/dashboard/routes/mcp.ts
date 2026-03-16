@@ -225,11 +225,13 @@ export const handleMcpRoutes: RouteHandler = async (req, res, pathname, url, ctx
       const chatConfigPath = join(homedir(), '.woodbury', 'chat-config.json');
       let provider = 'auto';
       let model = '';
+      let temperature = 0.7;
       try {
         const raw = await readFile(chatConfigPath, 'utf-8');
         const chatConfig = JSON.parse(raw);
         if (chatConfig.provider) provider = chatConfig.provider;
         if (chatConfig.model) model = chatConfig.model;
+        if (typeof chatConfig.temperature === 'number') temperature = chatConfig.temperature;
       } catch { /* no saved config */ }
 
       // Detect available providers from env
@@ -239,7 +241,7 @@ export const handleMcpRoutes: RouteHandler = async (req, res, pathname, url, ctx
         { id: 'groq', name: 'Groq (Llama)', hasKey: !!(process.env.GROQ_API_KEY || process.env.GROK_API_KEY), defaultModel: 'llama-3.1-70b-versatile' },
       ];
 
-      sendJson(res, 200, { provider, model, available });
+      sendJson(res, 200, { provider, model, temperature, available });
     } catch (err) {
       sendJson(res, 500, { error: String(err) });
     }
@@ -256,12 +258,30 @@ export const handleMcpRoutes: RouteHandler = async (req, res, pathname, url, ctx
       // Ensure dir exists
       try { await mkdir(dir, { recursive: true }); } catch { /* ok */ }
 
-      const newConfig: any = {};
-      if (body.provider && body.provider !== 'auto') {
-        newConfig.provider = body.provider;
+      // Read existing config so partial updates don't erase other fields
+      let existingConfig: any = {};
+      try {
+        const raw = await readFile(chatConfigPath, 'utf-8');
+        existingConfig = JSON.parse(raw);
+      } catch { /* no existing config */ }
+
+      const newConfig: any = { ...existingConfig };
+      if (body.provider !== undefined) {
+        if (body.provider && body.provider !== 'auto') {
+          newConfig.provider = body.provider;
+        } else {
+          delete newConfig.provider;
+        }
       }
-      if (body.model) {
-        newConfig.model = body.model;
+      if (body.model !== undefined) {
+        if (body.model) {
+          newConfig.model = body.model;
+        } else {
+          delete newConfig.model;
+        }
+      }
+      if (typeof body.temperature === 'number') {
+        newConfig.temperature = Math.max(0, Math.min(2, body.temperature));
       }
 
       await writeFile(chatConfigPath, JSON.stringify(newConfig, null, 2) + '\n', 'utf-8');

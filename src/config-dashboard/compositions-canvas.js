@@ -37,6 +37,25 @@
  *     disconnectAllEdges)
  */
 
+// ── API Contracts ─────────────────────────────────────────────
+//    These typedefs define the response shapes for API calls
+//    made from the canvas (e.g. add-node). They must match the
+//    backend TypeScript interfaces in generation.ts.
+
+/**
+ * Successful response from POST /api/compositions/:id/add-node.
+ * @typedef {Object} AddNodeResponse
+ * @property {boolean} success     - Always true on success
+ * @property {Object} composition  - The full updated composition document
+ * @property {string} newNodeId    - ID of the newly created node
+ * @property {string} path         - File path where the composition was saved
+ */
+
+/**
+ * Error response from any API endpoint.
+ * @typedef {Object} ApiErrorResponse
+ * @property {string} error - Human-readable error message
+ */
 
 // ── Graph Editor ─────────────────────────────────────────────
 
@@ -69,6 +88,7 @@ function renderGraphEditor() {
   html += '<div class="comp-add-dropdown-group-label">Special</div>';
   html += '<button class="comp-add-dropdown-item comp-add-dropdown-gate" id="comp-add-gate">&#x1f6d1; Approval Gate</button>';
   html += '<button class="comp-add-dropdown-item comp-add-dropdown-script" id="comp-add-script">&#x192; Script</button>';
+  html += '<button class="comp-add-dropdown-item comp-add-dropdown-script-file" id="comp-add-script-file">&#x1f4c4; Script File (v2)</button>';
   html += '<button class="comp-add-dropdown-item comp-add-dropdown-output" id="comp-add-output">&#x1f4e4; Output</button>';
   html += '<button class="comp-add-dropdown-item comp-add-dropdown-image" id="comp-add-image-viewer">&#x1f5bc; Image Viewer</button>';
   html += '<button class="comp-add-dropdown-item comp-add-dropdown-media" id="comp-add-media">&#x25b6; Media Player</button>';
@@ -95,7 +115,20 @@ function renderGraphEditor() {
   html += '<button class="comp-tb-btn" id="comp-undo-btn" title="Undo (Ctrl+Z)" disabled>&#x21a9;</button>';
   html += '<button class="comp-tb-btn" id="comp-redo-btn" title="Redo (Ctrl+Shift+Z)" disabled>&#x21aa;</button>';
   html += '<button class="comp-tb-btn comp-tb-btn-danger" id="comp-delete-selected" title="Remove selected" style="display:none;">&#x1f5d1; Remove</button>';
+  html += '<div class="comp-tb-layout-wrap" style="position:relative;display:inline-block;">';
   html += '<button class="comp-tb-btn" id="comp-auto-layout" title="Tidy up layout">&#x2195; Layout</button>';
+  html += '<button class="comp-tb-btn comp-tb-layout-arrow" id="comp-layout-arrow" title="Layout options" style="padding:0 4px;margin-left:-4px;border-left:1px solid rgba(255,255,255,0.1);">&#x25BE;</button>';
+  html += '<div class="comp-layout-menu" id="comp-layout-menu" style="display:none;position:absolute;top:100%;left:0;z-index:100;min-width:200px;background:#1e293b;border:1px solid #334155;border-radius:6px;padding:4px 0;box-shadow:0 4px 12px rgba(0,0,0,0.4);">';
+  html += '<div style="padding:4px 12px 2px;font-size:0.65rem;color:#64748b;text-transform:uppercase;letter-spacing:0.05em;">Layered (best for workflows)</div>';
+  html += '<div class="comp-layout-option" data-layout="layered-lr" style="padding:6px 12px;cursor:pointer;font-size:0.75rem;color:#cbd5e1;">→ Left → Right</div>';
+  html += '<div class="comp-layout-option" data-layout="layered-tb" style="padding:6px 12px;cursor:pointer;font-size:0.75rem;color:#cbd5e1;">↓ Top → Bottom</div>';
+  html += '<div class="comp-layout-option" data-layout="orthogonal" style="padding:6px 12px;cursor:pointer;font-size:0.75rem;color:#cbd5e1;">⊞ Orthogonal</div>';
+  html += '<div style="border-top:1px solid #334155;margin:4px 0;"></div>';
+  html += '<div style="padding:4px 12px 2px;font-size:0.65rem;color:#64748b;text-transform:uppercase;letter-spacing:0.05em;">Other</div>';
+  html += '<div class="comp-layout-option" data-layout="force" style="padding:6px 12px;cursor:pointer;font-size:0.75rem;color:#cbd5e1;">⚛ Force-Directed</div>';
+  html += '<div class="comp-layout-option" data-layout="radial" style="padding:6px 12px;cursor:pointer;font-size:0.75rem;color:#cbd5e1;">◎ Radial</div>';
+  html += '<div class="comp-layout-option" data-layout="compact" style="padding:6px 12px;cursor:pointer;font-size:0.75rem;color:#cbd5e1;">▦ Compact Grid</div>';
+  html += '</div></div>';
   html += '<button class="comp-tb-btn" id="comp-snap-toggle" title="Snap to grid">Grid</button>';
   html += '<button class="comp-tb-btn" id="comp-open-form-btn" title="Open this pipeline as a full-page form inside the app">Form View</button>';
   html += '<button class="comp-tb-btn" id="comp-share-form-btn" title="Copy a link that opens this pipeline as a form">&#x1f517; Share Form</button>';
@@ -139,6 +172,9 @@ function renderGraphEditor() {
   html += '</div>';
   html += '</div>'; // .comp-canvas-wrap
 
+  // Resize handle for properties panel (hidden until panel shown)
+  html += '<div class="resize-handle" id="comp-props-resizer" style="display:none;"><div class="resize-bar-inner"></div></div>';
+
   // Properties panel (hidden until selection)
   html += '<div class="comp-props-panel" id="comp-props-panel" style="display:none;">';
   html += '<div class="comp-props-header">';
@@ -164,6 +200,27 @@ function renderGraphEditor() {
   // Wire up minimap
   wireUpMinimap();
   requestAnimationFrame(function() { updateMinimap(); });
+
+  // Wire up properties panel resize handle
+  if (typeof initResizeHandle === 'function') {
+    initResizeHandle({
+      storageKey: 'woodbury-resize-comp-props',
+      resizer: document.getElementById('comp-props-resizer'),
+      targetPanel: document.getElementById('comp-props-panel'),
+      container: document.querySelector('.comp-editor-row'),
+      defaultWidth: 280,
+      minWidth: 220,
+      maxWidth: 500,
+      direction: 'right',
+      onResize: function() {
+        setTimeout(function() { updateEdgePositions(); updateMinimap(); }, 0);
+      },
+      isActive: function() {
+        var p = document.getElementById('comp-props-panel');
+        return p && p.style.display !== 'none';
+      }
+    });
+  }
 }
 
 function applyCanvasTransform() {
@@ -197,6 +254,7 @@ function renderNodes() {
     var node = compData.nodes[i];
     var isGate = node.workflowId === '__approval_gate__';
     var isScript = node.workflowId === '__script__';
+    var isScriptFile = node.workflowId === '__script_file__';
     var isOutput = node.workflowId === '__output__';
     var isComposition = node.workflowId.startsWith('comp:');
     var isImageViewer = node.workflowId === '__image_viewer__';
@@ -217,13 +275,14 @@ function renderNodes() {
     var isFileRead = node.workflowId === '__file_read__';
     var isJunction = node.workflowId === '__junction__';
     var isFlowControl = isBranch || isDelay || isGateNode || isForEach || isSwitch;
-    var isSpecial = isGate || isScript || isOutput || isComposition || isImageViewer || isMedia || isFlowControl || isAsset || isText || isFileOp || isJsonKeys || isTool || isFileWrite || isFileRead || isJunction || isVariable || isGetVariable;
+    var isSpecial = isGate || isScript || isScriptFile || isOutput || isComposition || isImageViewer || isMedia || isFlowControl || isAsset || isText || isFileOp || isJsonKeys || isTool || isFileWrite || isFileRead || isJunction || isVariable || isGetVariable;
     var wf = isSpecial ? null : getWorkflowForNode(node);
     var isSelected = selectedNodes.has(node.id);
     var nodeWarnings = warnings.filter(function(w) { return w.nodeId === node.id; });
     var displayName = node.label
       || (isGate ? 'Approval Gate'
         : isScript ? 'Script'
+        : isScriptFile ? 'Script File'
         : isOutput ? 'Pipeline Output'
         : isImageViewer ? 'Image Viewer'
         : isMedia ? 'Media Player'
@@ -255,6 +314,7 @@ function renderNodes() {
     var nodeClass = 'comp-node';
     if (isGate) nodeClass += ' comp-node-gate';
     if (isScript) nodeClass += ' comp-node-script';
+    if (isScriptFile) nodeClass += ' comp-node-script';
     if (isOutput) nodeClass += ' comp-node-output';
     if (isComposition) nodeClass += ' comp-node-composition';
     if (isImageViewer) nodeClass += ' comp-node-image-viewer';
@@ -288,6 +348,9 @@ function renderNodes() {
       html += '<span class="comp-node-name">' + compEscHtml(displayName) + '</span>';
     } else if (isScript) {
       html += '<span class="comp-node-script-icon">&#x192;</span>';
+      html += '<span class="comp-node-name">' + compEscHtml(displayName) + '</span>';
+    } else if (isScriptFile) {
+      html += '<span class="comp-node-script-icon">&#x1f4c4;</span>';
       html += '<span class="comp-node-name">' + compEscHtml(displayName) + '</span>';
     } else if (isOutput) {
       html += '<span class="comp-node-output-icon">&#x1f4e4;</span>';
@@ -414,6 +477,45 @@ function renderNodes() {
       html += '<div class="comp-node-footer">';
       html += '<span class="comp-node-script-badge">Script</span>';
       html += '<span style="color:#64748b;font-size:0.65rem;">' + scriptCfg.inputs.length + ' in / ' + scriptCfg.outputs.length + ' out</span>';
+      html += '</div>';
+    } else if (isScriptFile) {
+      // Script file node body — ports from scriptFile.inputs / scriptFile.outputs
+      var sfCfg = node.scriptFile || { inputs: [], outputs: [], file: '' };
+      html += '<div class="comp-node-body">';
+
+      // Inputs (left side)
+      html += '<div class="comp-node-ports comp-node-inputs">';
+      for (var sfi = 0; sfi < sfCfg.inputs.length; sfi++) {
+        var sfInp = sfCfg.inputs[sfi];
+        var sfInpPortId = node.id + ':in:' + sfInp.name;
+        var sfInpConnected = isPortConnected(node.id, sfInp.name, 'input');
+        html += '<div class="comp-port comp-port-in' + (sfInpConnected ? ' comp-port-connected' : '') + '" data-port-id="' + compEscAttr(sfInpPortId) + '" data-node-id="' + compEscAttr(node.id) + '" data-port-name="' + compEscAttr(sfInp.name) + '" data-port-dir="in">';
+        html += '<div class="comp-port-dot comp-port-dot-in"></div>';
+        html += '<span class="comp-port-label" title="' + compEscAttr(sfInp.description || sfInp.name) + '">' + compEscHtml(humanizeVarName(sfInp.name)) + '</span>';
+        html += '</div>';
+      }
+      html += '</div>';
+
+      // Outputs (right side)
+      html += '<div class="comp-node-ports comp-node-outputs">';
+      for (var sfo = 0; sfo < sfCfg.outputs.length; sfo++) {
+        var sfOut = sfCfg.outputs[sfo];
+        var sfOutPortId = node.id + ':out:' + sfOut.name;
+        var sfOutConnected = isPortConnected(node.id, sfOut.name, 'output');
+        html += '<div class="comp-port comp-port-out' + (sfOutConnected ? ' comp-port-connected' : '') + '" data-port-id="' + compEscAttr(sfOutPortId) + '" data-node-id="' + compEscAttr(node.id) + '" data-port-name="' + compEscAttr(sfOut.name) + '" data-port-dir="out">';
+        html += '<span class="comp-port-label" title="' + compEscAttr(sfOut.description || sfOut.name) + '">' + compEscHtml(humanizeVarName(sfOut.name)) + '</span>';
+        html += '<div class="comp-port-dot comp-port-dot-out"></div>';
+        html += '</div>';
+      }
+      html += '</div>';
+
+      html += '</div>'; // .comp-node-body
+
+      // Footer — show filename
+      html += '<div class="comp-node-footer">';
+      html += '<span class="comp-node-script-badge">Script File</span>';
+      var sfFileName = sfCfg.file ? sfCfg.file.split('/').pop() : 'No file';
+      html += '<span style="color:#64748b;font-size:0.65rem;" title="' + compEscAttr(sfCfg.file || '') + '">' + compEscHtml(sfFileName) + '</span>';
       html += '</div>';
     } else if (isOutput) {
       // Output node body — input ports only (values flowing in become pipeline outputs)
@@ -1158,7 +1260,7 @@ function renderNodes() {
       var toolParamNames = Object.keys(toolProps);
 
       html += '<div class="comp-node-body">';
-      // Input ports — one per tool parameter
+      // Input ports — one per tool parameter, with edge-derived fallback
       html += '<div class="comp-node-ports comp-node-inputs">';
       if (toolParamNames.length === 0 && !toolCfg.selectedTool) {
         html += '<div class="comp-port comp-port-in" style="opacity:0.4;pointer-events:none;">';
@@ -1166,6 +1268,16 @@ function renderNodes() {
         html += '<span class="comp-port-label" style="color:#64748b;font-style:italic;">Select a tool...</span>';
         html += '</div>';
       }
+      // Add any edge-referenced input ports not in the schema
+      var toolParamSet = {};
+      for (var tpsi = 0; tpsi < toolParamNames.length; tpsi++) toolParamSet[toolParamNames[tpsi]] = true;
+      (compData && compData.edges || []).forEach(function(edge) {
+        if (edge.targetNodeId === node.id && !toolParamSet[edge.targetPort]) {
+          toolParamNames.push(edge.targetPort);
+          toolProps[edge.targetPort] = { type: 'string', description: 'Connected input' };
+          toolParamSet[edge.targetPort] = true;
+        }
+      });
       for (var tpi = 0; tpi < toolParamNames.length; tpi++) {
         var tpName = toolParamNames[tpi];
         var tpDef = toolProps[tpName];
@@ -1180,12 +1292,31 @@ function renderNodes() {
         html += '</div>';
       }
       html += '</div>';
-      // Output ports
+      // Output ports — derive from tool's return schema if available, else use defaults
       html += '<div class="comp-node-ports comp-node-outputs">';
-      var toolOuts = [
-        { name: 'result', label: 'Result', type: 'object', title: 'Tool return value (parsed JSON object)' },
-        { name: 'success', label: 'Success', type: 'boolean', title: 'Whether the tool succeeded (true/false)' },
-      ];
+      var toolReturnSchema = (toolDef && toolDef.returnSchema && toolDef.returnSchema.properties)
+        ? toolDef.returnSchema.properties : null;
+      var toolOuts;
+      if (toolReturnSchema) {
+        toolOuts = Object.keys(toolReturnSchema).map(function(k) {
+          var prop = toolReturnSchema[k];
+          return { name: k, label: humanizeVarName(k), type: prop.type || 'object', title: prop.description || k };
+        });
+      } else {
+        // Default fallback
+        toolOuts = [
+          { name: 'result', label: 'Result', type: 'object', title: 'Tool return value (parsed JSON object)' },
+          { name: 'success', label: 'Success', type: 'boolean', title: 'Whether the tool succeeded (true/false)' },
+        ];
+        // Also add any ports referenced by edges that aren't in the defaults
+        var defaultOutNames = { result: true, success: true };
+        (compData && compData.edges || []).forEach(function(edge) {
+          if (edge.sourceNodeId === node.id && !defaultOutNames[edge.sourcePort]) {
+            toolOuts.push({ name: edge.sourcePort, label: humanizeVarName(edge.sourcePort), type: 'object', title: 'Connected output' });
+            defaultOutNames[edge.sourcePort] = true;
+          }
+        });
+      }
       for (var toi = 0; toi < toolOuts.length; toi++) {
         var toOut = toolOuts[toi];
         var toPortId = node.id + ':out:' + toOut.name;
@@ -1560,10 +1691,27 @@ function renderEdges() {
     var isSelected = selectedEdge === edge.id;
 
     var isFlowEdge = edge.sourcePort === '__done__' || edge.targetPort === '__trigger__';
-    html += '<path class="comp-edge' + (isFlowEdge ? ' comp-edge-flow' : '') + (isSelected ? ' comp-edge-selected' : '') + '" data-edge-id="' + compEscAttr(edge.id) + '" d="" />';
+    // Edge kind styling: import = dashed purple, trigger = dotted gray, default = solid
+    var edgeKindClass = '';
+    var edgeKindStyle = '';
+    if (edge.kind === 'import') {
+      edgeKindClass = ' comp-edge-import';
+      edgeKindStyle = ' stroke="#a78bfa" stroke-dasharray="8,4"';
+    } else if (edge.kind === 'trigger') {
+      edgeKindClass = ' comp-edge-trigger';
+      edgeKindStyle = ' stroke="#6b7280" stroke-dasharray="3,3"';
+    }
+    html += '<path class="comp-edge' + (isFlowEdge ? ' comp-edge-flow' : '') + edgeKindClass + (isSelected ? ' comp-edge-selected' : '') + '" data-edge-id="' + compEscAttr(edge.id) + '"' + edgeKindStyle + ' d="" />';
     // Edge label — humanized variable name (skip for flow edges)
     if (!isFlowEdge) {
       html += '<text class="comp-edge-label" data-edge-id="' + compEscAttr(edge.id) + '" x="0" y="0">' + compEscHtml(humanizeVarName(edge.sourcePort)) + '</text>';
+    }
+    // "+" button on flow edges for adding a step
+    if (isFlowEdge) {
+      html += '<g class="comp-edge-add-group" data-edge-id="' + compEscAttr(edge.id) + '" data-source-node-id="' + compEscAttr(edge.sourceNodeId) + '" style="cursor:pointer;opacity:0;transition:opacity 0.15s;">';
+      html += '<circle class="comp-edge-add-bg" cx="0" cy="0" r="11" fill="#1e293b" stroke="rgba(124,58,237,0.6)" stroke-width="1.5" />';
+      html += '<text class="comp-edge-add-icon" x="0" y="0" text-anchor="middle" dominant-baseline="central" fill="#c4b5fd" font-size="14" font-weight="bold" pointer-events="none">+</text>';
+      html += '</g>';
     }
   }
 
@@ -1572,12 +1720,44 @@ function renderEdges() {
 
   group.innerHTML = html;
 
+  // Wire up "+" button hover and click
+  var addGroups = group.querySelectorAll('.comp-edge-add-group');
+  for (var j = 0; j < addGroups.length; j++) {
+    (function(g) {
+      g.addEventListener('mouseenter', function() { g.style.opacity = '1'; });
+      g.addEventListener('mouseleave', function() { g.style.opacity = '0'; });
+      g.addEventListener('click', function(e) {
+        e.stopPropagation();
+        var sourceNodeId = g.getAttribute('data-source-node-id');
+        showAddStepPopover(g, sourceNodeId);
+      });
+    })(addGroups[j]);
+  }
+
+  // Also show "+" on edge path hover
+  var edgePaths = group.querySelectorAll('path.comp-edge.comp-edge-flow');
+  for (var k = 0; k < edgePaths.length; k++) {
+    (function(pathEl) {
+      var edgeId = pathEl.getAttribute('data-edge-id');
+      var addGroup = group.querySelector('.comp-edge-add-group[data-edge-id="' + edgeId + '"]');
+      if (!addGroup) return;
+      pathEl.addEventListener('mouseenter', function() { addGroup.style.opacity = '1'; });
+      pathEl.addEventListener('mouseleave', function() {
+        setTimeout(function() {
+          if (!addGroup.matches(':hover')) addGroup.style.opacity = '0';
+        }, 100);
+      });
+    })(edgePaths[k]);
+  }
+
   // Compute edge positions after a frame (nodes need to be in DOM)
   requestAnimationFrame(function() { updateEdgePositions(); });
 }
 
 function updateEdgePositions() {
   if (!compData) return;
+
+  var edgesRepaired = false;
 
   for (var i = 0; i < compData.edges.length; i++) {
     var edge = compData.edges[i];
@@ -1586,6 +1766,23 @@ function updateEdgePositions() {
 
     var srcPos = getPortPosition(edge.sourceNodeId, edge.sourcePort, 'out');
     var tgtPos = getPortPosition(edge.targetNodeId, edge.targetPort, 'in');
+
+    // Auto-repair: if source port not found, try "value" for variable/get_variable nodes
+    if (!srcPos && compData) {
+      var srcNode = compData.nodes.find(function(n) { return n.id === edge.sourceNodeId; });
+      if (srcNode && (srcNode.workflowId === '__variable__' || srcNode.workflowId === '__get_variable__') &&
+          edge.sourcePort !== 'value' && edge.sourcePort !== 'length') {
+        edge.sourcePort = 'value';
+        srcPos = getPortPosition(edge.sourceNodeId, 'value', 'out');
+        edgesRepaired = true;
+      }
+      // Also try "text" for text nodes
+      if (srcNode && srcNode.workflowId === '__text__' && edge.sourcePort !== 'text') {
+        edge.sourcePort = 'text';
+        srcPos = getPortPosition(edge.sourceNodeId, 'text', 'out');
+        edgesRepaired = true;
+      }
+    }
 
     if (srcPos && tgtPos) {
       pathEl.setAttribute('d', edgePath(srcPos.x, srcPos.y, tgtPos.x, tgtPos.y));
@@ -1598,8 +1795,134 @@ function updateEdgePositions() {
         labelEl.setAttribute('x', mx);
         labelEl.setAttribute('y', my);
       }
+
+      // Position "+" button at midpoint of flow edges
+      var addGroup = document.querySelector('.comp-edge-add-group[data-edge-id="' + edge.id + '"]');
+      if (addGroup) {
+        var amx = (srcPos.x + tgtPos.x) / 2;
+        var amy = (srcPos.y + tgtPos.y) / 2;
+        addGroup.setAttribute('transform', 'translate(' + amx + ',' + amy + ')');
+      }
     }
   }
+
+  // If edges were repaired, save the corrected data
+  if (edgesRepaired) {
+    immediateSave();
+  }
+}
+
+// ── Add Step Popover ─────────────────────────────────────────
+
+/** @type {HTMLElement|null} */
+var activeAddStepPopover = null;
+
+/** Dismiss and remove the active add-step popover, if any. */
+function dismissAddStepPopover() {
+  if (activeAddStepPopover) {
+    activeAddStepPopover.remove();
+    activeAddStepPopover = null;
+  }
+}
+
+/**
+ * Show a popover for describing a new step to add to the pipeline.
+ * Submits to POST /api/compositions/:id/add-node and updates the canvas on success.
+ * @param {SVGGElement} anchorEl - The "+" circle SVG group element used to position the popover.
+ * @param {string|null} afterNodeId - ID of the node to insert after, or null to append at end.
+ */
+function showAddStepPopover(anchorEl, afterNodeId) {
+  dismissAddStepPopover();
+
+  // Get screen position of the anchor (the "+" circle in the SVG)
+  var rect = anchorEl.getBoundingClientRect();
+  var pop = document.createElement('div');
+  pop.className = 'comp-add-step-popover';
+  pop.innerHTML =
+    '<input class="comp-add-step-input" id="comp-add-step-input" type="text" placeholder="What should this step do?" autocomplete="off" />' +
+    '<button class="comp-add-step-submit" id="comp-add-step-submit">Add</button>';
+
+  document.body.appendChild(pop);
+  activeAddStepPopover = pop;
+
+  // Position below the "+" circle
+  var popRect = pop.getBoundingClientRect();
+  pop.style.left = Math.max(8, rect.left + rect.width / 2 - popRect.width / 2) + 'px';
+  pop.style.top = (rect.bottom + 8) + 'px';
+
+  var input = pop.querySelector('#comp-add-step-input');
+  var submitBtn = pop.querySelector('#comp-add-step-submit');
+  input.focus();
+
+  function doSubmit() {
+    var description = input.value.trim();
+    if (!description) return;
+    input.disabled = true;
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Adding...';
+
+    fetch('/api/compositions/' + encodeURIComponent(compData.id) + '/add-node', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ description: description, afterNodeId: afterNodeId }),
+    })
+    .then(function(res) { return res.json(); })
+    .then(/** @param {AddNodeResponse & ApiErrorResponse} data */ function(data) {
+      dismissAddStepPopover();
+      if (data.error) {
+        if (typeof toast === 'function') toast(data.error, 'error');
+        return;
+      }
+      if (data.composition) {
+        pushUndoSnapshot();
+        compData.nodes = data.composition.nodes;
+        compData.edges = data.composition.edges;
+        compData.metadata = data.composition.metadata;
+        renderNodes();
+        renderEdges();
+        wireUpCanvas();
+        updateMinimap();
+
+        // Show validation results
+        if (data.validation && !data.validation.valid) {
+          var repairCount = data.validation.repairs ? data.validation.repairs.length : 0;
+          if (typeof toast === 'function') toast('Step added' + (repairCount > 0 ? ' (' + repairCount + ' auto-repaired)' : '') + '!', 'success');
+          if (typeof showValidationWarnings === 'function') showValidationWarnings(data.validation);
+        } else {
+          if (typeof toast === 'function') toast('Step added!', 'success');
+        }
+
+        // Select the new node
+        if (data.newNodeId) {
+          selectedNodes.clear();
+          selectedNodes.add(data.newNodeId);
+          selectedEdge = null;
+          updateNodeSelection();
+          showNodeProperties(data.newNodeId);
+        }
+      }
+    })
+    .catch(function(err) {
+      dismissAddStepPopover();
+      if (typeof toast === 'function') toast('Failed to add step: ' + err.message, 'error');
+    });
+  }
+
+  submitBtn.addEventListener('click', doSubmit);
+  input.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') doSubmit();
+    if (e.key === 'Escape') dismissAddStepPopover();
+  });
+
+  // Dismiss on click outside
+  setTimeout(function() {
+    document.addEventListener('mousedown', function handler(e) {
+      if (activeAddStepPopover && !activeAddStepPopover.contains(e.target)) {
+        dismissAddStepPopover();
+        document.removeEventListener('mousedown', handler);
+      }
+    });
+  }, 10);
 }
 
 // ── Toolbar ──────────────────────────────────────────────────
@@ -1625,6 +1948,7 @@ function wireUpToolbar() {
       'comp-add-node': function() { showAddNodeDropdown(); },
       'comp-add-gate': function() { addApprovalGateNode(); },
       'comp-add-script': function() { showAddScriptModal(); },
+      'comp-add-script-file': function() { addScriptFileNode(); },
       'comp-add-output': function() { addOutputNode(); },
       'comp-add-image-viewer': function() { addImageViewerNode(); },
       'comp-add-media': function() { addMediaNode(); },
@@ -1692,9 +2016,38 @@ function wireUpToolbar() {
   var genPipelineBtn = document.querySelector('#comp-generate-pipeline');
   if (genPipelineBtn) { genPipelineBtn.addEventListener('click', function() { showGeneratePipelineModal(); }); }
 
-  // Auto-layout button
+  // Auto-layout button — click runs current algorithm, arrow shows menu
   var layoutBtn = document.querySelector('#comp-auto-layout');
   if (layoutBtn) { layoutBtn.addEventListener('click', function() { autoLayoutNodes(); }); }
+  var layoutArrow = document.querySelector('#comp-layout-arrow');
+  var layoutMenu = document.querySelector('#comp-layout-menu');
+  if (layoutArrow && layoutMenu) {
+    layoutArrow.addEventListener('click', function(e) {
+      e.stopPropagation();
+      var isOpen = layoutMenu.style.display !== 'none';
+      layoutMenu.style.display = isOpen ? 'none' : '';
+      if (!isOpen) {
+        // Highlight current algorithm
+        layoutMenu.querySelectorAll('.comp-layout-option').forEach(function(opt) {
+          opt.style.background = opt.getAttribute('data-layout') === currentLayoutAlgorithm ? 'rgba(139,92,246,0.2)' : '';
+        });
+      }
+    });
+    layoutMenu.querySelectorAll('.comp-layout-option').forEach(function(opt) {
+      opt.addEventListener('mouseenter', function() { opt.style.background = 'rgba(139,92,246,0.3)'; });
+      opt.addEventListener('mouseleave', function() {
+        opt.style.background = opt.getAttribute('data-layout') === currentLayoutAlgorithm ? 'rgba(139,92,246,0.2)' : '';
+      });
+      opt.addEventListener('click', function(e) {
+        e.stopPropagation();
+        var algo = opt.getAttribute('data-layout');
+        layoutMenu.style.display = 'none';
+        autoLayoutNodes(algo);
+      });
+    });
+    // Close menu on outside click
+    document.addEventListener('click', function() { layoutMenu.style.display = 'none'; });
+  }
 
   // Snap-to-grid toggle
   var snapBtn = document.querySelector('#comp-snap-toggle');
@@ -1836,6 +2189,24 @@ async function deletePipeline() {
   }
 }
 
+async function migrateToV2() {
+  if (!compData) return;
+  if (!confirm('Migrate "' + compData.name + '" to v2 file-backed format?\n\nThis creates a new pipeline directory with .ts files for each script node. The original v1 pipeline is preserved.')) return;
+  try {
+    var resp = await fetch('/api/compositions/' + encodeURIComponent(compData.id) + '/migrate-to-v2', { method: 'POST' });
+    var result = await resp.json();
+    if (result.error) throw new Error(result.error);
+    toast('Migrated! ' + (result.migratedNodes || 0) + ' script nodes converted to .ts files. New pipeline: ' + result.id, 'success');
+    await fetchCompositions(true);
+    // Load the new v2 pipeline
+    if (result.id) {
+      selectComposition(result.id);
+    }
+  } catch (err) {
+    toast('Migration failed: ' + err.message, 'error');
+  }
+}
+
 function showMoreDropdown() {
   if (moreDropdownEl) { hideMoreDropdown(); return; }
 
@@ -1853,6 +2224,15 @@ function showMoreDropdown() {
     { label: 'Copy', icon: '&#x2398;', action: function() { duplicatePipeline(); } },
     { label: 'Delete', icon: '&#x1f5d1;', danger: true, action: function() { deletePipeline(); } },
   ];
+
+  // Add "Migrate to v2" option for v1 pipelines
+  if (compData && compData.version === '1.0') {
+    items.splice(items.length - 1, 0, {
+      label: 'Migrate to v2 (File-backed)',
+      icon: '&#x1f4c4;',
+      action: function() { migrateToV2(); },
+    });
+  }
 
   var menu = document.createElement('div');
   menu.className = 'comp-more-dropdown';
@@ -2615,6 +2995,41 @@ function addScriptNode(description, code, inputs, outputs, chatHistory, contextN
       chatHistory: chatHistory || [],
       contextNodeIds: Array.isArray(contextNodeIds) ? contextNodeIds.slice() : [],
       generationTranscript: Array.isArray(generationTranscript) ? generationTranscript.slice() : [],
+    },
+  };
+
+  compData.nodes.push(node);
+
+  // Select the new node to show properties panel
+  selectedNodes.clear();
+  selectedNodes.add(node.id);
+  selectedEdge = null; selectedEdges.clear();
+
+  renderNodes();
+  renderEdges();
+  wireUpCanvas();
+  updateNodeSelection();
+  updateDeleteButton();
+  updatePropertiesPanel();
+  immediateSave();
+  fetchCompositions();
+}
+
+function addScriptFileNode() {
+  if (!compData) return;
+  pushUndoSnapshot();
+
+  var vc = getViewportCenter();
+
+  var node = {
+    id: genId('scriptfile'),
+    workflowId: '__script_file__',
+    position: { x: vc.x, y: vc.y },
+    label: 'Script File',
+    scriptFile: {
+      file: '',
+      inputs: [],
+      outputs: [],
     },
   };
 
@@ -3951,6 +4366,20 @@ function startEdgeDrag(portEl, e) {
     };
 
     compData.edges.push(edge);
+
+    // v2: If both nodes are script file nodes, offer to auto-create import edge
+    var srcNode = compData.nodes.find(function(n) { return n.id === srcNodeId; });
+    var tgtNode = compData.nodes.find(function(n) { return n.id === tgtNodeId; });
+    if (srcNode && tgtNode &&
+        srcNode.workflowId === '__script_file__' && tgtNode.workflowId === '__script_file__' &&
+        srcNode.scriptFile && tgtNode.scriptFile) {
+      // Trigger server-side import auto-management
+      if (compData.id) {
+        fetch('/api/compositions/' + encodeURIComponent(compData.id) + '/sync', { method: 'POST' })
+          .catch(function() { /* best effort */ });
+      }
+    }
+
     renderNodes(); // Re-render to update port connected states
     renderEdges();
     wireUpCanvas();

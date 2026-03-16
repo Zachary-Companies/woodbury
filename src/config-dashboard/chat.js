@@ -7,6 +7,53 @@
 (function () {
   'use strict';
 
+  // ── API / Cross-Module Contracts ────────────────────────────
+  //    These typedefs mirror the backend TypeScript interfaces so
+  //    that every boundary has a documented data shape. If the
+  //    frontend were converted to TypeScript, these become imports.
+
+  /**
+   * A single failed node within a pipeline run.
+   * Produced by compositions-execution.js, consumed here.
+   * @typedef {Object} FailedNodeInfo
+   * @property {string} nodeId      - Composition node ID
+   * @property {string} nodeLabel   - Human-readable node label
+   * @property {string} error       - Raw error message
+   * @property {boolean} isScript   - Whether this is a script node
+   * @property {string} nodeType    - The node's workflowId (e.g. '__script__')
+   */
+
+  /**
+   * Failure payload passed from the execution tab to the chat tab
+   * via window.notifyChatOfPipelineFailure().
+   * @typedef {Object} PipelineFailure
+   * @property {string} compositionId
+   * @property {string} compositionName
+   * @property {FailedNodeInfo[]} failedNodes
+   * @property {number} timestamp   - Date.now() when the failure occurred
+   */
+
+  /**
+   * JSON returned by GET /api/chat/composition-context/:id.
+   * Used by renderSuggestedPrompts() to build context-aware chips.
+   * @typedef {Object} CompositionContextSummary
+   * @property {string} compositionId
+   * @property {string} name
+   * @property {string} description
+   * @property {number} nodeCount
+   * @property {Array<{id: string, label: string, type: string}>} nodes
+   * @property {'completed'|'failed'|null} lastRunStatus
+   * @property {{nodeId: string, nodeLabel: string, error: string}|null} lastRunError
+   * @property {string} projectNotes
+   */
+
+  /**
+   * JSON returned by POST /api/compositions/explain-error.
+   * @typedef {Object} ExplainErrorResponse
+   * @property {string} summary    - One-sentence plain-English explanation
+   * @property {string} suggestion - One-sentence suggested next step
+   */
+
   // ── State ──────────────────────────────────────────────────
   var chatHistory = [];           // { role: 'user'|'assistant', content: string }[]
   var activeCompositionId = null;  // pipeline currently shown in graph panel
@@ -15,6 +62,8 @@
   var chatInitialized = false;
   var preservedChatView = null;
   var preservedChatMainStyle = null;
+  /** @type {PipelineFailure|null} */
+  var pendingPipelineFailure = null; // stored when pipeline fails while chat tab is inactive
 
   // ── Markdown Rendering ────────────────────────────────────
   // Configure marked for safe, minimal rendering
@@ -123,8 +172,9 @@
     return 'New conversation';
   }
 
-  function saveSession() {
-    if (!currentSessionId || chatHistory.length === 0) return;
+  function saveSession(forceEmpty) {
+    if (!currentSessionId) return;
+    if (!forceEmpty && chatHistory.length === 0) return;
     var body = {
       title: deriveTitle(chatHistory),
       history: chatHistory,
@@ -206,6 +256,8 @@
     sessionCreatedAt = new Date().toISOString();
     chatInitialized = false;
     initChat();
+    // Save immediately so it appears in the session list
+    saveSession(true);
   }
 
   // ── Render Session Sidebar ──────────────────────────────────
@@ -338,11 +390,22 @@
     split.className = 'chat-split';
     split.innerHTML =
       '<div class="chat-panel">' +
-        '<div class="chat-panel-header">Woodbury Assistant</div>' +
+        '<div class="chat-panel-header">' +
+          '<span>Woodbury Assistant</span>' +
+          '<div class="chat-temp-control">' +
+            '<button class="chat-temp-btn" id="chat-temp-btn" title="Temperature">' +
+              '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+                '<path d="M14 14.76V3.5a2.5 2.5 0 0 0-5 0v11.26a4.5 4.5 0 1 0 5 0z"/>' +
+              '</svg>' +
+              '<span id="chat-temp-value">0.7</span>' +
+            '</button>' +
+          '</div>' +
+        '</div>' +
         '<div class="chat-messages" id="chat-messages">' +
-          '<div class="chat-welcome">' +
+          '<div class="chat-welcome" id="chat-welcome">' +
             '<div class="chat-welcome-title">Hi! I\'m Woodbury.</div>' +
-            '<div class="chat-welcome-hint">Tell me what you want to create, automate, or manage. I can build pipelines, generate content, and organize your assets.</div>' +
+            '<div class="chat-welcome-hint">Tell me what you want to create, automate, or manage.</div>' +
+            '<div class="chat-suggestion-chips" id="chat-suggestion-chips"></div>' +
           '</div>' +
         '</div>' +
         '<div class="chat-input-area">' +
@@ -350,6 +413,7 @@
           '<button class="chat-send-btn" id="chat-send-btn">Send</button>' +
         '</div>' +
       '</div>' +
+      '<div class="resize-handle" id="chat-resizer"><div class="resize-bar-inner"></div></div>' +
       '<div class="chat-workspace-panel">' +
         '<div class="chat-workspace-header">Agent Workspace</div>' +
         '<div class="chat-workspace-body">' +
@@ -403,6 +467,79 @@
       '</div>';
     main.appendChild(split);
 
+    // Wire up chat resize handle
+    if (typeof initResizeHandle === 'function') {
+      initResizeHandle({
+        storageKey: 'woodbury-resize-chat',
+        resizer: document.getElementById('chat-resizer'),
+        targetPanel: split.querySelector('.chat-panel'),
+        container: split,
+        defaultWidth: 400,
+        minWidth: 300,
+        maxWidth: function(cw) { return Math.round(cw * 0.6); },
+        direction: 'left'
+      });
+    }
+
+    // Wire up temperature control
+    (function () {
+      var tempBtn = document.getElementById('chat-temp-btn');
+      var tempValue = document.getElementById('chat-temp-value');
+      if (!tempBtn || !tempValue) return;
+
+      // Fetch current temperature on load
+      fetch('/api/mcp/chat-provider')
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          if (typeof data.temperature === 'number') {
+            tempValue.textContent = data.temperature.toFixed(1);
+          }
+        })
+        .catch(function () { /* silent */ });
+
+      tempBtn.addEventListener('click', function (e) {
+        e.stopPropagation();
+        var existing = document.getElementById('chat-temp-popover');
+        if (existing) { existing.remove(); return; }
+
+        var pop = document.createElement('div');
+        pop.id = 'chat-temp-popover';
+        pop.className = 'chat-temp-popover';
+        var currentTemp = parseFloat(tempValue.textContent) || 0.7;
+        pop.innerHTML =
+          '<div class="chat-temp-popover-label">Temperature</div>' +
+          '<input type="range" min="0" max="2" step="0.1" value="' + currentTemp + '" class="chat-temp-slider" id="chat-temp-slider">' +
+          '<div class="chat-temp-popover-value" id="chat-temp-slider-value">' + currentTemp.toFixed(1) + '</div>' +
+          '<div class="chat-temp-popover-hint">Lower = focused, Higher = creative</div>';
+        tempBtn.parentNode.appendChild(pop);
+
+        var slider = document.getElementById('chat-temp-slider');
+        var sliderVal = document.getElementById('chat-temp-slider-value');
+        slider.addEventListener('input', function () {
+          sliderVal.textContent = parseFloat(slider.value).toFixed(1);
+        });
+        slider.addEventListener('change', function () {
+          var newTemp = parseFloat(slider.value);
+          tempValue.textContent = newTemp.toFixed(1);
+          fetch('/api/mcp/chat-provider', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ temperature: newTemp })
+          });
+        });
+
+        // Close on outside click
+        setTimeout(function () {
+          document.addEventListener('click', function closePopover(ev) {
+            if (!pop.contains(ev.target) && ev.target !== tempBtn && !tempBtn.contains(ev.target)) {
+              pop.remove();
+              document.removeEventListener('click', closePopover);
+            }
+          });
+        }, 0);
+      });
+    })();
+
     // Wire up input
     var input = document.getElementById('chat-input');
     var sendBtn = document.getElementById('chat-send-btn');
@@ -442,6 +579,18 @@
     // Load session list for sidebar
     refreshSessionList();
     loadSkillPolicyUpdates();
+
+    // Show suggested prompts in welcome area
+    renderSuggestedPrompts();
+
+    // Check for pending pipeline failures
+    if (pendingPipelineFailure) {
+      var messagesEl = document.getElementById('chat-messages');
+      if (messagesEl) {
+        injectPipelineFailureCard(messagesEl, pendingPipelineFailure);
+        pendingPipelineFailure = null;
+      }
+    }
   }
 
   // ── Send Message ───────────────────────────────────────────
@@ -649,20 +798,32 @@
             if (isCompTool && data.success && data.result) {
               try {
                 var comp = JSON.parse(data.result);
-                if (comp && comp.id && comp.nodes) {
+                // Handle v2 file-backed pipeline results (format: "v2", manifest: {...})
+                var isV2 = comp && comp.format === 'v2' && comp.manifest;
+                var displayComp = isV2 ? comp.manifest : comp;
+                var cardId = isV2 ? (comp.pipelineId || comp.manifest.id) : comp.id;
+                var cardName = comp.name || (displayComp && displayComp.name) || cardId || '';
+                var cardDesc = comp.description || (displayComp && displayComp.description) || '';
+                var nodeCount = isV2 ? (typeof comp.nodes === 'number' ? comp.nodes : (displayComp.nodes ? displayComp.nodes.length : 0)) : (comp.nodes ? comp.nodes.length : 0);
+                var edgeCount = isV2 ? (typeof comp.edges === 'number' ? comp.edges : (displayComp.edges ? displayComp.edges.length : 0)) : (comp.edges ? comp.edges.length : 0);
+                var v2Badge = isV2 ? ' <span style="font-size:0.65rem;background:rgba(139,92,246,0.2);color:#c4b5fd;padding:1px 5px;border-radius:3px;margin-left:4px">v2 \u00B7 TypeScript</span>' : '';
+                var scriptFilesLine = isV2 && comp.scriptFiles ? '<div class="composition-card-meta" style="margin-top:2px;font-size:0.7rem;opacity:0.7">' + comp.scriptFiles.length + ' .ts files</div>' : '';
+
+                if (displayComp && cardId && (displayComp.nodes || nodeCount > 0)) {
                   var card = document.createElement('div');
                   card.className = 'composition-card';
                   card.innerHTML =
                     '<div class="composition-card-icon">\u26A1</div>' +
                     '<div class="composition-card-body">' +
-                      '<div class="composition-card-title">' + escapeHtml(comp.name || comp.id) + '</div>' +
-                      '<div class="composition-card-desc">' + escapeHtml(comp.description || '') + '</div>' +
+                      '<div class="composition-card-title">' + escapeHtml(cardName) + v2Badge + '</div>' +
+                      '<div class="composition-card-desc">' + escapeHtml(cardDesc) + '</div>' +
                       '<div class="composition-card-meta">' +
-                        (comp.nodes ? comp.nodes.length : 0) + ' nodes \u00B7 ' +
-                        (comp.edges ? comp.edges.length : 0) + ' connections' +
+                        nodeCount + ' nodes \u00B7 ' +
+                        edgeCount + ' connections' +
                       '</div>' +
+                      scriptFilesLine +
                     '</div>' +
-                    '<button class="composition-card-btn" data-comp-id="' + escapeHtml(comp.id) + '">View Pipeline \u2192</button>';
+                    '<button class="composition-card-btn" data-comp-id="' + escapeHtml(cardId) + '">View Pipeline \u2192</button>';
                   card.querySelector('.composition-card-btn').addEventListener('click', function () {
                     var compId = this.getAttribute('data-comp-id');
                     // Switch to the full Pipelines tab and open this composition
@@ -858,6 +1019,16 @@
     var input = document.getElementById('chat-input');
     if (input) input.focus();
 
+    // Show follow-up suggestion chips
+    var messages = document.getElementById('chat-messages');
+    if (messages) {
+      var followupContainer = document.createElement('div');
+      followupContainer.className = 'chat-suggestion-chips chat-followup-chips';
+      messages.appendChild(followupContainer);
+      renderSuggestedPrompts(followupContainer);
+      scrollToBottom();
+    }
+
     // Persist session after each exchange
     saveSession();
   }
@@ -936,6 +1107,84 @@
     eventEl.innerHTML = '<div class="tool-header"><span class="tool-name">' + escapeHtml(label) + '</span></div>';
     messagesDiv.insertBefore(eventEl, textEl);
     scrollToBottom();
+  }
+
+  // ── Suggested Prompts ─────────────────────────────────────
+
+  /**
+   * Render clickable chip buttons into a container element.
+   * @param {HTMLElement} container - The DOM element to render chips into.
+   * @param {string[]} chips - Array of prompt strings to display as clickable chips.
+   */
+  function renderChips(container, chips) {
+    container.innerHTML = '';
+    for (var i = 0; i < chips.length; i++) {
+      var btn = document.createElement('button');
+      btn.className = 'chat-suggestion-chip';
+      btn.textContent = chips[i];
+      btn.addEventListener('click', (function(text) {
+        return function() {
+          var inp = document.getElementById('chat-input');
+          if (inp) {
+            inp.value = text;
+            inp.focus();
+            sendMessage();
+          }
+        };
+      })(chips[i]));
+      container.appendChild(btn);
+    }
+  }
+
+  /**
+   * Render context-aware suggestion chips in the chat welcome area or a target element.
+   * Fetches the composition context summary to choose appropriate prompts.
+   * @param {HTMLElement} [targetEl] - Container element. Defaults to #chat-suggestion-chips.
+   */
+  function renderSuggestedPrompts(targetEl) {
+    if (!targetEl) targetEl = document.getElementById('chat-suggestion-chips');
+    if (!targetEl) return;
+
+    var chips;
+
+    if (!activeCompositionId) {
+      chips = [
+        'Create a content pipeline',
+        'Generate an image',
+        'Help me automate my posting',
+        'What can you do?'
+      ];
+      renderChips(targetEl, chips);
+      return;
+    }
+
+    // Fetch context for active composition
+    fetch('/api/chat/composition-context/' + encodeURIComponent(activeCompositionId))
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        if (data.lastRunStatus === 'failed' && data.lastRunError) {
+          var failedNode = data.lastRunError.nodeLabel || 'a step';
+          chips = [
+            'Fix the error in ' + failedNode,
+            'What went wrong?',
+            'Run it again',
+            'Show me the pipeline'
+          ];
+        } else {
+          var firstName = data.nodes && data.nodes[0] ? data.nodes[0].label : 'the first step';
+          chips = [
+            'Add a new step to this pipeline',
+            'Run this pipeline',
+            'What does this pipeline do?',
+            'Edit the ' + firstName + ' step'
+          ];
+        }
+        renderChips(targetEl, chips);
+      })
+      .catch(function() {
+        chips = ['Run this pipeline', 'What does this pipeline do?'];
+        renderChips(targetEl, chips);
+      });
   }
 
   function upsertTaskPanelTask(taskId, taskData) {
@@ -1478,6 +1727,104 @@
         chatInitialized = false;
         initChatLogs();
       });
+    }
+  };
+
+  // ── Pipeline Failure Notification ─────────────────────────
+
+  /**
+   * Inject a pipeline failure card into the chat messages area.
+   * Shows a plain-English summary for each failed node and a "Fix this in chat" button.
+   * @param {HTMLElement} messagesEl - The chat messages container (#chat-messages).
+   * @param {PipelineFailure} failure - The failure data from the execution tab.
+   */
+  function injectPipelineFailureCard(messagesEl, failure) {
+    var card = document.createElement('div');
+    card.className = 'chat-pipeline-failure';
+
+    var headerHtml = '<div class="chat-failure-header">' +
+      'Pipeline &ldquo;' + escapeHtml(failure.compositionName) + '&rdquo; ran into a problem' +
+    '</div>';
+    var nodesHtml = '';
+    for (var i = 0; i < failure.failedNodes.length; i++) {
+      var fn = failure.failedNodes[i];
+      nodesHtml += '<div class="chat-failure-node">' +
+        '<div class="chat-failure-node-name">' + escapeHtml(fn.nodeLabel) + '</div>' +
+        '<div class="chat-failure-node-error" id="chat-failure-explain-' + i + '">' +
+          '<span style="color:#64748b;font-size:0.68rem;font-style:italic;">Loading explanation...</span>' +
+        '</div>' +
+      '</div>';
+    }
+
+    card.innerHTML = headerHtml + nodesHtml +
+      '<button class="chat-failure-fix-btn" id="chat-failure-fix-btn">Fix this in chat</button>';
+
+    // Remove welcome message if present
+    var welcome = messagesEl.querySelector('.chat-welcome');
+    if (welcome) welcome.remove();
+
+    messagesEl.appendChild(card);
+    scrollToBottom();
+
+    // Fetch plain-English explanations for each failed node
+    failure.failedNodes.forEach(function(fn, idx) {
+      fetch('/api/compositions/explain-error', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ error: fn.error, nodeLabel: fn.nodeLabel, nodeType: fn.nodeType }),
+      })
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        var el = document.getElementById('chat-failure-explain-' + idx);
+        if (el && data.summary) {
+          el.textContent = data.summary;
+        } else if (el) {
+          el.textContent = fn.error.length > 120 ? fn.error.slice(0, 120) + '...' : fn.error;
+        }
+      })
+      .catch(function() {
+        var el = document.getElementById('chat-failure-explain-' + idx);
+        if (el) el.textContent = fn.error.length > 120 ? fn.error.slice(0, 120) + '...' : fn.error;
+      });
+    });
+
+    // Wire up "Fix this in chat" button
+    var fixBtn = card.querySelector('#chat-failure-fix-btn');
+    if (fixBtn) {
+      fixBtn.addEventListener('click', function() {
+        var firstFailed = failure.failedNodes[0];
+        var msg = 'My pipeline "' + failure.compositionName + '" failed at the "' + firstFailed.nodeLabel + '" step. ' +
+          'The error was: ' + firstFailed.error.slice(0, 500) + '. Can you fix it?';
+
+        // Ensure we're on the chat tab
+        if (typeof switchTab === 'function') {
+          switchTab('chat');
+        }
+
+        // Set active composition for context
+        activeCompositionId = failure.compositionId;
+
+        var input = document.getElementById('chat-input');
+        if (input) {
+          input.value = msg;
+          sendMessage();
+        }
+      });
+    }
+  }
+
+  /**
+   * Global handler called from compositions-execution.js when a pipeline run fails.
+   * If the chat tab is active, injects a failure card immediately.
+   * Otherwise, stores it for display when the chat tab is next opened.
+   * @param {PipelineFailure} failure
+   */
+  window.notifyChatOfPipelineFailure = function(failure) {
+    var messagesEl = document.getElementById('chat-messages');
+    if (messagesEl && document.querySelector('.chat-split')) {
+      injectPipelineFailureCard(messagesEl, failure);
+    } else {
+      pendingPipelineFailure = failure;
     }
   };
 

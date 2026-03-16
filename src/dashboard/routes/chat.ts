@@ -14,11 +14,35 @@
  */
 
 import type { DashboardContext, RouteHandler } from '../types.js';
+import type { CompositionDocument } from '../../workflow/types.js';
 import { sendJson, readBody } from '../utils.js';
 import { readFile, writeFile, readdir, unlink, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { debugLog } from '../../debug-log.js';
+import { discoverCompositions, readScriptFileCode } from '../../workflow/loader.js';
+import { readPipelineTodo } from '../pipeline-sync.js';
+import { resolveCompositionInterface } from '../composition-interface.js';
+import {
+  validateComposition,
+  getAvailableWorkflowIds,
+} from '../../loop/v3/closure-engine.js';
+
+// ────────────────────────────────────────────────────────────────
+//  API Contracts
+// ────────────────────────────────────────────────────────────────
+
+/** JSON shape returned by GET /api/chat/composition-context/:id */
+interface CompositionContextSummary {
+  compositionId: string;
+  name: string;
+  description: string;
+  nodeCount: number;
+  nodes: Array<{ id: string; label: string; type: string }>;
+  lastRunStatus: 'completed' | 'failed' | null;
+  lastRunError: { nodeId: string; nodeLabel: string; error: string } | null;
+  projectNotes: string;
+}
 
 // ────────────────────────────────────────────────────────────────
 //  Constants
@@ -200,15 +224,17 @@ async function ensureChatAgent(ctx: DashboardContext, sessionId: string): Promis
   const { McpClientManager } = await import('../../mcp-client-manager.js');
   const { loadMcpConfig } = await import('../../mcp-config.js');
 
-  // Load saved provider/model preference
+  // Load saved provider/model/temperature preference
   let savedProvider: string | undefined;
   let savedModel: string | undefined;
+  let savedTemperature: number | undefined;
   try {
     const chatConfigPath = join(homedir(), '.woodbury', 'chat-config.json');
     const raw = await readFile(chatConfigPath, 'utf-8');
     const chatConfig = JSON.parse(raw);
     if (chatConfig.provider) savedProvider = chatConfig.provider;
     if (chatConfig.model) savedModel = chatConfig.model;
+    if (typeof chatConfig.temperature === 'number') savedTemperature = chatConfig.temperature;
   } catch { /* no saved config, auto-detect */ }
 
   // Build config from available API keys + saved preference
@@ -221,6 +247,7 @@ async function ensureChatAgent(ctx: DashboardContext, sessionId: string): Promis
     },
     provider: savedProvider as any,
     model: savedModel,
+    temperature: savedTemperature,
     stream: true,
     verbose: ctx.verbose,
     timeout: CHAT_AGENT_TIMEOUT_MS,
@@ -247,16 +274,242 @@ async function ensureChatAgent(ctx: DashboardContext, sessionId: string): Promis
 }
 
 /**
+ * Build a composition context section for the system prompt.
+ * Loads the active pipeline's docs, interface, nodes, and last run status.
+ */
+async function buildCompositionContext(ctx: DashboardContext, compositionId: string): Promise<string> {
+  try {
+    const discovered = await discoverCompositions(ctx.workDir);
+    const entry = discovered.find(d => d.composition.id === compositionId);
+    if (!entry) return `\n\nThe user is currently viewing pipeline "${compositionId}" in the graph panel.`;
+    const comp = entry.composition;
+
+    const isV2 = entry.isV2Pipeline === true;
+    const pipelineDir = entry.pipelineDir || '';
+
+    const sections: string[] = [];
+    sections.push(`\n\n## Active Pipeline: "${comp.name}"`);
+    if (isV2) sections.push('**Format: v2 file-backed pipeline** — each script node is a real TypeScript file on disk.');
+    if (isV2 && pipelineDir) sections.push(`Pipeline directory: ${pipelineDir}`);
+    if (comp.description) sections.push(comp.description);
+
+    // Pipeline documentation summary
+    const docs = comp.metadata?.generatedPipelineDocs;
+    if (docs && docs.length > 0) {
+      const latestDoc = docs[docs.length - 1];
+      const summary = latestDoc.summary || latestDoc.markdown?.slice(0, 500) || '';
+      if (summary) sections.push(`\n### What it does\n${summary.slice(0, 500)}`);
+    }
+
+    // Interface contracts
+    try {
+      const iface = await resolveCompositionInterface(ctx.workDir, comp);
+      if (iface.inputs.length > 0) {
+        sections.push('\n### Inputs');
+        for (const inp of iface.inputs.slice(0, 10)) {
+          sections.push(`- ${inp.label || inp.name} (${inp.type}): ${inp.description || 'no description'}`);
+        }
+      }
+      if (iface.outputs.length > 0) {
+        sections.push('\n### Outputs');
+        for (const out of iface.outputs.slice(0, 10)) {
+          sections.push(`- ${out.name} (${(out as any).type || 'any'}): ${(out as any).description || ''}`);
+        }
+      }
+    } catch { /* interface resolution is best-effort */ }
+
+    // Node list
+    if (comp.nodes.length > 0) {
+      sections.push(`\n### Nodes (${comp.nodes.length} steps)`);
+      for (let i = 0; i < comp.nodes.length && i < 15; i++) {
+        const n = comp.nodes[i] as any;
+        const typeLabel = n.workflowId === '__script_file__' ? 'Script File' :
+          n.workflowId === '__script__' ? 'Script' :
+          n.workflowId === '__text__' ? 'Text' :
+          n.workflowId === '__output__' ? 'Output' :
+          n.workflowId === '__branch__' ? 'Branch' :
+          n.workflowId === '__for_each__' ? 'Loop' :
+          n.workflowId.replace(/^__/, '').replace(/__$/, '');
+        const desc = n.scriptFile?.description ? ` — ${n.scriptFile.description.slice(0, 80)}` :
+          n.script?.description ? ` — ${n.script.description.slice(0, 80)}` : '';
+        const fileInfo = n.scriptFile?.file ? ` [${n.scriptFile.file}]` : '';
+        sections.push(`${i + 1}. ${n.label || n.id} (${typeLabel})${fileInfo}${desc}`);
+      }
+    }
+
+    // v2: Include file contents for script file nodes (so the agent can see what to edit)
+    if (isV2 && pipelineDir) {
+      const scriptFileNodes = comp.nodes.filter((n: any) => n.workflowId === '__script_file__' && n.scriptFile?.file);
+      if (scriptFileNodes.length > 0) {
+        sections.push('\n### Script File Contents');
+        for (const n of scriptFileNodes.slice(0, 10) as any[]) {
+          try {
+            const code = await readScriptFileCode(pipelineDir, n.scriptFile);
+            const truncated = code.length > 1500 ? code.slice(0, 1500) + '\n// ... truncated' : code;
+            sections.push(`\n#### ${n.label || n.id} — \`${n.scriptFile.file}\`\n\`\`\`typescript\n${truncated}\n\`\`\``);
+          } catch {
+            sections.push(`\n#### ${n.label || n.id} — \`${n.scriptFile.file}\` (file not found)`);
+          }
+        }
+      }
+    }
+
+    // v2: Include TODO.json so the agent knows what tasks remain
+    if (isV2 && pipelineDir) {
+      const todo = await readPipelineTodo(pipelineDir);
+      if (todo && todo.items.length > 0) {
+        sections.push('\n### TODO.json — Task Tracker');
+        sections.push('Read and update this file to track your progress. Path: `' + pipelineDir + '/TODO.json`');
+        const pending = todo.items.filter(i => i.status === 'pending' || i.status === 'in-progress');
+        const failed = todo.items.filter(i => i.status === 'failed');
+        const done = todo.items.filter(i => i.status === 'done');
+        if (failed.length > 0) {
+          sections.push(`\n**Failed (${failed.length}):**`);
+          for (const item of failed) {
+            sections.push(`- ❌ ${item.task}${item.error ? ` — ${item.error}` : ''}${item.node ? ` (${item.node})` : ''}`);
+          }
+        }
+        if (pending.length > 0) {
+          sections.push(`\n**Pending (${pending.length}):**`);
+          for (const item of pending) {
+            const prefix = item.status === 'in-progress' ? '🔄' : '☐';
+            sections.push(`- ${prefix} ${item.task}${item.node ? ` (${item.node})` : ''}${item.blockedBy?.length ? ` [blocked by: ${item.blockedBy.join(', ')}]` : ''}`);
+          }
+        }
+        if (done.length > 0) {
+          sections.push(`\n**Done (${done.length}):** ${done.map(i => i.task).join(', ')}`);
+        }
+        sections.push('\nWhen you start a task, update its status in TODO.json. Add new items as you discover work.');
+      }
+    }
+
+    // Last run status
+    const run = ctx.activeCompRun;
+    if (run && run.compositionId === compositionId) {
+      if (run.done) {
+        if (run.success) {
+          sections.push('\n### Last Run\nStatus: Completed successfully');
+        } else {
+          sections.push('\n### Last Run\nStatus: Failed');
+          if (run.nodeStates) {
+            for (const [nid, ns] of Object.entries(run.nodeStates)) {
+              const nsAny = ns as any;
+              if (nsAny.status === 'failed' && nsAny.error) {
+                sections.push(`Failed at "${nsAny.workflowName || nid}": ${String(nsAny.error).slice(0, 200)}`);
+              }
+            }
+          }
+        }
+      } else {
+        sections.push('\n### Current Run\nStatus: Running');
+      }
+    }
+
+    // Project notes
+    if (comp.metadata?.projectNotes) {
+      sections.push(`\n### Project Notes\n${comp.metadata.projectNotes.slice(0, 600)}`);
+    }
+
+    // Pipeline health check — run lightweight validation
+    try {
+      const knownIds = getAvailableWorkflowIds(ctx.workDir);
+      const issues = validateComposition(comp, knownIds);
+      if (issues.length > 0) {
+        sections.push('\n### ⚠️ Current Issues');
+        for (const issue of issues.slice(0, 10)) {
+          sections.push(`- ${issue}`);
+        }
+        sections.push('You can fix these by regenerating the affected nodes or rewiring edges.');
+      }
+    } catch { /* validation is best-effort */ }
+
+    sections.push('\n### What you can do');
+    sections.push('- Add new steps to this pipeline');
+    sections.push('- Fix failing nodes');
+    sections.push('- Edit existing nodes by referencing their name');
+    sections.push('- Run the pipeline');
+    if (isV2 && pipelineDir) {
+      sections.push(`- Edit TypeScript files directly in ${pipelineDir}/`);
+      sections.push('- Use file_read and file_write tools to modify .ts files in the pipeline directory');
+      sections.push('- After editing files, sync the graph: POST /api/compositions/:id/sync');
+      sections.push('Each __script_file__ node maps to a .ts file. Edit the file to change the node behavior.');
+      sections.push('');
+      sections.push('### Testing (REQUIRED for v2 pipelines)');
+      sections.push('- Every node file (e.g. `fetch-data.ts`) must have a test file (`fetch-data.test.ts`)');
+      sections.push('- Tests use vitest: `import { describe, it, expect } from "vitest"`');
+      sections.push('- Use `createMockContext()` from `./_test-helpers.ts` for mock context');
+      sections.push(`- Run tests: \`cd ${pipelineDir} && npx vitest run\``);
+      sections.push('- When you write or edit code, ALWAYS write/update the test, then run it to verify');
+      sections.push('- If tests fail, fix the code and re-run until green');
+    }
+    sections.push('When they reference "this pipeline" or ask to modify it, they mean this one.');
+
+    return sections.join('\n');
+  } catch (err) {
+    debugLog.warn('chat', 'Failed to build composition context', { compositionId, error: String(err) });
+    return `\n\nThe user is currently viewing pipeline "${compositionId}" in the graph panel.`;
+  }
+}
+
+/**
+ * Build a JSON summary of a composition's context (for the frontend suggested prompts).
+ */
+async function getCompositionContextSummary(ctx: DashboardContext, compositionId: string): Promise<CompositionContextSummary | null> {
+  const discovered = await discoverCompositions(ctx.workDir);
+  const entry = discovered.find(d => d.composition.id === compositionId);
+  if (!entry) return null;
+  const comp = entry.composition;
+
+  const nodes = comp.nodes.map(n => ({
+    id: n.id,
+    label: n.label || n.id,
+    type: n.workflowId,
+  }));
+
+  let lastRunStatus: CompositionContextSummary['lastRunStatus'] = null;
+  let lastRunError: CompositionContextSummary['lastRunError'] = null;
+
+  const run = ctx.activeCompRun;
+  if (run && run.compositionId === compositionId && run.done) {
+    lastRunStatus = run.success ? 'completed' : 'failed';
+    if (!run.success && run.nodeStates) {
+      for (const [nid, ns] of Object.entries(run.nodeStates)) {
+        const nsAny = ns as any;
+        if (nsAny.status === 'failed' && nsAny.error) {
+          lastRunError = {
+            nodeId: nid,
+            nodeLabel: nsAny.workflowName || nid,
+            error: String(nsAny.error).slice(0, 200),
+          };
+          break;
+        }
+      }
+    }
+  }
+
+  return {
+    compositionId: comp.id,
+    name: comp.name,
+    description: comp.description || '',
+    nodeCount: comp.nodes.length,
+    nodes,
+    lastRunStatus,
+    lastRunError,
+    projectNotes: comp.metadata?.projectNotes || '',
+  };
+}
+
+/**
  * Build a chat-oriented system prompt (simplified for non-technical users).
  */
-function buildChatPrompt(ctx: DashboardContext, activeCompositionId?: string): string {
+async function buildChatPrompt(ctx: DashboardContext, activeCompositionId?: string): Promise<string> {
   const extensionPrompts = ctx.extensionManager?.getAllPromptSections() || [];
   const extSection = extensionPrompts.length > 0
     ? '\n\n## Extension Instructions\n\n' + extensionPrompts.join('\n\n')
     : '';
 
   const activeCtx = activeCompositionId
-    ? `\n\nThe user is currently viewing pipeline "${activeCompositionId}" in the graph panel. When they reference "this pipeline" or ask to modify it, they mean this one.`
+    ? await buildCompositionContext(ctx, activeCompositionId)
     : '';
 
   return `You are Woodbury, a friendly AI assistant that helps content creators automate their work.
@@ -272,6 +525,16 @@ function buildChatPrompt(ctx: DashboardContext, activeCompositionId?: string): s
 - When the user references something ambiguous ("my character", "that video"), look it up first. If multiple matches exist, ask which one they mean.
 - When building pipelines, explain each step in simple terms as you go
 - After creating content, offer to save it as a reusable asset
+
+## Task Tracking with TODO.json (MANDATORY for pipeline work)
+Every v2 pipeline has a \`TODO.json\` in its directory. When working on a pipeline:
+1. Read TODO.json first to see what needs doing
+2. Update item status as you work: "pending" → "in-progress" → "done"
+3. Add new items when you discover more work
+4. If something fails, set status to "failed" with an error message
+5. For code changes: always add "Write tests" and "Run tests" items
+6. Do NOT declare success until all items are done
+7. Use file_write to update TODO.json after each step
 - Show what you're doing — narrate your actions briefly
 
 ## Clarification
@@ -428,6 +691,23 @@ export const handleChatRoutes: RouteHandler = async (req, res, pathname, url, ct
     return true;
   }
 
+  // GET /api/chat/composition-context/:id — JSON summary for frontend suggested prompts
+  const compCtxMatch = pathname.match(/^\/api\/chat\/composition-context\/([^/]+)$/);
+  if (req.method === 'GET' && compCtxMatch) {
+    try {
+      const compositionId = decodeURIComponent(compCtxMatch[1]);
+      const summary = await getCompositionContextSummary(ctx, compositionId);
+      if (!summary) {
+        sendJson(res, 404, { error: 'Composition not found' });
+      } else {
+        sendJson(res, 200, summary);
+      }
+    } catch (err) {
+      sendJson(res, 500, { error: String(err) });
+    }
+    return true;
+  }
+
   // ── Chat Agent SSE Endpoint ──────────────────────────────
   if (req.method === 'POST' && pathname === '/api/chat') {
     if (ctx.chatAgentBusy) {
@@ -479,11 +759,23 @@ export const handleChatRoutes: RouteHandler = async (req, res, pathname, url, ct
       const agent = await ensureChatAgent(ctx, sessionId);
       ctx.chatAgent = agent;
 
+      // Build composition context for the active pipeline
+      let compositionContext = '';
+      if (activeCompositionId) {
+        try {
+          compositionContext = await buildCompositionContext(ctx, activeCompositionId);
+        } catch (err) {
+          debugLog.warn('chat', 'Failed to build composition context', { error: String(err) });
+        }
+      }
+
       const prompt = buildCompressedPrompt({
         sessionSummary: rollingSummary,
         summaryTurnCount,
         recentTurns: compressedHistory.recentTurns,
-        message,
+        message: compositionContext
+          ? `<pipeline_context>${compositionContext}</pipeline_context>\n\n${message}`
+          : message,
       });
 
       // Set up SSE response
@@ -576,7 +868,8 @@ export const handleChatRoutes: RouteHandler = async (req, res, pathname, url, ct
         if (success && isCompositionTool) {
           try {
             const parsed = typeof result === 'string' ? JSON.parse(result) : result;
-            const compId = parsed?.id || parsed?.composition?.id || activeCompositionId;
+            // Handle v2 pipeline results (format: "v2", pipelineId, manifest)
+            const compId = parsed?.pipelineId || parsed?.manifest?.id || parsed?.id || parsed?.composition?.id || activeCompositionId;
             if (compId) {
               activeCompositionId = compId;
               writeEvent('composition_updated', { compositionId: compId });
