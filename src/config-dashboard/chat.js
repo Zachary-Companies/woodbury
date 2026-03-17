@@ -622,6 +622,9 @@
 
     var accumulatedText = '';
     var toolPills = [];
+    // Wrap textEl in an object so handleSSEEvent can update the reference
+    // when creating new text segments for interleaving
+    var textRef = { current: textEl };
 
     abortController = new AbortController();
 
@@ -668,7 +671,9 @@
               var dataStr = line.slice(6);
               try {
                 var data = JSON.parse(dataStr);
-                handleSSEEvent(eventType || 'message', data, textEl, toolPills, function (t) {
+                // Follow the latest text segment for interleaved tool/text
+                while (textRef.current._nextSegment) textRef.current = textRef.current._nextSegment;
+                handleSSEEvent(eventType || 'message', data, textRef.current, toolPills, function (t) {
                   accumulatedText = t;
                 });
               } catch (e) {
@@ -721,6 +726,10 @@
   }
 
   function handleSSEEvent(type, data, textEl, toolPills, setAccumulated) {
+    // textEl is the *current* text segment. When tools arrive between text,
+    // we freeze the current segment and create a new one so tools interleave.
+    var parentBubble = textEl.parentElement;
+
     switch (type) {
       case 'token':
         // Remove typing indicator on first token
@@ -728,17 +737,30 @@
         if (typing) {
           textEl.innerHTML = '';
         }
-        // Accumulate raw text, display cleaned version
+        // Accumulate raw text on the CURRENT segment
         var currentRaw = textEl._rawText || '';
         currentRaw += data.token;
         textEl._rawText = currentRaw;
         var cleaned = stripAgentXml(currentRaw);
         renderMarkdown(textEl, cleaned);
-        setAccumulated(cleaned);
+        // Update the full accumulated text for history (all segments combined)
+        var allSegments = parentBubble.querySelectorAll('.chat-msg-text');
+        var fullText = '';
+        for (var si = 0; si < allSegments.length; si++) {
+          var segRaw = allSegments[si]._rawText || allSegments[si].textContent || '';
+          if (segRaw.trim()) fullText += (fullText ? '\n\n' : '') + stripAgentXml(segRaw);
+        }
+        setAccumulated(fullText);
         scrollToBottom();
         break;
 
       case 'tool_start':
+        // Freeze the current text segment if it has content
+        var hasContent = (textEl._rawText || '').trim().length > 0;
+        if (hasContent) {
+          textEl._frozen = true;
+        }
+
         var pill = document.createElement('div');
         pill.className = 'chat-tool-pill active';
         pill.dataset.toolName = data.name;
@@ -772,10 +794,19 @@
           pill.classList.toggle('expanded');
           scrollToBottom();
         });
-        // Insert pill before the text content
-        var messagesDiv = textEl.parentElement;
-        messagesDiv.insertBefore(pill, textEl);
+        // Append pill after the current text segment (interleaved)
+        parentBubble.appendChild(pill);
         toolPills.push(pill);
+
+        // Create a new text segment for tokens that come after this tool
+        var newTextEl = document.createElement('div');
+        newTextEl.className = 'chat-msg-text';
+        newTextEl._rawText = '';
+        parentBubble.appendChild(newTextEl);
+        // Update the outer reference so subsequent tokens go to the new segment
+        // We do this by mutating a shared object
+        textEl._nextSegment = newTextEl;
+
         scrollToBottom();
         break;
 
@@ -988,16 +1019,26 @@
         break;
 
       case 'done':
-        // Final clean pass — strip any remaining XML, render final markdown
-        if (data.content) {
-          var finalClean = stripAgentXml(data.content);
-          renderMarkdown(textEl, finalClean);
-          setAccumulated(finalClean);
-        } else if (textEl._rawText) {
-          var finalClean2 = stripAgentXml(textEl._rawText);
-          renderMarkdown(textEl, finalClean2);
-          setAccumulated(finalClean2);
+        // Combine all text segments for the final accumulated text
+        var allSegs = parentBubble.querySelectorAll('.chat-msg-text');
+        var combinedRaw = '';
+        for (var di = 0; di < allSegs.length; di++) {
+          var segRaw = allSegs[di]._rawText || '';
+          if (segRaw.trim()) combinedRaw += (combinedRaw ? '\n\n' : '') + segRaw;
         }
+        var finalSource = combinedRaw.trim() ? combinedRaw : (data.content || '');
+        var finalClean = stripAgentXml(finalSource);
+        // Re-render each segment's markdown cleanly
+        for (var di2 = 0; di2 < allSegs.length; di2++) {
+          var segText = stripAgentXml(allSegs[di2]._rawText || '');
+          if (segText.trim()) {
+            renderMarkdown(allSegs[di2], segText);
+          } else if (!allSegs[di2]._rawText && allSegs[di2].childNodes.length === 0) {
+            // Remove empty trailing segments
+            allSegs[di2].remove();
+          }
+        }
+        setAccumulated(finalClean);
         break;
 
       case 'error':

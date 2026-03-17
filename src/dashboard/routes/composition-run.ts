@@ -43,6 +43,12 @@ import {
   validateComposition,
   getAvailableWorkflowIds,
 } from '../../loop/v3/closure-engine.js';
+import {
+  topoSort as _topoSort,
+  gatherInputVariables as _gatherInputVariables,
+  getDownstreamNodes as _getDownstreamNodes,
+} from '../graph-utils.js';
+import { persistAppStateFromRun } from './pipeline-app.js';
 
 // ────────────────────────────────────────────────────────────────
 //  Constants
@@ -180,62 +186,14 @@ async function saveIdempotencyCache(
 //  Composition execution helpers
 // ────────────────────────────────────────────────────────────────
 
-function topoSort(
-  nodes: Array<{ id: string }>,
-  edges: Array<{ sourceNodeId: string; targetNodeId: string }>
-): string[] {
-  const adj = new Map<string, string[]>();
-  const inDeg = new Map<string, number>();
-  for (const n of nodes) { adj.set(n.id, []); inDeg.set(n.id, 0); }
-  const nodeIds = new Set(nodes.map((node) => node.id));
-  const invalidEdges = edges.filter((edge) => !nodeIds.has(edge.sourceNodeId) || !nodeIds.has(edge.targetNodeId));
-  if (invalidEdges.length > 0) {
-    const sample = invalidEdges.slice(0, 3)
-      .map((edge) => `${edge.sourceNodeId || '?'} -> ${edge.targetNodeId || '?'}`)
-      .join(', ');
-    throw new Error(`These workflows have invalid connections to missing steps. Check your connections: ${sample}`);
-  }
-  for (const e of edges) {
-    adj.get(e.sourceNodeId)?.push(e.targetNodeId);
-    inDeg.set(e.targetNodeId, (inDeg.get(e.targetNodeId) || 0) + 1);
-  }
-  const queue: string[] = [];
-  for (const [id, deg] of inDeg) { if (deg === 0) queue.push(id); }
-  const result: string[] = [];
-  while (queue.length > 0) {
-    const nodeId = queue.shift()!;
-    result.push(nodeId);
-    for (const neighbor of (adj.get(nodeId) || [])) {
-      const newDeg = (inDeg.get(neighbor) || 1) - 1;
-      inDeg.set(neighbor, newDeg);
-      if (newDeg === 0) queue.push(neighbor);
-    }
-  }
-  if (result.length !== nodes.length) {
-    throw new Error('These workflows form a loop and can\'t run in order. Check your connections.');
-  }
-  return result;
-}
+// Delegate to shared graph-utils (local aliases preserve existing call sites)
+const topoSort = _topoSort;
+const gatherInputVariables = _gatherInputVariables;
+const getDownstreamNodes = _getDownstreamNodes;
 
 export const __testOnly = {
   topoSort,
 };
-
-function gatherInputVariables(
-  nodeId: string,
-  edges: Array<{ sourceNodeId: string; sourcePort: string; targetNodeId: string; targetPort: string }>,
-  nodeOutputs: Record<string, Record<string, unknown>>
-): Record<string, unknown> {
-  const inputs: Record<string, unknown> = {};
-  for (const edge of edges) {
-    if (edge.targetNodeId !== nodeId) continue;
-    const upstreamOutputs = nodeOutputs[edge.sourceNodeId];
-    if (upstreamOutputs && edge.sourcePort in upstreamOutputs) {
-      inputs[edge.targetPort] = upstreamOutputs[edge.sourcePort];
-    }
-  }
-  return inputs;
-}
 
 function getInputValueByPortName(
   inputs: Record<string, unknown>,
@@ -253,23 +211,7 @@ function getInputValueByPortName(
   return undefined;
 }
 
-function getDownstreamNodes(
-  nodeId: string,
-  edges: Array<{ sourceNodeId: string; targetNodeId: string }>
-): Set<string> {
-  const downstream = new Set<string>();
-  const queue = [nodeId];
-  while (queue.length > 0) {
-    const current = queue.shift()!;
-    for (const e of edges) {
-      if (e.sourceNodeId === current && !downstream.has(e.targetNodeId)) {
-        downstream.add(e.targetNodeId);
-        queue.push(e.targetNodeId);
-      }
-    }
-  }
-  return downstream;
-}
+// getDownstreamNodes is now imported from graph-utils via the alias above
 
 /**
  * Classify whether an error is likely a code bug (fixable by LLM) vs external/infrastructure.
@@ -1433,7 +1375,7 @@ function executeGetVariableNode(
 // ────────────────────────────────────────────────────────────────
 
 const SPECIAL_NODE_IDS = new Set([
-  '__approval_gate__', '__script__', '__output__', '__image_viewer__',
+  '__approval_gate__', '__script__', '__script_file__', '__output__', '__image_viewer__',
   '__media__', '__branch__', '__delay__', '__gate__', '__for_each__',
   '__switch__', '__asset__', '__text__', '__file_op__', '__json_keys__',
   '__tool__', '__file_write__', '__file_read__', '__junction__',
@@ -1458,6 +1400,8 @@ function initNodeStates(
       nodeStates[node.id] = { status: 'pending', workflowId: '__approval_gate__', workflowName: node.label || 'Approval Gate', stepsTotal: 1, stepsCompleted: 0, currentStep: '' };
     } else if (node.workflowId === '__script__') {
       nodeStates[node.id] = { status: 'pending', workflowId: '__script__', workflowName: node.label || 'Script', stepsTotal: 1, stepsCompleted: 0, currentStep: '', logs: [] as string[] };
+    } else if (node.workflowId === '__script_file__') {
+      nodeStates[node.id] = { status: 'pending', workflowId: '__script_file__', workflowName: node.label || 'Script File', stepsTotal: 1, stepsCompleted: 0, currentStep: '', logs: [] as string[] };
     } else if (node.workflowId === '__output__') {
       nodeStates[node.id] = { status: 'pending', workflowId: '__output__', workflowName: node.label || 'Pipeline Output', stepsTotal: 1, stepsCompleted: 0, currentStep: '' };
     } else if (node.workflowId === '__image_viewer__') {
@@ -1592,6 +1536,74 @@ async function executeForEachBodyNode(
     bodyNs.stepsCompleted = 1;
     bodyNs.outputVariables = outputs;
     nodeOutputs[bodyNodeId] = { ...outputs };
+
+  } else if (bodyNode.workflowId === '__script_file__' && (bodyNode as any).scriptFile) {
+    // v2 file-backed script node in ForEach body
+    const scriptFileConfig = (bodyNode as any).scriptFile as { file: string; description: string; inputs: any[]; outputs: any[] };
+    const pipelineDir = (comp as any).pipelineDir;
+
+    if (!pipelineDir) {
+      bodyNs.status = 'failed';
+      bodyNs.error = 'Script file node requires a v2 pipeline directory (pipelineDir not set)';
+      nodeOutputs[bodyNodeId] = {};
+      return;
+    }
+
+    bodyNs.currentStep = `Running ${scriptFileConfig.file} (iter ${iterIndex + 1})...`;
+
+    // Default missing array/object inputs based on port declarations
+    if (Array.isArray(scriptFileConfig.inputs)) {
+      for (const port of scriptFileConfig.inputs) {
+        if (bodyMergedInputs[port.name] === undefined || bodyMergedInputs[port.name] === null) {
+          const pType = String(port.type || '').toLowerCase();
+          if (pType.endsWith('[]') || pType === 'array') {
+            bodyMergedInputs[port.name] = [];
+          } else if (pType === 'object') {
+            bodyMergedInputs[port.name] = {};
+          } else if (pType === 'number') {
+            bodyMergedInputs[port.name] = 0;
+          } else if (pType === 'boolean') {
+            bodyMergedInputs[port.name] = false;
+          } else if (pType === 'string') {
+            bodyMergedInputs[port.name] = '';
+          }
+        }
+      }
+    }
+
+    bodyNs.inputVariables = { ...bodyMergedInputs };
+
+    try {
+      const { scriptRunPrompt, scriptModel, scriptTools } = await buildScriptContext(ctx);
+      const scriptLogs: string[] = [];
+      const context = makeScriptExecutionContext(scriptRunPrompt, scriptModel, scriptTools, scriptLogs, {
+        setProgress: (completed: number, total?: number, label?: string) => {
+          bodyNs.stepsCompleted = completed;
+          if (total != null) bodyNs.stepsTotal = total;
+          if (label) bodyNs.currentStep = `${label} (iter ${iterIndex + 1})`;
+        },
+      });
+      const result = await executeScriptFile(pipelineDir, scriptFileConfig.file, bodyMergedInputs, context);
+
+      bodyNs.status = 'completed';
+      bodyNs.stepsTotal = 1;
+      bodyNs.stepsCompleted = 1;
+      bodyNs.logs = scriptLogs;
+      bodyNs.outputVariables = result || {};
+      nodeOutputs[bodyNodeId] = result || {};
+
+      debugLog.info('comp-run', `ForEach body script file "${bodyNodeId}" (${scriptFileConfig.file}) completed (iter ${iterIndex + 1})`, {
+        outputKeys: Object.keys(result || {}),
+      });
+    } catch (scriptErr: any) {
+      bodyNs.status = 'failed';
+      bodyNs.error = scriptErr?.message || String(scriptErr);
+      bodyNs.logs = Array.isArray(scriptErr?.logs) ? scriptErr.logs : [];
+      nodeOutputs[bodyNodeId] = {};
+      debugLog.error('comp-run', `ForEach body script file "${bodyNodeId}" (${scriptFileConfig.file}) failed (iter ${iterIndex + 1})`, {
+        error: bodyNs.error,
+      });
+    }
 
   } else if (bodyNode.workflowId === '__branch__' && bodyNode.branchNode) {
     let condVal: unknown = bodyEdgeInputs['condition'];
@@ -2090,6 +2102,17 @@ export const handleCompositionRunRoutes: RouteHandler = async (req, res, pathnam
           outputFiles: allOutputFiles.length > 0 ? allOutputFiles : undefined,
           pipelineOutputs: r.pipelineOutputs,
         });
+
+        // Auto-save all node outputs as app state (per-node project files)
+        // This runs after every pipeline run so outputs are always persisted
+        // and available for editing in app mode.
+        persistAppStateFromRun(
+          r.compositionId,
+          r.compositionName,
+          runId,
+          nodeOutputs,
+          order,
+        ).catch(() => { /* best-effort — don't fail the run */ });
       }
 
       // Execute asynchronously
@@ -2213,6 +2236,27 @@ export const handleCompositionRunRoutes: RouteHandler = async (req, res, pathnam
 
               const edgeInputs = gatherInputVariables(nodeId, comp.edges, nodeOutputs);
               const mergedInputs: Record<string, unknown> = { ...initialVariables, ...edgeInputs };
+
+              // Default missing array/object inputs based on port declarations
+              if (Array.isArray(scriptFileConfig.inputs)) {
+                for (const port of scriptFileConfig.inputs) {
+                  if (mergedInputs[port.name] === undefined || mergedInputs[port.name] === null) {
+                    const pType = String(port.type || '').toLowerCase();
+                    if (pType.endsWith('[]') || pType === 'array') {
+                      mergedInputs[port.name] = [];
+                    } else if (pType === 'object') {
+                      mergedInputs[port.name] = {};
+                    } else if (pType === 'number') {
+                      mergedInputs[port.name] = 0;
+                    } else if (pType === 'boolean') {
+                      mergedInputs[port.name] = false;
+                    } else if (pType === 'string') {
+                      mergedInputs[port.name] = '';
+                    }
+                  }
+                }
+              }
+
               ns.inputVariables = { ...mergedInputs };
 
               try {

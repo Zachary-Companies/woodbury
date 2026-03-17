@@ -831,7 +831,7 @@ function computeValidationWarnings() {
     }
 
     // Missing workflows (skip special nodes)
-    if (node.workflowId !== '__approval_gate__' && node.workflowId !== '__script__' && node.workflowId !== '__output__' && node.workflowId !== '__image_viewer__' && node.workflowId !== '__media__' && node.workflowId !== '__branch__' && node.workflowId !== '__delay__' && node.workflowId !== '__gate__' && node.workflowId !== '__for_each__' && node.workflowId !== '__switch__' && node.workflowId !== '__asset__' && node.workflowId !== '__text__' && node.workflowId !== '__file_op__' && node.workflowId !== '__json_keys__' && node.workflowId !== '__tool__' && node.workflowId !== '__file_write__' && node.workflowId !== '__file_read__' && node.workflowId !== '__junction__' && node.workflowId !== '__variable__' && node.workflowId !== '__get_variable__' && !node.workflowId.startsWith('comp:')) {
+    if (node.workflowId !== '__approval_gate__' && node.workflowId !== '__script__' && node.workflowId !== '__script_file__' && node.workflowId !== '__output__' && node.workflowId !== '__image_viewer__' && node.workflowId !== '__media__' && node.workflowId !== '__branch__' && node.workflowId !== '__delay__' && node.workflowId !== '__gate__' && node.workflowId !== '__for_each__' && node.workflowId !== '__switch__' && node.workflowId !== '__asset__' && node.workflowId !== '__text__' && node.workflowId !== '__file_op__' && node.workflowId !== '__json_keys__' && node.workflowId !== '__tool__' && node.workflowId !== '__file_write__' && node.workflowId !== '__file_read__' && node.workflowId !== '__junction__' && node.workflowId !== '__variable__' && node.workflowId !== '__get_variable__' && !node.workflowId.startsWith('comp:')) {
       var wf = getWorkflowForNode(node);
       if (!wf) {
         warnings.push({ nodeId: node.id, type: 'missing', message: 'Workflow was deleted or renamed' });
@@ -1766,6 +1766,7 @@ async function selectComposition(id, viewOverride) {
   pendingCompositionFocusNodeId = options.restoreNodeId || null;
   var compView = viewOverride || (typeof parseHash === 'function' ? parseHash().view : null);
   document.body.classList.toggle('composition-form-mode', compView === 'form');
+  document.body.classList.toggle('composition-app-mode', compView === 'app');
 
   // Update URL hash for deep linking
   if (typeof updateHash === 'function') {
@@ -1805,6 +1806,8 @@ async function selectComposition(id, viewOverride) {
 
     if (compView === 'form' && typeof renderCompositionFormPage === 'function') {
       renderCompositionFormPage();
+    } else if (compView === 'app' && typeof renderCompositionAppPage === 'function') {
+      renderCompositionAppPage();
     } else {
       renderGraphEditor();
       if (typeof pollCompRunStatus === 'function') {

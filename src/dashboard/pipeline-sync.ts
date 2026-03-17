@@ -252,45 +252,21 @@ export async function syncAllFilesToManifest(
     if (portsChanged || edgesChanged) anyChanged = true;
   }
 
-  // Detect new .ts files not in the manifest
+  // Remove nodes whose .ts files no longer exist on disk
   try {
-    const entries = await fs.readdir(pipelineDir);
-    const manifestFiles = new Set(
-      pipeline.nodes
-        .filter(n => n.scriptFile?.file)
-        .map(n => n.scriptFile!.file)
-    );
-
-    for (const entry of entries) {
-      if (!entry.endsWith('.ts') || entry === 'tsconfig.json' || entry.endsWith('.d.ts')) continue;
-      if (entry.endsWith('.test.ts')) continue; // Test files are not nodes
-      if (entry === 'vitest.config.ts') continue; // Vitest config is not a node
-      if (entry.startsWith('_')) continue; // Shared utility files are not nodes
-      if (manifestFiles.has(entry)) continue;
-
-      // New .ts file not in manifest — read and check for execute()
-      const filePath = join(pipelineDir, entry);
-      const code = await fs.readFile(filePath, 'utf-8');
-      if (!/(?:export\s+)?(?:async\s+)?function\s+execute\s*\(/.test(code)) continue;
-
-      const { inputs, outputs } = parsePortAnnotations(code);
-      const nodeId = `node-${entry.replace(/\.ts$/, '')}-${Date.now().toString(36)}`;
-      const label = entry.replace(/\.ts$/, '').replace(/[-_]/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
-
-      const newNode: PipelineNode = {
-        id: nodeId,
-        workflowId: '__script_file__',
-        position: { x: 100, y: 100 + pipeline.nodes.length * 150 },
-        label,
-        scriptFile: {
-          file: entry,
-          description: '',
-          inputs,
-          outputs,
-        },
-      };
-
-      pipeline.nodes.push(newNode);
+    const entries = new Set(await fs.readdir(pipelineDir));
+    const toRemove: string[] = [];
+    for (const node of pipeline.nodes) {
+      if (node.scriptFile?.file && !entries.has(node.scriptFile.file)) {
+        toRemove.push(node.id);
+      }
+    }
+    if (toRemove.length > 0) {
+      const removeSet = new Set(toRemove);
+      pipeline.nodes = pipeline.nodes.filter(n => !removeSet.has(n.id));
+      pipeline.edges = pipeline.edges.filter(e =>
+        !removeSet.has(e.sourceNodeId) && !removeSet.has(e.targetNodeId)
+      );
       anyChanged = true;
     }
   } catch {
@@ -313,6 +289,24 @@ export async function scaffoldPipeline(
 ): Promise<{ pipelineDir: string; manifestPath: string }> {
   const pipelineDir = join(parentDir, id);
   await fs.mkdir(pipelineDir, { recursive: true });
+
+  // Clean stale .ts files from previous generation (overwrite scenario)
+  try {
+    const existing = await fs.readdir(pipelineDir);
+    for (const entry of existing) {
+      if (
+        entry.endsWith('.ts') &&
+        !entry.endsWith('.d.ts') &&
+        entry !== 'tsconfig.json' &&
+        entry !== 'vitest.config.ts' &&
+        !entry.startsWith('_')
+      ) {
+        await fs.unlink(join(pipelineDir, entry));
+      }
+    }
+  } catch {
+    // Directory might be new
+  }
 
   const manifest: PipelineDocument = {
     version: '2.0',

@@ -534,21 +534,13 @@ import { localThing } from './local.js';
   });
 
   describe('syncAllFilesToManifest()', () => {
-    it('detects new .ts files with execute() and adds them as nodes', async () => {
-      const parentDir = join(testDir, 'sync-new-files-test');
+    it('removes nodes whose .ts files no longer exist on disk', async () => {
+      const parentDir = join(testDir, 'sync-remove-files-test');
       await fs.mkdir(parentDir, { recursive: true });
 
       const { pipelineDir } = await scaffoldPipeline(parentDir, 'sync-pipeline', 'Sync Pipeline');
 
-      const pipeline: PipelineDocument = {
-        version: '2.0',
-        id: 'sync-pipeline',
-        name: 'Sync Pipeline',
-        nodes: [],
-        edges: [],
-      };
-
-      // Write a .ts file outside of addScriptFileNode
+      // Write one file that exists
       const tsCode = `
 /**
  * @input query: string - Search query
@@ -560,16 +552,39 @@ export async function execute(inputs: { query: string }) {
 `;
       await fs.writeFile(join(pipelineDir, 'search.ts'), tsCode, 'utf-8');
 
+      const pipeline: PipelineDocument = {
+        version: '2.0',
+        id: 'sync-pipeline',
+        name: 'Sync Pipeline',
+        nodes: [
+          {
+            id: 'node-search',
+            workflowId: '__script_file__',
+            position: { x: 0, y: 0 },
+            label: 'Search',
+            scriptFile: { file: 'search.ts', description: '', inputs: [], outputs: [] },
+          },
+          {
+            id: 'node-deleted',
+            workflowId: '__script_file__',
+            position: { x: 0, y: 0 },
+            label: 'Deleted Node',
+            scriptFile: { file: 'deleted-file.ts', description: '', inputs: [], outputs: [] },
+          },
+        ],
+        edges: [
+          { id: 'e1', sourceNodeId: 'node-search', sourcePort: 'results', targetNodeId: 'node-deleted', targetPort: 'data' },
+        ],
+      };
+
       const changed = await syncAllFilesToManifest(pipelineDir, pipeline);
 
       expect(changed).toBe(true);
+      // Node for deleted file should be removed
       expect(pipeline.nodes).toHaveLength(1);
-      expect(pipeline.nodes[0].workflowId).toBe('__script_file__');
-      expect(pipeline.nodes[0].scriptFile!.file).toBe('search.ts');
-      expect(pipeline.nodes[0].scriptFile!.inputs).toHaveLength(1);
-      expect(pipeline.nodes[0].scriptFile!.inputs[0].name).toBe('query');
-      expect(pipeline.nodes[0].scriptFile!.outputs).toHaveLength(1);
-      expect(pipeline.nodes[0].scriptFile!.outputs[0].name).toBe('results');
+      expect(pipeline.nodes[0].id).toBe('node-search');
+      // Edge to deleted node should be removed too
+      expect(pipeline.edges).toHaveLength(0);
     });
 
     it('ignores .ts files without an execute() function', async () => {

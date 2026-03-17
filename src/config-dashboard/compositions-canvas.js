@@ -131,6 +131,7 @@ function renderGraphEditor() {
   html += '</div></div>';
   html += '<button class="comp-tb-btn" id="comp-snap-toggle" title="Snap to grid">Grid</button>';
   html += '<button class="comp-tb-btn" id="comp-open-form-btn" title="Open this pipeline as a full-page form inside the app">Form View</button>';
+  html += '<button class="comp-tb-btn" id="comp-open-app-btn" title="Open as an interactive app with editable outputs">&#x1f4f1; App</button>';
   html += '<button class="comp-tb-btn" id="comp-share-form-btn" title="Copy a link that opens this pipeline as a form">&#x1f517; Share Form</button>';
   html += '<button class="comp-tb-btn comp-tb-btn-run" id="comp-run-btn" title="Run this pipeline">&#x25b6; Run</button>';
   html += '<button class="comp-tb-btn comp-tb-btn-batch" id="comp-batch-btn" title="Run with different variable sets">&#x1f4e6; Batch</button>';
@@ -2066,6 +2067,14 @@ function wireUpToolbar() {
       if (!compData) return;
       if (typeof updateHash === 'function') updateHash('compositions', compData.id, 'form');
       selectComposition(compData.id, 'form');
+    });
+  }
+  var openAppBtn = document.querySelector('#comp-open-app-btn');
+  if (openAppBtn) {
+    openAppBtn.addEventListener('click', function() {
+      if (!compData) return;
+      if (typeof updateHash === 'function') updateHash('compositions', compData.id, 'app');
+      selectComposition(compData.id, 'app');
     });
   }
   var shareFormBtn = document.querySelector('#comp-share-form-btn');

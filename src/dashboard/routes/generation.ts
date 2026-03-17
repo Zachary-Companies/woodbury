@@ -8,7 +8,7 @@
  * - POST /api/compositions/generate-pipeline — AI-powered pipeline decomposition
  */
 
-import { appendFile, mkdir, readFile, readdir } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { existsSync } from 'node:fs';
@@ -1639,6 +1639,35 @@ function validateGeneratedScriptCode(
     }
   }
 
+  // ── Anti-pattern detection ──────────────────────────────────
+  // Detect JSON.stringify on return values (objects passed between nodes should stay as objects)
+  if (/JSON\.stringify\s*\([^)]*\)\s*\)?\s*[;,]?\s*$/.test(code) || /\.map\s*\(\s*\w+\s*=>\s*JSON\.stringify\s*\(/.test(code)) {
+    // Check if it's in a return context
+    if (/return\s*\{[^}]*JSON\.stringify/.test(code)) {
+      issues.push('ANTI-PATTERN: Do not JSON.stringify output values. Outputs are passed as native JS objects between nodes. JSON.stringify converts them to strings which causes "[object Object] is not valid JSON" errors in downstream nodes.');
+    }
+  }
+
+  // Detect JSON.parse on inputs that are already objects
+  if (/JSON\.parse\s*\(\s*inputs\./.test(code) && !/typeof\s+inputs\.\w+\s*===?\s*['"]string['"]/.test(code)) {
+    issues.push('ANTI-PATTERN: Do not JSON.parse inputs from other nodes. Inputs arrive as their declared types (objects, arrays, etc.), not as JSON strings. If you must handle both, use: typeof x === "string" ? JSON.parse(x) : x');
+  }
+
+  // Detect unguarded iteration
+  if (/for\s*\(\s*(?:const|let|var)\s+\w+\s+of\s+inputs\./.test(code) && !/Array\.isArray\s*\(\s*inputs\./.test(code)) {
+    issues.push('ANTI-PATTERN: Unguarded iteration over inputs. Always check Array.isArray(inputs.x) before iterating, because unconnected ports arrive as undefined.');
+  }
+
+  // Detect console.log usage
+  if (/console\.(log|warn|error)\s*\(/.test(code)) {
+    issues.push('Do not use console.log/warn/error. Use context.log() instead.');
+  }
+
+  // Detect require/import statements
+  if (/\brequire\s*\(|^import\s+/m.test(code)) {
+    issues.push('Do not use require() or import statements. The execute() function runs in a sandboxed environment. Use context.tools and context.llm for all external functionality.');
+  }
+
   return { ok: issues.length === 0, issues, ports };
 }
 
@@ -1680,6 +1709,47 @@ function buildWoodburyBuiltinToolingGuidance(userMessage: string): string {
 const SCRIPT_PROGRESS_GUIDANCE = [
   'When generating script-node code with long-running loops, use context.progress.start(total, label), context.progress.set(completed, total, label), context.progress.increment(label), and context.progress.complete(label) so the node UI can show a progress bar while the script runs.',
 ].join(' ');
+
+/**
+ * Critical rules that prevent the most common code generation failures.
+ * These are injected into EVERY script generation prompt.
+ */
+const SCRIPT_ROBUSTNESS_RULES = [
+  '',
+  '## CRITICAL CODE RULES — violations cause runtime failures for end users:',
+  '',
+  '1. **NEVER JSON.stringify objects between nodes.** Outputs are passed as native JS objects/arrays, not strings.',
+  '   - BAD:  return { cast: characters.map(c => JSON.stringify(c)) }',
+  '   - GOOD: return { cast: characters }',
+  '   Downstream nodes receive the actual objects. JSON.stringify destroys them.',
+  '',
+  '2. **NEVER JSON.parse inputs from other nodes.** Inputs arrive as their declared types, not strings.',
+  '   - BAD:  const data = JSON.parse(inputs.cast)',
+  '   - GOOD: const data = inputs.cast',
+  '   If the input might be either a string or object, use: const data = typeof inputs.x === "string" ? JSON.parse(inputs.x) : inputs.x',
+  '',
+  '3. **ALWAYS guard iterable inputs.** Inputs from unconnected ports arrive as empty arrays/strings/etc.',
+  '   - BAD:  for (const item of inputs.items) { ... }',
+  '   - GOOD: const items = Array.isArray(inputs.items) ? inputs.items : []; for (const item of items) { ... }',
+  '',
+  '4. **ALWAYS validate inputs before using them.** Never assume an input is present or the right type.',
+  '   - Check arrays: Array.isArray(x) before iterating',
+  '   - Check strings: typeof x === "string" && x.length > 0 before parsing',
+  '   - Check objects: x && typeof x === "object" before accessing properties',
+  '',
+  '5. **Port types must match between nodes.** If you output `cast: object[]`, the downstream node must declare `cast: object[]`, not `cast: string[]`.',
+  '',
+  '6. **NEVER use console.log.** Use context.log() for logging.',
+  '',
+  '7. **NEVER import modules.** The execute() function runs in a sandboxed AsyncFunction. Use context.tools and context.llm instead.',
+  '',
+  '8. **ALWAYS return all declared @output ports.** If an output is conditional, return a sensible default (empty array, empty string, etc.).',
+  '',
+  '9. **ALWAYS wrap the function body in try/catch.** Return fallback values on error so the pipeline continues.',
+  '',
+  '10. **NEVER produce nested JSON strings.** If your LLM call returns JSON, parse it once. Do not re-stringify it for output. Downstream nodes expect objects, not strings of objects.',
+  '',
+].join('\n');
 
 type ScriptGenerationMode = 'generate' | 'edit' | 'repair' | 'verify';
 
@@ -2166,6 +2236,7 @@ async function runStrictScriptGenerationFallback(
         'The code must define async function execute(inputs, context).',
         'The execute function must return an object containing all declared outputs.',
         'Preserve the requested behavior while fixing any structural validation errors.',
+        SCRIPT_ROBUSTNESS_RULES,
         builtinGuidance,
         SCRIPT_PROGRESS_GUIDANCE,
         planSection,
@@ -2252,6 +2323,7 @@ async function runScriptGenerationWithClosureEngine(
     'The code must include a JSDoc block with @input and @output annotations.',
     'The code must define async function execute(inputs, context).',
     'The function must return an object containing all declared outputs.',
+    SCRIPT_ROBUSTNESS_RULES,
     builtinGuidance,
     SCRIPT_PROGRESS_GUIDANCE,
     prePlan ? formatPrePlanForPrompt(prePlan) : '',
@@ -2806,8 +2878,8 @@ function normalizeImageFit(raw: unknown): 'contain' | 'cover' | 'actual' {
   return raw === 'cover' || raw === 'actual' ? raw : 'contain';
 }
 
-function normalizeVariableType(raw: unknown): 'string' | 'number' | 'array' | 'boolean' {
-  return raw === 'number' || raw === 'array' || raw === 'boolean' ? raw : 'string';
+function normalizeVariableType(raw: unknown): 'string' | 'number' | 'array' | 'boolean' | 'object' {
+  return raw === 'number' || raw === 'array' || raw === 'boolean' || raw === 'object' ? raw : 'string';
 }
 
 /**
@@ -2852,6 +2924,95 @@ function splitOptionList(raw: string): string[] {
   return parts
     .map(p => p.trim().replace(/^["']+|["']+$/g, '').replace(/\.{2,}$/, '').trim())
     .filter(p => p.length > 0 && !noiseWords.has(p.toLowerCase()));
+}
+
+/**
+ * Infer objectFields from an object-type variable's description.
+ * Tries to extract field names and types from natural language descriptions like:
+ *   "Configuration with tone (dramatic, comedic), target audience, and word count"
+ *   "Settings: { format: string, quality: high/medium/low, verbose: boolean }"
+ */
+function inferObjectFieldsFromDescription(
+  description: string,
+  label: string,
+): Array<{ key: string; label?: string; type?: string; default?: string; options?: string[] }> {
+  if (!description) return [];
+  const fields: Array<{ key: string; label?: string; type?: string; default?: string; options?: string[] }> = [];
+
+  // Pattern 1: JSON-like descriptions "{ key: type, key2: type }"
+  const braceMatch = description.match(/\{([^}]+)\}/);
+  if (braceMatch) {
+    const pairs = braceMatch[1].split(',');
+    for (const pair of pairs) {
+      const colonSplit = pair.split(':').map(s => s.trim());
+      if (colonSplit.length >= 2 && colonSplit[0]) {
+        const key = colonSplit[0].replace(/["']/g, '').trim();
+        const typeStr = colonSplit[1].replace(/["']/g, '').trim().toLowerCase();
+        const slashOptions = typeStr.split('/').map(s => s.trim()).filter(s => s.length > 0);
+        if (slashOptions.length >= 2) {
+          fields.push({
+            key,
+            label: humanizeFieldKey(key),
+            type: 'select',
+            options: slashOptions,
+            default: slashOptions[0],
+          });
+        } else if (typeStr === 'boolean' || typeStr === 'bool') {
+          fields.push({ key, label: humanizeFieldKey(key), type: 'boolean', default: 'false' });
+        } else if (typeStr === 'number' || typeStr === 'int' || typeStr === 'integer') {
+          fields.push({ key, label: humanizeFieldKey(key), type: 'number', default: '0' });
+        } else {
+          fields.push({ key, label: humanizeFieldKey(key), type: 'string', default: '' });
+        }
+      }
+    }
+    if (fields.length > 0) return fields;
+  }
+
+  // Pattern 2: "with X, Y, and Z" or "including X, Y, Z"
+  const withMatch = description.match(/(?:with|including|contains|has)\s+(.+)/i);
+  if (withMatch) {
+    const parts = withMatch[1].split(/\s*,\s*|\s+and\s+/i).map(s => s.trim()).filter(s => s.length > 0 && s.length < 40);
+    for (const part of parts) {
+      // Check for inline options: "tone (dramatic, comedic)"
+      const inlineOptsMatch = part.match(/^(\w[\w\s]*?)\s*\(([^)]+)\)/);
+      if (inlineOptsMatch) {
+        const key = inlineOptsMatch[1].trim().toLowerCase().replace(/\s+/g, '_');
+        const opts = splitOptionList(inlineOptsMatch[2]);
+        fields.push({
+          key,
+          label: humanizeFieldKey(key),
+          type: opts.length >= 2 ? 'select' : 'string',
+          ...(opts.length >= 2 ? { options: opts, default: opts[0] } : {}),
+        });
+      } else {
+        const key = part.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
+        if (key) {
+          // Guess type from common words
+          const lower = part.toLowerCase();
+          const isBoolean = /\b(enabled?|disabled?|verbose|active|visible|show|hide)\b/i.test(lower);
+          const isNumber = /\b(count|size|width|height|max|min|limit|amount|total|number|quantity)\b/i.test(lower);
+          fields.push({
+            key,
+            label: humanizeFieldKey(key),
+            type: isBoolean ? 'boolean' : isNumber ? 'number' : 'string',
+            default: isBoolean ? 'false' : isNumber ? '0' : '',
+          });
+        }
+      }
+    }
+  }
+
+  return fields;
+}
+
+/** Convert a snake_case or camelCase key to a human-readable label */
+function humanizeFieldKey(key: string): string {
+  return key
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
+    .replace(/[_-]+/g, ' ')
+    .replace(/\b\w/g, c => c.toUpperCase())
+    .trim();
 }
 
 function normalizeAssetMode(raw: unknown): 'pick' | 'save' | 'list' | 'remove' | 'generate_path' {
@@ -2934,10 +3095,21 @@ function buildPipelineGenerationNodeTypeGuidance(toolDocs: string): string {
     '',
     '"variable" — shared state and top-level pipeline form inputs',
     '  Input ports: "set", "push". Output ports: "value", "length".',
-    '  Config: { "type": "variable", "label": "...", "variableNode": { "type": "string|number|array|boolean", "initialValue": "", "exposeAsInput": true|false, "inputName": "prompt", "description": "...", "required": true|false, "generationPrompt": "...", "inputControl": "text|textarea|select|combobox", "options": ["opt1", "opt2"] } }',
+    '  Config: { "type": "variable", "label": "...", "variableNode": { "type": "string|number|array|boolean|object", "initialValue": "", "exposeAsInput": true|false, "inputName": "prompt", "description": "...", "required": true|false, "generationPrompt": "...", "inputControl": "text|textarea|select|combobox", "options": ["opt1", "opt2"], "objectFields": [...] } }',
     '  inputControl: "text" = single-line (default), "textarea" = multi-line, "select" = fixed dropdown (user must pick one), "combobox" = dropdown + freeform typing.',
     '  Use "select" for finite known choices (e.g. output format, script kind). Use "combobox" for curated suggestions that still allow creative input (e.g. genre, tone). Omit or use "text" for freeform fields (e.g. title).',
     '  When inputControl is "select" or "combobox", you MUST include a non-empty "options" array. Set "initialValue" to the best default option.',
+    '',
+    '  IMPORTANT — Object variables for non-technical users:',
+    '  When type is "object", ALWAYS include "objectFields" to decompose the object into individual form fields.',
+    '  objectFields: [{ "key": "fieldName", "label": "Human Label", "type": "string|number|boolean|select", "default": "...", "options": ["a","b"] }]',
+    '  Example: A "metadata" variable with type "object" should be decomposed:',
+    '    "objectFields": [',
+    '      { "key": "tone", "label": "Tone", "type": "select", "options": ["dramatic", "comedic", "neutral"], "default": "dramatic" },',
+    '      { "key": "targetAudience", "label": "Target Audience", "type": "string", "default": "general" },',
+    '      { "key": "wordCount", "label": "Max Word Count", "type": "number", "default": "5000" }',
+    '    ]',
+    '  This renders as individual labeled fields instead of a raw JSON editor. NEVER leave type "object" without objectFields.',
     '',
     '"get_variable" — read a Variable node by id',
     '  Output ports: "value", "length".',
@@ -3123,6 +3295,30 @@ function materializeGeneratedPipelineNode(
       }
     }
 
+    // Normalize objectFields for object-type variables
+    let objectFields: Array<{ key: string; label?: string; type?: string; default?: string; options?: string[] }> = [];
+    if (Array.isArray(variableNode.objectFields)) {
+      objectFields = variableNode.objectFields
+        .filter((f: unknown) => typeof f === 'object' && f !== null && typeof (f as any).key === 'string')
+        .map((f: any) => ({
+          key: String(f.key).trim(),
+          ...(typeof f.label === 'string' && f.label.trim() ? { label: f.label.trim() } : {}),
+          ...(typeof f.type === 'string' && f.type.trim() ? { type: f.type.trim() } : {}),
+          ...(typeof f.default === 'string' ? { default: f.default } : {}),
+          ...(Array.isArray(f.options) && f.options.length > 0
+            ? { options: f.options.map((o: unknown) => String(o).trim()).filter((o: string) => o.length > 0) }
+            : {}),
+        }));
+    }
+
+    // Auto-decompose object variables that are missing objectFields
+    // by inferring fields from the description
+    if (variableType === 'object' && objectFields.length === 0) {
+      const desc = typeof variableNode.description === 'string' ? variableNode.description : '';
+      const label = typeof rawNode.label === 'string' ? rawNode.label : '';
+      objectFields = inferObjectFieldsFromDescription(desc, label);
+    }
+
     node.variableNode = {
       type: variableType,
       initialValue: typeof variableNode.initialValue === 'string'
@@ -3135,6 +3331,7 @@ function materializeGeneratedPipelineNode(
       generationPrompt: typeof variableNode.generationPrompt === 'string' ? variableNode.generationPrompt : '',
       ...(inputControl ? { inputControl } : {}),
       ...(options.length > 0 ? { options } : {}),
+      ...(objectFields.length > 0 ? { objectFields } : {}),
     };
   } else if (workflowId === '__get_variable__') {
     const getVariableNode = normalizePlainRecord(rawNode.getVariableNode);
@@ -4710,19 +4907,114 @@ Remember: respond with ONLY the JSON object.`;
         v2Pipeline.edges = realEdges;
         await savePipelineManifest(pipelineDir, v2Pipeline);
 
-        // Generate test files for all nodes and run them
+        // Generate test files for all nodes, run them, and repair failures
         let pipelineTestResults: any = null;
         try {
           const testFiles = await generateAllNodeTests(pipelineDir, v2Pipeline.nodes as any[]);
           if (testFiles.length > 0) {
             await ensureTestHelpers(pipelineDir);
             pipelineTestResults = await runPipelineTests(pipelineDir, { timeout: 60000 });
-            debugLog.info('generation', 'V2 pipeline tests completed', {
+            debugLog.info('generation', 'V2 pipeline tests completed (round 1)', {
               pipelineId,
               testFiles: testFiles.length,
               passed: pipelineTestResults.passed,
               failed: pipelineTestResults.failed,
             });
+
+            // ── Test failure repair loop (up to 2 attempts) ──
+            const MAX_REPAIR_ATTEMPTS = 2;
+            let repairAttempt = 0;
+            while (pipelineTestResults.failed > 0 && repairAttempt < MAX_REPAIR_ATTEMPTS) {
+              repairAttempt++;
+              debugLog.info('generation', `V2 pipeline test repair attempt ${repairAttempt}/${MAX_REPAIR_ATTEMPTS}`, {
+                pipelineId,
+                failedTests: pipelineTestResults.failed,
+              });
+
+              // Find which nodes have failing tests
+              const failingFiles = (pipelineTestResults.testFiles || [])
+                .filter((tf: any) => tf.tests?.some((t: any) => t.status === 'fail'))
+                .map((tf: any) => ({
+                  testFile: tf.file,
+                  nodeFile: tf.file.replace('.test.ts', '.ts'),
+                  errors: tf.tests.filter((t: any) => t.status === 'fail').map((t: any) => t.error || t.name),
+                }));
+
+              let repaired = 0;
+              for (const failing of failingFiles) {
+                try {
+                  // Read the failing node's code and test file
+                  const nodeCode = await readFile(join(pipelineDir, failing.nodeFile), 'utf-8');
+                  const testCode = await readFile(join(pipelineDir, failing.testFile), 'utf-8');
+
+                  // Find the corresponding node in the manifest
+                  const matchNode = (v2Pipeline.nodes as any[]).find(
+                    (n: any) => n.scriptFile?.file === failing.nodeFile,
+                  );
+                  if (!matchNode) continue;
+
+                  // Ask LLM to fix the code based on test errors
+                  const repairUserMsg = [
+                    'The following TypeScript pipeline node has failing tests. Fix the execute() function so all tests pass.',
+                    '',
+                    `## File: ${failing.nodeFile}`,
+                    '```typescript',
+                    nodeCode,
+                    '```',
+                    '',
+                    `## Test file: ${failing.testFile}`,
+                    '```typescript',
+                    testCode,
+                    '```',
+                    '',
+                    '## Test errors:',
+                    ...failing.errors.map((e: string) => `- ${e}`),
+                    '',
+                    'Return ONLY the corrected TypeScript code for the node file (not the test file).',
+                    'Keep the same @input/@output annotations and execute() signature.',
+                    'Fix the logic so the tests pass. Do not change the test expectations.',
+                  ].join('\n');
+
+                  const repairSystemMsg = 'You are a TypeScript expert. Return only valid TypeScript code, no markdown fences, no explanation.';
+                  const { runPrompt: runRepairPrompt } = await import('../../loop/llm-service.js');
+                  const repairProviderAndModel = getScriptGenerationProviderAndModel('generation');
+                  const repairMessages: Array<{ role: 'system' | 'user'; content: string }> = [
+                    { role: 'system', content: repairSystemMsg },
+                    { role: 'user', content: repairUserMsg },
+                  ];
+                  const repairResp = await runRepairPrompt(repairMessages, repairProviderAndModel.model, {
+                    maxTokens: 8192,
+                    temperature: 0.2,
+                  });
+                  const repaired_code = repairResp.content;
+
+                  if (repaired_code && repaired_code.trim().length > 50) {
+                    // Strip markdown fences if present
+                    let cleanCode = repaired_code.trim();
+                    if (cleanCode.startsWith('```')) {
+                      cleanCode = cleanCode.replace(/^```\w*\n?/, '').replace(/\n?```\s*$/, '');
+                    }
+                    await writeFile(join(pipelineDir, failing.nodeFile), cleanCode, 'utf-8');
+                    repaired++;
+                    debugLog.info('generation', `Repaired ${failing.nodeFile}`, { attempt: repairAttempt });
+                  }
+                } catch (repairErr) {
+                  debugLog.warn('generation', `Failed to repair ${failing.nodeFile}`, { error: String(repairErr) });
+                }
+              }
+
+              if (repaired === 0) break; // Nothing to fix, stop trying
+
+              // Re-run tests after repair
+              pipelineTestResults = await runPipelineTests(pipelineDir, { timeout: 60000 });
+              debugLog.info('generation', `V2 pipeline tests after repair ${repairAttempt}`, {
+                pipelineId,
+                passed: pipelineTestResults.passed,
+                failed: pipelineTestResults.failed,
+              });
+            }
+
+            pipelineTestResults.repairAttempts = repairAttempt;
           }
         } catch (testErr) {
           debugLog.warn('generation', 'Failed to generate/run v2 pipeline tests', { error: String(testErr) });

@@ -2369,7 +2369,7 @@ function renderCompositionStepResults(data) {
       if (ns.error) {
         html += '<div class="comp-form-step-error">' + compEscHtml(ns.error) + '</div>';
       }
-      if (status === 'failed' && ns.error && ns.workflowId === '__script__') {
+      if (status === 'failed' && ns.error && (ns.workflowId === '__script__' || ns.workflowId === '__script_file__')) {
         html += '<button class="comp-form-step-fix-btn" data-comp-fix-node="' + compEscAttr(nodeId) + '">&#x26A1; Fix &amp; Re-run</button>';
       }
       if (ns.currentStep) {
@@ -2628,6 +2628,7 @@ async function renderCompositionFormPage() {
   html += '</div>';
   html += '<div class="comp-form-hero-actions">';
   html += '<button class="comp-tb-btn" id="comp-form-share-link">&#x1f517; Copy Form Link</button>';
+  html += '<button class="comp-tb-btn" id="comp-form-open-app">&#x1f4f1; Open as App</button>';
   html += '<button class="comp-tb-btn" id="comp-form-open-editor">Open Editor</button>';
   html += '</div>';
   html += '</div>';
@@ -2664,6 +2665,14 @@ async function renderCompositionFormPage() {
 
   var shareBtn = document.querySelector('#comp-form-share-link');
   if (shareBtn) shareBtn.addEventListener('click', copyCompositionFormShareLink);
+
+  var openAppBtn = document.querySelector('#comp-form-open-app');
+  if (openAppBtn) {
+    openAppBtn.addEventListener('click', function() {
+      if (typeof updateHash === 'function') updateHash('compositions', compData.id, 'app');
+      selectComposition(compData.id, 'app');
+    });
+  }
 
   var openEditorBtn = document.querySelector('#comp-form-open-editor');
   if (openEditorBtn) {
@@ -2970,7 +2979,7 @@ function pollCompRunStatus() {
                   nodeId: failNodeId,
                   nodeLabel: failNodeData ? (failNodeData.label || failNodeId) : failNodeId,
                   error: failNs.error,
-                  isScript: failNodeData ? failNodeData.workflowId === '__script__' : false,
+                  isScript: failNodeData ? (failNodeData.workflowId === '__script__' || failNodeData.workflowId === '__script_file__') : false,
                   nodeType: failNodeData ? failNodeData.workflowId : 'unknown',
                 });
               }
@@ -3471,7 +3480,7 @@ function updateNodeExecutionState(nodeId, status) {
     }
     // Truncate for node display, full error in properties panel
     var shortError = errorText.length > 120 ? errorText.slice(0, 120) + '...' : errorText;
-    var isScriptNode = compData && compData.nodes && compData.nodes.find(function(n) { return n.id === nodeId && n.workflowId === '__script__'; });
+    var isScriptNode = compData && compData.nodes && compData.nodes.find(function(n) { return n.id === nodeId && (n.workflowId === '__script__' || n.workflowId === '__script_file__'); });
     var bannerButtons = '<span class="comp-error-dismiss" title="Clear error">&#x2715;</span>';
     if (isScriptNode) {
       bannerButtons = '<span class="comp-error-repair" title="Repair with AI">&#x26A1;</span>' + bannerButtons;
@@ -3752,7 +3761,7 @@ function injectNodeErrorDisplay(body, nodeId) {
   if (nodeError) {
     // Check if this is a script node (to show repair button)
     var theNode = compData && compData.nodes ? compData.nodes.find(function(n) { return n.id === nodeId; }) : null;
-    var isScript = theNode && theNode.workflowId === '__script__' && theNode.script;
+    var isScript = theNode && (theNode.workflowId === '__script__' && theNode.script) || (theNode && theNode.workflowId === '__script_file__' && theNode.scriptFile);
 
     var buttonsHtml = '<span style="display:flex;gap:4px;">';
     if (isScript) {
