@@ -28,6 +28,8 @@ var appState = null;
 var appBindings = null; // BindingsDocument { version, pipelineId, bindings[] }
 var appActiveSection = null;
 var appViewMode = 'data'; // 'data' | 'screenplay'
+var appConnectionMode = false; // When true, entities become selectable for binding creation
+var appConnectionSelections = []; // Array of { entityType, entityId, label, sectionId, data }
 
 // ────────────────────────────────────────────────────────────────
 //  API helpers
@@ -70,6 +72,24 @@ async function fetchAppBindings(pipelineId) {
   } catch (e) {
     return { version: '1.0', pipelineId: pipelineId, bindings: [] };
   }
+}
+
+async function createAppBinding(pipelineId, binding) {
+  var res = await fetch('/api/compositions/' + encodeURIComponent(pipelineId) + '/bindings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(binding),
+  });
+  if (!res.ok) throw new Error('Failed to create binding');
+  return res.json();
+}
+
+async function deleteAppBinding(pipelineId, bindingId) {
+  var res = await fetch('/api/compositions/' + encodeURIComponent(pipelineId) + '/bindings/' + encodeURIComponent(bindingId), {
+    method: 'DELETE',
+  });
+  if (!res.ok) throw new Error('Failed to delete binding');
+  return res.json();
 }
 
 async function refreshAppFromRun(pipelineId) {
@@ -160,6 +180,20 @@ function renderAppSidebar(schema, state) {
     html += ' Screenplay</button>';
     html += '</div>';
   }
+
+  // Connection Mode toggle
+  html += '<div class="app-connection-toggle">';
+  html += '<button class="app-connection-toggle-btn' + (appConnectionMode ? ' active' : '') + '" id="app-toggle-connection-mode" title="Enter connection mode to link entities together">';
+  html += '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" width="14" height="14"><circle cx="4" cy="4" r="2"/><circle cx="12" cy="12" r="2"/><path d="M5.5 5.5l5 5"/></svg>';
+  html += ' Connections';
+  if (appConnectionMode && appConnectionSelections.length > 0) {
+    html += ' <span class="app-connection-count">' + appConnectionSelections.length + '</span>';
+  }
+  html += '</button>';
+  if (appConnectionMode) {
+    html += '<button class="app-connection-clear-btn" id="app-connection-clear" title="Clear selection">Clear</button>';
+  }
+  html += '</div>';
 
   // Actions bar
   html += '<div class="app-sidebar-actions">';
@@ -531,7 +565,19 @@ function renderAppPanelArray(items, key, sectionKey) {
   html += '<div class="app-panel-card-grid" data-panel-cards="' + compEscAttr(key) + '">';
   for (var ci = 0; ci < items.length; ci++) {
     var item = items[ci];
-    html += '<div class="app-panel-card" data-panel-card-index="' + ci + '">';
+    // Connection mode: add entity data attributes for selection
+    var connAttrs = '';
+    var connSelected = false;
+    if (appConnectionMode && idKey && item[idKey]) {
+      var connEntityType = typeKey && item[typeKey] ? String(item[typeKey]).toLowerCase() : key.replace(/s$/, ''); // e.g. "characters" → "character"
+      var connEntityId = String(item[idKey]);
+      var connLabel = titleKey && item[titleKey] ? String(item[titleKey]) : connEntityId;
+      connSelected = appConnectionSelections.some(function(s) { return s.entityId === connEntityId; });
+      connAttrs = ' data-conn-entity-type="' + compEscAttr(connEntityType) + '"'
+        + ' data-conn-entity-id="' + compEscAttr(connEntityId) + '"'
+        + ' data-conn-entity-label="' + compEscAttr(connLabel) + '"';
+    }
+    html += '<div class="app-panel-card' + (connSelected ? ' app-conn-selected' : '') + '" data-panel-card-index="' + ci + '"' + connAttrs + '>';
 
     // Image if found
     var imgVal = imageKey ? item[imageKey] : null;
@@ -1109,7 +1155,14 @@ function renderNLEBeat(beat, beatIndex, scene, timeline) {
     }
   }
 
-  var html = '<div class="nle-beat' + (hasImage ? ' nle-beat--has-image' : '') + '" data-nle-beat="' + beatIndex + '">';
+  // Connection mode: add entity data for the beat's shot element
+  var beatConnAttrs = '';
+  var beatConnSelected = false;
+  if (appConnectionMode && shotElement && shotElement.id) {
+    beatConnSelected = appConnectionSelections.some(function(s) { return s.entityId === shotElement.id; });
+    beatConnAttrs = ' data-conn-entity-type="shot" data-conn-entity-id="' + compEscAttr(shotElement.id) + '" data-conn-entity-label="' + compEscAttr(shotElement.shotText ? shotElement.shotText.substring(0, 60) : 'Shot ' + (beatIndex + 1)) + '"';
+  }
+  var html = '<div class="nle-beat' + (hasImage ? ' nle-beat--has-image' : '') + (beatConnSelected ? ' app-conn-selected' : '') + '" data-nle-beat="' + beatIndex + '"' + beatConnAttrs + '>';
 
   // Left: previs image
   html += '<div class="nle-beat-visual">';
@@ -1216,7 +1269,13 @@ function renderNLEBeat(beat, beatIndex, scene, timeline) {
       var ref = refImages[ri];
       var refSrc = resolveImageSrc(ref.filePath);
       var refTitle = ref.name + (ref.description ? ': ' + ref.description.substring(0, 100) : '');
-      html += '<div class="nle-ref-tile app-img-zoomable" data-app-img-src="' + compEscAttr(refSrc) + '" title="' + compEscAttr(refTitle) + '">';
+      var refConnAttrs = '';
+      var refConnSelected = false;
+      if (appConnectionMode && ref.id) {
+        refConnSelected = appConnectionSelections.some(function(s) { return s.entityId === ref.id; });
+        refConnAttrs = ' data-conn-entity-type="' + compEscAttr(ref.type) + '" data-conn-entity-id="' + compEscAttr(ref.id) + '" data-conn-entity-label="' + compEscAttr(ref.name) + '"';
+      }
+      html += '<div class="nle-ref-tile' + (appConnectionMode ? '' : ' app-img-zoomable') + (refConnSelected ? ' app-conn-selected' : '') + '"' + (appConnectionMode ? '' : ' data-app-img-src="' + compEscAttr(refSrc) + '"') + ' title="' + compEscAttr(refTitle) + '"' + refConnAttrs + '>';
       html += '<img src="' + compEscAttr(refSrc) + '" loading="lazy" alt="" />';
       html += '<span class="nle-ref-tile-label" style="' + (ref.type === 'character' ? 'border-left-color:' + ref.color : '') + '">' + compEscHtml(ref.name) + '</span>';
       html += '</div>';
@@ -1284,8 +1343,15 @@ function renderNLEElement(elem, timeline) {
     var charName = elem.characterName || elem.characterId || 'UNKNOWN';
     // Character color based on name hash
     var charColor = nleCharColor(charName);
+    // Connection mode: make character name selectable
+    var charConnAttrs = '';
+    var charConnSel = false;
+    if (appConnectionMode && elem.characterId) {
+      charConnSel = appConnectionSelections.some(function(s) { return s.entityId === elem.characterId; });
+      charConnAttrs = ' data-conn-entity-type="character" data-conn-entity-id="' + compEscAttr(elem.characterId) + '" data-conn-entity-label="' + compEscAttr(charName) + '"';
+    }
     html += '<div class="nle-dialogue-header" style="border-left-color:' + charColor + '">';
-    html += '<span class="nle-dialogue-character" style="color:' + charColor + '">' + compEscHtml(charName) + '</span>';
+    html += '<span class="nle-dialogue-character' + (charConnSel ? ' app-conn-selected' : '') + '" style="color:' + charColor + '"' + charConnAttrs + '>' + compEscHtml(charName) + '</span>';
     if (elem.modifiers && elem.modifiers.length > 0) {
       html += '<span class="nle-dialogue-modifier">(' + compEscHtml(elem.modifiers.join(', ')) + ')</span>';
     }
@@ -1389,7 +1455,7 @@ async function renderCompositionAppPage() {
   }
 
   // Render
-  var html = '<div class="app-shell">';
+  var html = '<div class="app-shell' + (appConnectionMode ? ' app-shell--connection-mode' : '') + '">';
   html += renderAppSidebar(appSchema, appState);
 
   // Content area
@@ -1420,6 +1486,11 @@ async function renderCompositionAppPage() {
   html += '<div class="app-detail-modal-body" id="app-detail-modal-body"></div>';
   html += '</div>';
   html += '</div>';
+
+  // Connection mode floating selection tray (shown when items are selected)
+  if (appConnectionMode) {
+    html += renderConnectionTray();
+  }
 
   main.innerHTML = html;
   wireAppActions(main);
@@ -2078,6 +2149,440 @@ function wireAppActions(root) {
       return null;
     }
     return findArray(outputs);
+  }
+
+  // ── Connection Mode: post-render entity annotation ──
+  // Rich cards from compositions-execution.js don't know about connection mode,
+  // so we annotate them with entity data attributes after rendering.
+  if (appConnectionMode && appState && appSchema && appActiveSection) {
+    var connActiveSection = appSchema.sections.find(function(s) { return s.id === appActiveSection; });
+    if (connActiveSection && connActiveSection.nodeId && appState.nodeData && appState.nodeData[connActiveSection.nodeId]) {
+      var sectionOutputs = appState.nodeData[connActiveSection.nodeId].outputs;
+      // Walk outputs to find arrays of objects with id fields and annotate
+      // matching rich cards with connection-mode data attributes.
+      (function annotateOutputCards(outputs) {
+        if (!outputs || typeof outputs !== 'object') return;
+        var keys = Object.keys(outputs);
+        for (var oi = 0; oi < keys.length; oi++) {
+          var oKey = keys[oi];
+          var oVal = outputs[oKey];
+          if (Array.isArray(oVal) && oVal.length > 0 && oVal[0] && typeof oVal[0] === 'object') {
+            // Match cards to items by index within parent grid
+            var grids = root.querySelectorAll('.comp-form-rich-grid, .comp-form-array-cards');
+            grids.forEach(function(grid) {
+              var cards = grid.querySelectorAll(':scope > .comp-form-rich-card');
+              if (cards.length !== oVal.length) return; // Skip mismatched grids
+              cards.forEach(function(card, idx) {
+                var item = oVal[idx];
+                if (!item) return;
+                var itemId = item.id || item.libraryId || item.assetId || item.slug;
+                if (!itemId) return;
+                var itemType = (item.type || oKey.replace(/s$/, '')).toLowerCase();
+                var itemLabel = item.name || item.title || item.displayName || item.label || itemId;
+                card.setAttribute('data-conn-entity-type', itemType);
+                card.setAttribute('data-conn-entity-id', String(itemId));
+                card.setAttribute('data-conn-entity-label', String(itemLabel));
+                card.style.position = 'relative';
+                var isSelected = appConnectionSelections.some(function(s) { return s.entityId === String(itemId); });
+                if (isSelected) card.classList.add('app-conn-selected');
+              });
+            });
+            return; // Only annotate the first matching array
+          }
+          if (oVal && typeof oVal === 'object' && !Array.isArray(oVal)) {
+            annotateOutputCards(oVal);
+          }
+        }
+      })(sectionOutputs);
+    }
+  }
+
+  // ── Connection Mode wiring ──
+
+  // Toggle connection mode
+  var connToggle = root.querySelector('#app-toggle-connection-mode');
+  if (connToggle) {
+    connToggle.addEventListener('click', function() {
+      appConnectionMode = !appConnectionMode;
+      if (!appConnectionMode) {
+        appConnectionSelections = [];
+      }
+      renderCompositionAppPage();
+    });
+  }
+
+  // Clear connection selection
+  var connClear = root.querySelector('#app-connection-clear');
+  if (connClear) {
+    connClear.addEventListener('click', function() {
+      appConnectionSelections = [];
+      renderCompositionAppPage();
+    });
+  }
+
+  // Connection mode: entity selection on click
+  if (appConnectionMode) {
+    root.querySelectorAll('[data-conn-entity-id]').forEach(function(el) {
+      el.addEventListener('click', function(e) {
+        // Don't intercept clicks on buttons/links inside the card
+        if (e.target.closest('button, a, .app-panel-card-raw-btn')) return;
+        e.preventDefault();
+        e.stopPropagation();
+
+        var entityType = el.getAttribute('data-conn-entity-type');
+        var entityId = el.getAttribute('data-conn-entity-id');
+        var entityLabel = el.getAttribute('data-conn-entity-label') || entityId;
+
+        // Toggle selection
+        var existingIdx = appConnectionSelections.findIndex(function(s) { return s.entityId === entityId; });
+        if (existingIdx !== -1) {
+          appConnectionSelections.splice(existingIdx, 1);
+        } else {
+          appConnectionSelections.push({
+            entityType: entityType,
+            entityId: entityId,
+            label: entityLabel,
+          });
+        }
+        renderCompositionAppPage();
+      });
+    });
+  }
+
+  // Connection tray actions
+  var connDescribeBtn = root.querySelector('#app-conn-describe-btn');
+  if (connDescribeBtn) {
+    connDescribeBtn.addEventListener('click', function() {
+      openConnectionModal();
+    });
+  }
+
+  // Quick binding buttons in the tray
+  root.querySelectorAll('.app-conn-quick-btn').forEach(function(btn) {
+    btn.addEventListener('click', async function() {
+      var bindType = btn.getAttribute('data-conn-quick-type');
+      if (!bindType || appConnectionSelections.length < 2) return;
+
+      btn.disabled = true;
+      btn.textContent = 'Creating...';
+      try {
+        await createQuickBindings(bindType);
+        toast('Bindings created', 'success');
+        // Refresh bindings
+        appBindings = await fetchAppBindings(compData.id);
+        renderCompositionAppPage();
+      } catch (err) {
+        toast('Failed: ' + (err.message || err), 'error');
+        btn.disabled = false;
+      }
+    });
+  });
+
+  // Remove selection chip
+  root.querySelectorAll('.app-conn-chip-remove').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      var entityId = btn.getAttribute('data-conn-remove');
+      appConnectionSelections = appConnectionSelections.filter(function(s) { return s.entityId !== entityId; });
+      renderCompositionAppPage();
+    });
+  });
+
+  // Connection modal submit
+  var connModalSubmit = root.querySelector('#app-conn-modal-submit');
+  if (connModalSubmit) {
+    connModalSubmit.addEventListener('click', async function() {
+      var descInput = root.querySelector('#app-conn-modal-desc');
+      var typeSelect = root.querySelector('#app-conn-modal-type');
+      if (!descInput || !typeSelect) return;
+
+      var description = descInput.value.trim();
+      var bindingType = typeSelect.value;
+
+      if (!bindingType) {
+        toast('Select a connection type', 'error');
+        return;
+      }
+
+      connModalSubmit.disabled = true;
+      connModalSubmit.textContent = 'Creating...';
+
+      try {
+        await createBindingsFromModal(bindingType, description);
+        toast('Connections created!', 'success');
+        appBindings = await fetchAppBindings(compData.id);
+        appConnectionSelections = [];
+        closeConnectionModal();
+        renderCompositionAppPage();
+      } catch (err) {
+        toast('Failed: ' + (err.message || err), 'error');
+        connModalSubmit.disabled = false;
+        connModalSubmit.textContent = 'Create Connections';
+      }
+    });
+  }
+
+  var connModalCancel = root.querySelector('#app-conn-modal-cancel');
+  if (connModalCancel) {
+    connModalCancel.addEventListener('click', closeConnectionModal);
+  }
+  var connModalBackdrop = root.querySelector('#app-conn-modal-backdrop');
+  if (connModalBackdrop) {
+    connModalBackdrop.addEventListener('click', closeConnectionModal);
+  }
+}
+
+// ────────────────────────────────────────────────────────────────
+//  Connection Mode — rendering and logic
+// ────────────────────────────────────────────────────────────────
+
+/**
+ * Render the floating connection tray that appears at the bottom
+ * when connection mode is active and entities are selected.
+ */
+function renderConnectionTray() {
+  var html = '<div class="app-conn-tray' + (appConnectionSelections.length > 0 ? ' app-conn-tray--has-items' : '') + '" id="app-conn-tray">';
+
+  if (appConnectionSelections.length === 0) {
+    html += '<div class="app-conn-tray-hint">';
+    html += '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" width="16" height="16"><circle cx="4" cy="4" r="2"/><circle cx="12" cy="12" r="2"/><path d="M5.5 5.5l5 5"/></svg>';
+    html += ' Click on entities to select them, then create connections between them.';
+    html += '</div>';
+  } else {
+    // Selected items chips
+    html += '<div class="app-conn-tray-selections">';
+    html += '<span class="app-conn-tray-label">Selected:</span>';
+    for (var i = 0; i < appConnectionSelections.length; i++) {
+      var sel = appConnectionSelections[i];
+      html += '<span class="app-conn-chip">';
+      html += '<span class="app-conn-chip-type">' + compEscHtml(sel.entityType) + '</span>';
+      html += '<span class="app-conn-chip-label">' + compEscHtml(sel.label) + '</span>';
+      html += '<button class="app-conn-chip-remove" data-conn-remove="' + compEscAttr(sel.entityId) + '">&times;</button>';
+      html += '</span>';
+    }
+    html += '</div>';
+
+    // Actions
+    html += '<div class="app-conn-tray-actions">';
+    if (appConnectionSelections.length >= 2) {
+      // Quick binding buttons for common types
+      var types = detectConnectionTypes();
+      for (var ti = 0; ti < types.length; ti++) {
+        html += '<button class="app-conn-quick-btn" data-conn-quick-type="' + compEscAttr(types[ti].type) + '" title="' + compEscAttr(types[ti].hint) + '">' + compEscHtml(types[ti].label) + '</button>';
+      }
+      html += '<button class="app-conn-describe-btn" id="app-conn-describe-btn">&#x270E; Describe Connection...</button>';
+    } else {
+      html += '<span class="app-conn-tray-hint">Select at least 2 entities</span>';
+    }
+    html += '</div>';
+  }
+
+  html += '</div>';
+
+  // Connection modal (hidden by default)
+  html += '<div class="app-conn-modal" id="app-conn-modal" style="display:none;">';
+  html += '<div class="app-conn-modal-backdrop" id="app-conn-modal-backdrop"></div>';
+  html += '<div class="app-conn-modal-container">';
+  html += '<h3 class="app-conn-modal-title">Create Connection</h3>';
+  html += renderConnectionModalBody();
+  html += '</div>';
+  html += '</div>';
+
+  return html;
+}
+
+/**
+ * Detect smart quick-action binding types based on the selected entity types.
+ */
+function detectConnectionTypes() {
+  var types = [];
+  var entityTypes = {};
+  for (var i = 0; i < appConnectionSelections.length; i++) {
+    var t = appConnectionSelections[i].entityType;
+    if (!entityTypes[t]) entityTypes[t] = [];
+    entityTypes[t].push(appConnectionSelections[i]);
+  }
+
+  var hasShot = !!entityTypes['shot'];
+  var hasCharacter = !!entityTypes['character'];
+  var hasLocation = !!entityTypes['location'];
+
+  if (hasShot && hasCharacter) {
+    types.push({ type: 'depicts', label: 'Depicts', hint: 'Shot depicts these characters' });
+  }
+  if (hasShot && hasLocation) {
+    types.push({ type: 'set-in', label: 'Set In', hint: 'Shot is set in this location' });
+  }
+  if (hasCharacter && entityTypes['character'] && entityTypes['character'].length >= 2) {
+    types.push({ type: 'related-to', label: 'Related', hint: 'Characters are related' });
+  }
+
+  // Generic fallback
+  if (types.length === 0) {
+    types.push({ type: 'references', label: 'References', hint: 'Generic reference connection' });
+  }
+
+  return types;
+}
+
+/**
+ * Render the body of the connection modal with selected entities
+ * and a description field.
+ */
+function renderConnectionModalBody() {
+  var html = '<div class="app-conn-modal-body">';
+
+  // Show selected entities
+  html += '<div class="app-conn-modal-entities">';
+  for (var i = 0; i < appConnectionSelections.length; i++) {
+    var sel = appConnectionSelections[i];
+    if (i > 0) {
+      html += '<span class="app-conn-modal-arrow">&rarr;</span>';
+    }
+    html += '<div class="app-conn-modal-entity">';
+    html += '<span class="app-conn-modal-entity-type">' + compEscHtml(sel.entityType) + '</span>';
+    html += '<span class="app-conn-modal-entity-label">' + compEscHtml(sel.label) + '</span>';
+    html += '</div>';
+  }
+  html += '</div>';
+
+  // Connection type selector
+  html += '<div class="app-conn-modal-field">';
+  html += '<label class="app-conn-modal-label">Connection Type</label>';
+  html += '<select class="app-conn-modal-select" id="app-conn-modal-type">';
+  var detectedTypes = detectConnectionTypes();
+  for (var ti = 0; ti < detectedTypes.length; ti++) {
+    html += '<option value="' + compEscAttr(detectedTypes[ti].type) + '">' + compEscHtml(detectedTypes[ti].label) + ' — ' + compEscHtml(detectedTypes[ti].hint) + '</option>';
+  }
+  html += '<option value="depicts">Depicts (character in shot)</option>';
+  html += '<option value="set-in">Set In (shot in location)</option>';
+  html += '<option value="voice">Voice (dialogue by character)</option>';
+  html += '<option value="references">References (generic)</option>';
+  html += '<option value="custom">Custom...</option>';
+  html += '</select>';
+  html += '</div>';
+
+  // Description/notes
+  html += '<div class="app-conn-modal-field">';
+  html += '<label class="app-conn-modal-label">Description (optional)</label>';
+  html += '<textarea class="app-conn-modal-textarea" id="app-conn-modal-desc" placeholder="Describe the connection or any notes..." rows="3"></textarea>';
+  html += '</div>';
+
+  // Direction hint
+  if (appConnectionSelections.length === 2) {
+    html += '<div class="app-conn-modal-direction">';
+    html += 'Direction: <strong>' + compEscHtml(appConnectionSelections[0].label) + '</strong> &rarr; <strong>' + compEscHtml(appConnectionSelections[1].label) + '</strong>';
+    html += ' <button class="app-conn-modal-swap" id="app-conn-modal-swap">&#x21C4; Swap</button>';
+    html += '</div>';
+  }
+
+  // Actions
+  html += '<div class="app-conn-modal-actions">';
+  html += '<button class="app-conn-modal-btn app-conn-modal-btn--primary" id="app-conn-modal-submit">Create Connections</button>';
+  html += '<button class="app-conn-modal-btn" id="app-conn-modal-cancel">Cancel</button>';
+  html += '</div>';
+
+  html += '</div>';
+  return html;
+}
+
+function openConnectionModal() {
+  var modal = document.getElementById('app-conn-modal');
+  if (modal) {
+    modal.style.display = 'flex';
+    document.body.style.overflow = 'hidden';
+
+    // Wire swap button
+    var swapBtn = modal.querySelector('#app-conn-modal-swap');
+    if (swapBtn) {
+      swapBtn.addEventListener('click', function() {
+        appConnectionSelections.reverse();
+        // Re-render modal body
+        var container = modal.querySelector('.app-conn-modal-container');
+        if (container) {
+          container.innerHTML = '<h3 class="app-conn-modal-title">Create Connection</h3>' + renderConnectionModalBody();
+          // Re-wire swap button
+          var newSwap = container.querySelector('#app-conn-modal-swap');
+          if (newSwap) {
+            newSwap.addEventListener('click', function() {
+              appConnectionSelections.reverse();
+              openConnectionModal(); // Re-render
+            });
+          }
+        }
+      });
+    }
+  }
+}
+
+function closeConnectionModal() {
+  var modal = document.getElementById('app-conn-modal');
+  if (modal) {
+    modal.style.display = 'none';
+    document.body.style.overflow = '';
+  }
+}
+
+/**
+ * Create quick bindings between selected entities using a specific type.
+ * First selected entity of one type becomes source, others become targets.
+ */
+async function createQuickBindings(bindingType) {
+  if (appConnectionSelections.length < 2 || !compData) return;
+
+  // Determine source and targets based on binding type
+  var source, targets;
+
+  if (bindingType === 'depicts' || bindingType === 'set-in') {
+    // Source = shots, targets = characters/locations
+    var shots = appConnectionSelections.filter(function(s) { return s.entityType === 'shot'; });
+    var others = appConnectionSelections.filter(function(s) { return s.entityType !== 'shot'; });
+    if (shots.length === 0 || others.length === 0) {
+      // Fall back: first is source, rest are targets
+      source = [appConnectionSelections[0]];
+      targets = appConnectionSelections.slice(1);
+    } else {
+      source = shots;
+      targets = others;
+    }
+  } else {
+    // Generic: first selected is source, rest are targets
+    source = [appConnectionSelections[0]];
+    targets = appConnectionSelections.slice(1);
+  }
+
+  // Create one binding per source-target pair
+  for (var si = 0; si < source.length; si++) {
+    for (var ti = 0; ti < targets.length; ti++) {
+      await createAppBinding(compData.id, {
+        type: bindingType,
+        source: { entityType: source[si].entityType, entityId: source[si].entityId },
+        target: { entityType: targets[ti].entityType, entityId: targets[ti].entityId },
+        confidence: 1.0,
+        origin: 'manual',
+      });
+    }
+  }
+}
+
+/**
+ * Create bindings from the modal form.
+ */
+async function createBindingsFromModal(bindingType, description) {
+  if (appConnectionSelections.length < 2 || !compData) return;
+
+  // First entity is source, rest are targets
+  var sourceEntity = appConnectionSelections[0];
+
+  for (var i = 1; i < appConnectionSelections.length; i++) {
+    var target = appConnectionSelections[i];
+    await createAppBinding(compData.id, {
+      type: bindingType,
+      source: { entityType: sourceEntity.entityType, entityId: sourceEntity.entityId },
+      target: { entityType: target.entityType, entityId: target.entityId },
+      confidence: 1.0,
+      origin: 'manual',
+      metadata: description ? { description: description } : undefined,
+    });
   }
 }
 
