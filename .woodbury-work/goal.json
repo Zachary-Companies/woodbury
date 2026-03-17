@@ -1,18 +1,13 @@
 {
-  "objective": "Repair the Woodbury script-node JavaScript for generating pre-visualization images so it properly reports progress to pass deterministic unit tests",
+  "objective": "Investigate and fix why the script generation process produces zero elements despite having characters, locations, sections, and assets",
   "successCriteria": [
-    "Script calls context.progress.start() with total count and description",
-    "Script calls context.progress.increment() for each processed shot",
-    "Script calls context.progress.complete() when finished",
-    "All progress calls are properly executed and observable by unit tests",
-    "Script maintains existing functionality for generating pre-vis assets"
+    "Identify the root cause of elements array being empty",
+    "Elements are properly generated and distributed to sections",
+    "Script package assembly includes non-zero elements count"
   ],
   "constraints": [
-    "Return only a single repaired JavaScript code block",
-    "Honor exact port names unless validation error exists",
-    "Use Woodbury-native asset and collection functions",
-    "Maintain deterministic behavior for unit testing"
+    "Must maintain existing character, location, section, and asset generation functionality"
   ],
-  "createdAt": "2026-03-15T02:13:11.332Z",
-  "updatedAt": "2026-03-15T02:13:11.332Z"
+  "createdAt": "2026-03-16T22:07:50.302Z",
+  "updatedAt": "2026-03-16T22:07:50.302Z"
 }

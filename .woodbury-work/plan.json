@@ -1,9 +1,9 @@
 {
   "tasks": [
     {
-      "id": "task_mmr4edkm_m0fgfx",
+      "id": "task_mmtqik3u_506xbr",
       "subject": "task",
-      "description": "Repair the Woodbury script-node JavaScript for generating pre-visualization images so it properly reports progress to pass deterministic unit tests",
+      "description": "Investigate and fix why the script generation process produces zero elements despite having characters, locations, sections, and assets",
       "status": "pending",
       "blockedBy": [],
       "blocks": [],
@@ -11,5 +11,5 @@
       "validators": []
     }
   ],
-  "updatedAt": "2026-03-15T02:13:17.495Z"
+  "updatedAt": "2026-03-16T22:07:56.498Z"
 }

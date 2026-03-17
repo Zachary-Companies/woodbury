@@ -1,0 +1,374 @@
+{
+  "version": "1.0",
+  "id": "script-generator-pipeline",
+  "name": "Script Generator",
+  "description": "Generate a complete screenplay package from input parameters. Produces a GeneratedScriptPackage containing: ScriptDocument with metadata/cast/locations/sections, AssetCollection with character headshots/location landscapes/previs frames, and PrevisualizationPlan linking shots to assets. Enforces invariants: every named character gets a headshot, every location gets a landscape, every ShotElement gets a previs frame.",
+  "folder": "script-generator",
+  "nodes": [
+    {
+      "id": "input_kind",
+      "workflowId": "__variable__",
+      "position": { "x": 50, "y": 50 },
+      "label": "Script Kind",
+      "variableNode": {
+        "type": "string",
+        "initialValue": "short-film",
+        "exposeAsInput": true,
+        "inputName": "kind",
+        "description": "Type of script (commercial, tv-episode, tv-pilot, feature-film, short-film)",
+        "required": true,
+        "inputControl": "select",
+        "options": ["commercial", "tv-episode", "tv-pilot", "feature-film", "short-film"]
+      }
+    },
+    {
+      "id": "input_title",
+      "workflowId": "__variable__",
+      "position": { "x": 50, "y": 130 },
+      "label": "Title",
+      "variableNode": {
+        "type": "string",
+        "initialValue": "",
+        "exposeAsInput": true,
+        "inputName": "title",
+        "description": "The title of the script",
+        "required": true
+      }
+    },
+    {
+      "id": "input_subtitle",
+      "workflowId": "__variable__",
+      "position": { "x": 50, "y": 210 },
+      "label": "Subtitle",
+      "variableNode": {
+        "type": "string",
+        "initialValue": "",
+        "exposeAsInput": true,
+        "inputName": "subtitle",
+        "description": "Optional subtitle for the script"
+      }
+    },
+    {
+      "id": "input_genre",
+      "workflowId": "__variable__",
+      "position": { "x": 50, "y": 290 },
+      "label": "Genre",
+      "variableNode": {
+        "type": "array",
+        "initialValue": "[\"drama\"]",
+        "exposeAsInput": true,
+        "inputName": "genre",
+        "description": "Genre(s) for the script (e.g., drama, comedy, sci-fi, horror)",
+        "required": true
+      }
+    },
+    {
+      "id": "input_visualizationStyle",
+      "workflowId": "__variable__",
+      "position": { "x": 50, "y": 370 },
+      "label": "Visualization Style",
+      "variableNode": {
+        "type": "string",
+        "initialValue": "cinematic realism",
+        "exposeAsInput": true,
+        "inputName": "visualizationStyle",
+        "description": "Visual style for asset generation (e.g., 'cinematic watercolor realism', 'noir photography')",
+        "required": true
+      }
+    },
+    {
+      "id": "input_logline",
+      "workflowId": "__variable__",
+      "position": { "x": 50, "y": 450 },
+      "label": "Logline",
+      "variableNode": {
+        "type": "string",
+        "initialValue": "",
+        "exposeAsInput": true,
+        "inputName": "logline",
+        "description": "One-sentence summary of the story"
+      }
+    },
+    {
+      "id": "input_tone",
+      "workflowId": "__variable__",
+      "position": { "x": 50, "y": 530 },
+      "label": "Tone",
+      "variableNode": {
+        "type": "array",
+        "initialValue": "[]",
+        "exposeAsInput": true,
+        "inputName": "tone",
+        "description": "Tonal qualities (e.g., dark, suspenseful, comedic)"
+      }
+    },
+    {
+      "id": "input_runtimeMinutes",
+      "workflowId": "__variable__",
+      "position": { "x": 50, "y": 610 },
+      "label": "Runtime (minutes)",
+      "variableNode": {
+        "type": "number",
+        "initialValue": "10",
+        "exposeAsInput": true,
+        "inputName": "runtimeMinutes",
+        "description": "Target runtime in minutes"
+      }
+    },
+    {
+      "id": "input_authorName",
+      "workflowId": "__variable__",
+      "position": { "x": 50, "y": 690 },
+      "label": "Author Name",
+      "variableNode": {
+        "type": "string",
+        "initialValue": "Anonymous",
+        "exposeAsInput": true,
+        "inputName": "authorName",
+        "description": "Name of the script author"
+      }
+    },
+    {
+      "id": "generate_script",
+      "workflowId": "__script__",
+      "position": { "x": 350, "y": 200 },
+      "label": "Generate Script Document",
+      "script": {
+        "description": "Generate the ScriptDocument structure with metadata based on input parameters",
+        "code": "// @input kind: string - Type of script\n// @input title: string - Script title\n// @input subtitle: string - Optional subtitle\n// @input genre: string[] - Genre array\n// @input visualizationStyle: string - Visual style for assets\n// @input logline: string - Story logline\n// @input tone: string[] - Tonal qualities\n// @input runtimeMinutes: number - Target runtime\n// @input authorName: string - Author name\n// @output scriptInput: object - The ScriptGeneratorInput object\n// @output script: object - The ScriptDocument structure\n// @output scriptId: string - Generated script ID\n// @output title: string - Script title (pass-through)\n// @output visualizationStyle: string - Visual style (pass-through)\n// @output genre: string[] - Genre array (pass-through)\n// @output logline: string - Logline (pass-through)\n// @output tone: string[] - Tone array (pass-through)\n\nconst kind = inputs.kind || 'short-film';\nconst title = inputs.title || 'Untitled';\nconst subtitle = inputs.subtitle || '';\nconst genre = Array.isArray(inputs.genre) ? inputs.genre : (inputs.genre ? [inputs.genre] : ['drama']);\nconst visualizationStyle = inputs.visualizationStyle || 'cinematic realism';\nconst logline = inputs.logline || '';\nconst tone = Array.isArray(inputs.tone) ? inputs.tone : [];\nconst runtimeMinutes = inputs.runtimeMinutes || 10;\nconst authorName = inputs.authorName || 'Anonymous';\n\n// Build the input object\nconst scriptInput = {\n  kind,\n  title,\n  subtitle: subtitle || undefined,\n  genre,\n  visualizationStyle,\n  logline: logline || undefined,\n  tone: tone.length ? tone : undefined,\n  runtimeMinutes,\n  author: [{ name: authorName, role: 'writer' }]\n};\n\n// Generate unique IDs\nconst scriptId = `script_${title.toLowerCase().replace(/[^a-z0-9]/g, '_')}_${Date.now()}`;\n\n// Build metadata\nconst metadata = {\n  title,\n  subtitle: subtitle || undefined,\n  logline: logline || undefined,\n  author: [{ name: authorName, role: 'writer' }],\n  genre,\n  tone: tone.length ? tone : undefined,\n  runtimeMinutes,\n  draftDate: new Date().toISOString().split('T')[0],\n  version: '1.0'\n};\n\n// Create the script document structure\nconst script = {\n  id: scriptId,\n  kind,\n  metadata,\n  cast: [],\n  locations: [],\n  sections: []\n};\n\nreturn {\n  scriptInput,\n  script,\n  scriptId,\n  title,\n  visualizationStyle,\n  genre,\n  logline,\n  tone\n};",
+        "inputs": [
+          { "name": "kind", "type": "string", "description": "Type of script", "required": true },
+          { "name": "title", "type": "string", "description": "Script title", "required": true },
+          { "name": "subtitle", "type": "string", "description": "Optional subtitle" },
+          { "name": "genre", "type": "string[]", "description": "Genre array", "required": true },
+          { "name": "visualizationStyle", "type": "string", "description": "Visual style for assets", "required": true },
+          { "name": "logline", "type": "string", "description": "Story logline" },
+          { "name": "tone", "type": "string[]", "description": "Tonal qualities" },
+          { "name": "runtimeMinutes", "type": "number", "description": "Target runtime" },
+          { "name": "authorName", "type": "string", "description": "Author name" }
+        ],
+        "outputs": [
+          { "name": "scriptInput", "type": "string", "description": "The ScriptGeneratorInput object" },
+          { "name": "script", "type": "string", "description": "The ScriptDocument structure" },
+          { "name": "scriptId", "type": "string", "description": "Generated script ID" },
+          { "name": "title", "type": "string", "description": "Script title (pass-through)" },
+          { "name": "visualizationStyle", "type": "string", "description": "Visual style (pass-through)" },
+          { "name": "genre", "type": "string[]", "description": "Genre array (pass-through)" },
+          { "name": "logline", "type": "string", "description": "Logline (pass-through)" },
+          { "name": "tone", "type": "string[]", "description": "Tone array (pass-through)" }
+        ]
+      }
+    },
+    {
+      "id": "generate_story_content",
+      "workflowId": "__script__",
+      "position": { "x": 650, "y": 200 },
+      "label": "Generate Story Content",
+      "script": {
+        "description": "Generate story content: cast, locations, and sections with scenes. This creates placeholder content that would typically be filled by an LLM.",
+        "code": "// @input script: object - The ScriptDocument to populate\n// @input title: string - Script title\n// @input genre: string[] - Genre array\n// @input logline: string - Story logline\n// @input visualizationStyle: string - Visual style\n// @output script: object - Updated ScriptDocument with cast/locations/sections\n// @output cast: object[] - Character definitions\n// @output locations: object[] - Location definitions\n// @output sections: object[] - Script sections\n// @output shotElements: object[] - Extracted shot elements for previs\n// @output title: string - Script title (pass-through)\n// @output visualizationStyle: string - Visual style (pass-through)\n\nconst script = JSON.parse(JSON.stringify(inputs.script));\nconst title = inputs.title;\nconst genre = inputs.genre;\nconst logline = inputs.logline;\nconst visualizationStyle = inputs.visualizationStyle;\n\n// Helper to generate IDs\nconst genId = (prefix, name) => `${prefix}_${name.toLowerCase().replace(/[^a-z0-9]/g, '_')}`;\n\n// Placeholder cast - in real use, LLM would generate based on logline/genre\nconst cast = [\n  {\n    id: genId('char', 'protagonist'),\n    name: 'PROTAGONIST',\n    displayName: 'The Protagonist',\n    description: `Main character of ${title}`,\n    ageRange: '25-35',\n    gender: 'any'\n  }\n];\n\n// Placeholder locations\nconst locations = [\n  {\n    id: genId('loc', 'main_setting'),\n    name: 'MAIN SETTING',\n    description: `Primary location for ${title}`,\n    recurring: true\n  }\n];\n\n// Generate sections with scenes\nconst sections = [\n  {\n    id: 'scene_1',\n    type: 'scene',\n    order: 1,\n    sceneNumber: '1',\n    heading: {\n      prefix: 'EXT',\n      location: locations[0].name,\n      timeOfDay: 'DAY'\n    },\n    synopsis: `Opening scene of ${title}`,\n    beats: [\n      {\n        id: 'shot_1_1',\n        type: 'shot',\n        text: 'ESTABLISHING SHOT - The setting comes into view.'\n      },\n      {\n        id: 'action_1_1',\n        type: 'action',\n        text: `${cast[0].name} enters the scene.`\n      },\n      {\n        id: 'dialogue_1_1',\n        type: 'dialogue',\n        characterId: cast[0].id,\n        characterName: cast[0].name,\n        lines: ['(First line of dialogue)']\n      }\n    ],\n    locationId: locations[0].id,\n    estimatedDurationSeconds: 60\n  }\n];\n\n// Update script with generated content\nscript.cast = cast;\nscript.locations = locations;\nscript.sections = sections;\n\n// Extract all shot elements for previs generation\nconst shotElements = [];\nsections.forEach(section => {\n  if (section.type === 'scene' && section.beats) {\n    section.beats.forEach(beat => {\n      if (beat.type === 'shot') {\n        shotElements.push({\n          shotId: beat.id,\n          shotText: beat.text,\n          sceneId: section.id,\n          locationId: section.locationId,\n          characterIds: cast.map(c => c.id)\n        });\n      }\n    });\n  }\n});\n\nreturn {\n  script,\n  cast,\n  locations,\n  sections,\n  shotElements,\n  title,\n  visualizationStyle\n};",
+        "inputs": [
+          { "name": "script", "type": "string", "description": "The ScriptDocument to populate", "required": true },
+          { "name": "title", "type": "string", "description": "Script title", "required": true },
+          { "name": "genre", "type": "string[]", "description": "Genre array" },
+          { "name": "logline", "type": "string", "description": "Story logline" },
+          { "name": "visualizationStyle", "type": "string", "description": "Visual style", "required": true }
+        ],
+        "outputs": [
+          { "name": "script", "type": "string", "description": "Updated ScriptDocument with cast/locations/sections" },
+          { "name": "cast", "type": "string[]", "description": "Character definitions" },
+          { "name": "locations", "type": "string[]", "description": "Location definitions" },
+          { "name": "sections", "type": "string[]", "description": "Script sections" },
+          { "name": "shotElements", "type": "string[]", "description": "Extracted shot elements for previs" },
+          { "name": "title", "type": "string", "description": "Script title (pass-through)" },
+          { "name": "visualizationStyle", "type": "string", "description": "Visual style (pass-through)" }
+        ]
+      }
+    },
+    {
+      "id": "generate_character_assets",
+      "workflowId": "__script__",
+      "position": { "x": 950, "y": 100 },
+      "label": "Generate Character Assets",
+      "script": {
+        "description": "Generate character headshot assets for each cast member. Rule: requireHeadshotForEachNamedCharacter = true",
+        "code": "// @input cast: object[] - Character definitions\n// @input title: string - Script title (for collection name)\n// @input visualizationStyle: string - Visual style for prompts\n// @output characterAssets: object[] - Character headshot VisualAsset objects\n\nconst cast = inputs.cast || [];\nconst title = inputs.title;\nconst visualizationStyle = inputs.visualizationStyle;\n\nconst characterAssets = cast.map(character => {\n  const assetId = `asset_headshot_${character.id}`;\n  \n  // Build descriptive prompt from character data\n  const promptParts = [\n    'Portrait headshot of',\n    character.displayName || character.name,\n  ];\n  \n  if (character.description) {\n    promptParts.push(character.description);\n  }\n  if (character.ageRange) {\n    promptParts.push(`age ${character.ageRange}`);\n  }\n  promptParts.push(visualizationStyle);\n  \n  return {\n    id: assetId,\n    type: 'character-headshot',\n    name: `${character.displayName || character.name} Headshot`,\n    collectionName: title,\n    prompt: promptParts.join(', '),\n    visualizationStyle,\n    characterId: character.id,\n    status: 'planned',\n    aspectRatio: '3:4',\n    tags: ['character', 'headshot', character.name.toLowerCase()]\n  };\n});\n\nreturn { characterAssets };",
+        "inputs": [
+          { "name": "cast", "type": "string[]", "description": "Character definitions", "required": true },
+          { "name": "title", "type": "string", "description": "Script title (for collection name)", "required": true },
+          { "name": "visualizationStyle", "type": "string", "description": "Visual style for prompts", "required": true }
+        ],
+        "outputs": [
+          { "name": "characterAssets", "type": "string[]", "description": "Character headshot VisualAsset objects" }
+        ]
+      }
+    },
+    {
+      "id": "generate_location_assets",
+      "workflowId": "__script__",
+      "position": { "x": 950, "y": 250 },
+      "label": "Generate Location Assets",
+      "script": {
+        "description": "Generate landscape assets for each location. Rule: requireLandscapeForEachLocation = true",
+        "code": "// @input locations: object[] - Location definitions\n// @input title: string - Script title (for collection name)\n// @input visualizationStyle: string - Visual style for prompts\n// @output locationAssets: object[] - Location landscape VisualAsset objects\n\nconst locations = inputs.locations || [];\nconst title = inputs.title;\nconst visualizationStyle = inputs.visualizationStyle;\n\nconst locationAssets = locations.map(location => {\n  const assetId = `asset_landscape_${location.id}`;\n  \n  // Build descriptive prompt from location data\n  const promptParts = [\n    location.name,\n    location.description || 'establishing view'\n  ];\n  promptParts.push(visualizationStyle);\n  \n  return {\n    id: assetId,\n    type: 'landscape',\n    name: `${location.name} Landscape`,\n    collectionName: title,\n    prompt: promptParts.join(', '),\n    visualizationStyle,\n    locationId: location.id,\n    status: 'planned',\n    aspectRatio: '16:9',\n    tags: ['location', 'landscape', 'establishing']\n  };\n});\n\nreturn { locationAssets };",
+        "inputs": [
+          { "name": "locations", "type": "string[]", "description": "Location definitions", "required": true },
+          { "name": "title", "type": "string", "description": "Script title (for collection name)", "required": true },
+          { "name": "visualizationStyle", "type": "string", "description": "Visual style for prompts", "required": true }
+        ],
+        "outputs": [
+          { "name": "locationAssets", "type": "string[]", "description": "Location landscape VisualAsset objects" }
+        ]
+      }
+    },
+    {
+      "id": "generate_previs_assets",
+      "workflowId": "__script__",
+      "position": { "x": 950, "y": 400 },
+      "label": "Generate Previs Assets",
+      "script": {
+        "description": "Generate previs-frame assets for each shot element. Rule: requirePrevisForEveryShot = true",
+        "code": "// @input shotElements: object[] - Shot elements extracted from scenes\n// @input title: string - Script title (for collection name)\n// @input visualizationStyle: string - Visual style for prompts\n// @input locations: object[] - Location definitions for context\n// @input cast: object[] - Character definitions for context\n// @output previsAssets: object[] - Previs-frame VisualAsset objects\n// @output shotElements: object[] - Shot elements (pass-through)\n\nconst shotElements = inputs.shotElements || [];\nconst title = inputs.title;\nconst visualizationStyle = inputs.visualizationStyle;\nconst locations = inputs.locations || [];\nconst cast = inputs.cast || [];\n\n// Create a lookup for location names\nconst locationMap = {};\nlocations.forEach(loc => { locationMap[loc.id] = loc; });\n\n// Create a lookup for character names\nconst characterMap = {};\ncast.forEach(char => { characterMap[char.id] = char; });\n\nconst previsAssets = shotElements.map((shot, index) => {\n  const assetId = `asset_previs_${shot.sceneId}_${shot.shotId}`;\n  \n  // Build prompt from shot text and context\n  const location = locationMap[shot.locationId];\n  const promptParts = [\n    shot.shotText,\n    location ? `at ${location.name}` : '',\n    visualizationStyle\n  ].filter(Boolean);\n  \n  return {\n    id: assetId,\n    type: 'previs-frame',\n    name: `${shot.sceneId} ${shot.shotId} Previs`,\n    collectionName: title,\n    prompt: promptParts.join(', '),\n    visualizationStyle,\n    sceneId: shot.sceneId,\n    shotElementId: shot.shotId,\n    locationId: shot.locationId,\n    status: 'planned',\n    aspectRatio: '16:9',\n    tags: ['previs', 'frame', shot.sceneId]\n  };\n});\n\nreturn { previsAssets, shotElements };",
+        "inputs": [
+          { "name": "shotElements", "type": "string[]", "description": "Shot elements extracted from scenes", "required": true },
+          { "name": "title", "type": "string", "description": "Script title (for collection name)", "required": true },
+          { "name": "visualizationStyle", "type": "string", "description": "Visual style for prompts", "required": true },
+          { "name": "locations", "type": "string[]", "description": "Location definitions for context" },
+          { "name": "cast", "type": "string[]", "description": "Character definitions for context" }
+        ],
+        "outputs": [
+          { "name": "previsAssets", "type": "string[]", "description": "Previs-frame VisualAsset objects" },
+          { "name": "shotElements", "type": "string[]", "description": "Shot elements (pass-through)" }
+        ]
+      }
+    },
+    {
+      "id": "assemble_asset_collection",
+      "workflowId": "__script__",
+      "position": { "x": 1250, "y": 250 },
+      "label": "Assemble Asset Collection",
+      "script": {
+        "description": "Assemble all assets into the AssetCollection. Rule: assets.name must equal script.metadata.title",
+        "code": "// @input title: string - Script title (must match collection name)\n// @input characterAssets: object[] - Character headshot assets\n// @input locationAssets: object[] - Location landscape assets\n// @input previsAssets: object[] - Previs-frame assets\n// @output assetCollection: object - The complete AssetCollection\n\nconst title = inputs.title;\nconst characterAssets = inputs.characterAssets || [];\nconst locationAssets = inputs.locationAssets || [];\nconst previsAssets = inputs.previsAssets || [];\n\n// Combine all assets\nconst allAssets = [\n  ...characterAssets,\n  ...locationAssets,\n  ...previsAssets\n];\n\n// Create the AssetCollection\nconst assetCollection = {\n  id: `assets_${title.toLowerCase().replace(/[^a-z0-9]/g, '_')}`,\n  name: title, // Must equal script.metadata.title\n  description: `Visual assets for ${title}`,\n  assets: allAssets\n};\n\nreturn { assetCollection };",
+        "inputs": [
+          { "name": "title", "type": "string", "description": "Script title (must match collection name)", "required": true },
+          { "name": "characterAssets", "type": "string[]", "description": "Character headshot assets", "required": true },
+          { "name": "locationAssets", "type": "string[]", "description": "Location landscape assets", "required": true },
+          { "name": "previsAssets", "type": "string[]", "description": "Previs-frame assets", "required": true }
+        ],
+        "outputs": [
+          { "name": "assetCollection", "type": "string", "description": "The complete AssetCollection" }
+        ]
+      }
+    },
+    {
+      "id": "generate_previs_plan",
+      "workflowId": "__script__",
+      "position": { "x": 1250, "y": 450 },
+      "label": "Generate Previs Plan",
+      "script": {
+        "description": "Generate the PrevisualizationPlan. Rule: every PrevisualizationShot.assetId must point to a previs-frame asset",
+        "code": "// @input title: string - Script title (for collection name)\n// @input scriptId: string - Script document ID\n// @input shotElements: object[] - Shot elements from scenes\n// @input previsAssets: object[] - Previs-frame assets\n// @input locations: object[] - Location definitions\n// @input cast: object[] - Character definitions\n// @output previsualizations: object - The PrevisualizationPlan\n\nconst title = inputs.title;\nconst scriptId = inputs.scriptId;\nconst shotElements = inputs.shotElements || [];\nconst previsAssets = inputs.previsAssets || [];\nconst locations = inputs.locations || [];\nconst cast = inputs.cast || [];\n\n// Create lookup for previs assets by shot\nconst previsAssetMap = {};\nprevisAssets.forEach(asset => {\n  const key = `${asset.sceneId}_${asset.shotElementId}`;\n  previsAssetMap[key] = asset;\n});\n\n// Generate PrevisualizationShots\nconst shots = shotElements.map((shot, index) => {\n  const key = `${shot.sceneId}_${shot.shotId}`;\n  const asset = previsAssetMap[key];\n  \n  // Determine camera intent from shot text\n  let cameraIntent = 'narrative';\n  const shotTextLower = shot.shotText.toLowerCase();\n  if (shotTextLower.includes('establishing') || shotTextLower.includes('wide')) {\n    cameraIntent = 'establishing';\n  } else if (shotTextLower.includes('close') || shotTextLower.includes('cu')) {\n    cameraIntent = 'close-up';\n  } else if (shotTextLower.includes('medium') || shotTextLower.includes('ms')) {\n    cameraIntent = 'medium';\n  }\n  \n  // Determine composition\n  let composition = 'standard';\n  if (shotTextLower.includes('wide')) composition = 'very wide';\n  if (shotTextLower.includes('close')) composition = 'tight';\n  if (shotTextLower.includes('two-shot')) composition = 'two-shot';\n  \n  return {\n    id: `previs_${index + 1}`,\n    sceneId: shot.sceneId,\n    shotElementId: shot.shotId,\n    shotText: shot.shotText,\n    order: index + 1,\n    locationId: shot.locationId,\n    characterIds: shot.characterIds,\n    description: `Previs frame for: ${shot.shotText}`,\n    cameraIntent,\n    composition,\n    lighting: 'natural',\n    durationSeconds: 3,\n    assetId: asset ? asset.id : null // Links to the previs-frame asset\n  };\n});\n\n// Create the PrevisualizationPlan\nconst previsualizations = {\n  scriptId,\n  collectionName: title,\n  shots\n};\n\nreturn { previsualizations };",
+        "inputs": [
+          { "name": "title", "type": "string", "description": "Script title (for collection name)", "required": true },
+          { "name": "scriptId", "type": "string", "description": "Script document ID", "required": true },
+          { "name": "shotElements", "type": "string[]", "description": "Shot elements from scenes", "required": true },
+          { "name": "previsAssets", "type": "string[]", "description": "Previs-frame assets", "required": true },
+          { "name": "locations", "type": "string[]", "description": "Location definitions" },
+          { "name": "cast", "type": "string[]", "description": "Character definitions" }
+        ],
+        "outputs": [
+          { "name": "previsualizations", "type": "string", "description": "The PrevisualizationPlan" }
+        ]
+      }
+    },
+    {
+      "id": "validate_and_assemble",
+      "workflowId": "__script__",
+      "position": { "x": 1550, "y": 300 },
+      "label": "Validate & Assemble Package",
+      "script": {
+        "description": "Final validation and assembly of GeneratedScriptPackage. Enforces all invariants from ScriptGeneratorRules.",
+        "code": "// @input scriptInput: object - The original ScriptGeneratorInput\n// @input script: object - The ScriptDocument\n// @input assetCollection: object - The AssetCollection\n// @input previsualizations: object - The PrevisualizationPlan\n// @output generatedPackage: object - The complete GeneratedScriptPackage\n// @output validation: object - Validation results with errors/warnings/stats\n\nconst scriptInput = inputs.scriptInput;\nconst script = inputs.script;\nconst assetCollection = inputs.assetCollection;\nconst previsualizations = inputs.previsualizations;\n\n// Validation results\nconst validationErrors = [];\nconst validationWarnings = [];\n\n// Rule 1: assets.name must equal script.metadata.title\nif (assetCollection.name !== script.metadata.title) {\n  validationErrors.push(`Asset collection name '${assetCollection.name}' does not match script title '${script.metadata.title}'`);\n}\n\n// Rule 2: Every named character must have a headshot\nconst characterIds = new Set(script.cast.map(c => c.id));\nconst headshotCharacterIds = new Set(\n  assetCollection.assets\n    .filter(a => a.type === 'character-headshot')\n    .map(a => a.characterId)\n);\ncharacterIds.forEach(charId => {\n  if (!headshotCharacterIds.has(charId)) {\n    validationErrors.push(`Missing headshot asset for character: ${charId}`);\n  }\n});\n\n// Rule 3: Every location must have a landscape\nconst locationIds = new Set(script.locations.map(l => l.id));\nconst landscapeLocationIds = new Set(\n  assetCollection.assets\n    .filter(a => a.type === 'landscape')\n    .map(a => a.locationId)\n);\nlocationIds.forEach(locId => {\n  if (!landscapeLocationIds.has(locId)) {\n    validationErrors.push(`Missing landscape asset for location: ${locId}`);\n  }\n});\n\n// Rule 4: Every shot element must have a previs\nconst shotElementIds = [];\nscript.sections.forEach(section => {\n  if (section.type === 'scene' && section.beats) {\n    section.beats.forEach(beat => {\n      if (beat.type === 'shot') {\n        shotElementIds.push(beat.id);\n      }\n    });\n  }\n});\nconst previsAssetShotIds = new Set(\n  assetCollection.assets\n    .filter(a => a.type === 'previs-frame')\n    .map(a => a.shotElementId)\n);\nshotElementIds.forEach(shotId => {\n  if (!previsAssetShotIds.has(shotId)) {\n    validationErrors.push(`Missing previs-frame asset for shot: ${shotId}`);\n  }\n});\n\n// Rule 5: Every PrevisualizationShot.assetId must point to a previs-frame\nconst previsFrameIds = new Set(\n  assetCollection.assets\n    .filter(a => a.type === 'previs-frame')\n    .map(a => a.id)\n);\nprevisualizations.shots.forEach(shot => {\n  if (!shot.assetId || !previsFrameIds.has(shot.assetId)) {\n    validationErrors.push(`PrevisualizationShot ${shot.id} has invalid assetId: ${shot.assetId}`);\n  }\n});\n\n// Build the final package\nconst generatedPackage = {\n  input: scriptInput,\n  script,\n  assets: assetCollection,\n  previsualizations\n};\n\n// Add validation metadata\nconst validation = {\n  valid: validationErrors.length === 0,\n  errors: validationErrors,\n  warnings: validationWarnings,\n  stats: {\n    castCount: script.cast.length,\n    locationCount: script.locations.length,\n    sectionCount: script.sections.length,\n    totalAssets: assetCollection.assets.length,\n    headshotAssets: assetCollection.assets.filter(a => a.type === 'character-headshot').length,\n    landscapeAssets: assetCollection.assets.filter(a => a.type === 'landscape').length,\n    previsAssets: assetCollection.assets.filter(a => a.type === 'previs-frame').length,\n    previsShots: previsualizations.shots.length\n  }\n};\n\nreturn {\n  generatedPackage,\n  validation\n};",
+        "inputs": [
+          { "name": "scriptInput", "type": "string", "description": "The original ScriptGeneratorInput", "required": true },
+          { "name": "script", "type": "string", "description": "The ScriptDocument", "required": true },
+          { "name": "assetCollection", "type": "string", "description": "The AssetCollection", "required": true },
+          { "name": "previsualizations", "type": "string", "description": "The PrevisualizationPlan", "required": true }
+        ],
+        "outputs": [
+          { "name": "generatedPackage", "type": "string", "description": "The complete GeneratedScriptPackage" },
+          { "name": "validation", "type": "string", "description": "Validation results with errors/warnings/stats" }
+        ]
+      }
+    },
+    {
+      "id": "output_node",
+      "workflowId": "__output__",
+      "position": { "x": 1850, "y": 300 },
+      "label": "Pipeline Output",
+      "outputNode": {
+        "ports": [
+          { "name": "generatedPackage", "type": "string", "description": "The complete GeneratedScriptPackage with input, script, assets, and previsualizations" },
+          { "name": "validation", "type": "string", "description": "Validation results including errors, warnings, and statistics" }
+        ]
+      }
+    }
+  ],
+  "edges": [
+    { "id": "e1", "sourceNodeId": "input_kind", "sourcePort": "value", "targetNodeId": "generate_script", "targetPort": "kind" },
+    { "id": "e2", "sourceNodeId": "input_title", "sourcePort": "value", "targetNodeId": "generate_script", "targetPort": "title" },
+    { "id": "e3", "sourceNodeId": "input_subtitle", "sourcePort": "value", "targetNodeId": "generate_script", "targetPort": "subtitle" },
+    { "id": "e4", "sourceNodeId": "input_genre", "sourcePort": "value", "targetNodeId": "generate_script", "targetPort": "genre" },
+    { "id": "e5", "sourceNodeId": "input_visualizationStyle", "sourcePort": "value", "targetNodeId": "generate_script", "targetPort": "visualizationStyle" },
+    { "id": "e6", "sourceNodeId": "input_logline", "sourcePort": "value", "targetNodeId": "generate_script", "targetPort": "logline" },
+    { "id": "e7", "sourceNodeId": "input_tone", "sourcePort": "value", "targetNodeId": "generate_script", "targetPort": "tone" },
+    { "id": "e8", "sourceNodeId": "input_runtimeMinutes", "sourcePort": "value", "targetNodeId": "generate_script", "targetPort": "runtimeMinutes" },
+    { "id": "e9", "sourceNodeId": "input_authorName", "sourcePort": "value", "targetNodeId": "generate_script", "targetPort": "authorName" },
+    
+    { "id": "e10", "sourceNodeId": "generate_script", "sourcePort": "script", "targetNodeId": "generate_story_content", "targetPort": "script" },
+    { "id": "e11", "sourceNodeId": "generate_script", "sourcePort": "title", "targetNodeId": "generate_story_content", "targetPort": "title" },
+    { "id": "e12", "sourceNodeId": "generate_script", "sourcePort": "genre", "targetNodeId": "generate_story_content", "targetPort": "genre" },
+    { "id": "e13", "sourceNodeId": "generate_script", "sourcePort": "logline", "targetNodeId": "generate_story_content", "targetPort": "logline" },
+    { "id": "e14", "sourceNodeId": "generate_script", "sourcePort": "visualizationStyle", "targetNodeId": "generate_story_content", "targetPort": "visualizationStyle" },
+    
+    { "id": "e15", "sourceNodeId": "generate_story_content", "sourcePort": "cast", "targetNodeId": "generate_character_assets", "targetPort": "cast" },
+    { "id": "e16", "sourceNodeId": "generate_story_content", "sourcePort": "title", "targetNodeId": "generate_character_assets", "targetPort": "title" },
+    { "id": "e17", "sourceNodeId": "generate_story_content", "sourcePort": "visualizationStyle", "targetNodeId": "generate_character_assets", "targetPort": "visualizationStyle" },
+    
+    { "id": "e18", "sourceNodeId": "generate_story_content", "sourcePort": "locations", "targetNodeId": "generate_location_assets", "targetPort": "locations" },
+    { "id": "e19", "sourceNodeId": "generate_story_content", "sourcePort": "title", "targetNodeId": "generate_location_assets", "targetPort": "title" },
+    { "id": "e20", "sourceNodeId": "generate_story_content", "sourcePort": "visualizationStyle", "targetNodeId": "generate_location_assets", "targetPort": "visualizationStyle" },
+    
+    { "id": "e21", "sourceNodeId": "generate_story_content", "sourcePort": "shotElements", "targetNodeId": "generate_previs_assets", "targetPort": "shotElements" },
+    { "id": "e22", "sourceNodeId": "generate_story_content", "sourcePort": "title", "targetNodeId": "generate_previs_assets", "targetPort": "title" },
+    { "id": "e23", "sourceNodeId": "generate_story_content", "sourcePort": "visualizationStyle", "targetNodeId": "generate_previs_assets", "targetPort": "visualizationStyle" },
+    { "id": "e24", "sourceNodeId": "generate_story_content", "sourcePort": "locations", "targetNodeId": "generate_previs_assets", "targetPort": "locations" },
+    { "id": "e25", "sourceNodeId": "generate_story_content", "sourcePort": "cast", "targetNodeId": "generate_previs_assets", "targetPort": "cast" },
+    
+    { "id": "e26", "sourceNodeId": "generate_story_content", "sourcePort": "title", "targetNodeId": "assemble_asset_collection", "targetPort": "title" },
+    { "id": "e27", "sourceNodeId": "generate_character_assets", "sourcePort": "characterAssets", "targetNodeId": "assemble_asset_collection", "targetPort": "characterAssets" },
+    { "id": "e28", "sourceNodeId": "generate_location_assets", "sourcePort": "locationAssets", "targetNodeId": "assemble_asset_collection", "targetPort": "locationAssets" },
+    { "id": "e29", "sourceNodeId": "generate_previs_assets", "sourcePort": "previsAssets", "targetNodeId": "assemble_asset_collection", "targetPort": "previsAssets" },
+    
+    { "id": "e30", "sourceNodeId": "generate_story_content", "sourcePort": "title", "targetNodeId": "generate_previs_plan", "targetPort": "title" },
+    { "id": "e31", "sourceNodeId": "generate_script", "sourcePort": "scriptId", "targetNodeId": "generate_previs_plan", "targetPort": "scriptId" },
+    { "id": "e32", "sourceNodeId": "generate_previs_assets", "sourcePort": "shotElements", "targetNodeId": "generate_previs_plan", "targetPort": "shotElements" },
+    { "id": "e33", "sourceNodeId": "generate_previs_assets", "sourcePort": "previsAssets", "targetNodeId": "generate_previs_plan", "targetPort": "previsAssets" },
+    { "id": "e34", "sourceNodeId": "generate_story_content", "sourcePort": "locations", "targetNodeId": "generate_previs_plan", "targetPort": "locations" },
+    { "id": "e35", "sourceNodeId": "generate_story_content", "sourcePort": "cast", "targetNodeId": "generate_previs_plan", "targetPort": "cast" },
+    
+    { "id": "e36", "sourceNodeId": "generate_script", "sourcePort": "scriptInput", "targetNodeId": "validate_and_assemble", "targetPort": "scriptInput" },
+    { "id": "e37", "sourceNodeId": "generate_story_content", "sourcePort": "script", "targetNodeId": "validate_and_assemble", "targetPort": "script" },
+    { "id": "e38", "sourceNodeId": "assemble_asset_collection", "sourcePort": "assetCollection", "targetNodeId": "validate_and_assemble", "targetPort": "assetCollection" },
+    { "id": "e39", "sourceNodeId": "generate_previs_plan", "sourcePort": "previsualizations", "targetNodeId": "validate_and_assemble", "targetPort": "previsualizations" },
+    
+    { "id": "e40", "sourceNodeId": "validate_and_assemble", "sourcePort": "generatedPackage", "targetNodeId": "output_node", "targetPort": "generatedPackage" },
+    { "id": "e41", "sourceNodeId": "validate_and_assemble", "sourcePort": "validation", "targetNodeId": "output_node", "targetPort": "validation" }
+  ],
+  "metadata": {
+    "createdAt": "2026-03-16T00:00:00.000Z",
+    "updatedAt": "2026-03-16T00:00:00.000Z",
+    "projectNotes": "Script Generator Pipeline - Converts TypeScript type definitions into a working pipeline that generates complete screenplay packages (GeneratedScriptPackage) with ScriptDocument, AssetCollection, and PrevisualizationPlan. Enforces all ScriptGeneratorRules invariants."
+  }
+}

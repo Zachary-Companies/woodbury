@@ -1,0 +1,67 @@
+{
+  "version": "1.0",
+  "id": "comp-screenplay-generator-v2",
+  "name": "Complete Screenplay Generator v2",
+  "description": "Generate a complete GeneratedScriptPackage with full ScriptDocument, AssetCollection, and PrevisualizationPlan conforming to the complete TypeScript contract. Handles all ScriptKind types, section types, element types, dialogue modifiers, and enforces all generator rules.",
+  "nodes": [
+    {
+      "id": "node-input-script",
+      "workflowId": "__variable__",
+      "position": { "x": 50, "y": 200 },
+      "label": "Script Input",
+      "variableNode": {
+        "name": "scriptInput",
+        "type": "object",
+        "description": "ScriptGeneratorInput: { kind: ScriptKind, title: string, subtitle?: string, genre: string|string[], visualizationStyle: string, logline?: string, tone?: string[], audience?: string[], language?: string, runtimeMinutes?: number, author?: CreditPerson[], series?: SeriesMetadata, commercial?: CommercialMetadata }",
+        "exposeAsInput": true,
+        "inputName": "scriptInput"
+      }
+    },
+    {
+      "id": "node-input-rules",
+      "workflowId": "__variable__",
+      "position": { "x": 50, "y": 350 },
+      "label": "Generator Rules",
+      "variableNode": {
+        "name": "generatorRules",
+        "type": "object",
+        "description": "ScriptGeneratorRules with defaults",
+        "exposeAsInput": true,
+        "inputName": "generatorRules",
+        "defaultValue": {
+          "requireDialogueForNarrativeKinds": true,
+          "requireHeadshotForEachNamedCharacter": true,
+          "requireLandscapeForEachLocation": true,
+          "requirePrevisForEveryShot": true
+        }
+      }
+    },
+    {
+      "id": "node-validate",
+      "workflowId": "__script__",
+      "position": { "x": 350, "y": 275 },
+      "label": "Validate & Normalize Input",
+      "script": {
+        "description": "Validate ScriptGeneratorInput against all ScriptKind types. Normalize arrays. Validate metadata for specific kinds.",
+        "code": "async function execute(inputs, context) {\n  const { scriptInput, generatorRules } = inputs;\n  const errors = [];\n  let input = typeof scriptInput === 'string' ? JSON.parse(scriptInput) : scriptInput;\n  let rules = typeof generatorRules === 'string' ? JSON.parse(generatorRules) : generatorRules;\n  rules = { requireDialogueForNarrativeKinds: true, requireHeadshotForEachNamedCharacter: true, requireLandscapeForEachLocation: true, requirePrevisForEveryShot: true, ...rules };\n  const validKinds = ['commercial', 'tv-episode', 'tv-pilot', 'feature-film', 'short-film'];\n  if (!input.kind || !validKinds.includes(input.kind)) errors.push('Invalid kind: ' + input.kind);\n  if (!input.title) errors.push('Missing required field: title');\n  if (!input.genre) errors.push('Missing required field: genre');\n  if (!input.visualizationStyle) errors.push('Missing required field: visualizationStyle');\n  const normalizeArray = (val) => Array.isArray(val) ? val : (val ? [val] : []);\n  const validatedInput = {\n    kind: input.kind,\n    title: input.title || 'Untitled',\n    subtitle: input.subtitle || null,\n    genre: normalizeArray(input.genre),\n    visualizationStyle: input.visualizationStyle || 'cinematic',\n    logline: input.logline || null,\n    tone: normalizeArray(input.tone),\n    audience: normalizeArray(input.audience),\n    language: input.language || 'en',\n    runtimeMinutes: input.runtimeMinutes || (input.kind === 'commercial' ? 0.5 : input.kind === 'short-film' ? 15 : 90),\n    author: input.author || [{ name: 'Unknown', role: 'writer' }]\n  };\n  if (['tv-episode', 'tv-pilot'].includes(input.kind)) {\n    validatedInput.series = input.series ? { seriesTitle: input.series.seriesTitle || input.title, seasonNumber: input.series.seasonNumber || 1, episodeNumber: input.series.episodeNumber || 1, episodeTitle: input.series.episodeTitle || input.title, arcSummary: input.series.arcSummary || null } : { seriesTitle: input.title, seasonNumber: 1, episodeNumber: 1, episodeTitle: input.title, arcSummary: null };\n  }\n  if (input.kind === 'commercial') {\n    validatedInput.commercial = input.commercial ? { brand: input.commercial.brand || null, product: input.commercial.product || null, campaign: input.commercial.campaign || null, spotLengthSeconds: input.commercial.spotLengthSeconds || 30, aspectRatio: input.commercial.aspectRatio || '16:9', callToAction: input.commercial.callToAction || null, deliverables: input.commercial.deliverables || [] } : { brand: null, product: null, campaign: null, spotLengthSeconds: 30, aspectRatio: '16:9', callToAction: null, deliverables: [] };\n  }\n  context.log('Validated input for ' + validatedInput.kind + ': ' + validatedInput.title);\n  return { validatedInput, rules, errors };\n}",
+        "inputs": [
+          { "name": "scriptInput", "type": "object", "description": "Raw ScriptGeneratorInput" },
+          { "name": "generatorRules", "type": "object", "description": "ScriptGeneratorRules" }
+        ],
+        "outputs": [
+          { "name": "validatedInput", "type": "object", "description": "Validated ScriptGeneratorInput" },
+          { "name": "rules", "type": "object", "description": "Validated ScriptGeneratorRules" },
+          { "name": "errors", "type": "string[]", "description": "Validation errors" }
+        ]
+      }
+    }
+  ],
+  "edges": [
+    { "id": "e1", "sourceNodeId": "node-input-script", "sourcePort": "value", "targetNodeId": "node-validate", "targetPort": "scriptInput" },
+    { "id": "e2", "sourceNodeId": "node-input-rules", "sourcePort": "value", "targetNodeId": "node-validate", "targetPort": "generatorRules" }
+  ],
+  "metadata": {
+    "createdAt": "2026-03-16T00:00:00Z",
+    "updatedAt": "2026-03-16T00:00:00Z"
+  }
+}
