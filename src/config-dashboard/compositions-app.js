@@ -25,7 +25,9 @@
 
 var appSchema = null;
 var appState = null;
+var appBindings = null; // BindingsDocument { version, pipelineId, bindings[] }
 var appActiveSection = null;
+var appViewMode = 'data'; // 'data' | 'screenplay'
 
 // ────────────────────────────────────────────────────────────────
 //  API helpers
@@ -58,6 +60,16 @@ async function saveAppNodeState(pipelineId, nodeId, outputs) {
   });
   if (!res.ok) throw new Error('Failed to save');
   return res.json();
+}
+
+async function fetchAppBindings(pipelineId) {
+  try {
+    var res = await fetch('/api/app/' + encodeURIComponent(pipelineId) + '/bindings');
+    if (!res.ok) return { version: '1.0', pipelineId: pipelineId, bindings: [] };
+    return res.json();
+  } catch (e) {
+    return { version: '1.0', pipelineId: pipelineId, bindings: [] };
+  }
 }
 
 async function refreshAppFromRun(pipelineId) {
@@ -135,6 +147,19 @@ function renderAppSidebar(schema, state) {
     html += '</button>';
   }
   html += '</nav>';
+
+  // View mode toggle
+  var hasScreenplayData = detectScreenplayData(state);
+  if (hasScreenplayData) {
+    html += '<div class="app-view-toggle">';
+    html += '<button class="app-view-toggle-btn' + (appViewMode === 'data' ? ' active' : '') + '" data-app-view-mode="data">';
+    html += '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" width="14" height="14"><rect x="2" y="2" width="5" height="5" rx="1"/><rect x="9" y="2" width="5" height="5" rx="1"/><rect x="2" y="9" width="5" height="5" rx="1"/><rect x="9" y="9" width="5" height="5" rx="1"/></svg>';
+    html += ' Data</button>';
+    html += '<button class="app-view-toggle-btn' + (appViewMode === 'screenplay' ? ' active' : '') + '" data-app-view-mode="screenplay">';
+    html += '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" width="14" height="14"><rect x="1" y="2" width="14" height="12" rx="1.5"/><path d="M5 5h6M5 8h4M5 11h5"/></svg>';
+    html += ' Screenplay</button>';
+    html += '</div>';
+  }
 
   // Actions bar
   html += '<div class="app-sidebar-actions">';
@@ -690,6 +715,626 @@ function renderAppFieldEditor(value, key, nodeId) {
 }
 
 // ────────────────────────────────────────────────────────────────
+//  Screenplay NLE — data detection and stitching
+// ────────────────────────────────────────────────────────────────
+
+/**
+ * Detect whether the pipeline output contains screenplay-shaped data.
+ * Looks for sections[], elements[], and previsualizations.shots[] anywhere
+ * in the node outputs.
+ */
+function detectScreenplayData(state) {
+  if (!state || !state.nodeData) return false;
+  var found = { sections: false, elements: false, previs: false };
+  for (var nodeId in state.nodeData) {
+    var outputs = state.nodeData[nodeId].outputs;
+    if (!outputs) continue;
+    _walkForScreenplay(outputs, found, 0);
+    if (found.sections && found.elements) return true;
+  }
+  return false;
+}
+
+function _walkForScreenplay(obj, found, depth) {
+  if (!obj || typeof obj !== 'object' || depth > 4) return;
+  if (Array.isArray(obj)) {
+    if (obj.length > 0 && obj[0] && typeof obj[0] === 'object') {
+      var keys = Object.keys(obj[0]);
+      if (keys.indexOf('type') !== -1 && keys.indexOf('children') !== -1 && keys.indexOf('order') !== -1) {
+        found.sections = true;
+      }
+      if (keys.indexOf('type') !== -1 && (keys.indexOf('shotText') !== -1 || keys.indexOf('characterName') !== -1 || keys.indexOf('content') !== -1) && keys.indexOf('id') !== -1) {
+        var types = {};
+        for (var i = 0; i < Math.min(obj.length, 20); i++) { types[obj[i].type] = true; }
+        if (types.shot || types.dialogue || types.action) found.elements = true;
+      }
+      if (keys.indexOf('shotElementId') !== -1 && keys.indexOf('sceneId') !== -1) {
+        found.previs = true;
+      }
+    }
+    return;
+  }
+  for (var k in obj) {
+    _walkForScreenplay(obj[k], found, depth + 1);
+  }
+}
+
+/**
+ * Stitch screenplay data from across pipeline nodes into a unified timeline.
+ *
+ * Returns: {
+ *   title, logline, metadata,
+ *   characters: { id -> character },
+ *   locations: { id -> location },
+ *   acts: [{ id, title, scenes: [{ id, title, heading, beats: [{ element, previs?, asset? }] }] }],
+ *   orphanElements: []   // elements not assigned to any scene
+ * }
+ */
+function stitchScreenplayTimeline(state) {
+  if (!state || !state.nodeData) return null;
+
+  // Collect all relevant data from any node
+  var allSections = null, allElements = null, allPrevis = null;
+  var allCharacters = null, allLocations = null, allAssets = null;
+  var metadata = null;
+
+  for (var nodeId in state.nodeData) {
+    var outputs = state.nodeData[nodeId].outputs;
+    if (!outputs) continue;
+    _extractScreenplayFields(outputs, 0);
+  }
+
+  function _extractScreenplayFields(obj, depth) {
+    if (!obj || typeof obj !== 'object' || depth > 5) return;
+    if (Array.isArray(obj)) return;
+    for (var k in obj) {
+      var v = obj[k];
+      if (!v) continue;
+
+      // scriptPackage wrapper — recurse into it
+      if (k === 'scriptPackage' && typeof v === 'object' && v.script) {
+        _extractScreenplayFields(v, depth + 1);
+        _extractScreenplayFields(v.script, depth + 1);
+        if (v.previsualizations) _extractScreenplayFields(v, depth + 1);
+        if (v.assets) _extractScreenplayFields(v, depth + 1);
+        continue;
+      }
+      if (k === 'script' && typeof v === 'object' && !Array.isArray(v)) {
+        _extractScreenplayFields(v, depth + 1);
+        continue;
+      }
+
+      if (k === 'sections' && Array.isArray(v) && v.length > 0 && v[0].children !== undefined) {
+        if (!allSections || v.length > allSections.length) allSections = v;
+      }
+      if (k === 'elements' && Array.isArray(v) && v.length > 0 && v[0].type) {
+        if (!allElements || v.length > allElements.length) allElements = v;
+      }
+      if (k === 'shots' && Array.isArray(v) && v.length > 0 && v[0].shotElementId) {
+        if (!allPrevis || v.length > allPrevis.length) allPrevis = v;
+      }
+      if (k === 'previsualizations' && typeof v === 'object' && v.shots) {
+        if (!allPrevis || v.shots.length > (allPrevis ? allPrevis.length : 0)) allPrevis = v.shots;
+      }
+      if (k === 'characters' && Array.isArray(v) && v.length > 0 && v[0].name) {
+        if (!allCharacters || v.length > allCharacters.length) allCharacters = v;
+      }
+      if (k === 'locations' && Array.isArray(v) && v.length > 0 && v[0].name) {
+        if (!allLocations || v.length > allLocations.length) allLocations = v;
+      }
+      if (k === 'assets' && typeof v === 'object' && !Array.isArray(v) && v.assets) {
+        allAssets = v.assets;
+      }
+      if (k === 'assets' && Array.isArray(v) && v.length > 0 && v[0].filePath) {
+        if (!allAssets || v.length > allAssets.length) allAssets = v;
+      }
+      if (k === 'metadata' && typeof v === 'object' && !Array.isArray(v) && v.title) {
+        metadata = v;
+      }
+
+      // Recurse into objects (not arrays)
+      if (typeof v === 'object' && !Array.isArray(v)) {
+        _extractScreenplayFields(v, depth + 1);
+      }
+    }
+  }
+
+  if (!allElements || !allSections) return null;
+
+  // Build lookup maps
+  var charMap = {};
+  if (allCharacters) {
+    for (var ci = 0; ci < allCharacters.length; ci++) {
+      charMap[allCharacters[ci].id] = allCharacters[ci];
+    }
+  }
+  var locMap = {};
+  if (allLocations) {
+    for (var li = 0; li < allLocations.length; li++) {
+      locMap[allLocations[li].id] = allLocations[li];
+    }
+  }
+  var assetMap = {};
+  if (allAssets) {
+    for (var ai = 0; ai < allAssets.length; ai++) {
+      assetMap[allAssets[ai].id] = allAssets[ai];
+    }
+  }
+  var previsMap = {}; // shotElementId -> previs
+  if (allPrevis) {
+    for (var pi = 0; pi < allPrevis.length; pi++) {
+      previsMap[allPrevis[pi].shotElementId] = allPrevis[pi];
+    }
+  }
+
+  // Build character ID -> headshot asset map
+  var charAssetMap = {}; // characterId -> asset (with filePath)
+  var locAssetMap = {};  // locationId -> asset (with filePath)
+  if (allAssets) {
+    for (var ami = 0; ami < allAssets.length; ami++) {
+      var asset = allAssets[ami];
+      var meta = asset.metadata || {};
+      if (meta.characterId && (asset.type === 'character-headshot' || (asset.name && asset.name.toLowerCase().indexOf('headshot') !== -1))) {
+        charAssetMap[meta.characterId] = asset;
+      }
+      if (meta.locationId && (asset.type === 'landscape' || (asset.name && asset.name.toLowerCase().indexOf('landscape') !== -1))) {
+        locAssetMap[meta.locationId] = asset;
+      }
+    }
+  }
+
+  // Flatten sections into an ordered list of scenes
+  var flatScenes = [];
+  for (var si = 0; si < allSections.length; si++) {
+    var section = allSections[si];
+    if (section.type === 'act') {
+      var children = section.children || [];
+      for (var sci = 0; sci < children.length; sci++) {
+        flatScenes.push({
+          scene: children[sci],
+          actTitle: section.title,
+          actId: section.id,
+        });
+      }
+    } else if (section.type === 'scene') {
+      flatScenes.push({ scene: section, actTitle: null, actId: null });
+    }
+    // skip blackout, etc.
+  }
+
+  // Assign elements to scenes proportionally
+  // Each scene has N beats; total beats = sum; elements distributed by beat ratio
+  var totalBeats = 0;
+  for (var fi = 0; fi < flatScenes.length; fi++) {
+    var beats = (flatScenes[fi].scene.beats || []).length || 5;
+    flatScenes[fi]._beats = beats;
+    totalBeats += beats;
+  }
+
+  var elemIdx = 0;
+  var acts = [];
+  var currentAct = null;
+
+  for (var fsi = 0; fsi < flatScenes.length; fsi++) {
+    var fs = flatScenes[fsi];
+    var sc = fs.scene;
+
+    // Start new act if needed
+    if (fs.actId && (!currentAct || currentAct.id !== fs.actId)) {
+      currentAct = { id: fs.actId, title: fs.actTitle, scenes: [] };
+      acts.push(currentAct);
+    }
+    if (!currentAct) {
+      currentAct = { id: '__default', title: 'Scenes', scenes: [] };
+      acts.push(currentAct);
+    }
+
+    // Calculate how many elements belong to this scene
+    var ratio = fs._beats / totalBeats;
+    var count = Math.round(ratio * allElements.length);
+    // Ensure at least 1 and last scene gets remainder
+    if (count < 1) count = 1;
+    if (fsi === flatScenes.length - 1) count = allElements.length - elemIdx;
+
+    var sceneElements = allElements.slice(elemIdx, elemIdx + count);
+    elemIdx += count;
+
+    // Build beats: group elements by shot markers
+    // Each "beat" starts with a shot element and includes subsequent action/dialogue
+    var sceneBeats = [];
+    var currentBeat = null;
+    for (var ei = 0; ei < sceneElements.length; ei++) {
+      var elem = sceneElements[ei];
+      if (elem.type === 'shot' || (!currentBeat && ei === 0)) {
+        currentBeat = { elements: [], previs: null, asset: null };
+        sceneBeats.push(currentBeat);
+        // Look up previs for shot elements
+        if (elem.type === 'shot' && previsMap[elem.id]) {
+          var pv = previsMap[elem.id];
+          currentBeat.previs = pv;
+          // Prefer regenerated file path over the original asset
+          if (pv._generatedFilePath) {
+            currentBeat.asset = { filePath: pv._generatedFilePath };
+          } else if (pv.assetId && assetMap[pv.assetId]) {
+            currentBeat.asset = assetMap[pv.assetId];
+          }
+        }
+      }
+      if (!currentBeat) {
+        currentBeat = { elements: [], previs: null, asset: null };
+        sceneBeats.push(currentBeat);
+      }
+      currentBeat.elements.push(elem);
+    }
+
+    var heading = sc.sceneHeading
+      ? (sc.sceneHeading.location || '') + ' — ' + (sc.sceneHeading.timeOfDay || '')
+      : '';
+
+    currentAct.scenes.push({
+      id: sc.id,
+      title: sc.title,
+      heading: heading,
+      synopsis: sc.synopsis || '',
+      beats: sceneBeats,
+    });
+  }
+
+  return {
+    title: metadata ? metadata.title : '',
+    logline: metadata ? metadata.logline : '',
+    metadata: metadata,
+    characters: charMap,
+    locations: locMap,
+    characterAssets: charAssetMap,
+    locationAssets: locAssetMap,
+    bindings: appBindings || { version: '1.0', bindings: [] },
+    acts: acts,
+    totalElements: allElements.length,
+    totalPrevis: allPrevis ? allPrevis.length : 0,
+  };
+}
+
+// ────────────────────────────────────────────────────────────────
+//  Screenplay NLE — rendering
+// ────────────────────────────────────────────────────────────────
+
+function renderAppScreenplayView(timeline, state) {
+  if (!timeline) {
+    return '<div class="app-empty-state"><div class="app-empty-icon">&#x1f3ac;</div>' +
+      '<h3>No screenplay data found</h3><p>Run the pipeline to generate screenplay content.</p></div>';
+  }
+
+  var html = '<div class="nle-container">';
+
+  // Header
+  html += '<div class="nle-header">';
+  html += '<h1 class="nle-title">' + compEscHtml(timeline.title || 'Untitled Screenplay') + '</h1>';
+  if (timeline.logline) {
+    html += '<p class="nle-logline">' + compEscHtml(timeline.logline) + '</p>';
+  }
+  // Stats
+  html += '<div class="nle-stats">';
+  html += '<span class="nle-stat">' + timeline.acts.length + ' acts</span>';
+  var totalScenes = 0;
+  for (var ai = 0; ai < timeline.acts.length; ai++) totalScenes += timeline.acts[ai].scenes.length;
+  html += '<span class="nle-stat">' + totalScenes + ' scenes</span>';
+  html += '<span class="nle-stat">' + timeline.totalElements + ' elements</span>';
+  html += '<span class="nle-stat">' + timeline.totalPrevis + ' previs shots</span>';
+  html += '</div>';
+  html += '</div>';
+
+  // Scene navigation strip
+  html += '<div class="nle-scene-strip" id="nle-scene-strip">';
+  for (var nai = 0; nai < timeline.acts.length; nai++) {
+    var act = timeline.acts[nai];
+    html += '<div class="nle-strip-act">';
+    html += '<span class="nle-strip-act-label">' + compEscHtml(act.title || 'Act ' + (nai + 1)) + '</span>';
+    for (var nsi = 0; nsi < act.scenes.length; nsi++) {
+      var sc = act.scenes[nsi];
+      var previsCount = 0;
+      for (var bi = 0; bi < sc.beats.length; bi++) { if (sc.beats[bi].previs) previsCount++; }
+      html += '<button class="nle-strip-scene" data-nle-scene="' + compEscAttr(sc.id) + '" title="' + compEscAttr(sc.title) + '">';
+      html += '<span class="nle-strip-scene-num">' + compEscHtml(sc.title.replace(/^Scene\s*/i, '').substring(0, 20)) + '</span>';
+      if (previsCount > 0) {
+        html += '<span class="nle-strip-scene-imgs">' + previsCount + ' &#x1f3ac;</span>';
+      }
+      html += '</button>';
+    }
+    html += '</div>';
+  }
+  html += '</div>';
+
+  // Timeline body — scrollable
+  html += '<div class="nle-timeline" id="nle-timeline">';
+
+  for (var tai = 0; tai < timeline.acts.length; tai++) {
+    var timelineAct = timeline.acts[tai];
+    html += '<div class="nle-act" data-nle-act="' + compEscAttr(timelineAct.id) + '">';
+    html += '<div class="nle-act-header">';
+    html += '<h2 class="nle-act-title">' + compEscHtml(timelineAct.title || 'Act ' + (tai + 1)) + '</h2>';
+    html += '</div>';
+
+    for (var tsi = 0; tsi < timelineAct.scenes.length; tsi++) {
+      var scene = timelineAct.scenes[tsi];
+      html += renderNLEScene(scene, timeline);
+    }
+
+    html += '</div>'; // .nle-act
+  }
+
+  html += '</div>'; // .nle-timeline
+  html += '</div>'; // .nle-container
+
+  return html;
+}
+
+function renderNLEScene(scene, timeline) {
+  var html = '<div class="nle-scene" id="nle-scene-' + compEscAttr(scene.id) + '" data-nle-scene="' + compEscAttr(scene.id) + '">';
+
+  // Scene header
+  html += '<div class="nle-scene-header">';
+  html += '<div class="nle-scene-header-left">';
+  html += '<h3 class="nle-scene-title">' + compEscHtml(scene.title) + '</h3>';
+  if (scene.heading) {
+    html += '<div class="nle-scene-heading">' + compEscHtml(scene.heading) + '</div>';
+  }
+  html += '</div>';
+  if (scene.synopsis) {
+    html += '<p class="nle-scene-synopsis">' + compEscHtml(scene.synopsis) + '</p>';
+  }
+  html += '</div>';
+
+  // Beats
+  for (var bi = 0; bi < scene.beats.length; bi++) {
+    var beat = scene.beats[bi];
+    html += renderNLEBeat(beat, bi, scene, timeline);
+  }
+
+  html += '</div>'; // .nle-scene
+  return html;
+}
+
+function renderNLEBeat(beat, beatIndex, scene, timeline) {
+  var hasImage = beat.asset && beat.asset.filePath;
+  var shotElement = null;
+  var otherElements = [];
+
+  for (var i = 0; i < beat.elements.length; i++) {
+    var el = beat.elements[i];
+    if (el.type === 'shot' && !shotElement) {
+      shotElement = el;
+    } else {
+      otherElements.push(el);
+    }
+  }
+
+  var html = '<div class="nle-beat' + (hasImage ? ' nle-beat--has-image' : '') + '" data-nle-beat="' + beatIndex + '">';
+
+  // Left: previs image
+  html += '<div class="nle-beat-visual">';
+  if (hasImage) {
+    var imgSrc = resolveImageSrc(beat.asset.filePath);
+    html += '<div class="nle-beat-image app-img-zoomable" data-app-img-src="' + compEscAttr(imgSrc) + '">';
+    html += '<img src="' + compEscAttr(imgSrc) + '" loading="lazy" alt="" />';
+    html += '</div>';
+    // Image controls
+    html += '<div class="nle-beat-image-controls">';
+    html += '<button class="nle-beat-regen-btn" data-nle-regen-element="' + compEscAttr(shotElement ? shotElement.id : '') + '" data-nle-regen-asset="' + compEscAttr(beat.asset.id || '') + '" title="Regenerate this image">&#x1f504; Regen</button>';
+    html += '<button class="nle-beat-prompt-btn" data-nle-prompt-element="' + compEscAttr(shotElement ? shotElement.id : '') + '" title="Edit image prompt">&#x270E; Prompt</button>';
+    html += '</div>';
+  } else if (shotElement) {
+    // No image — show placeholder
+    html += '<div class="nle-beat-image-placeholder">';
+    html += '<div class="nle-beat-placeholder-icon">&#x1f3ac;</div>';
+    html += '<button class="nle-beat-gen-btn" data-nle-gen-element="' + compEscAttr(shotElement.id) + '" title="Generate previs image">Generate Image</button>';
+    html += '</div>';
+  }
+  // Shot metadata (camera info)
+  if (shotElement) {
+    html += '<div class="nle-beat-shot-meta">';
+    if (shotElement.frameSize) {
+      html += '<span class="nle-shot-tag">' + compEscHtml(shotElement.frameSize) + '</span>';
+    }
+    if (shotElement.cameraMovement && shotElement.cameraMovement !== 'STATIC') {
+      html += '<span class="nle-shot-tag">' + compEscHtml(shotElement.cameraMovement) + '</span>';
+    }
+    if (beat.previs && beat.previs.durationSeconds) {
+      html += '<span class="nle-shot-tag nle-shot-duration">' + beat.previs.durationSeconds + 's</span>';
+    }
+    html += '</div>';
+  }
+
+  // Reference images strip — shows the actual images that will be fed to
+  // the generator when Regen is clicked. Only shows refs that have images.
+  // Uses bindings if available (pipeline-specific connections), otherwise
+  // falls back to previs.characterIds/locationId.
+  var refImages = [];
+  var shotElemId = shotElement ? shotElement.id : null;
+  var beatCharIds = [];
+  var beatLocId = null;
+
+  // Check bindings first
+  var hasBindings = timeline.bindings && timeline.bindings.bindings && timeline.bindings.bindings.length > 0;
+  if (hasBindings && shotElemId) {
+    // Get characters from "depicts" bindings for this shot
+    for (var bi = 0; bi < timeline.bindings.bindings.length; bi++) {
+      var b = timeline.bindings.bindings[bi];
+      if (b.source.entityType === 'shot' && b.source.entityId === shotElemId) {
+        if (b.type === 'depicts' && b.target.entityType === 'character') {
+          beatCharIds.push(b.target.entityId);
+        } else if (b.type === 'set-in' && b.target.entityType === 'location') {
+          beatLocId = b.target.entityId;
+        }
+      }
+    }
+  }
+
+  // Fall back to previs data if no bindings found
+  if (beatCharIds.length === 0) {
+    beatCharIds = beat.previs ? (beat.previs.characterIds || []) : [];
+  }
+  if (!beatLocId) {
+    beatLocId = beat.previs ? beat.previs.locationId : null;
+  }
+
+  for (var bci = 0; bci < beatCharIds.length; bci++) {
+    var charId = beatCharIds[bci];
+    var charAsset = timeline.characterAssets[charId];
+    if (charAsset && charAsset.filePath) {
+      var charData = timeline.characters[charId];
+      refImages.push({
+        type: 'character',
+        id: charId,
+        name: charData ? (charData.displayName || charData.name) : charId,
+        filePath: charAsset.filePath,
+        description: charData ? charData.description : '',
+        color: nleCharColor(charData ? (charData.displayName || charData.name) : charId),
+      });
+    }
+  }
+  if (beatLocId) {
+    var locAsset = timeline.locationAssets[beatLocId];
+    if (locAsset && locAsset.filePath) {
+      var locData = timeline.locations[beatLocId];
+      refImages.push({
+        type: 'location',
+        id: beatLocId,
+        name: locData ? locData.name : beatLocId,
+        filePath: locAsset.filePath,
+        description: locData ? locData.description : '',
+        color: '#7cb8f7',
+      });
+    }
+  }
+
+  if (refImages.length > 0) {
+    html += '<div class="nle-beat-refs">';
+    html += '<div class="nle-refs-label">Refs (' + refImages.length + ')</div>';
+    html += '<div class="nle-refs-strip">';
+    for (var ri = 0; ri < refImages.length; ri++) {
+      var ref = refImages[ri];
+      var refSrc = resolveImageSrc(ref.filePath);
+      var refTitle = ref.name + (ref.description ? ': ' + ref.description.substring(0, 100) : '');
+      html += '<div class="nle-ref-tile app-img-zoomable" data-app-img-src="' + compEscAttr(refSrc) + '" title="' + compEscAttr(refTitle) + '">';
+      html += '<img src="' + compEscAttr(refSrc) + '" loading="lazy" alt="" />';
+      html += '<span class="nle-ref-tile-label" style="' + (ref.type === 'character' ? 'border-left-color:' + ref.color : '') + '">' + compEscHtml(ref.name) + '</span>';
+      html += '</div>';
+    }
+    html += '</div>';
+    html += '</div>';
+  }
+
+  html += '</div>'; // .nle-beat-visual
+
+  // Right: screenplay text
+  html += '<div class="nle-beat-text">';
+
+  // Shot description
+  if (shotElement && shotElement.shotText) {
+    html += '<div class="nle-element nle-element--shot">';
+    html += '<span class="nle-element-label">SHOT</span>';
+    html += '<span class="nle-element-content">' + compEscHtml(shotElement.shotText) + '</span>';
+    html += '</div>';
+  }
+
+  // Other elements (action, dialogue, transition)
+  for (var oi = 0; oi < otherElements.length; oi++) {
+    var elem = otherElements[oi];
+    html += renderNLEElement(elem, timeline);
+  }
+
+  html += '</div>'; // .nle-beat-text
+
+  // Previs detail (expandable prompt area)
+  if (beat.previs) {
+    html += '<div class="nle-beat-prompt-area" data-nle-prompt-area="' + compEscAttr(shotElement ? shotElement.id : '') + '" style="display:none;">';
+    html += '<div class="nle-prompt-section">';
+    html += '<label class="nle-prompt-label">Shot Description</label>';
+    html += '<textarea class="nle-prompt-textarea" data-nle-field="description" rows="3">' + compEscHtml(beat.previs.description || '') + '</textarea>';
+    html += '</div>';
+    html += '<div class="nle-prompt-section">';
+    html += '<label class="nle-prompt-label">Camera Intent</label>';
+    html += '<textarea class="nle-prompt-textarea" data-nle-field="cameraIntent" rows="2">' + compEscHtml(beat.previs.cameraIntent || '') + '</textarea>';
+    html += '</div>';
+    html += '<div class="nle-prompt-section">';
+    html += '<label class="nle-prompt-label">Composition</label>';
+    html += '<textarea class="nle-prompt-textarea" data-nle-field="composition" rows="2">' + compEscHtml(beat.previs.composition || '') + '</textarea>';
+    html += '</div>';
+    html += '<div class="nle-prompt-section">';
+    html += '<label class="nle-prompt-label">Lighting</label>';
+    html += '<textarea class="nle-prompt-textarea" data-nle-field="lighting" rows="2">' + compEscHtml(beat.previs.lighting || '') + '</textarea>';
+    html += '</div>';
+    html += '<div class="nle-prompt-actions">';
+    html += '<button class="nle-prompt-save" data-nle-save-element="' + compEscAttr(shotElement ? shotElement.id : '') + '">&#x2728; Regenerate with changes</button>';
+    html += '<button class="nle-prompt-cancel" data-nle-cancel-element="' + compEscAttr(shotElement ? shotElement.id : '') + '">Cancel</button>';
+    html += '</div>';
+    html += '</div>';
+  }
+
+  html += '</div>'; // .nle-beat
+  return html;
+}
+
+function renderNLEElement(elem, timeline) {
+  var html = '';
+
+  if (elem.type === 'dialogue') {
+    html += '<div class="nle-element nle-element--dialogue">';
+    var charName = elem.characterName || elem.characterId || 'UNKNOWN';
+    // Character color based on name hash
+    var charColor = nleCharColor(charName);
+    html += '<div class="nle-dialogue-header" style="border-left-color:' + charColor + '">';
+    html += '<span class="nle-dialogue-character" style="color:' + charColor + '">' + compEscHtml(charName) + '</span>';
+    if (elem.modifiers && elem.modifiers.length > 0) {
+      html += '<span class="nle-dialogue-modifier">(' + compEscHtml(elem.modifiers.join(', ')) + ')</span>';
+    }
+    html += '</div>';
+    html += '<div class="nle-dialogue-content" style="border-left-color:' + charColor + '">';
+    var lines = elem.lines || [elem.content];
+    for (var li = 0; li < lines.length; li++) {
+      html += '<p class="nle-dialogue-line">' + compEscHtml(lines[li]) + '</p>';
+    }
+    html += '</div>';
+    html += '</div>';
+  } else if (elem.type === 'action') {
+    html += '<div class="nle-element nle-element--action">';
+    html += '<span class="nle-element-content">' + compEscHtml(elem.content || '') + '</span>';
+    html += '</div>';
+  } else if (elem.type === 'transition') {
+    html += '<div class="nle-element nle-element--transition">';
+    html += '<span class="nle-element-content">' + compEscHtml(elem.content || '') + '</span>';
+    html += '</div>';
+  } else if (elem.type === 'parenthetical') {
+    html += '<div class="nle-element nle-element--parenthetical">';
+    html += '<span class="nle-element-content">(' + compEscHtml(elem.content || '') + ')</span>';
+    html += '</div>';
+  } else if (elem.type === 'shot') {
+    // Secondary shot within a beat
+    html += '<div class="nle-element nle-element--shot nle-element--shot-secondary">';
+    html += '<span class="nle-element-label">SHOT</span>';
+    html += '<span class="nle-element-content">' + compEscHtml(elem.shotText || elem.content || '') + '</span>';
+    html += '</div>';
+  }
+
+  return html;
+}
+
+/** Generate a consistent color for a character name */
+function nleCharColor(name) {
+  var colors = [
+    '#7c9ef7', '#f7a07c', '#7cf7b8', '#f77cc4', '#c49ef7',
+    '#f7e47c', '#7cd4f7', '#f79e7c', '#a1f77c', '#f77c7c',
+    '#7cf7e4', '#d47cf7', '#f7c47c', '#7c7cf7', '#7cf79e',
+  ];
+  var hash = 0;
+  for (var i = 0; i < name.length; i++) {
+    hash = ((hash << 5) - hash + name.charCodeAt(i)) | 0;
+  }
+  return colors[Math.abs(hash) % colors.length];
+}
+
+// ────────────────────────────────────────────────────────────────
 //  Main page render
 // ────────────────────────────────────────────────────────────────
 
@@ -703,13 +1348,15 @@ async function renderCompositionAppPage() {
   // Show loading state
   main.innerHTML = '<div class="app-loading"><div class="spinner"></div> Loading app...</div>';
 
-  // Fetch schema and state in parallel
+  // Fetch schema, state, and bindings in parallel
   var results = await Promise.all([
     fetchAppSchema(compData.id),
     fetchAppState(compData.id),
+    fetchAppBindings(compData.id),
   ]);
   appSchema = results[0];
   appState = results[1];
+  appBindings = results[2];
 
   if (!appSchema) {
     main.innerHTML = '<div class="app-error">Failed to load pipeline schema.</div>';
@@ -747,7 +1394,10 @@ async function renderCompositionAppPage() {
 
   // Content area
   html += '<div class="app-content">';
-  if (appActiveSection) {
+  if (appViewMode === 'screenplay' && detectScreenplayData(appState)) {
+    var timeline = stitchScreenplayTimeline(appState);
+    html += renderAppScreenplayView(timeline, appState);
+  } else if (appActiveSection) {
     var activeSection = appSchema.sections.find(function(s) { return s.id === appActiveSection; });
     if (activeSection) {
       html += renderAppSectionContent(activeSection, appState);
@@ -776,6 +1426,143 @@ async function renderCompositionAppPage() {
 }
 
 // ────────────────────────────────────────────────────────────────
+//  Previs image generation
+// ────────────────────────────────────────────────────────────────
+
+/**
+ * Call the server to generate/regenerate a previs image for a shot element.
+ * The server resolves character headshots and location references from the
+ * pipeline's asset data and passes them to nanobanana for generation.
+ *
+ * @param {string} elementId - The shot element ID (e.g. "element_1")
+ * @param {Object} promptOverrides - Optional prompt field overrides (description, cameraIntent, composition, lighting)
+ * @param {HTMLElement} triggerBtn - The button that triggered this (for loading state)
+ * @param {HTMLElement} root - The root DOM element for finding related elements
+ */
+async function generatePrevisImage(elementId, promptOverrides, triggerBtn, root) {
+  if (!compData) return;
+
+  var originalText = triggerBtn.innerHTML;
+  triggerBtn.disabled = true;
+  triggerBtn.innerHTML = '&#x23F3; Generating...';
+  triggerBtn.classList.add('nle-generating');
+
+  try {
+    var res = await fetch('/api/app/' + encodeURIComponent(compData.id) + '/generate-previs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        elementId: elementId,
+        promptOverrides: promptOverrides || {},
+        model: 'flash',
+        aspectRatio: '16:9',
+      }),
+    });
+
+    var data = await res.json();
+
+    if (!res.ok || !data.success) {
+      toast('Generation failed: ' + (data.error || 'Unknown error'), 'error');
+      triggerBtn.disabled = false;
+      triggerBtn.innerHTML = originalText;
+      triggerBtn.classList.remove('nle-generating');
+      return;
+    }
+
+    // Show success with reference info
+    var refInfo = '';
+    if (data.refCount) {
+      var parts = [];
+      if (data.refCount.characters > 0) parts.push(data.refCount.characters + ' character ref' + (data.refCount.characters > 1 ? 's' : ''));
+      if (data.refCount.locations > 0) parts.push('location ref');
+      if (parts.length > 0) refInfo = ' (used ' + parts.join(' + ') + ')';
+    }
+    toast('Generated previs for ' + elementId + refInfo, 'success');
+
+    // Update the image in the DOM without a full re-render
+    var beat = root.querySelector('[data-nle-regen-element="' + elementId + '"]');
+    if (!beat) beat = root.querySelector('[data-nle-gen-element="' + elementId + '"]');
+    if (beat) {
+      var beatContainer = beat.closest('.nle-beat');
+      if (beatContainer) {
+        var visual = beatContainer.querySelector('.nle-beat-visual');
+        if (visual && data.filePath) {
+          var newSrc = resolveImageSrc(data.filePath);
+
+          // Replace placeholder or existing image
+          var existingImg = visual.querySelector('.nle-beat-image img');
+          if (existingImg) {
+            var cacheBusted = newSrc + '&t=' + Date.now();
+            existingImg.src = cacheBusted; // cache bust
+            // Update the zoomable wrapper so the modal shows the new image
+            var zoomable = existingImg.closest('.app-img-zoomable');
+            if (zoomable) zoomable.setAttribute('data-app-img-src', cacheBusted);
+          } else {
+            // Replace placeholder with real image
+            var placeholder = visual.querySelector('.nle-beat-image-placeholder');
+            if (placeholder) {
+              var imgHtml = '<div class="nle-beat-image app-img-zoomable" data-app-img-src="' + compEscAttr(newSrc) + '">';
+              imgHtml += '<img src="' + compEscAttr(newSrc) + '" loading="lazy" alt="" />';
+              imgHtml += '</div>';
+              imgHtml += '<div class="nle-beat-image-controls">';
+              imgHtml += '<button class="nle-beat-regen-btn" data-nle-regen-element="' + compEscAttr(elementId) + '" title="Regenerate this image">&#x1f504; Regen</button>';
+              imgHtml += '<button class="nle-beat-prompt-btn" data-nle-prompt-element="' + compEscAttr(elementId) + '" title="Edit image prompt">&#x270E; Prompt</button>';
+              imgHtml += '</div>';
+              placeholder.outerHTML = imgHtml;
+
+              // Re-wire the new buttons
+              var newRegenBtn = visual.querySelector('.nle-beat-regen-btn');
+              if (newRegenBtn) {
+                newRegenBtn.addEventListener('click', function() {
+                  generatePrevisImage(elementId, {}, newRegenBtn, root);
+                });
+              }
+              var newPromptBtn = visual.querySelector('.nle-beat-prompt-btn');
+              if (newPromptBtn) {
+                newPromptBtn.addEventListener('click', function() {
+                  var area = root.querySelector('[data-nle-prompt-area="' + elementId + '"]');
+                  if (area) {
+                    var isVisible = area.style.display !== 'none';
+                    area.style.display = isVisible ? 'none' : 'block';
+                    newPromptBtn.classList.toggle('active', !isVisible);
+                  }
+                });
+              }
+              // Wire zoom on new image
+              var newZoomable = visual.querySelector('.app-img-zoomable');
+              if (newZoomable) {
+                newZoomable.addEventListener('click', function() {
+                  var src = newZoomable.getAttribute('data-app-img-src');
+                  if (src) {
+                    var modalEl = document.querySelector('#app-detail-modal');
+                    var modalBodyEl = document.querySelector('#app-detail-modal-body');
+                    if (modalEl && modalBodyEl) {
+                      modalBodyEl.innerHTML = '<img class="app-detail-modal-img" src="' + compEscAttr(src) + '" alt="" />';
+                      modalEl.className = 'app-detail-modal open app-detail-modal--image';
+                      document.body.style.overflow = 'hidden';
+                    }
+                  }
+                });
+              }
+            }
+          }
+
+          // Close the prompt area if it was open
+          var promptArea = root.querySelector('[data-nle-prompt-area="' + elementId + '"]');
+          if (promptArea) promptArea.style.display = 'none';
+        }
+      }
+    }
+  } catch (err) {
+    toast('Generation error: ' + (err.message || err), 'error');
+  }
+
+  triggerBtn.disabled = false;
+  triggerBtn.innerHTML = originalText;
+  triggerBtn.classList.remove('nle-generating');
+}
+
+// ────────────────────────────────────────────────────────────────
 //  Event wiring
 // ────────────────────────────────────────────────────────────────
 
@@ -785,6 +1572,17 @@ function wireAppActions(root) {
     btn.addEventListener('click', function() {
       appActiveSection = btn.getAttribute('data-app-section');
       renderCompositionAppPage();
+    });
+  });
+
+  // View mode toggle
+  root.querySelectorAll('.app-view-toggle-btn').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      var mode = btn.getAttribute('data-app-view-mode');
+      if (mode && mode !== appViewMode) {
+        appViewMode = mode;
+        renderCompositionAppPage();
+      }
     });
   });
 
@@ -1101,6 +1899,80 @@ function wireAppActions(root) {
     }
     return search(nodeData.outputs);
   }
+
+  // ── NLE-specific wiring ──
+
+  // Scene strip navigation — scroll to scene
+  root.querySelectorAll('.nle-strip-scene').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      var sceneId = btn.getAttribute('data-nle-scene');
+      var target = root.querySelector('#nle-scene-' + sceneId);
+      if (target) {
+        target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        // Highlight briefly
+        target.classList.add('nle-scene--highlight');
+        setTimeout(function() { target.classList.remove('nle-scene--highlight'); }, 1500);
+      }
+    });
+  });
+
+  // Prompt toggle — show/hide prompt editing area
+  root.querySelectorAll('.nle-beat-prompt-btn').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      var elemId = btn.getAttribute('data-nle-prompt-element');
+      var area = root.querySelector('[data-nle-prompt-area="' + elemId + '"]');
+      if (area) {
+        var isVisible = area.style.display !== 'none';
+        area.style.display = isVisible ? 'none' : 'block';
+        btn.classList.toggle('active', !isVisible);
+      }
+    });
+  });
+
+  // Prompt cancel
+  root.querySelectorAll('.nle-prompt-cancel').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      var elemId = btn.getAttribute('data-nle-cancel-element');
+      var area = root.querySelector('[data-nle-prompt-area="' + elemId + '"]');
+      if (area) area.style.display = 'none';
+      var togBtn = root.querySelector('[data-nle-prompt-element="' + elemId + '"]');
+      if (togBtn) togBtn.classList.remove('active');
+    });
+  });
+
+  // Regenerate image button
+  root.querySelectorAll('.nle-beat-regen-btn').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      var elemId = btn.getAttribute('data-nle-regen-element');
+      if (!elemId) return;
+      generatePrevisImage(elemId, {}, btn, root);
+    });
+  });
+
+  // Generate image (for shots without previs)
+  root.querySelectorAll('.nle-beat-gen-btn').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      var elemId = btn.getAttribute('data-nle-gen-element');
+      if (!elemId) return;
+      generatePrevisImage(elemId, {}, btn, root);
+    });
+  });
+
+  // Save prompt changes + regenerate
+  root.querySelectorAll('.nle-prompt-save').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      var elemId = btn.getAttribute('data-nle-save-element');
+      if (!elemId) return;
+      var area = root.querySelector('[data-nle-prompt-area="' + elemId + '"]');
+      if (!area) return;
+      var fields = {};
+      area.querySelectorAll('.nle-prompt-textarea').forEach(function(ta) {
+        var field = ta.getAttribute('data-nle-field');
+        if (field) fields[field] = ta.value;
+      });
+      generatePrevisImage(elemId, fields, btn, root);
+    });
+  });
 
   // Wire up existing composition result actions (copy, tabs, filters)
   if (typeof wireCompositionResultActions === 'function') {

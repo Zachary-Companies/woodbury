@@ -12,14 +12,16 @@
  *   POST /api/app/:id/refresh-stale  — re-run only stale downstream nodes
  */
 
-import { readFile, writeFile, mkdir, readdir } from 'node:fs/promises';
-import { join } from 'node:path';
+import { readFile, writeFile, mkdir, readdir, access } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { join, basename } from 'node:path';
 import { homedir } from 'node:os';
 import type { DashboardContext, RouteHandler } from '../types.js';
 import { sendJson, readBody, atomicWriteFile } from '../utils.js';
 import { discoverCompositions } from '../../workflow/loader.js';
 import { topoSort, gatherInputVariables, getDownstreamNodes } from '../graph-utils.js';
 import { debugLog } from '../../debug-log.js';
+import { loadBindings, getTargetIds } from '../pipeline-bindings.js';
 
 // ────────────────────────────────────────────────────────────────
 //  Constants
@@ -670,5 +672,433 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
     return true;
   }
 
+  // ── GET /api/app/:id/bindings ────────────────────────────────
+  // Get bindings for the pipeline's app view
+  if (req.method === 'GET' && subPath === '/bindings') {
+    const compositions = await discoverCompositions();
+    const entry = compositions.find(c => c.composition.id === pipelineId);
+    if (entry?.isV2Pipeline && entry.pipelineDir) {
+      const bindingsDoc = await loadBindings(entry.pipelineDir);
+      sendJson(res, 200, bindingsDoc);
+    } else {
+      sendJson(res, 200, { version: '1.0', pipelineId, bindings: [] });
+    }
+    return true;
+  }
+
+  // ── POST /api/app/:id/generate-previs ──────────────────────
+  // Generate or regenerate a previs image for a shot element.
+  // Resolves character headshots and location references from the
+  // pipeline's asset data and passes them as reference images to
+  // the nanobanana image generator.
+  if (req.method === 'POST' && subPath === '/generate-previs') {
+    const body = await readBody(req);
+    const elementId: string = body.elementId;
+    const promptOverrides: Record<string, string> = body.promptOverrides || {};
+    const model: 'flash' | 'pro' = body.model || 'flash';
+    const aspectRatio: string = body.aspectRatio || '16:9';
+
+    if (!elementId) {
+      sendJson(res, 400, { error: 'elementId required' });
+      return true;
+    }
+
+    // Collect all screenplay data from app state
+    const screenplay = await collectScreenplayData(pipelineId);
+    if (!screenplay) {
+      sendJson(res, 404, { error: 'No screenplay data found in app state' });
+      return true;
+    }
+
+    // Find the previs entry for this element
+    const previs = screenplay.previsMap[elementId];
+    const element = screenplay.elementMap[elementId];
+    if (!element) {
+      sendJson(res, 404, { error: 'Element not found: ' + elementId });
+      return true;
+    }
+
+    // Gather reference images — character headshots + location landscape
+    const referenceImages: string[] = [];
+    const refDescriptions: string[] = [];
+
+    // Try to resolve character bindings first (pipeline-specific connections)
+    // Falls back to previs.characterIds if no bindings exist
+    let characterIds: string[] = [];
+
+    // Check for pipeline bindings
+    const compositions = await discoverCompositions();
+    const pipelineEntry = compositions.find(c => c.composition.id === pipelineId);
+    if (pipelineEntry?.isV2Pipeline && pipelineEntry.pipelineDir) {
+      const bindingsDoc = await loadBindings(pipelineEntry.pipelineDir);
+      if (bindingsDoc.bindings.length > 0) {
+        // Use bindings: "which characters does this shot depict?"
+        characterIds = getTargetIds(bindingsDoc, 'shot', elementId, 'depicts');
+        debugLog.info('generate-previs', `Using ${characterIds.length} characters from bindings for ${elementId}`);
+      }
+    }
+
+    // Fall back to previs.characterIds if no bindings found
+    if (characterIds.length === 0) {
+      characterIds = previs?.characterIds || [];
+    }
+
+    for (const charId of characterIds) {
+      const charAsset = screenplay.characterAssets[charId];
+      if (charAsset?.filePath && fileExists(charAsset.filePath)) {
+        referenceImages.push(charAsset.filePath);
+        const charData = screenplay.characters[charId];
+        const desc = charData?.description || charData?.name || charId;
+        refDescriptions.push(
+          `Reference image ${referenceImages.length} is ${charData?.displayName || charData?.name || charId}` +
+          (desc ? ` (${desc.substring(0, 120)})` : '')
+        );
+      }
+    }
+
+    // Location — check bindings first, fall back to previs.locationId
+    let locationId = previs?.locationId;
+    if (!locationId && pipelineEntry?.isV2Pipeline && pipelineEntry.pipelineDir) {
+      const bindingsDoc = await loadBindings(pipelineEntry.pipelineDir);
+      const locIds = getTargetIds(bindingsDoc, 'shot', elementId, 'set-in');
+      if (locIds.length > 0) locationId = locIds[0];
+    }
+    if (locationId) {
+      const locAsset = screenplay.locationAssets[locationId];
+      if (locAsset?.filePath && fileExists(locAsset.filePath)) {
+        referenceImages.push(locAsset.filePath);
+        const locData = screenplay.locations[locationId];
+        refDescriptions.push(
+          `Reference image ${referenceImages.length} is the location "${locData?.name || locationId}"` +
+          (locData?.description ? ` (${locData.description.substring(0, 120)})` : '')
+        );
+      }
+    }
+
+    // Build the generation prompt following the Nano Banana prompting guide:
+    //   Formula: [Reference images] + [Relationship instruction] + [New scenario]
+    //   With: [Subject] + [Action] + [Location/context] + [Composition] + [Style]
+    //   Best practices: narrative descriptions (not keyword lists), positive framing,
+    //   specific camera/lens/lighting, color grading, materiality emphasis.
+    const shotText = element.shotText || element.content || '';
+    const previsDescription = promptOverrides.description || previs?.description || shotText;
+    const cameraIntent = promptOverrides.cameraIntent || previs?.cameraIntent || '';
+    const composition = promptOverrides.composition || previs?.composition || '';
+    const lighting = promptOverrides.lighting || previs?.lighting || '';
+
+    // Derive camera/lens details from shot metadata
+    const frameSize = element.frameSize || '';
+    const cameraMovement = element.cameraMovement || '';
+    const duration = previs?.durationSeconds || 0;
+
+    // Map frame sizes to lens descriptions for the prompt
+    const lensMap: Record<string, string> = {
+      'WIDE': 'wide-angle lens (24mm), deep depth of field',
+      'EXTREME WIDE': 'ultra wide-angle lens (16mm), expansive depth of field',
+      'MEDIUM': 'standard lens (50mm), natural perspective with moderate depth of field',
+      'MEDIUM CLOSE-UP': '85mm portrait lens, shallow depth of field (f/2.8)',
+      'CLOSE-UP': '85mm portrait lens, very shallow depth of field (f/1.8)',
+      'EXTREME CLOSE-UP': 'macro lens (100mm), extremely shallow depth of field (f/1.4)',
+    };
+    const lensDesc = lensMap[frameSize.toUpperCase()] || '';
+
+    // Map camera movements to cinematic technique descriptions
+    const movementMap: Record<string, string> = {
+      'STATIC': 'locked-off camera on a tripod, perfectly still frame',
+      'PAN': 'smooth horizontal pan following the action',
+      'TILT': 'gentle vertical tilt revealing the scene',
+      'DOLLY': 'dolly tracking shot moving through the space',
+      'SLOW PUSH IN': 'subtle dolly push-in, gradually tightening the frame',
+      'PUSH IN': 'dolly push-in toward the subject',
+      'PULL BACK': 'slow dolly pull-back revealing the wider scene',
+      'TRACKING': 'tracking shot moving alongside the subject',
+      'CRANE': 'crane shot with elevated, sweeping perspective',
+      'HANDHELD': 'handheld camera with slight organic movement',
+      'STEADICAM': 'smooth Steadicam floating through the scene',
+    };
+    const movementDesc = movementMap[cameraMovement.toUpperCase()] || '';
+
+    let prompt = '';
+
+    // [Reference images] + [Relationship instruction]
+    if (referenceImages.length > 0) {
+      prompt += 'Using the attached reference images as visual guides for character appearance and location setting: ';
+      prompt += refDescriptions.join('. ') + '. ';
+      prompt += 'The characters in this frame must match these references exactly — same face, hair, body type, clothing, and features. ';
+      prompt += 'The environment should be consistent with the location reference.\n\n';
+    }
+
+    // [Subject] + [Action] — narrative scene description
+    prompt += previsDescription;
+    if (previsDescription !== shotText && shotText) {
+      prompt += ` The camera captures: ${shotText}`;
+    }
+    prompt += '\n\n';
+
+    // [Composition] — camera, lens, and framing
+    if (lensDesc || movementDesc || composition) {
+      prompt += 'Shot on a cinema camera';
+      if (lensDesc) prompt += ` with a ${lensDesc}`;
+      prompt += '. ';
+      if (movementDesc) prompt += `Camera technique: ${movementDesc}. `;
+      if (composition) prompt += composition + '. ';
+      prompt += '\n\n';
+    }
+
+    // [Lighting]
+    if (lighting) {
+      prompt += `Lighting: ${lighting}. `;
+    }
+    if (cameraIntent && cameraIntent !== composition) {
+      prompt += cameraIntent + '. ';
+    }
+    if (lighting || cameraIntent) prompt += '\n\n';
+
+    // [Style] — cinematic film stock and color grading
+    prompt += 'Style: Cinematic previsualization frame, shot on 35mm film with subtle grain. ';
+    prompt += 'Professional cinematography with rich color grading, deep shadows, and controlled highlights. ';
+    prompt += 'The image should feel like a single frame from a feature film.';
+
+    // Import and call nanobanana
+    let nanobananaTool: typeof import('../../loop/tools/nanobanana.js').nanobanana;
+    try {
+      const { nanobanana: nb } = await import('../../loop/tools/nanobanana.js');
+      nanobananaTool = nb;
+    } catch (err) {
+      sendJson(res, 500, { error: 'Image generation not available: ' + String(err) });
+      return true;
+    }
+
+    // Create output directory
+    const previsDir = join(APP_STATE_DIR, pipelineId, 'previs');
+    await mkdir(previsDir, { recursive: true });
+    const outputPath = join(previsDir, `previs_${elementId}_${Date.now().toString(36)}.png`);
+
+    try {
+      debugLog.info('generate-previs', `Generating previs for ${elementId} with ${referenceImages.length} reference images`);
+      const result = await nanobananaTool({
+        action: 'generate' as const,
+        prompt,
+        referenceImages: referenceImages.length > 0 ? referenceImages : undefined,
+        model,
+        aspectRatio: aspectRatio as any,
+        outputPath,
+      }, previsDir);
+
+      const parsed = typeof result === 'string' ? JSON.parse(result) : result;
+
+      if (!parsed.success && parsed.error) {
+        sendJson(res, 500, { error: parsed.error });
+        return true;
+      }
+
+      const filePath = parsed.filePath || outputPath;
+
+      // Update the previs data in app state if we have a previs entry
+      if (previs) {
+        await updatePrevisAsset(pipelineId, elementId, filePath, screenplay);
+      }
+
+      sendJson(res, 200, {
+        success: true,
+        elementId,
+        filePath,
+        refsUsed: referenceImages.map((r: string) => basename(r)),
+        refCount: { characters: characterIds.length, locations: locationId ? 1 : 0 },
+        prompt: prompt.substring(0, 500),
+        model,
+      });
+    } catch (err) {
+      debugLog.info('generate-previs', `Error: ${err}`);
+      sendJson(res, 500, { error: 'Generation failed: ' + (err instanceof Error ? err.message : String(err)) });
+    }
+    return true;
+  }
+
   return false;
 };
+
+// ────────────────────────────────────────────────────────────────
+//  Screenplay data helpers — resolve references for previs gen
+// ────────────────────────────────────────────────────────────────
+
+interface ScreenplayData {
+  characters: Record<string, any>;
+  locations: Record<string, any>;
+  elementMap: Record<string, any>;
+  previsMap: Record<string, any>;
+  characterAssets: Record<string, any>;  // characterId -> asset with filePath
+  locationAssets: Record<string, any>;   // locationId -> asset with filePath
+  assetMap: Record<string, any>;         // assetId -> asset
+}
+
+/**
+ * Collect all screenplay-related data from a pipeline's app state.
+ * Walks all node outputs looking for characters, locations, elements,
+ * previs shots, and assets — then builds lookup maps.
+ */
+async function collectScreenplayData(pipelineId: string): Promise<ScreenplayData | null> {
+  const dir = join(APP_STATE_DIR, pipelineId);
+  let files: string[];
+  try {
+    files = await readdir(dir);
+  } catch { return null; }
+
+  let allCharacters: any[] = [];
+  let allLocations: any[] = [];
+  let allElements: any[] = [];
+  let allPrevis: any[] = [];
+  let allAssets: any[] = [];
+
+  for (const file of files) {
+    if (!file.endsWith('.json') || file === '_manifest.json') continue;
+    try {
+      const raw = await readFile(join(dir, file), 'utf-8');
+      const data = JSON.parse(raw);
+      extractScreenplayFields(data, 0);
+    } catch { /* skip */ }
+  }
+
+  function extractScreenplayFields(obj: any, depth: number): void {
+    if (!obj || typeof obj !== 'object' || depth > 5) return;
+    if (Array.isArray(obj)) return;
+
+    for (const k of Object.keys(obj)) {
+      const v = obj[k];
+      if (!v) continue;
+
+      if (k === 'scriptPackage' && typeof v === 'object' && v.script) {
+        extractScreenplayFields(v, depth + 1);
+        extractScreenplayFields(v.script, depth + 1);
+        continue;
+      }
+      if (k === 'script' && typeof v === 'object' && !Array.isArray(v)) {
+        extractScreenplayFields(v, depth + 1);
+        continue;
+      }
+      if (k === 'characters' && Array.isArray(v) && v.length > 0 && v[0]?.name) {
+        if (v.length > allCharacters.length) allCharacters = v;
+      }
+      if (k === 'locations' && Array.isArray(v) && v.length > 0 && v[0]?.name) {
+        if (v.length > allLocations.length) allLocations = v;
+      }
+      if (k === 'elements' && Array.isArray(v) && v.length > 0 && v[0]?.type && v[0]?.id) {
+        if (v.length > allElements.length) allElements = v;
+      }
+      if (k === 'shots' && Array.isArray(v) && v.length > 0 && v[0]?.shotElementId) {
+        if (v.length > allPrevis.length) allPrevis = v;
+      }
+      if (k === 'previsualizations' && typeof v === 'object' && v.shots) {
+        if (v.shots.length > allPrevis.length) allPrevis = v.shots;
+      }
+      if (k === 'assets' && Array.isArray(v) && v.length > 0 && v[0]?.filePath) {
+        if (v.length > allAssets.length) allAssets = v;
+      }
+      if (k === 'assets' && typeof v === 'object' && !Array.isArray(v) && v.assets) {
+        if (Array.isArray(v.assets) && v.assets.length > allAssets.length) allAssets = v.assets;
+      }
+
+      if (typeof v === 'object' && !Array.isArray(v)) {
+        extractScreenplayFields(v, depth + 1);
+      }
+    }
+  }
+
+  if (allElements.length === 0) return null;
+
+  // Build lookup maps
+  const characters: Record<string, any> = {};
+  for (const c of allCharacters) characters[c.id] = c;
+
+  const locations: Record<string, any> = {};
+  for (const l of allLocations) locations[l.id] = l;
+
+  const elementMap: Record<string, any> = {};
+  for (const e of allElements) elementMap[e.id] = e;
+
+  const previsMap: Record<string, any> = {};
+  for (const p of allPrevis) previsMap[p.shotElementId] = p;
+
+  const assetMap: Record<string, any> = {};
+  for (const a of allAssets) assetMap[a.id] = a;
+
+  // Map character IDs to their headshot assets
+  const characterAssets: Record<string, any> = {};
+  for (const asset of allAssets) {
+    const meta = asset.metadata || {};
+    if (meta.characterId && (asset.type === 'character-headshot' || asset.name?.toLowerCase().includes('headshot'))) {
+      characterAssets[meta.characterId] = asset;
+    }
+  }
+
+  // Map location IDs to their landscape assets
+  const locationAssets: Record<string, any> = {};
+  for (const asset of allAssets) {
+    const meta = asset.metadata || {};
+    if (meta.locationId && (asset.type === 'landscape' || asset.name?.toLowerCase().includes('landscape'))) {
+      locationAssets[meta.locationId] = asset;
+    }
+  }
+
+  return { characters, locations, elementMap, previsMap, characterAssets, locationAssets, assetMap };
+}
+
+/** Check if a file path exists synchronously */
+function fileExists(filePath: string): boolean {
+  try { return existsSync(filePath); } catch { return false; }
+}
+
+/**
+ * Update the previs asset filePath in the stored app state after regeneration.
+ * Finds the previs entry matching this element and updates its assetId's filePath,
+ * or adds a new asset entry.
+ */
+async function updatePrevisAsset(
+  pipelineId: string,
+  elementId: string,
+  newFilePath: string,
+  screenplay: ScreenplayData
+): Promise<void> {
+  // Find which node file contains the previsualizations
+  const dir = join(APP_STATE_DIR, pipelineId);
+  let files: string[];
+  try { files = await readdir(dir); } catch { return; }
+
+  for (const file of files) {
+    if (!file.endsWith('.json') || file === '_manifest.json') continue;
+    const filePath = join(dir, file);
+    try {
+      const raw = await readFile(filePath, 'utf-8');
+      const data = JSON.parse(raw);
+      if (updatePrevisInObj(data, elementId, newFilePath)) {
+        await writeFile(filePath, JSON.stringify(data, null, 2));
+        debugLog.info('generate-previs', `Updated previs asset in ${file} for ${elementId}`);
+        return;
+      }
+    } catch { /* skip */ }
+  }
+}
+
+/**
+ * Recursively walk an object to find and update the previs shot matching elementId.
+ * Updates the asset's filePath or creates a new asset entry.
+ */
+function updatePrevisInObj(obj: any, elementId: string, newFilePath: string): boolean {
+  if (!obj || typeof obj !== 'object') return false;
+  if (Array.isArray(obj)) {
+    for (const item of obj) {
+      if (item?.shotElementId === elementId) {
+        // Found the previs entry — update or create its asset reference
+        item._generatedFilePath = newFilePath;
+        item._generatedAt = new Date().toISOString();
+        return true;
+      }
+      if (updatePrevisInObj(item, elementId, newFilePath)) return true;
+    }
+    return false;
+  }
+  for (const k of Object.keys(obj)) {
+    if (updatePrevisInObj(obj[k], elementId, newFilePath)) return true;
+  }
+  return false;
+}

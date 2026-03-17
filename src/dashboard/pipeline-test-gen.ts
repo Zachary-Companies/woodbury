@@ -280,7 +280,11 @@ export function generateNodeTestFile(
  * Ensure _test-helpers.ts exists in the pipeline directory.
  */
 export async function ensureTestHelpers(pipelineDir: string): Promise<void> {
-  const helpersPath = join(pipelineDir, '_test-helpers.ts');
+  // Prefer src/ directory if it exists (new layout), fall back to root (legacy)
+  const srcDir = join(pipelineDir, 'src');
+  const useSrc = existsSync(srcDir);
+  const targetDir = useSrc ? srcDir : pipelineDir;
+  const helpersPath = join(targetDir, '_test-helpers.ts');
   if (!existsSync(helpersPath)) {
     await fs.writeFile(helpersPath, TEST_HELPERS_CONTENT, 'utf-8');
   }
@@ -296,7 +300,7 @@ export async function ensureVitestConfig(pipelineDir: string): Promise<void> {
 
 export default defineConfig({
   test: {
-    include: ['*.test.ts'],
+    include: ['src/**/*.test.ts', '*.test.ts'],
     globals: false,
     testTimeout: 15000,
   },
@@ -534,14 +538,19 @@ export async function generateAllNodeTests(
     try {
       const filePath = join(pipelineDir, node.scriptFile.file);
       const code = await fs.readFile(filePath, 'utf-8');
+      // For test generation, use just the basename for module imports
+      const nodeBaseName = node.scriptFile.file.includes('/')
+        ? node.scriptFile.file.split('/').pop()!
+        : node.scriptFile.file;
       const testFileName = node.scriptFile.file.replace(/\.ts$/, '.test.ts');
       const testCode = generateNodeTestFile(
-        node.scriptFile.file,
+        nodeBaseName,
         code,
         node.scriptFile.inputs || [],
         node.scriptFile.outputs || [],
         { nodeLabel: node.label },
       );
+      // Write test file alongside source file
       await fs.writeFile(join(pipelineDir, testFileName), testCode, 'utf-8');
       created.push(testFileName);
     } catch (err) {

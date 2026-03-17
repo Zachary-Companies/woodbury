@@ -38,6 +38,7 @@ import { handleSkillPolicyRoutes } from './skill-policies.js';
 import { handleMemoryRoutes } from './memories.js';
 import { handleSkillOptimizerRoutes } from './skill-optimizer.js';
 import { handlePipelineAppRoutes } from './pipeline-app.js';
+import { handleBindingsRoutes } from './bindings.js';
 
 // ── Handler chain (order matters for overlapping prefixes) ──
 
@@ -60,6 +61,9 @@ const handlers: RouteHandler[] = [
 
   // AI generation (must come before composition CRUD to catch /api/compositions/generate-*)
   handleGenerationRoutes,
+
+  // Pipeline bindings (must come before composition CRUD to catch /api/compositions/:id/bindings*)
+  handleBindingsRoutes,
 
   // Composition CRUD, execution, batch
   handleCompositionsRoutes,

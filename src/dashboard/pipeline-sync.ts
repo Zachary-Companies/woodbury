@@ -110,8 +110,8 @@ export async function addImportEdgeToCode(
 
   let code = await fs.readFile(sourceFilePath, 'utf-8');
 
-  // Check if import already exists
-  const targetModule = targetNode.scriptFile.file.replace(/\.(js|ts)$/, '');
+  // Check if import already exists (use basename since files in src/ import with ./)
+  const targetModule = basename(targetNode.scriptFile.file).replace(/\.(js|ts)$/, '');
   const existingImports = parseImports(code);
   const alreadyImported = existingImports.some(i => i.fromModule === targetModule);
   if (alreadyImported) return;
@@ -152,7 +152,7 @@ export async function removeImportEdgeFromCode(
   if (!existsSync(sourceFilePath)) return;
 
   let code = await fs.readFile(sourceFilePath, 'utf-8');
-  const targetModule = targetNode.scriptFile.file.replace(/\.(js|ts)$/, '');
+  const targetModule = basename(targetNode.scriptFile.file).replace(/\.(js|ts)$/, '');
 
   // Remove import lines referencing this module
   const lines = code.split('\n');
@@ -204,7 +204,8 @@ export async function syncFileToManifest(
   const fileToNodeMap = new Map<string, PipelineNode>();
   for (const n of pipeline.nodes) {
     if (n.scriptFile?.file) {
-      const moduleName = n.scriptFile.file.replace(/\.(js|ts)$/, '');
+      // Use basename for matching since imports use ./module (no src/ prefix)
+      const moduleName = basename(n.scriptFile.file).replace(/\.(js|ts)$/, '');
       fileToNodeMap.set(moduleName, n);
     }
   }
@@ -253,12 +254,18 @@ export async function syncAllFilesToManifest(
   }
 
   // Remove nodes whose .ts files no longer exist on disk
+  // Supports both new layout (src/foo.ts) and legacy layout (foo.ts)
   try {
-    const entries = new Set(await fs.readdir(pipelineDir));
     const toRemove: string[] = [];
     for (const node of pipeline.nodes) {
-      if (node.scriptFile?.file && !entries.has(node.scriptFile.file)) {
-        toRemove.push(node.id);
+      if (!node.scriptFile?.file) continue;
+      const fullPath = join(pipelineDir, node.scriptFile.file);
+      if (!existsSync(fullPath)) {
+        // Also check legacy root path for files not yet migrated
+        const legacyPath = join(pipelineDir, basename(node.scriptFile.file));
+        if (!existsSync(legacyPath)) {
+          toRemove.push(node.id);
+        }
       }
     }
     if (toRemove.length > 0) {
@@ -290,22 +297,45 @@ export async function scaffoldPipeline(
   const pipelineDir = join(parentDir, id);
   await fs.mkdir(pipelineDir, { recursive: true });
 
+  // Create src/ directory for script node files
+  const srcDir = join(pipelineDir, 'src');
+  await fs.mkdir(srcDir, { recursive: true });
+
+  // Create bindings/ directory for custom data connections
+  const bindingsDir = join(pipelineDir, 'bindings');
+  await fs.mkdir(bindingsDir, { recursive: true });
+
+  // Write initial empty bindings.json
+  const emptyBindings = { version: '1.0', pipelineId: id, bindings: [] };
+  await fs.writeFile(join(bindingsDir, 'bindings.json'), JSON.stringify(emptyBindings, null, 2), 'utf-8');
+
+  // Write initial empty views.json
+  const emptyViews = { version: '1.0', pipelineId: id, views: [] };
+  await fs.writeFile(join(bindingsDir, 'views.json'), JSON.stringify(emptyViews, null, 2), 'utf-8');
+
+  // Write initial empty rules.json
+  const emptyRules = { version: '1.0', pipelineId: id, rules: [] };
+  await fs.writeFile(join(bindingsDir, 'rules.json'), JSON.stringify(emptyRules, null, 2), 'utf-8');
+
   // Clean stale .ts files from previous generation (overwrite scenario)
-  try {
-    const existing = await fs.readdir(pipelineDir);
-    for (const entry of existing) {
-      if (
-        entry.endsWith('.ts') &&
-        !entry.endsWith('.d.ts') &&
-        entry !== 'tsconfig.json' &&
-        entry !== 'vitest.config.ts' &&
-        !entry.startsWith('_')
-      ) {
-        await fs.unlink(join(pipelineDir, entry));
+  // Check both src/ and root for backward compat
+  for (const dir of [srcDir, pipelineDir]) {
+    try {
+      const existing = await fs.readdir(dir);
+      for (const entry of existing) {
+        if (
+          entry.endsWith('.ts') &&
+          !entry.endsWith('.d.ts') &&
+          entry !== 'tsconfig.json' &&
+          entry !== 'vitest.config.ts' &&
+          !entry.startsWith('_')
+        ) {
+          await fs.unlink(join(dir, entry));
+        }
       }
+    } catch {
+      // Directory might be new
     }
-  } catch {
-    // Directory might be new
   }
 
   const manifest: PipelineDocument = {
@@ -340,8 +370,8 @@ export async function scaffoldPipeline(
       outDir: '.build',
       declaration: false,
     },
-    include: ['*.ts', 'woodbury.d.ts'],
-    exclude: ['.build'],
+    include: ['src/**/*.ts', 'woodbury.d.ts'],
+    exclude: ['.build', 'node_modules'],
   };
   await fs.writeFile(join(pipelineDir, 'tsconfig.json'), JSON.stringify(tsconfig, null, 2), 'utf-8');
 
@@ -467,14 +497,19 @@ ${id}/
 ├── .env.example        # Template for pipeline-specific secrets
 ├── .gitignore          # Excludes build artifacts
 ├── README.md           # This file
-├── _utils.ts           # Shared utilities (prefixed with _ = not a node)
-├── lib/                # Shared library modules (not auto-detected as nodes)
-└── *.ts                # Script node files (one per node)
+├── src/                # Script node files (one per node)
+│   ├── *.ts            # Node execute() implementations
+│   ├── _utils.ts       # Shared utilities (prefixed with _ = not a node)
+│   └── *.test.ts       # Colocated test files
+└── bindings/           # Custom data connections (entity relationships)
+    ├── bindings.json   # Entity-to-entity relationships
+    ├── views.json      # Custom view configurations
+    └── rules.json      # Auto-binding rule definitions
 \`\`\`
 
 ## Script Node Contract
 
-Every \`.ts\` file in this directory is a pipeline node. Each must export an \`execute\` function:
+Every \`.ts\` file in \`src/\` is a pipeline node. Each must export an \`execute\` function:
 
 \`\`\`typescript
 /// <reference path="./woodbury.d.ts" />
@@ -558,7 +593,8 @@ It is a directed graph of TypeScript script nodes that execute sequentially. The
 - \`tsconfig.json\` — Editor config. Do not edit.
 - \`package.json\` — npm dependency manifest. Add packages here or use \`npm install <package>\`.
 - \`.env.example\` — Template for pipeline-specific secrets. Copy to \`.env\` and fill in values.
-- \`*.ts\` — **These are the files you should edit.** Each one is a pipeline script node.
+- \`src/*.ts\` — **These are the files you should edit.** Each one is a pipeline script node.
+- \`bindings/\` — Custom data connections between pipeline entities. Contains \`bindings.json\`, \`views.json\`, and \`rules.json\`.
 
 ## How Script Nodes Work
 
@@ -590,7 +626,7 @@ export async function execute(
 4. **Use \`context.llm\` for AI calls** — Don't import external AI SDKs. Use the built-in \`context.llm.generate()\` and \`context.llm.generateJSON()\`.
 5. **Use \`context.log()\` for logging** — Don't use \`console.log\`. Use \`context.log(message)\` so logs appear in the pipeline run UI.
 6. **Use \`context.progress\` for long tasks** — Call \`context.progress.start(total)\`, \`context.progress.increment()\`, and \`context.progress.complete()\`.
-7. **Keep the reference directive** — The \`/// <reference path="./woodbury.d.ts" />\` line provides type hints for \`ScriptContext\`.
+7. **Keep the reference directive** — The \`/// <reference path="../woodbury.d.ts" />\` line provides type hints for \`ScriptContext\`.
 
 ### Available Context APIs
 
@@ -703,14 +739,49 @@ The \`createMockContext()\` helper accepts overrides for:
 
 Not every .ts file needs to be a pipeline node. For shared helper functions:
 
-- **Prefix with underscore**: \`_utils.ts\`, \`_helpers.ts\`, \`_types.ts\` — these are ignored by the auto-detection
-- **Use a \`lib/\` directory**: Put shared modules in \`lib/\` — they won't be scanned
+- **Prefix with underscore**: \`src/_utils.ts\`, \`src/_helpers.ts\`, \`src/_types.ts\` — these are ignored by the auto-detection
+- **Use a \`lib/\` directory**: Put shared modules in \`src/lib/\` — they won't be scanned
 
 Import shared utilities in your node files:
 \`\`\`typescript
 import { formatDate } from './_utils.js';
 import { MyInterface } from './lib/types.js';
 \`\`\`
+
+## Bindings (Custom Data Connections)
+
+The \`bindings/\` directory stores custom relationships between data entities across pipeline nodes:
+
+- **\`bindings.json\`** — Explicit entity-to-entity relationships (e.g., "shot X depicts characters A, B")
+- **\`views.json\`** — Custom view configurations (e.g., NLE screenplay view entity mappings)
+- **\`rules.json\`** — Auto-binding rules that populate bindings from node output data
+
+Bindings can be managed through:
+- The Woodbury dashboard UI (add/remove connections visually)
+- The API (\`/api/compositions/:id/bindings\`)
+- Direct file editing (JSON)
+- AI assistants (Claude Code can read/write bindings)
+
+### Bindings JSON Structure
+
+\`\`\`json
+{
+  "version": "1.0",
+  "pipelineId": "${id}",
+  "bindings": [
+    {
+      "id": "b1",
+      "type": "depicts",
+      "source": { "entityType": "shot", "entityId": "shot-ext-park-1" },
+      "target": { "entityType": "character", "entityId": "char-emma" },
+      "confidence": 1.0,
+      "origin": "auto:character-in-shot"
+    }
+  ]
+}
+\`\`\`
+
+Binding types: \`depicts\` (character in shot), \`set-in\` (shot in location), \`voice\` (dialogue speaker), or custom types.
 `;
 }
 
@@ -795,9 +866,14 @@ export async function addScriptFileNode(
   // Generate node ID
   const nodeId = `node-${fileName.replace(/\.ts$/, '')}-${Date.now().toString(36)}`;
 
-  // Write the .ts file
+  // Write the .ts file to src/
+  const srcDir = join(pipelineDir, 'src');
+  await fs.mkdir(srcDir, { recursive: true });
   const fileCode = code || generateScaffold(label, description, inputs, outputs);
-  await fs.writeFile(join(pipelineDir, fileName), fileCode, 'utf-8');
+  await fs.writeFile(join(srcDir, fileName), fileCode, 'utf-8');
+
+  // Store path relative to pipelineDir (includes src/ prefix)
+  const relativeFile = `src/${fileName}`;
 
   // Add node to manifest
   const node: PipelineNode = {
@@ -806,7 +882,7 @@ export async function addScriptFileNode(
     position: { x: 200, y: 100 + pipeline.nodes.length * 150 },
     label,
     scriptFile: {
-      file: fileName,
+      file: relativeFile,
       description,
       inputs,
       outputs,
@@ -861,6 +937,163 @@ function tsType(portType: string): string {
     case 'boolean': return 'boolean';
     case 'string[]': return 'string[]';
     default: return 'any';
+  }
+}
+
+// ── Pipeline migration ────────────────────────────────────────
+
+/**
+ * Migrate a v2 pipeline from flat layout (*.ts at root) to src/ layout.
+ * Moves script node files into src/ and updates scriptFile.file paths.
+ * Also creates bindings/ directory if missing.
+ * Returns true if any files were moved.
+ */
+export async function migratePipelineToSrcLayout(
+  pipelineDir: string,
+  pipeline: PipelineDocument,
+): Promise<boolean> {
+  const srcDir = join(pipelineDir, 'src');
+  const bindingsDir = join(pipelineDir, 'bindings');
+  let anyMoved = false;
+
+  // Check if already migrated (src/ exists and has .ts files)
+  let srcHasFiles = false;
+  try {
+    const srcEntries = await fs.readdir(srcDir);
+    srcHasFiles = srcEntries.some(e => e.endsWith('.ts') && !e.endsWith('.d.ts'));
+  } catch {
+    // src/ doesn't exist yet
+  }
+
+  // If no nodes reference src/ paths and src/ has no files, do the migration
+  const needsMigration = pipeline.nodes.some(n =>
+    n.scriptFile?.file && !n.scriptFile.file.startsWith('src/')
+  );
+
+  if (!needsMigration && srcHasFiles) {
+    // Already migrated or no script nodes
+    // Just ensure bindings/ exists
+    await ensureBindingsDir(pipelineDir, pipeline.id);
+    return false;
+  }
+
+  if (needsMigration) {
+    await fs.mkdir(srcDir, { recursive: true });
+
+    for (const node of pipeline.nodes) {
+      if (!node.scriptFile?.file) continue;
+      if (node.scriptFile.file.startsWith('src/')) continue; // already migrated
+
+      const oldPath = join(pipelineDir, node.scriptFile.file);
+      const newPath = join(srcDir, node.scriptFile.file);
+
+      if (existsSync(oldPath)) {
+        await fs.rename(oldPath, newPath);
+        anyMoved = true;
+      }
+
+      // Update the manifest reference
+      node.scriptFile.file = `src/${node.scriptFile.file}`;
+    }
+
+    // Move test files and helpers too
+    try {
+      const rootEntries = await fs.readdir(pipelineDir);
+      for (const entry of rootEntries) {
+        if (
+          (entry.endsWith('.test.ts') || entry === '_test-helpers.ts' || entry === '_test-fixtures.ts') &&
+          existsSync(join(pipelineDir, entry))
+        ) {
+          await fs.rename(join(pipelineDir, entry), join(srcDir, entry));
+          anyMoved = true;
+        }
+      }
+    } catch {
+      // ignore
+    }
+
+    // Update tsconfig if it exists
+    const tsconfigPath = join(pipelineDir, 'tsconfig.json');
+    if (existsSync(tsconfigPath)) {
+      try {
+        const tsconfig = JSON.parse(await fs.readFile(tsconfigPath, 'utf-8'));
+        if (tsconfig.include && Array.isArray(tsconfig.include)) {
+          const hasOldPattern = tsconfig.include.some((p: string) => p === '*.ts');
+          if (hasOldPattern) {
+            tsconfig.include = tsconfig.include
+              .filter((p: string) => p !== '*.ts')
+              .concat('src/**/*.ts');
+            if (!tsconfig.include.includes('woodbury.d.ts')) {
+              tsconfig.include.push('woodbury.d.ts');
+            }
+            await fs.writeFile(tsconfigPath, JSON.stringify(tsconfig, null, 2), 'utf-8');
+          }
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    // Update vitest config if it exists
+    const vitestPath = join(pipelineDir, 'vitest.config.ts');
+    if (existsSync(vitestPath)) {
+      try {
+        let vitestCode = await fs.readFile(vitestPath, 'utf-8');
+        if (vitestCode.includes("'*.test.ts'")) {
+          vitestCode = vitestCode.replace("'*.test.ts'", "'src/**/*.test.ts'");
+          await fs.writeFile(vitestPath, vitestCode, 'utf-8');
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    if (anyMoved) {
+      await savePipelineManifest(pipelineDir, pipeline);
+    }
+  }
+
+  // Ensure bindings/ directory exists
+  await ensureBindingsDir(pipelineDir, pipeline.id);
+
+  return anyMoved;
+}
+
+/**
+ * Check if a pipeline needs migration to the src/ layout.
+ */
+export function pipelineNeedsMigration(pipeline: PipelineDocument): boolean {
+  return pipeline.nodes.some(n =>
+    n.scriptFile?.file && !n.scriptFile.file.startsWith('src/')
+  );
+}
+
+/**
+ * Ensure the bindings/ directory and initial files exist.
+ */
+async function ensureBindingsDir(pipelineDir: string, pipelineId: string): Promise<void> {
+  const bindingsDir = join(pipelineDir, 'bindings');
+  await fs.mkdir(bindingsDir, { recursive: true });
+
+  const bindingsPath = join(bindingsDir, 'bindings.json');
+  if (!existsSync(bindingsPath)) {
+    await fs.writeFile(bindingsPath, JSON.stringify({
+      version: '1.0', pipelineId, bindings: [],
+    }, null, 2), 'utf-8');
+  }
+
+  const viewsPath = join(bindingsDir, 'views.json');
+  if (!existsSync(viewsPath)) {
+    await fs.writeFile(viewsPath, JSON.stringify({
+      version: '1.0', pipelineId, views: [],
+    }, null, 2), 'utf-8');
+  }
+
+  const rulesPath = join(bindingsDir, 'rules.json');
+  if (!existsSync(rulesPath)) {
+    await fs.writeFile(rulesPath, JSON.stringify({
+      version: '1.0', pipelineId, rules: [],
+    }, null, 2), 'utf-8');
   }
 }
 

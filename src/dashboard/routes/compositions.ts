@@ -16,7 +16,7 @@ import {
   readScriptFileCode,
   writeScriptFileCode,
 } from '../../workflow/loader.js';
-import { scaffoldPipeline, addScriptFileNode, savePipelineManifest, syncAllFilesToManifest, readPipelineTodo, writePipelineTodo } from '../pipeline-sync.js';
+import { scaffoldPipeline, addScriptFileNode, savePipelineManifest, syncAllFilesToManifest, readPipelineTodo, writePipelineTodo, migratePipelineToSrcLayout, pipelineNeedsMigration } from '../pipeline-sync.js';
 import type { PipelineTodo } from '../pipeline-sync.js';
 import { generateNodeTestFile, generateAllNodeTests, runPipelineTests, ensureTestHelpers } from '../pipeline-test-gen.js';
 import { debugLog } from '../../debug-log.js';
@@ -170,7 +170,15 @@ export const handleCompositionsRoutes: RouteHandler = async (req, res, pathname,
         }
       }
 
-      sendJson(res, 200, { composition: found.composition, path: found.path, source: found.source });
+      // Check if pipeline needs migration to src/ layout
+      const needsSrcMigration = found.isV2Pipeline && pipelineNeedsMigration(found.composition as any);
+
+      sendJson(res, 200, {
+        composition: found.composition,
+        path: found.path,
+        source: found.source,
+        ...(needsSrcMigration ? { needsMigration: 'src-layout' } : {}),
+      });
     } catch (err) {
       sendJson(res, 500, { error: String(err) });
     }
@@ -568,6 +576,21 @@ export const handleCompositionsRoutes: RouteHandler = async (req, res, pathname,
         await savePipelineManifest(pipelineDir, pipeline);
         invalidateCompositionCache();
         sendJson(res, 201, { id: pipeline.id, pipelineDir, migratedNodes: comp.nodes.filter(n => n.workflowId === '__script__').length });
+      } catch (err: any) {
+        sendJson(res, 500, { error: err.message });
+      }
+      return true;
+    }
+
+    // ── v2: Migrate to src/ layout ──────────────────────────
+    if (req.method === 'POST' && pathname.match(/^\/api\/compositions\/[^/]+\/migrate-src$/)) {
+      const compId = pathname.split('/')[3];
+      const pipelineDir = join(homedir(), '.woodbury', 'workflows', compId);
+      try {
+        const pipeline = await loadPipeline(pipelineDir);
+        const moved = await migratePipelineToSrcLayout(pipelineDir, pipeline);
+        invalidateCompositionCache();
+        sendJson(res, 200, { migrated: moved, pipelineId: compId });
       } catch (err: any) {
         sendJson(res, 500, { error: err.message });
       }

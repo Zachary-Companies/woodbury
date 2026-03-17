@@ -22,6 +22,7 @@ import { homedir } from 'node:os';
 import { debugLog } from '../../debug-log.js';
 import { discoverCompositions, readScriptFileCode } from '../../workflow/loader.js';
 import { readPipelineTodo } from '../pipeline-sync.js';
+import { loadBindings, loadRules, loadViews } from '../pipeline-bindings.js';
 import { resolveCompositionInterface } from '../composition-interface.js';
 import {
   validateComposition,
@@ -383,6 +384,64 @@ async function buildCompositionContext(ctx: DashboardContext, compositionId: str
       }
     }
 
+    // v2: Include bindings context — custom data connections between entities
+    if (isV2 && pipelineDir) {
+      try {
+        const bindingsDoc = await loadBindings(pipelineDir);
+        const rulesDoc = await loadRules(pipelineDir);
+        const viewsDoc = await loadViews(pipelineDir);
+
+        sections.push('\n### Bindings (Custom Data Connections)');
+        sections.push(`Bindings directory: \`${pipelineDir}/bindings/\``);
+        sections.push('Bindings define semantic relationships between entities in pipeline node outputs.');
+        sections.push('For example: "shot X depicts characters A, B" or "dialogue Y is spoken by character Z".');
+
+        if (bindingsDoc.bindings.length > 0) {
+          sections.push(`\n**Active bindings (${bindingsDoc.bindings.length}):**`);
+          // Group by type for readability
+          const byType: Record<string, typeof bindingsDoc.bindings> = {};
+          for (const b of bindingsDoc.bindings) {
+            if (!byType[b.type]) byType[b.type] = [];
+            byType[b.type].push(b);
+          }
+          for (const [type, bindings] of Object.entries(byType)) {
+            sections.push(`- **${type}** (${bindings.length}): ${bindings.slice(0, 5).map(b =>
+              `${b.source.entityType}:${b.source.entityId} → ${b.target.entityType}:${b.target.entityId}`
+            ).join(', ')}${bindings.length > 5 ? ` ... +${bindings.length - 5} more` : ''}`);
+          }
+        } else {
+          sections.push('\n**No bindings defined yet.** The pipeline will fall back to generic entity resolution.');
+          sections.push('You should create bindings to define which characters appear in each shot,');
+          sections.push('which location each scene is set in, and which character speaks each dialogue line.');
+        }
+
+        if (rulesDoc.rules.length > 0) {
+          sections.push(`\n**Auto-binding rules (${rulesDoc.rules.length}):**`);
+          for (const r of rulesDoc.rules.slice(0, 5)) {
+            sections.push(`- ${r.enabled ? '✅' : '❌'} "${r.name}" (${r.type}): ${r.source.entityType}.${r.source.field} → ${r.target.entityType}.${r.target.matchField} [${r.relationship}]`);
+          }
+        }
+
+        if (viewsDoc.views.length > 0) {
+          sections.push(`\n**Custom views (${viewsDoc.views.length}):**`);
+          for (const v of viewsDoc.views) {
+            sections.push(`- ${v.icon || '📄'} "${v.label}" (${v.type})`);
+          }
+        }
+
+        sections.push('\n**How to manage bindings:**');
+        sections.push('- Edit `bindings/bindings.json` directly with `file_write`');
+        sections.push('- Or use the API: `POST /api/compositions/' + compositionId + '/bindings` to create bindings');
+        sections.push('- Binding types: `depicts` (character in shot), `set-in` (shot in location), `voice` (dialogue speaker), or custom');
+        sections.push('- Each binding has: `{ id, type, source: { entityType, entityId }, target: { entityType, entityId }, confidence, origin }`');
+        sections.push('- Auto-binding rules in `bindings/rules.json` can automatically populate bindings by text-matching entity names in descriptions');
+        sections.push('- Apply rules: `POST /api/compositions/' + compositionId + '/bindings/apply-rules` with sourceEntities and targetEntities arrays');
+        sections.push('- Custom views in `bindings/views.json` define how the app mode renders pipeline data (e.g., screenplay NLE view)');
+      } catch {
+        // bindings loading is best-effort
+      }
+    }
+
     // Last run status
     const run = ctx.activeCompRun;
     if (run && run.compositionId === compositionId) {
@@ -429,13 +488,20 @@ async function buildCompositionContext(ctx: DashboardContext, compositionId: str
     sections.push('- Edit existing nodes by referencing their name');
     sections.push('- Run the pipeline');
     if (isV2 && pipelineDir) {
-      sections.push(`- Edit TypeScript files directly in ${pipelineDir}/`);
-      sections.push('- Use file_read and file_write tools to modify .ts files in the pipeline directory');
+      sections.push(`- Edit TypeScript files directly in ${pipelineDir}/src/`);
+      sections.push('- Use file_read and file_write tools to modify .ts files in the pipeline src/ directory');
       sections.push('- After editing files, sync the graph: POST /api/compositions/:id/sync');
-      sections.push('Each __script_file__ node maps to a .ts file. Edit the file to change the node behavior.');
+      sections.push('Each __script_file__ node maps to a .ts file in `src/`. Edit the file to change the node behavior.');
+      sections.push('');
+      sections.push('### Bindings Management');
+      sections.push('- Create bindings to connect entities across nodes (e.g., which characters are in each shot)');
+      sections.push('- Edit `bindings/bindings.json` or use the API endpoints');
+      sections.push('- Create auto-binding rules in `bindings/rules.json` to automatically detect relationships');
+      sections.push('- Define custom views in `bindings/views.json` for specialized app mode rendering');
+      sections.push('- When the user asks about character/shot/location relationships, check and update bindings');
       sections.push('');
       sections.push('### Testing (REQUIRED for v2 pipelines)');
-      sections.push('- Every node file (e.g. `fetch-data.ts`) must have a test file (`fetch-data.test.ts`)');
+      sections.push('- Every node file (e.g. `src/fetch-data.ts`) must have a test file (`src/fetch-data.test.ts`)');
       sections.push('- Tests use vitest: `import { describe, it, expect } from "vitest"`');
       sections.push('- Use `createMockContext()` from `./_test-helpers.ts` for mock context');
       sections.push(`- Run tests: \`cd ${pipelineDir} && npx vitest run\``);
