@@ -614,9 +614,9 @@ export const handleCompositionsRoutes: RouteHandler = async (req, res, pathname,
           // Not a git repo — proceed
         }
 
-        execSync('git init', { cwd: pipelineDir, stdio: 'pipe' });
-        execSync('git add -A', { cwd: pipelineDir, stdio: 'pipe' });
-        execSync('git commit -m "Initial pipeline scaffold"', { cwd: pipelineDir, stdio: 'pipe', env: { ...process.env, GIT_AUTHOR_NAME: 'Woodbury', GIT_AUTHOR_EMAIL: 'pipeline@woodbury.dev', GIT_COMMITTER_NAME: 'Woodbury', GIT_COMMITTER_EMAIL: 'pipeline@woodbury.dev' } });
+        execSync('git init', { cwd: pipelineDir, stdio: 'pipe', maxBuffer: 10 * 1024 * 1024 });
+        execSync('git add -A', { cwd: pipelineDir, stdio: 'pipe', maxBuffer: 50 * 1024 * 1024 });
+        execSync('git commit -m "Initial pipeline scaffold"', { cwd: pipelineDir, stdio: 'pipe', maxBuffer: 50 * 1024 * 1024, env: { ...process.env, GIT_AUTHOR_NAME: 'Woodbury', GIT_AUTHOR_EMAIL: 'pipeline@woodbury.dev', GIT_COMMITTER_NAME: 'Woodbury', GIT_COMMITTER_EMAIL: 'pipeline@woodbury.dev' } });
 
         sendJson(res, 200, { initialized: true, pipelineDir });
       } catch (err: any) {
@@ -636,10 +636,10 @@ export const handleCompositionsRoutes: RouteHandler = async (req, res, pathname,
           sendJson(res, 200, { isRepo: false });
           return true;
         }
-        const status = execSync('git status --porcelain', { cwd: pipelineDir, encoding: 'utf-8' }).trim();
-        const log = execSync('git log --oneline -5', { cwd: pipelineDir, encoding: 'utf-8' }).trim();
-        const branch = execSync('git branch --show-current', { cwd: pipelineDir, encoding: 'utf-8' }).trim();
-        const remotes = execSync('git remote -v', { cwd: pipelineDir, encoding: 'utf-8' }).trim();
+        const status = execSync('git status --porcelain', { cwd: pipelineDir, encoding: 'utf-8', maxBuffer: 50 * 1024 * 1024 }).trim();
+        const log = execSync('git log --oneline -5', { cwd: pipelineDir, encoding: 'utf-8', maxBuffer: 10 * 1024 * 1024 }).trim();
+        const branch = execSync('git branch --show-current', { cwd: pipelineDir, encoding: 'utf-8', maxBuffer: 10 * 1024 * 1024 }).trim();
+        const remotes = execSync('git remote -v', { cwd: pipelineDir, encoding: 'utf-8', maxBuffer: 10 * 1024 * 1024 }).trim();
         sendJson(res, 200, {
           isRepo: true,
           branch,
@@ -662,10 +662,11 @@ export const handleCompositionsRoutes: RouteHandler = async (req, res, pathname,
       const pipelineDir = join(homedir(), '.woodbury', 'workflows', compId);
       try {
         const { execSync } = await import('node:child_process');
-        execSync('git add -A', { cwd: pipelineDir, stdio: 'pipe' });
+        execSync('git add -A', { cwd: pipelineDir, stdio: 'pipe', maxBuffer: 50 * 1024 * 1024 });
         execSync(`git commit -m "${message.replace(/"/g, '\\"')}"`, {
           cwd: pipelineDir,
           stdio: 'pipe',
+          maxBuffer: 50 * 1024 * 1024,
           env: { ...process.env, GIT_AUTHOR_NAME: 'Woodbury', GIT_AUTHOR_EMAIL: 'pipeline@woodbury.dev', GIT_COMMITTER_NAME: 'Woodbury', GIT_COMMITTER_EMAIL: 'pipeline@woodbury.dev' },
         });
         sendJson(res, 200, { committed: true });
@@ -705,8 +706,155 @@ export const handleCompositionsRoutes: RouteHandler = async (req, res, pathname,
       const pipelineDir = join(homedir(), '.woodbury', 'workflows', compId);
       try {
         const { execSync } = await import('node:child_process');
-        execSync(`git push -u ${remote} ${branch}`, { cwd: pipelineDir, stdio: 'pipe', timeout: 30000 });
+        execSync(`git push -u ${remote} ${branch}`, { cwd: pipelineDir, stdio: 'pipe', maxBuffer: 50 * 1024 * 1024, timeout: 30000 });
         sendJson(res, 200, { pushed: true, remote, branch });
+      } catch (err: any) {
+        sendJson(res, 500, { error: err.message });
+      }
+      return true;
+    }
+
+    // ── v2: Smart commit — AI-generated message, commit + push ──
+    if (req.method === 'POST' && pathname.match(/^\/api\/compositions\/[^/]+\/git-smart-commit$/)) {
+      const compId = pathname.split('/')[3];
+      const pipelineDir = join(homedir(), '.woodbury', 'workflows', compId);
+      try {
+        const { execSync } = await import('node:child_process');
+        const { runPrompt } = await import('../../loop/llm-service.js');
+
+        // Get the diff
+        const diff = execSync('git diff HEAD', { cwd: pipelineDir, encoding: 'utf-8', maxBuffer: 50 * 1024 * 1024 }).trim();
+        const untrackedRaw = execSync('git ls-files --others --exclude-standard', { cwd: pipelineDir, encoding: 'utf-8', maxBuffer: 50 * 1024 * 1024 }).trim();
+        const untracked = untrackedRaw ? untrackedRaw.split('\n') : [];
+
+        if (!diff && untracked.length === 0) {
+          sendJson(res, 200, { committed: false, message: 'No changes to commit' });
+          return true;
+        }
+
+        // Build a summary of changes for the LLM
+        let changeSummary = '';
+        if (diff) {
+          // Truncate large diffs to keep token usage reasonable
+          changeSummary += diff.length > 6000 ? diff.slice(0, 6000) + '\n... (diff truncated)' : diff;
+        }
+        if (untracked.length > 0) {
+          changeSummary += '\n\nNew untracked files:\n' + untracked.join('\n');
+          // Show contents of small new files
+          for (const f of untracked.slice(0, 5)) {
+            try {
+              const content = execSync(`head -50 "${f}"`, { cwd: pipelineDir, encoding: 'utf-8' }).trim();
+              if (content.length < 2000) {
+                changeSummary += `\n\n--- New file: ${f} ---\n${content}`;
+              }
+            } catch { /* skip */ }
+          }
+        }
+
+        // Get recent commits for style context
+        let recentCommits = '';
+        try {
+          recentCommits = execSync('git log --oneline -5', { cwd: pipelineDir, encoding: 'utf-8' }).trim();
+        } catch { /* no commits yet */ }
+
+        // Generate commit message with AI
+        const provider = process.env.ANTHROPIC_API_KEY ? 'anthropic'
+          : process.env.OPENAI_API_KEY ? 'openai' : 'anthropic';
+        const model = provider === 'anthropic' ? 'claude-sonnet-4-20250514'
+          : provider === 'openai' ? 'gpt-4o-mini' : 'claude-sonnet-4-20250514';
+
+        const llmRes = await runPrompt([
+          {
+            role: 'system',
+            content: [
+              'You write concise, descriptive git commit messages for a Woodbury pipeline project.',
+              'A pipeline is a visual node-based workflow that generates screenplays, characters, images, etc.',
+              'Write a commit message with:',
+              '- A short summary line (max 72 chars) that describes WHAT changed and WHY',
+              '- A blank line',
+              '- Optional bullet points for details if the changes are significant',
+              'Do NOT wrap in quotes or markdown. Return ONLY the commit message text.',
+              recentCommits ? '\nRecent commits for style reference:\n' + recentCommits : '',
+            ].join('\n'),
+          },
+          {
+            role: 'user',
+            content: 'Generate a commit message for these changes:\n\n' + changeSummary,
+          },
+        ], model, { provider, maxTokens: 300 });
+
+        const commitMessage = (llmRes.content || 'Update pipeline').trim();
+
+        // Stage all, commit, and push if remote exists
+        execSync('git add -A', { cwd: pipelineDir, stdio: 'pipe', maxBuffer: 50 * 1024 * 1024 });
+        // Use a temp file for the commit message to avoid shell escaping issues
+        const { writeFileSync, unlinkSync } = await import('node:fs');
+        const msgFile = join(pipelineDir, '.git', 'WOODBURY_COMMIT_MSG');
+        writeFileSync(msgFile, commitMessage);
+        try {
+          execSync(`git commit -F "${msgFile}"`, {
+            cwd: pipelineDir, stdio: 'pipe', maxBuffer: 50 * 1024 * 1024,
+            env: { ...process.env, GIT_AUTHOR_NAME: 'Woodbury', GIT_AUTHOR_EMAIL: 'pipeline@woodbury.dev', GIT_COMMITTER_NAME: 'Woodbury', GIT_COMMITTER_EMAIL: 'pipeline@woodbury.dev' },
+          });
+        } finally {
+          try { unlinkSync(msgFile); } catch { /* fine */ }
+        }
+
+        // Try to push if remote exists
+        let pushed = false;
+        let pushError = '';
+        try {
+          const remotes = execSync('git remote', { cwd: pipelineDir, encoding: 'utf-8', maxBuffer: 10 * 1024 * 1024 }).trim();
+          if (remotes) {
+            const branch = execSync('git branch --show-current', { cwd: pipelineDir, encoding: 'utf-8', maxBuffer: 10 * 1024 * 1024 }).trim() || 'main';
+            execSync(`git push -u origin ${branch}`, { cwd: pipelineDir, stdio: 'pipe', maxBuffer: 50 * 1024 * 1024, timeout: 30000 });
+            pushed = true;
+          }
+        } catch (pushErr: any) {
+          pushError = pushErr.message || String(pushErr);
+        }
+
+        sendJson(res, 200, { committed: true, pushed, pushError: pushError || undefined, message: commitMessage });
+      } catch (err: any) {
+        sendJson(res, 500, { error: err.message });
+      }
+      return true;
+    }
+
+    // ── v2: Open in GitHub Desktop ──────────────────────────
+    if (req.method === 'POST' && pathname.match(/^\/api\/compositions\/[^/]+\/open-github-desktop$/)) {
+      const compId = pathname.split('/')[3];
+      const pipelineDir = join(homedir(), '.woodbury', 'workflows', compId);
+      try {
+        const { execSync, exec } = await import('node:child_process');
+        const { existsSync } = await import('node:fs');
+
+        // Ensure it's a git repo first — GitHub Desktop requires one
+        const gitDir = join(pipelineDir, '.git');
+        if (!existsSync(gitDir)) {
+          execSync('git init', { cwd: pipelineDir, stdio: 'pipe', maxBuffer: 10 * 1024 * 1024 });
+          execSync('git add -A', { cwd: pipelineDir, stdio: 'pipe', maxBuffer: 50 * 1024 * 1024 });
+          execSync('git commit -m "Initial commit"', {
+            cwd: pipelineDir, stdio: 'pipe', maxBuffer: 50 * 1024 * 1024,
+            env: { ...process.env, GIT_AUTHOR_NAME: 'Woodbury', GIT_AUTHOR_EMAIL: 'pipeline@woodbury.dev', GIT_COMMITTER_NAME: 'Woodbury', GIT_COMMITTER_EMAIL: 'pipeline@woodbury.dev' },
+          });
+        }
+
+        const platform = process.platform;
+        if (platform === 'darwin') {
+          // Use the GitHub Desktop CLI command — most reliable way to open + add a repo
+          exec(`open -a "GitHub Desktop" "${pipelineDir}"`, (err) => {
+            if (err) {
+              // Fallback to github CLI if the .app name doesn't match
+              exec(`github "${pipelineDir}"`);
+            }
+          });
+        } else if (platform === 'win32') {
+          exec(`start "" "github-desktop://openRepo/${pipelineDir}"`);
+        } else {
+          exec(`xdg-open "github-desktop://openRepo/${pipelineDir}"`);
+        }
+        sendJson(res, 200, { opened: true, path: pipelineDir });
       } catch (err: any) {
         sendJson(res, 500, { error: err.message });
       }
@@ -736,7 +884,7 @@ export const handleCompositionsRoutes: RouteHandler = async (req, res, pathname,
         }
 
         // Clone the repo
-        execSync(`git clone "${url}" "${targetDir}"`, { stdio: 'pipe', timeout: 60000 });
+        execSync(`git clone "${url}" "${targetDir}"`, { stdio: 'pipe', maxBuffer: 50 * 1024 * 1024, timeout: 60000 });
 
         // Verify it's a valid v2 pipeline
         const pipelineJsonPath = join(targetDir, 'pipeline.json');

@@ -7227,6 +7227,49 @@ textarea.wf-se-input {
   align-items: center;
   justify-content: space-between;
 }
+.chat-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+.chat-run-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-height: 28px;
+  padding: 0.2rem 0.55rem;
+  border: 1px solid #334155;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.55);
+  color: #94a3b8;
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  transition: border-color 0.15s, color 0.15s, background 0.15s, box-shadow 0.15s;
+}
+.chat-run-indicator.active {
+  border-color: rgba(129, 140, 248, 0.45);
+  background: rgba(67, 56, 202, 0.16);
+  color: #e0e7ff;
+  box-shadow: 0 0 0 1px rgba(129, 140, 248, 0.12);
+}
+.chat-run-indicator-spinner {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 2px solid rgba(148, 163, 184, 0.28);
+  border-top-color: #64748b;
+  flex-shrink: 0;
+  transition: border-color 0.15s;
+}
+.chat-run-indicator.active .chat-run-indicator-spinner {
+  border-color: rgba(196, 181, 253, 0.22);
+  border-top-color: #a78bfa;
+  animation: chatRunSpin 0.75s linear infinite;
+}
+.chat-run-indicator-text {
+  white-space: nowrap;
+}
 .chat-temp-control { position: relative; }
 .chat-temp-btn {
   background: none;
@@ -7760,6 +7803,10 @@ textarea.wf-se-input {
 @keyframes chatTyping {
   0%, 60%, 100% { opacity: 0.3; transform: scale(0.8); }
   30% { opacity: 1; transform: scale(1); }
+}
+@keyframes chatRunSpin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
 }
 .chat-welcome {
   display: flex;
@@ -8933,11 +8980,104 @@ textarea.wf-se-input {
   color: #e2e8f0;
 }
 
+/* ── Git Section ───────────────────────────────────────────── */
+
+.app-git-section {
+  margin-top: 0.25rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.04);
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.app-git-status-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.7rem;
+  padding: 0 0.25rem;
+}
+
+.app-git-branch {
+  color: #64748b;
+  font-size: 0.65rem;
+}
+
+.app-git-commits {
+  font-size: 0.62rem;
+  color: #64748b;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  padding: 0.25rem 0.35rem;
+  background: rgba(0, 0, 0, 0.15);
+  border-radius: 4px;
+  max-height: 4rem;
+  overflow-y: auto;
+}
+
+.app-git-commit-line {
+  padding: 1px 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.app-action-commit {
+  background: linear-gradient(135deg, rgba(16, 185, 129, 0.2), rgba(16, 185, 129, 0.1)) !important;
+  border-color: rgba(16, 185, 129, 0.3) !important;
+  color: #6ee7b7 !important;
+}
+
+.app-action-commit:hover {
+  background: linear-gradient(135deg, rgba(16, 185, 129, 0.3), rgba(16, 185, 129, 0.15)) !important;
+  border-color: rgba(16, 185, 129, 0.5) !important;
+  color: #a7f3d0 !important;
+}
+
 /* ── Command Bar ────────────────────────────────────────────── */
 
 .app-command-bar {
   padding: 0.5rem 0.75rem 0.75rem;
   border-top: 1px solid rgba(139, 92, 246, 0.06);
+}
+
+.app-command-input-wrap {
+  position: relative;
+}
+
+.app-command-spinner {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.app-command-spinner-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #8b5cf6;
+  animation: app-dot-bounce 1.2s ease-in-out infinite;
+}
+
+.app-command-spinner-dot:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.app-command-spinner-dot:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes app-dot-bounce {
+  0%, 60%, 100% { opacity: 0.25; transform: scale(0.8); }
+  30% { opacity: 1; transform: scale(1.2); }
+}
+
+.app-command-input-wrap .app-command-input {
+  padding-right: 2.5rem;
 }
 
 .app-command-input {
@@ -8960,6 +9100,63 @@ textarea.wf-se-input {
 
 .app-command-input::placeholder {
   color: #475569;
+}
+
+.app-command-input:disabled {
+  opacity: 0.7;
+  cursor: wait;
+  border-color: rgba(139, 92, 246, 0.4);
+  animation: app-input-glow 2s ease-in-out infinite;
+}
+
+@keyframes app-input-glow {
+  0%, 100% { box-shadow: 0 0 0 rgba(139, 92, 246, 0); }
+  50% { box-shadow: 0 0 8px rgba(139, 92, 246, 0.2); }
+}
+
+.app-command-response {
+  margin-top: 0.5rem;
+  max-height: 200px;
+  overflow-y: auto;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid rgba(139,92,246,0.15);
+  border-radius: 6px;
+  background: rgba(0,0,0,0.2);
+  font-size: 0.72rem;
+  line-height: 1.5;
+  color: #cbd5e1;
+  transition: opacity 0.5s;
+}
+.app-command-thinking {
+  color: rgba(255,255,255,0.4);
+  font-style: italic;
+}
+.app-command-error {
+  color: #f87171;
+}
+.app-command-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  margin-bottom: 0.35rem;
+}
+.app-command-tool-pill {
+  display: inline-block;
+  padding: 0.1rem 0.4rem;
+  border-radius: 10px;
+  background: rgba(139,92,246,0.15);
+  color: #c4b5fd;
+  font-size: 0.65rem;
+  border: 1px solid rgba(139,92,246,0.2);
+}
+.app-command-text {
+  color: #e2e8f0;
+}
+.app-command-text code {
+  background: rgba(255,255,255,0.08);
+  padding: 0.1rem 0.3rem;
+  border-radius: 3px;
+  font-size: 0.68rem;
 }
 
 /* ── Content Area ───────────────────────────────────────────── */
@@ -10501,6 +10698,313 @@ body.composition-app-mode .main {
   font-style: italic;
 }
 
+
+/* ── Inline Editable Elements ────────────────────────────────── */
+
+.nle-editable {
+  cursor: text;
+  border-radius: 3px;
+  padding: 2px 4px;
+  margin: -2px -4px;
+  transition: background-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.nle-editable:hover {
+  background-color: rgba(99, 102, 241, 0.1);
+  box-shadow: 0 0 0 1px rgba(99, 102, 241, 0.3);
+}
+
+.nle-editable.nle-editing {
+  background-color: rgba(99, 102, 241, 0.15);
+  box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.5);
+  outline: none;
+}
+
+.nle-editable.nle-saving {
+  opacity: 0.7;
+  pointer-events: none;
+}
+
+.nle-editable.nle-saved {
+  animation: nle-save-flash 0.5s ease;
+}
+
+@keyframes nle-save-flash {
+  0% { background-color: rgba(34, 197, 94, 0.3); }
+  100% { background-color: transparent; }
+}
+
+/* Hint on hover */
+.nle-editable::after {
+  content: '✎';
+  opacity: 0;
+  margin-left: 6px;
+  font-size: 11px;
+  color: #6366f1;
+  transition: opacity 0.15s ease;
+}
+
+.nle-editable:hover::after {
+  opacity: 0.6;
+}
+
+.nle-editable.nle-editing::after {
+  content: 'Enter to save, Esc to cancel';
+  opacity: 0.5;
+  font-size: 10px;
+  color: #94a3b8;
+  font-style: italic;
+  display: block;
+  margin-left: 0;
+  margin-top: 4px;
+}
+
+/* ── Dialogue Edit Button ────────────────────────────────────── */
+
+.nle-dialogue-edit-btn {
+  background: transparent;
+  border: none;
+  color: #64748b;
+  font-size: 12px;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+  opacity: 0;
+  transition: opacity 0.15s, background-color 0.15s, color 0.15s;
+  margin-left: auto;
+}
+
+.nle-element--dialogue:hover .nle-dialogue-edit-btn {
+  opacity: 1;
+}
+
+.nle-dialogue-edit-btn:hover {
+  background: rgba(99, 102, 241, 0.15);
+  color: #a5b4fc;
+}
+
+.nle-dialogue-modifier--empty {
+  display: none;
+}
+
+.nle-element--dialogue:hover .nle-dialogue-modifier--empty {
+  display: inline;
+  opacity: 0.4;
+}
+
+.nle-dialogue-modifier--empty::before {
+  content: '(add modifier)';
+  font-size: 10px;
+}
+
+/* ── Dialogue Edit Modal ─────────────────────────────────────── */
+
+.app-detail-modal--dialogue .app-detail-modal-container {
+  max-width: 600px;
+}
+
+.dialogue-edit-modal {
+  padding: 8px;
+}
+
+.dialogue-edit-title {
+  font-size: 18px;
+  font-weight: 600;
+  color: #f1f5f9;
+  margin: 0 0 20px 0;
+}
+
+.dialogue-edit-field {
+  margin-bottom: 20px;
+}
+
+.dialogue-edit-label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: #94a3b8;
+  margin-bottom: 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.dialogue-edit-hint {
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+  opacity: 0.7;
+  font-size: 11px;
+}
+
+.dialogue-edit-input {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid rgba(139,92,246,0.3);
+  border-radius: 6px;
+  background: rgba(0,0,0,0.3);
+  color: #f1f5f9;
+  font-size: 14px;
+  font-family: inherit;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.dialogue-edit-input:focus {
+  outline: none;
+  border-color: rgba(139,92,246,0.6);
+  box-shadow: 0 0 0 3px rgba(139,92,246,0.15);
+}
+
+.dialogue-edit-modifier-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.dialogue-edit-mod-chip {
+  background: rgba(100, 116, 139, 0.2);
+  border: 1px solid rgba(100, 116, 139, 0.3);
+  color: #94a3b8;
+  font-size: 11px;
+  padding: 4px 10px;
+  border-radius: 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.dialogue-edit-mod-chip:hover {
+  background: rgba(139, 92, 246, 0.2);
+  border-color: rgba(139, 92, 246, 0.4);
+  color: #c4b5fd;
+}
+
+.dialogue-edit-mod-chip.active {
+  background: rgba(139, 92, 246, 0.3);
+  border-color: rgba(139, 92, 246, 0.5);
+  color: #e9d5ff;
+}
+
+.dialogue-edit-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.dialogue-edit-line-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.dialogue-edit-textarea {
+  flex: 1;
+  padding: 10px 12px;
+  border: 1px solid rgba(139,92,246,0.3);
+  border-radius: 6px;
+  background: rgba(0,0,0,0.3);
+  color: #f1f5f9;
+  font-size: 14px;
+  font-family: inherit;
+  line-height: 1.5;
+  resize: vertical;
+  min-height: 60px;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.dialogue-edit-textarea:focus {
+  outline: none;
+  border-color: rgba(139,92,246,0.6);
+  box-shadow: 0 0 0 3px rgba(139,92,246,0.15);
+}
+
+.dialogue-edit-line-remove {
+  background: rgba(239, 68, 68, 0.2);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  color: #fca5a5;
+  font-size: 16px;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s;
+  flex-shrink: 0;
+}
+
+.dialogue-edit-line-remove:hover {
+  background: rgba(239, 68, 68, 0.3);
+  border-color: rgba(239, 68, 68, 0.5);
+}
+
+.dialogue-edit-add-line {
+  background: transparent;
+  border: 1px dashed rgba(139, 92, 246, 0.3);
+  color: #a5b4fc;
+  font-size: 13px;
+  padding: 8px 16px;
+  border-radius: 6px;
+  cursor: pointer;
+  margin-top: 8px;
+  transition: all 0.15s;
+}
+
+.dialogue-edit-add-line:hover {
+  background: rgba(139, 92, 246, 0.1);
+  border-color: rgba(139, 92, 246, 0.5);
+}
+
+.dialogue-edit-actions {
+  display: flex;
+  gap: 12px;
+  justify-content: flex-end;
+  margin-top: 24px;
+  padding-top: 16px;
+  border-top: 1px solid rgba(100, 116, 139, 0.2);
+}
+
+.dialogue-edit-save {
+  background: linear-gradient(135deg, #8b5cf6, #6366f1);
+  border: none;
+  color: white;
+  font-size: 14px;
+  font-weight: 600;
+  padding: 10px 24px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.dialogue-edit-save:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(139, 92, 246, 0.4);
+}
+
+.dialogue-edit-save:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+
+.dialogue-edit-cancel {
+  background: transparent;
+  border: 1px solid rgba(100, 116, 139, 0.3);
+  color: #94a3b8;
+  font-size: 14px;
+  padding: 10px 20px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.dialogue-edit-cancel:hover {
+  background: rgba(100, 116, 139, 0.1);
+  border-color: rgba(100, 116, 139, 0.5);
+}
+
+
 /* ── Prompt Editing Area ─────────────────────────────────────── */
 
 .nle-prompt-section {
@@ -11096,4 +11600,264 @@ body.composition-app-mode .main {
     rgba(139,92,246,0.015) 20px,
     rgba(139,92,246,0.015) 21px
   );
+}
+
+/* ── Connection tray toolbar ──────────────────────────────────── */
+
+.app-conn-tray-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+  margin-bottom: 0.5rem;
+}
+
+.app-conn-toolbar-btn {
+  padding: 0.3rem 0.65rem;
+  border: 1px solid rgba(139,92,246,0.35);
+  border-radius: 6px;
+  background: rgba(139,92,246,0.12);
+  color: #c4b5fd;
+  font-size: 0.72rem;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+.app-conn-toolbar-btn:hover {
+  background: rgba(139,92,246,0.25);
+  border-color: rgba(139,92,246,0.55);
+  color: #fff;
+}
+.app-conn-toolbar-btn:disabled {
+  opacity: 0.5;
+  cursor: wait;
+}
+
+.app-conn-toolbar-status {
+  font-size: 0.7rem;
+  color: rgba(255,255,255,0.45);
+  margin-left: auto;
+}
+
+/* ── Rules modal ──────────────────────────────────────────────── */
+
+.app-rules-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 10002;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.app-rules-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0,0,0,0.55);
+  backdrop-filter: blur(4px);
+}
+.app-rules-modal-container {
+  position: relative;
+  width: 620px;
+  max-height: 80vh;
+  overflow-y: auto;
+  background: #1e1e2e;
+  border: 1px solid rgba(139,92,246,0.25);
+  border-radius: 14px;
+  padding: 1.5rem;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+}
+.app-rules-modal-header {
+  margin-bottom: 1rem;
+}
+.app-rules-modal-title {
+  margin: 0 0 0.25rem 0;
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: #e2e8f0;
+}
+.app-rules-modal-subtitle {
+  margin: 0;
+  font-size: 0.78rem;
+  color: rgba(255,255,255,0.5);
+  line-height: 1.45;
+}
+
+/* Rules list */
+.app-rules-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  margin-bottom: 0.75rem;
+}
+.app-rules-empty {
+  padding: 1.25rem;
+  text-align: center;
+  color: rgba(255,255,255,0.35);
+  font-size: 0.8rem;
+  border: 1px dashed rgba(255,255,255,0.1);
+  border-radius: 10px;
+}
+.app-rules-empty p { margin: 0; }
+
+/* Rule card */
+.app-rule-card {
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 10px;
+  padding: 0.75rem;
+  background: rgba(255,255,255,0.02);
+  transition: border-color 0.15s;
+}
+.app-rule-card:hover {
+  border-color: rgba(139,92,246,0.2);
+}
+.app-rule-card-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.6rem;
+}
+.app-rule-toggle {
+  display: flex;
+  align-items: center;
+}
+.app-rule-toggle input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  accent-color: #8b5cf6;
+}
+.app-rule-name {
+  flex: 1;
+  background: transparent;
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 5px;
+  padding: 0.25rem 0.5rem;
+  color: #e2e8f0;
+  font-size: 0.78rem;
+  font-weight: 500;
+}
+.app-rule-name:focus {
+  border-color: rgba(139,92,246,0.4);
+  outline: none;
+}
+.app-rule-delete {
+  background: transparent;
+  border: none;
+  color: rgba(255,255,255,0.3);
+  font-size: 1rem;
+  cursor: pointer;
+  padding: 0 0.25rem;
+  line-height: 1;
+}
+.app-rule-delete:hover {
+  color: #f87171;
+}
+
+/* Rule builder — visual sentence */
+.app-rule-builder {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.app-rule-row {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
+.app-rule-keyword {
+  color: rgba(255,255,255,0.4);
+  font-size: 0.73rem;
+  font-style: italic;
+  white-space: nowrap;
+}
+.app-rule-select {
+  background: rgba(255,255,255,0.05);
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 5px;
+  padding: 0.2rem 0.4rem;
+  color: #c4b5fd;
+  font-size: 0.73rem;
+  cursor: pointer;
+}
+.app-rule-select:focus {
+  border-color: rgba(139,92,246,0.5);
+  outline: none;
+}
+.app-rule-options {
+  display: flex;
+  gap: 0.75rem;
+  margin-top: 0.35rem;
+  padding-top: 0.35rem;
+  border-top: 1px solid rgba(255,255,255,0.04);
+}
+.app-rule-option {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.7rem;
+  color: rgba(255,255,255,0.4);
+  cursor: pointer;
+}
+.app-rule-option input[type="checkbox"] {
+  width: 12px;
+  height: 12px;
+  accent-color: #8b5cf6;
+}
+
+/* Add rule / presets */
+.app-rules-add-row {
+  margin-bottom: 0.75rem;
+}
+.app-rules-add-btn {
+  width: 100%;
+  padding: 0.45rem;
+  border: 1px dashed rgba(139,92,246,0.3);
+  border-radius: 8px;
+  background: transparent;
+  color: #c4b5fd;
+  font-size: 0.78rem;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.app-rules-add-btn:hover {
+  background: rgba(139,92,246,0.08);
+  border-color: rgba(139,92,246,0.5);
+  color: #fff;
+}
+
+.app-rules-presets {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  padding: 0.6rem 0;
+  border-top: 1px solid rgba(255,255,255,0.06);
+  margin-bottom: 0.75rem;
+}
+.app-rules-presets-label {
+  font-size: 0.7rem;
+  color: rgba(255,255,255,0.35);
+  white-space: nowrap;
+}
+.app-rules-preset-btn {
+  padding: 0.2rem 0.5rem;
+  border: 1px solid rgba(59,130,246,0.25);
+  border-radius: 12px;
+  background: rgba(59,130,246,0.08);
+  color: #93c5fd;
+  font-size: 0.68rem;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.app-rules-preset-btn:hover {
+  background: rgba(59,130,246,0.2);
+  border-color: rgba(59,130,246,0.5);
+  color: #fff;
+}
+
+.app-rules-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
 }

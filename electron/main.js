@@ -196,6 +196,213 @@ function createWindow(url) {
   });
 }
 
+// ── API Keys Window ───────────────────────────────────────────
+
+let apiKeysWindow = null;
+
+function openApiKeysWindow() {
+  if (apiKeysWindow && !apiKeysWindow.isDestroyed()) {
+    apiKeysWindow.focus();
+    return;
+  }
+
+  const port = dashboardPort || 9001;
+
+  const html = `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>API Keys</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: #0f1117;
+    color: #e2e8f0;
+    padding: 24px;
+    font-size: 13px;
+    -webkit-app-region: no-drag;
+  }
+  h2 { font-size: 15px; font-weight: 600; margin-bottom: 4px; color: #f1f5f9; }
+  .subtitle { font-size: 11px; color: #64748b; margin-bottom: 20px; }
+  .field { margin-bottom: 16px; }
+  label { display: block; font-size: 11px; font-weight: 500; color: #94a3b8; margin-bottom: 5px; letter-spacing: 0.03em; }
+  .input-row { display: flex; gap: 6px; align-items: center; }
+  input {
+    flex: 1;
+    padding: 7px 10px;
+    background: #1e2433;
+    border: 1px solid #2d3748;
+    border-radius: 6px;
+    color: #e2e8f0;
+    font-size: 12px;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    outline: none;
+    transition: border-color 0.15s;
+  }
+  input:focus { border-color: #7c3aed; }
+  input::placeholder { color: #475569; font-family: -apple-system, sans-serif; }
+  .badge {
+    font-size: 10px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  .badge.set { background: rgba(16,185,129,0.15); color: #6ee7b7; border: 1px solid rgba(16,185,129,0.25); }
+  .badge.unset { background: rgba(100,116,139,0.15); color: #94a3b8; border: 1px solid rgba(100,116,139,0.2); }
+  .actions { display: flex; gap: 8px; margin-top: 22px; justify-content: flex-end; }
+  button {
+    padding: 7px 16px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    border: none;
+    transition: all 0.15s;
+  }
+  .btn-primary { background: #7c3aed; color: #fff; }
+  .btn-primary:hover { background: #6d28d9; }
+  .btn-primary:disabled { opacity: 0.5; cursor: wait; }
+  .btn-cancel { background: #1e2433; color: #94a3b8; border: 1px solid #2d3748; }
+  .btn-cancel:hover { color: #e2e8f0; }
+  .status { font-size: 11px; margin-top: 10px; min-height: 16px; text-align: right; }
+  .status.ok { color: #6ee7b7; }
+  .status.err { color: #f87171; }
+  .divider { border: none; border-top: 1px solid #1e2433; margin: 18px 0 14px; }
+  .hint { font-size: 10px; color: #475569; margin-top: 18px; }
+  .hint a { color: #7c3aed; text-decoration: none; }
+  .hint a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+<h2>API Keys</h2>
+<p class="subtitle">Saved to ~/.woodbury/.env · Applied immediately without restart</p>
+
+<div id="fields">Loading...</div>
+
+<div class="actions">
+  <button class="btn-cancel" id="btn-cancel">Cancel</button>
+  <button class="btn-primary" id="btn-save">Save Keys</button>
+</div>
+<div class="status" id="status"></div>
+
+<p class="hint">Leave a field blank to keep the existing key. Enter a single space to remove a key.</p>
+
+<script>
+const PORT = ${port};
+const BASE = 'http://127.0.0.1:' + PORT;
+
+const PROVIDERS = [
+  { key: 'ANTHROPIC_API_KEY', label: 'Anthropic', placeholder: 'sk-ant-...', link: 'https://console.anthropic.com/settings/keys', group: 'LLM Providers' },
+  { key: 'OPENAI_API_KEY', label: 'OpenAI', placeholder: 'sk-proj-...', link: 'https://platform.openai.com/api-keys', group: 'LLM Providers' },
+  { key: 'GROQ_API_KEY', label: 'Groq', placeholder: 'gsk_...', link: 'https://console.groq.com/keys', group: 'LLM Providers' },
+  { key: 'GEMINI_API_KEY', label: 'Google Gemini (Nanobanana)', placeholder: 'AIza...', link: 'https://aistudio.google.com/app/apikey', group: 'Media Generation' },
+  { key: 'ELEVENLABS_API_KEY', label: 'ElevenLabs (TTS)', placeholder: 'xi-...', link: 'https://elevenlabs.io/app/settings/api-keys', group: 'Media Generation' },
+];
+
+let currentStatus = {};
+
+async function load() {
+  try {
+    const r = await fetch(BASE + '/api/env-keys');
+    const data = await r.json();
+    currentStatus = data.keys || {};
+  } catch { currentStatus = {}; }
+
+  const container = document.getElementById('fields');
+  let lastGroup = '';
+  container.innerHTML = PROVIDERS.map(p => {
+    const info = currentStatus[p.key] || { set: false, masked: '' };
+    const groupHeader = p.group !== lastGroup ? \`<div style="font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:0.08em;margin:\${lastGroup ? '14px' : '0'} 0 6px;padding-top:\${lastGroup ? '10px' : '0'};border-top:\${lastGroup ? '1px solid #1e2433' : 'none'}">\${p.group}</div>\` : '';
+    lastGroup = p.group;
+    return groupHeader + \`<div class="field">
+      <label>\${p.label} — <a href="\${p.link}" target="_blank" onclick="require('electron').shell.openExternal('\${p.link}'); return false;" style="color:#7c3aed;text-decoration:none;font-size:10px;">Get key ↗</a></label>
+      <div class="input-row">
+        <input type="password" id="\${p.key}" placeholder="\${info.set ? info.masked + ' (enter new to change)' : p.placeholder}" autocomplete="off" />
+        <span class="badge \${info.set ? 'set' : 'unset'}">\${info.set ? '✓ Set' : 'Not set'}</span>
+      </div>
+    </div>\`;
+  }).join('');
+}
+
+document.getElementById('btn-cancel').addEventListener('click', () => window.close());
+
+document.getElementById('btn-save').addEventListener('click', async () => {
+  const btn = document.getElementById('btn-save');
+  const statusEl = document.getElementById('status');
+  btn.disabled = true;
+  btn.textContent = 'Saving...';
+  statusEl.textContent = '';
+  statusEl.className = 'status';
+
+  const body = {};
+  for (const p of PROVIDERS) {
+    const val = document.getElementById(p.key).value;
+    if (val !== '') body[p.key] = val.trim();
+  }
+
+  try {
+    const r = await fetch(BASE + '/api/env-keys', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || 'Save failed');
+    statusEl.textContent = '✓ Keys saved successfully';
+    statusEl.className = 'status ok';
+    setTimeout(() => window.close(), 800);
+  } catch (e) {
+    statusEl.textContent = '✗ ' + e.message;
+    statusEl.className = 'status err';
+    btn.disabled = false;
+    btn.textContent = 'Save Keys';
+  }
+});
+
+// Close on Escape
+document.addEventListener('keydown', e => { if (e.key === 'Escape') window.close(); });
+
+load();
+</script>
+</body>
+</html>`;
+
+  apiKeysWindow = new BrowserWindow({
+    width: 460,
+    height: 520,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    alwaysOnTop: true,
+    title: 'API Keys',
+    parent: mainWindow || undefined,
+    modal: false,
+    webPreferences: {
+      nodeIntegration: true,
+      contextIsolation: false,
+    },
+    backgroundColor: '#0f1117',
+    titleBarStyle: 'hiddenInset',
+    vibrancy: null,
+  });
+
+  // Write to a temp file — data: URLs block fetch() to localhost
+  const tmpPath = require('path').join(require('os').tmpdir(), 'woodbury-api-keys.html');
+  require('fs').writeFileSync(tmpPath, html);
+  apiKeysWindow.loadFile(tmpPath);
+  apiKeysWindow.setMenuBarVisibility(false);
+
+  apiKeysWindow.on('closed', () => {
+    apiKeysWindow = null;
+    // Refresh model list since new keys may be available
+    cachedModelOptions = null;
+    isFetchingModels = false;
+    setTimeout(() => fetchAndCacheModels(dashboardPort), 500);
+  });
+}
+
 // ── Application Menu ─────────────────────────────────────────
 
 function goTab(tab) {
@@ -206,6 +413,137 @@ function goTab(tab) {
       `if (typeof switchTab === 'function') switchTab(${JSON.stringify(tab)});`
     ).catch(() => {});
   }
+}
+
+const CHAT_CONFIG_PATH = path.join(os.homedir(), '.woodbury', 'chat-config.json');
+
+// Live model list fetched from dashboard API — null means not yet loaded
+let cachedModelOptions = null;
+let isFetchingModels = false;
+let dashboardPort = null; // set when dashboard starts
+
+const PROVIDER_LABELS = { anthropic: 'Anthropic', openai: 'OpenAI', groq: 'Groq' };
+
+const STATIC_MODEL_OPTIONS = [
+  { label: 'Auto-detect', provider: 'auto', model: '' },
+  { type: 'separator' },
+  { label: 'Claude Sonnet 4.5 (Anthropic)', provider: 'anthropic', model: 'claude-sonnet-4-5-20250514' },
+  { label: 'Claude Sonnet 4 (Anthropic)', provider: 'anthropic', model: 'claude-sonnet-4-20250514' },
+  { label: 'Claude Opus 4 (Anthropic)', provider: 'anthropic', model: 'claude-opus-4-20250514' },
+  { label: 'Claude Haiku 3.5 (Anthropic)', provider: 'anthropic', model: 'claude-haiku-3-5-20241022' },
+  { type: 'separator' },
+  { label: 'GPT-4o (OpenAI)', provider: 'openai', model: 'gpt-4o' },
+  { label: 'GPT-4o mini (OpenAI)', provider: 'openai', model: 'gpt-4o-mini' },
+  { type: 'separator' },
+  { label: 'Llama 3.1 70B (Groq)', provider: 'groq', model: 'llama-3.1-70b-versatile' },
+];
+
+function readChatConfig() {
+  try {
+    return JSON.parse(fs.readFileSync(CHAT_CONFIG_PATH, 'utf-8'));
+  } catch {
+    return {};
+  }
+}
+
+function writeChatConfig(updates) {
+  const existing = readChatConfig();
+  const next = { ...existing, ...updates };
+  if (!updates.provider || updates.provider === 'auto') {
+    delete next.provider;
+    delete next.model;
+  }
+  try {
+    fs.mkdirSync(path.dirname(CHAT_CONFIG_PATH), { recursive: true });
+    fs.writeFileSync(CHAT_CONFIG_PATH, JSON.stringify(next, null, 2) + '\n', 'utf-8');
+  } catch (e) {
+    console.error('Failed to write chat config:', e.message);
+  }
+}
+
+function fetchAndCacheModels(port) {
+  if (isFetchingModels || !port) return;
+  isFetchingModels = true;
+  const http = require('http');
+  const req = http.get(`http://127.0.0.1:${port}/api/models/available`, (resp) => {
+    let data = '';
+    resp.on('data', (chunk) => { data += chunk; });
+    resp.on('end', () => {
+      try {
+        const parsed = JSON.parse(data);
+        if (parsed.byProvider) {
+          const options = [{ label: 'Auto-detect', provider: 'auto', model: '' }];
+          for (const [provider, models] of Object.entries(parsed.byProvider)) {
+            if (!models || models.length === 0) continue;
+            options.push({ type: 'separator' });
+            for (const m of models) {
+              options.push({
+                label: `${m.name} (${PROVIDER_LABELS[provider] || provider})`,
+                provider: m.provider,
+                model: m.id,
+              });
+            }
+          }
+          cachedModelOptions = options;
+          createApplicationMenu(); // Rebuild with live models
+        }
+      } catch { /* ignore */ }
+      isFetchingModels = false;
+    });
+  });
+  req.on('error', () => { isFetchingModels = false; });
+  req.setTimeout(10000, () => { req.destroy(); isFetchingModels = false; });
+}
+
+function buildModelSubmenu() {
+  const config = readChatConfig();
+  const currentModel = config.model || '';
+  const currentProvider = config.provider || 'auto';
+  const options = cachedModelOptions || STATIC_MODEL_OPTIONS;
+
+  const items = options.map((opt) => {
+    if (opt.type === 'separator') return { type: 'separator' };
+    const isAuto = opt.provider === 'auto';
+    const isChecked = isAuto
+      ? !config.provider || currentProvider === 'auto'
+      : currentModel === opt.model && currentProvider === opt.provider;
+    return {
+      label: opt.label,
+      type: 'checkbox',
+      checked: isChecked,
+      click: () => {
+        if (isAuto) {
+          writeChatConfig({ provider: 'auto', model: '' });
+        } else {
+          writeChatConfig({ provider: opt.provider, model: opt.model });
+        }
+        createApplicationMenu();
+      },
+    };
+  });
+
+  items.push({ type: 'separator' });
+  items.push({
+    label: isFetchingModels
+      ? 'Loading...'
+      : cachedModelOptions
+        ? '↻ Refresh Model List'
+        : '↻ Load Available Models...',
+    enabled: !isFetchingModels,
+    click: () => {
+      cachedModelOptions = null;
+      isFetchingModels = false;
+      fetchAndCacheModels(dashboardPort);
+      createApplicationMenu();
+    },
+  });
+  items.push({ type: 'separator' });
+  items.push({
+    label: 'API Keys...',
+    click: () => openApiKeysWindow(),
+  });
+
+  return items;
 }
 
 function createApplicationMenu() {
@@ -283,6 +621,12 @@ function createApplicationMenu() {
         { label: 'Marketplace', accelerator: 'CmdOrCtrl+5', click: () => goTab('marketplace') },
         { label: 'Social', accelerator: 'CmdOrCtrl+6', click: () => goTab('social') },
       ],
+    },
+
+    // Model menu
+    {
+      label: 'Model',
+      submenu: buildModelSubmenu(),
     },
 
     // View menu
@@ -662,8 +1006,11 @@ app.on('ready', async () => {
 
   try {
     dashboardHandle = await startBackend();
+    dashboardPort = dashboardHandle.port;
     createWindow(dashboardHandle.url);
     createTray();
+    // Fetch live model list from running dashboard (after a short delay to let it stabilize)
+    setTimeout(() => fetchAndCacheModels(dashboardPort), 3000);
     setupAutoUpdater();
 
     // Process any protocol URL that arrived before the backend was ready

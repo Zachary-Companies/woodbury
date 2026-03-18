@@ -206,11 +206,16 @@ function renderAppSidebar(schema, state) {
   html += '<button class="app-action-btn" id="app-run-pipeline">&#x25b6; Run Pipeline</button>';
   html += '<button class="app-action-btn app-action-secondary" id="app-open-editor">Open Editor</button>';
   html += '<button class="app-action-btn app-action-secondary" id="app-open-form">Open Form</button>';
+  html += '<div class="app-git-section" id="app-git-section"></div>';
   html += '</div>';
 
-  // Command bar
+  // Command bar — sends to the chat agent with pipeline context
   html += '<div class="app-command-bar">';
-  html += '<input type="text" class="app-command-input" id="app-command-input" placeholder="Type a command..." />';
+  html += '<div class="app-command-input-wrap">';
+  html += '<input type="text" class="app-command-input" id="app-command-input" placeholder="Ask the AI to change something..." />';
+  html += '<div class="app-command-spinner" id="app-command-spinner" style="display:none;"><span class="app-command-spinner-dot"></span><span class="app-command-spinner-dot"></span><span class="app-command-spinner-dot"></span></div>';
+  html += '</div>';
+  html += '<div class="app-command-response" id="app-command-response" style="display:none;"></div>';
   html += '</div>';
 
   html += '</div>';
@@ -1289,11 +1294,11 @@ function renderNLEBeat(beat, beatIndex, scene, timeline) {
   // Right: screenplay text
   html += '<div class="nle-beat-text">';
 
-  // Shot description
+  // Shot description (editable)
   if (shotElement && shotElement.shotText) {
     html += '<div class="nle-element nle-element--shot">';
     html += '<span class="nle-element-label">SHOT</span>';
-    html += '<span class="nle-element-content">' + compEscHtml(shotElement.shotText) + '</span>';
+    html += '<span class="nle-element-content nle-editable" data-nle-edit-type="shot" data-nle-edit-field="shotText" data-nle-edit-element-id="' + compEscAttr(shotElement.id) + '" title="Click to edit">' + compEscHtml(shotElement.shotText) + '</span>';
     html += '</div>';
   }
 
@@ -1339,7 +1344,16 @@ function renderNLEElement(elem, timeline) {
   var html = '';
 
   if (elem.type === 'dialogue') {
-    html += '<div class="nle-element nle-element--dialogue">';
+    // Store element data for the edit modal
+    var elemData = {
+      id: elem.id,
+      characterName: elem.characterName || elem.characterId || '',
+      characterId: elem.characterId || '',
+      modifiers: elem.modifiers || [],
+      lines: elem.lines || [elem.content || '']
+    };
+    var elemDataAttr = ' data-nle-element-data="' + compEscAttr(JSON.stringify(elemData)) + '"';
+    html += '<div class="nle-element nle-element--dialogue" data-nle-element-id="' + compEscAttr(elem.id || '') + '"' + elemDataAttr + '>';
     var charName = elem.characterName || elem.characterId || 'UNKNOWN';
     // Character color based on name hash
     var charColor = nleCharColor(charName);
@@ -1351,35 +1365,42 @@ function renderNLEElement(elem, timeline) {
       charConnAttrs = ' data-conn-entity-type="character" data-conn-entity-id="' + compEscAttr(elem.characterId) + '" data-conn-entity-label="' + compEscAttr(charName) + '"';
     }
     html += '<div class="nle-dialogue-header" style="border-left-color:' + charColor + '">';
-    html += '<span class="nle-dialogue-character' + (charConnSel ? ' app-conn-selected' : '') + '" style="color:' + charColor + '"' + charConnAttrs + '>' + compEscHtml(charName) + '</span>';
+    html += '<span class="nle-dialogue-character nle-editable' + (charConnSel ? ' app-conn-selected' : '') + '" style="color:' + charColor + '"' + charConnAttrs;
+    html += ' data-nle-edit-type="dialogue" data-nle-edit-field="characterName" data-nle-edit-element-id="' + compEscAttr(elem.id || '') + '" title="Click to edit character name"';
+    html += '>' + compEscHtml(charName) + '</span>';
     if (elem.modifiers && elem.modifiers.length > 0) {
-      html += '<span class="nle-dialogue-modifier">(' + compEscHtml(elem.modifiers.join(', ')) + ')</span>';
+      html += '<span class="nle-dialogue-modifier nle-editable" data-nle-edit-type="dialogue" data-nle-edit-field="modifiers" data-nle-edit-element-id="' + compEscAttr(elem.id || '') + '" title="Click to edit modifiers">(' + compEscHtml(elem.modifiers.join(', ')) + ')</span>';
+    } else {
+      html += '<span class="nle-dialogue-modifier nle-dialogue-modifier--empty nle-editable" data-nle-edit-type="dialogue" data-nle-edit-field="modifiers" data-nle-edit-element-id="' + compEscAttr(elem.id || '') + '" title="Click to add modifiers (V.O., O.S., etc.)"></span>';
     }
+    // Edit button to open full dialogue editor
+    html += '<button class="nle-dialogue-edit-btn" data-nle-edit-dialogue="' + compEscAttr(elem.id || '') + '" title="Edit dialogue">&#x270E;</button>';
     html += '</div>';
     html += '<div class="nle-dialogue-content" style="border-left-color:' + charColor + '">';
     var lines = elem.lines || [elem.content];
     for (var li = 0; li < lines.length; li++) {
-      html += '<p class="nle-dialogue-line">' + compEscHtml(lines[li]) + '</p>';
+      // Each line is editable — for multi-line dialogues, we edit the lines array
+      html += '<p class="nle-dialogue-line nle-editable" data-nle-edit-type="dialogue" data-nle-edit-field="lines" data-nle-edit-element-id="' + compEscAttr(elem.id || '') + '" data-nle-edit-line-index="' + li + '" title="Click to edit dialogue">' + compEscHtml(lines[li]) + '</p>';
     }
     html += '</div>';
     html += '</div>';
   } else if (elem.type === 'action') {
     html += '<div class="nle-element nle-element--action">';
-    html += '<span class="nle-element-content">' + compEscHtml(elem.content || '') + '</span>';
+    html += '<span class="nle-element-content nle-editable" data-nle-edit-type="action" data-nle-edit-field="content" data-nle-edit-element-id="' + compEscAttr(elem.id || '') + '" title="Click to edit action">' + compEscHtml(elem.content || '') + '</span>';
     html += '</div>';
   } else if (elem.type === 'transition') {
     html += '<div class="nle-element nle-element--transition">';
-    html += '<span class="nle-element-content">' + compEscHtml(elem.content || '') + '</span>';
+    html += '<span class="nle-element-content nle-editable" data-nle-edit-type="transition" data-nle-edit-field="content" data-nle-edit-element-id="' + compEscAttr(elem.id || '') + '" title="Click to edit transition">' + compEscHtml(elem.content || '') + '</span>';
     html += '</div>';
   } else if (elem.type === 'parenthetical') {
     html += '<div class="nle-element nle-element--parenthetical">';
-    html += '<span class="nle-element-content">(' + compEscHtml(elem.content || '') + ')</span>';
+    html += '<span class="nle-element-content nle-editable" data-nle-edit-type="parenthetical" data-nle-edit-field="content" data-nle-edit-element-id="' + compEscAttr(elem.id || '') + '" title="Click to edit parenthetical">(' + compEscHtml(elem.content || '') + ')</span>';
     html += '</div>';
   } else if (elem.type === 'shot') {
     // Secondary shot within a beat
     html += '<div class="nle-element nle-element--shot nle-element--shot-secondary">';
     html += '<span class="nle-element-label">SHOT</span>';
-    html += '<span class="nle-element-content">' + compEscHtml(elem.shotText || elem.content || '') + '</span>';
+    html += '<span class="nle-element-content nle-editable" data-nle-edit-type="shot" data-nle-edit-field="shotText" data-nle-edit-element-id="' + compEscAttr(elem.id || '') + '" title="Click to edit shot">' + compEscHtml(elem.shotText || elem.content || '') + '</span>';
     html += '</div>';
   }
 
@@ -1633,6 +1654,66 @@ async function generatePrevisImage(elementId, promptOverrides, triggerBtn, root)
   triggerBtn.classList.remove('nle-generating');
 }
 
+
+// ────────────────────────────────────────────────────────────────
+//  Inline element editing
+// ────────────────────────────────────────────────────────────────
+
+/**
+ * Save an inline edit to a screenplay element (shot description, etc.)
+ * Updates the element in the app state and persists to the server.
+ */
+async function saveInlineEdit(el, root) {
+  var editType = el.getAttribute('data-nle-edit-type');
+  var editField = el.getAttribute('data-nle-edit-field');
+  var elementId = el.getAttribute('data-nle-edit-element-id');
+  var originalValue = el.getAttribute('data-nle-original-value');
+  var newValue = el.textContent.trim();
+  
+  // Exit edit mode
+  el.setAttribute('contenteditable', 'false');
+  el.classList.remove('nle-editing');
+  
+  // If no change, do nothing
+  if (newValue === originalValue) {
+    return;
+  }
+  
+  // Show saving indicator
+  el.classList.add('nle-saving');
+  
+  try {
+    var res = await fetch('/api/app/' + encodeURIComponent(compData.id) + '/element/' + encodeURIComponent(elementId), {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        field: editField,
+        value: newValue,
+        elementType: editType,
+      }),
+    });
+    
+    var data = await res.json();
+    
+    if (!res.ok) {
+      toast('Failed to save: ' + (data.error || 'Unknown error'), 'error');
+      // Restore original value
+      el.textContent = originalValue;
+      return;
+    }
+    
+    toast('Saved', 'success');
+    el.classList.add('nle-saved');
+    setTimeout(function() { el.classList.remove('nle-saved'); }, 1500);
+    
+  } catch (err) {
+    toast('Save failed: ' + (err.message || err), 'error');
+    el.textContent = originalValue;
+  } finally {
+    el.classList.remove('nle-saving');
+  }
+}
+
 // ────────────────────────────────────────────────────────────────
 //  Event wiring
 // ────────────────────────────────────────────────────────────────
@@ -1673,6 +1754,12 @@ function wireAppActions(root) {
       if (typeof updateHash === 'function') updateHash('compositions', compData.id, 'form');
       selectComposition(compData.id, 'form');
     });
+  }
+
+  // Git status section in sidebar
+  var gitSection = root.querySelector('#app-git-section');
+  if (gitSection && compData && compData.id) {
+    loadAppGitStatus(compData.id, gitSection);
   }
 
   // Run Pipeline button
@@ -1808,9 +1895,9 @@ function wireAppActions(root) {
     commandInput.addEventListener('keydown', function(e) {
       if (e.key === 'Enter') {
         var text = commandInput.value.trim();
-        if (!text) return;
+        if (!text || !compData) return;
         commandInput.value = '';
-        toast('Commands will be available soon. For now, use the edit buttons on each section.', 'info');
+        sendAppCommand(text, compData.id, root);
       }
     });
   }
@@ -2042,6 +2129,87 @@ function wireAppActions(root) {
         if (field) fields[field] = ta.value;
       });
       generatePrevisImage(elemId, fields, btn, root);
+    });
+  });
+
+
+  // ── Inline editing for screenplay elements (shot descriptions, etc.) ──
+  root.querySelectorAll('.nle-editable').forEach(function(el) {
+    el.addEventListener('click', function(e) {
+      // Don't trigger if already editing
+      if (el.getAttribute('contenteditable') === 'true') return;
+      
+      var editType = el.getAttribute('data-nle-edit-type');
+      var editField = el.getAttribute('data-nle-edit-field');
+      var elementId = el.getAttribute('data-nle-edit-element-id');
+      
+      if (!editType || !editField || !elementId) return;
+      
+      // Store original value
+      var originalText = el.textContent;
+      el.setAttribute('data-nle-original-value', originalText);
+      
+      // Make editable
+      el.setAttribute('contenteditable', 'true');
+      el.classList.add('nle-editing');
+      el.focus();
+      
+      // Select all text
+      var range = document.createRange();
+      range.selectNodeContents(el);
+      var sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+    });
+    
+    // Handle blur (save on focus loss)
+    el.addEventListener('blur', function() {
+      if (el.getAttribute('contenteditable') !== 'true') return;
+      saveInlineEdit(el, root);
+    });
+    
+    // Handle keyboard shortcuts
+    el.addEventListener('keydown', function(e) {
+      if (el.getAttribute('contenteditable') !== 'true') return;
+      
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        el.blur(); // Trigger save
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        // Restore original value
+        var original = el.getAttribute('data-nle-original-value');
+        if (original !== null) {
+          el.textContent = original;
+        }
+        el.setAttribute('contenteditable', 'false');
+        el.classList.remove('nle-editing');
+      }
+    });
+  });
+
+  // ── Dialogue Edit Modal ──────────────────────────────────────────────────
+  // Wire up dialogue edit buttons to open a full editor modal
+  root.querySelectorAll('.nle-dialogue-edit-btn').forEach(function(btn) {
+    btn.addEventListener('click', function(e) {
+      e.stopPropagation();
+      var elementId = btn.getAttribute('data-nle-edit-dialogue');
+      if (!elementId) return;
+      
+      // Find the dialogue element and get its data
+      var dialogueEl = root.querySelector('[data-nle-element-id="' + elementId + '"]');
+      if (!dialogueEl) return;
+      
+      var dataAttr = dialogueEl.getAttribute('data-nle-element-data');
+      var elemData;
+      try {
+        elemData = JSON.parse(dataAttr);
+      } catch (err) {
+        toast('Could not load dialogue data', 'error');
+        return;
+      }
+      
+      openDialogueEditModal(elemData, root);
     });
   });
 
@@ -2329,6 +2497,287 @@ function wireAppActions(root) {
   if (connModalBackdrop) {
     connModalBackdrop.addEventListener('click', closeConnectionModal);
   }
+
+  // Auto-Scan button
+  var autoScanBtn = root.querySelector('#app-conn-auto-scan');
+  if (autoScanBtn) {
+    autoScanBtn.addEventListener('click', async function() {
+      await runAutoScan();
+      // Refresh bindings after scan
+      if (compData && compData.id) {
+        appBindings = await fetchAppBindings(compData.id);
+        renderCompositionAppPage();
+      }
+    });
+  }
+
+  // Rules button
+  var manageRulesBtn = root.querySelector('#app-conn-manage-rules');
+  if (manageRulesBtn) {
+    manageRulesBtn.addEventListener('click', function() {
+      openRulesModal();
+    });
+  }
+}
+
+
+// ────────────────────────────────────────────────────────────────
+//  Dialogue Edit Modal
+// ────────────────────────────────────────────────────────────────
+
+/**
+ * Open a modal to edit all fields of a dialogue element.
+ * @param {Object} elemData - The dialogue element data { id, characterName, characterId, modifiers, lines }
+ * @param {HTMLElement} root - The root DOM element
+ */
+function openDialogueEditModal(elemData, root) {
+  var modal = document.getElementById('app-detail-modal');
+  var modalBody = document.getElementById('app-detail-modal-body');
+  if (!modal || !modalBody) return;
+
+  var charColor = nleCharColor(elemData.characterName || 'UNKNOWN');
+  
+  var html = '<div class="dialogue-edit-modal">';
+  html += '<h3 class="dialogue-edit-title" style="border-left: 4px solid ' + charColor + '; padding-left: 12px;">Edit Dialogue</h3>';
+  
+  // Character name field
+  html += '<div class="dialogue-edit-field">';
+  html += '<label class="dialogue-edit-label">Character Name</label>';
+  html += '<input type="text" class="dialogue-edit-input" id="dialogue-edit-character" value="' + compEscAttr(elemData.characterName || '') + '" placeholder="CHARACTER NAME" style="text-transform: uppercase;" />';
+  html += '</div>';
+  
+  // Modifiers field (V.O., O.S., CONT'D, etc.)
+  html += '<div class="dialogue-edit-field">';
+  html += '<label class="dialogue-edit-label">Modifiers <span class="dialogue-edit-hint">(V.O., O.S., CONT\'D, etc. — comma separated)</span></label>';
+  html += '<input type="text" class="dialogue-edit-input" id="dialogue-edit-modifiers" value="' + compEscAttr((elemData.modifiers || []).join(', ')) + '" placeholder="V.O., CONT\'D" />';
+  html += '<div class="dialogue-edit-modifier-chips">';
+  var commonMods = ['V.O.', 'O.S.', 'O.C.', 'CONT\'D', 'PRE-LAP', 'FILTERED', 'INTO PHONE'];
+  for (var mi = 0; mi < commonMods.length; mi++) {
+    html += '<button class="dialogue-edit-mod-chip" data-mod="' + compEscAttr(commonMods[mi]) + '">' + compEscHtml(commonMods[mi]) + '</button>';
+  }
+  html += '</div>';
+  html += '</div>';
+  
+  // Dialogue lines
+  html += '<div class="dialogue-edit-field">';
+  html += '<label class="dialogue-edit-label">Dialogue Lines</label>';
+  html += '<div class="dialogue-edit-lines" id="dialogue-edit-lines">';
+  var lines = elemData.lines || [''];
+  for (var li = 0; li < lines.length; li++) {
+    html += '<div class="dialogue-edit-line-row" data-line-index="' + li + '">';
+    html += '<textarea class="dialogue-edit-textarea" rows="2" placeholder="Enter dialogue...">' + compEscHtml(lines[li]) + '</textarea>';
+    if (lines.length > 1) {
+      html += '<button class="dialogue-edit-line-remove" data-remove-line="' + li + '" title="Remove line">&times;</button>';
+    }
+    html += '</div>';
+  }
+  html += '</div>';
+  html += '<button class="dialogue-edit-add-line" id="dialogue-edit-add-line">+ Add Line</button>';
+  html += '</div>';
+  
+  // Actions
+  html += '<div class="dialogue-edit-actions">';
+  html += '<button class="dialogue-edit-save" id="dialogue-edit-save" data-element-id="' + compEscAttr(elemData.id) + '">Save Changes</button>';
+  html += '<button class="dialogue-edit-cancel" id="dialogue-edit-cancel">Cancel</button>';
+  html += '</div>';
+  
+  html += '</div>';
+  
+  modalBody.innerHTML = html;
+  modal.className = 'app-detail-modal open app-detail-modal--dialogue';
+  document.body.style.overflow = 'hidden';
+  
+  // Wire up modal interactions
+  wireDialogueEditModal(elemData, root);
+}
+
+/**
+ * Wire up the dialogue edit modal interactions.
+ */
+function wireDialogueEditModal(elemData, root) {
+  var modal = document.getElementById('app-detail-modal');
+  var modalBody = document.getElementById('app-detail-modal-body');
+  if (!modal || !modalBody) return;
+  
+  // Modifier chip clicks — toggle modifier in the input
+  modalBody.querySelectorAll('.dialogue-edit-mod-chip').forEach(function(chip) {
+    chip.addEventListener('click', function() {
+      var mod = chip.getAttribute('data-mod');
+      var input = modalBody.querySelector('#dialogue-edit-modifiers');
+      if (!input || !mod) return;
+      
+      var current = input.value.split(',').map(function(s) { return s.trim(); }).filter(Boolean);
+      var idx = current.indexOf(mod);
+      if (idx !== -1) {
+        current.splice(idx, 1);
+        chip.classList.remove('active');
+      } else {
+        current.push(mod);
+        chip.classList.add('active');
+      }
+      input.value = current.join(', ');
+    });
+    
+    // Mark active chips based on current modifiers
+    var mod = chip.getAttribute('data-mod');
+    if ((elemData.modifiers || []).indexOf(mod) !== -1) {
+      chip.classList.add('active');
+    }
+  });
+  
+  // Add line button
+  var addLineBtn = modalBody.querySelector('#dialogue-edit-add-line');
+  if (addLineBtn) {
+    addLineBtn.addEventListener('click', function() {
+      var linesContainer = modalBody.querySelector('#dialogue-edit-lines');
+      if (!linesContainer) return;
+      
+      var lineRows = linesContainer.querySelectorAll('.dialogue-edit-line-row');
+      var newIndex = lineRows.length;
+      
+      var newRow = document.createElement('div');
+      newRow.className = 'dialogue-edit-line-row';
+      newRow.setAttribute('data-line-index', newIndex);
+      newRow.innerHTML = '<textarea class="dialogue-edit-textarea" rows="2" placeholder="Enter dialogue..."></textarea>' +
+        '<button class="dialogue-edit-line-remove" data-remove-line="' + newIndex + '" title="Remove line">&times;</button>';
+      linesContainer.appendChild(newRow);
+      
+      // Focus the new textarea
+      var newTextarea = newRow.querySelector('textarea');
+      if (newTextarea) newTextarea.focus();
+      
+      // Wire remove button
+      var removeBtn = newRow.querySelector('.dialogue-edit-line-remove');
+      if (removeBtn) {
+        removeBtn.addEventListener('click', function() {
+          newRow.remove();
+          updateRemoveButtons();
+        });
+      }
+      
+      updateRemoveButtons();
+    });
+  }
+  
+  // Remove line buttons
+  modalBody.querySelectorAll('.dialogue-edit-line-remove').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      var row = btn.closest('.dialogue-edit-line-row');
+      if (row) row.remove();
+      updateRemoveButtons();
+    });
+  });
+  
+  function updateRemoveButtons() {
+    var linesContainer = modalBody.querySelector('#dialogue-edit-lines');
+    if (!linesContainer) return;
+    var rows = linesContainer.querySelectorAll('.dialogue-edit-line-row');
+    rows.forEach(function(row, idx) {
+      row.setAttribute('data-line-index', idx);
+      var removeBtn = row.querySelector('.dialogue-edit-line-remove');
+      if (removeBtn) {
+        removeBtn.setAttribute('data-remove-line', idx);
+        // Hide remove button if only one line
+        removeBtn.style.display = rows.length > 1 ? '' : 'none';
+      }
+    });
+  }
+  
+  // Cancel button
+  var cancelBtn = modalBody.querySelector('#dialogue-edit-cancel');
+  if (cancelBtn) {
+    cancelBtn.addEventListener('click', function() {
+      closeDialogueEditModal();
+    });
+  }
+  
+  // Save button
+  var saveBtn = modalBody.querySelector('#dialogue-edit-save');
+  if (saveBtn) {
+    saveBtn.addEventListener('click', async function() {
+      var elementId = saveBtn.getAttribute('data-element-id');
+      if (!elementId) return;
+      
+      // Collect values
+      var charInput = modalBody.querySelector('#dialogue-edit-character');
+      var modInput = modalBody.querySelector('#dialogue-edit-modifiers');
+      var linesContainer = modalBody.querySelector('#dialogue-edit-lines');
+      
+      var newCharName = charInput ? charInput.value.trim().toUpperCase() : '';
+      var newModifiers = modInput ? modInput.value.split(',').map(function(s) { return s.trim(); }).filter(Boolean) : [];
+      var newLines = [];
+      if (linesContainer) {
+        linesContainer.querySelectorAll('.dialogue-edit-textarea').forEach(function(ta) {
+          var line = ta.value.trim();
+          if (line) newLines.push(line);
+        });
+      }
+      if (newLines.length === 0) newLines = [''];
+      
+      saveBtn.disabled = true;
+      saveBtn.textContent = 'Saving...';
+      
+      try {
+        // Save each field that changed
+        var updates = [];
+        if (newCharName !== elemData.characterName) {
+          updates.push({ field: 'characterName', value: newCharName });
+        }
+        if (JSON.stringify(newModifiers) !== JSON.stringify(elemData.modifiers || [])) {
+          updates.push({ field: 'modifiers', value: newModifiers });
+        }
+        if (JSON.stringify(newLines) !== JSON.stringify(elemData.lines || [])) {
+          updates.push({ field: 'lines', value: newLines });
+        }
+        
+        if (updates.length === 0) {
+          toast('No changes to save', 'info');
+          closeDialogueEditModal();
+          return;
+        }
+        
+        // Save all updates
+        for (var ui = 0; ui < updates.length; ui++) {
+          var update = updates[ui];
+          var res = await fetch('/api/app/' + encodeURIComponent(compData.id) + '/element/' + encodeURIComponent(elementId), {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              field: update.field,
+              value: update.value,
+              elementType: 'dialogue',
+            }),
+          });
+          
+          if (!res.ok) {
+            var errData = await res.json();
+            throw new Error(errData.error || 'Failed to save ' + update.field);
+          }
+        }
+        
+        toast('Dialogue saved', 'success');
+        closeDialogueEditModal();
+        
+        // Refresh the page to show updated dialogue
+        renderCompositionAppPage();
+        
+      } catch (err) {
+        toast('Save failed: ' + (err.message || err), 'error');
+        saveBtn.disabled = false;
+        saveBtn.textContent = 'Save Changes';
+      }
+    });
+  }
+}
+
+function closeDialogueEditModal() {
+  var modal = document.getElementById('app-detail-modal');
+  if (modal) {
+    modal.classList.remove('open');
+    var modalBody = document.getElementById('app-detail-modal-body');
+    if (modalBody) modalBody.innerHTML = '';
+    document.body.style.overflow = '';
+  }
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -2342,10 +2791,19 @@ function wireAppActions(root) {
 function renderConnectionTray() {
   var html = '<div class="app-conn-tray' + (appConnectionSelections.length > 0 ? ' app-conn-tray--has-items' : '') + '" id="app-conn-tray">';
 
+  // Toolbar row — always visible in connection mode
+  html += '<div class="app-conn-tray-toolbar">';
+  html += '<button class="app-conn-toolbar-btn" id="app-conn-auto-scan" title="Automatically detect connections using your rules">';
+  html += '&#x26A1; Auto-Scan</button>';
+  html += '<button class="app-conn-toolbar-btn" id="app-conn-manage-rules" title="Create and edit rules for automatic connection detection">';
+  html += '&#x2699; Rules</button>';
+  html += '<span class="app-conn-toolbar-status" id="app-conn-scan-status"></span>';
+  html += '</div>';
+
   if (appConnectionSelections.length === 0) {
     html += '<div class="app-conn-tray-hint">';
     html += '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" width="16" height="16"><circle cx="4" cy="4" r="2"/><circle cx="12" cy="12" r="2"/><path d="M5.5 5.5l5 5"/></svg>';
-    html += ' Click on entities to select them, then create connections between them.';
+    html += ' Click on entities to select them, or use Auto-Scan to detect connections automatically.';
     html += '</div>';
   } else {
     // Selected items chips
@@ -2386,6 +2844,9 @@ function renderConnectionTray() {
   html += renderConnectionModalBody();
   html += '</div>';
   html += '</div>';
+
+  // Rules editor modal (hidden by default)
+  html += renderRulesModal();
 
   return html;
 }
@@ -2582,6 +3043,712 @@ async function createBindingsFromModal(bindingType, description) {
       confidence: 1.0,
       origin: 'manual',
       metadata: description ? { description: description } : undefined,
+    });
+  }
+}
+
+// ── Rules Modal ──────────────────────────────────────────────
+
+/**
+ * Cached rules loaded from the server.
+ */
+var appBindingRules = [];
+
+/**
+ * Known entity types discovered from pipeline data — populated by scanning.
+ */
+var appKnownEntityTypes = ['shot', 'character', 'location', 'scene', 'dialogue'];
+
+/**
+ * Known entity fields per type — populated when data is available.
+ */
+var appKnownEntityFields = {
+  shot: ['shotText', 'content', 'description', 'text', 'action'],
+  character: ['name', 'displayName', 'aliases'],
+  location: ['name', 'description'],
+  scene: ['heading', 'sceneHeading', 'title', 'content'],
+  dialogue: ['text', 'content', 'characterName'],
+};
+
+/**
+ * Render the rules editor modal.
+ */
+function renderRulesModal() {
+  var html = '<div class="app-rules-modal" id="app-rules-modal" style="display:none;">';
+  html += '<div class="app-rules-modal-backdrop" id="app-rules-modal-backdrop"></div>';
+  html += '<div class="app-rules-modal-container">';
+
+  // Header
+  html += '<div class="app-rules-modal-header">';
+  html += '<h3 class="app-rules-modal-title">Connection Rules</h3>';
+  html += '<p class="app-rules-modal-subtitle">Rules automatically detect connections between entities in your pipeline. ';
+  html += 'For example, a rule can find character names mentioned in shot descriptions.</p>';
+  html += '</div>';
+
+  // Rules list
+  html += '<div class="app-rules-list" id="app-rules-list">';
+  if (appBindingRules.length === 0) {
+    html += '<div class="app-rules-empty">';
+    html += '<p>No rules yet. Add a rule to automatically detect connections.</p>';
+    html += '</div>';
+  } else {
+    for (var ri = 0; ri < appBindingRules.length; ri++) {
+      var rule = appBindingRules[ri];
+      html += renderRuleCard(rule, ri);
+    }
+  }
+  html += '</div>';
+
+  // Add rule button
+  html += '<div class="app-rules-add-row">';
+  html += '<button class="app-rules-add-btn" id="app-rules-add-btn">+ Add Rule</button>';
+  html += '</div>';
+
+  // Preset rules
+  html += '<div class="app-rules-presets">';
+  html += '<span class="app-rules-presets-label">Quick presets:</span>';
+  html += '<button class="app-rules-preset-btn" data-preset="character-in-shot">Character names in shots</button>';
+  html += '<button class="app-rules-preset-btn" data-preset="location-in-shot">Location names in shots</button>';
+  html += '<button class="app-rules-preset-btn" data-preset="character-in-dialogue">Character in dialogue</button>';
+  html += '</div>';
+
+  // Actions
+  html += '<div class="app-rules-modal-actions">';
+  html += '<button class="app-conn-modal-btn app-conn-modal-btn--primary" id="app-rules-save-btn">Save Rules</button>';
+  html += '<button class="app-conn-modal-btn" id="app-rules-cancel-btn">Cancel</button>';
+  html += '</div>';
+
+  html += '</div>';
+  html += '</div>';
+  return html;
+}
+
+/**
+ * Render a single rule as an editable card.
+ */
+function renderRuleCard(rule, index) {
+  var html = '<div class="app-rule-card" data-rule-index="' + index + '">';
+
+  // Enable toggle + name
+  html += '<div class="app-rule-card-header">';
+  html += '<label class="app-rule-toggle">';
+  html += '<input type="checkbox" class="app-rule-enabled" data-rule-idx="' + index + '"' + (rule.enabled ? ' checked' : '') + '>';
+  html += '</label>';
+  html += '<input type="text" class="app-rule-name" data-rule-idx="' + index + '" value="' + compEscAttr(rule.name || '') + '" placeholder="Rule name...">';
+  html += '<button class="app-rule-delete" data-rule-idx="' + index + '" title="Delete rule">&times;</button>';
+  html += '</div>';
+
+  // Visual rule builder: "When [source type]'s [field] contains [target type]'s [field], create [relationship]"
+  html += '<div class="app-rule-builder">';
+
+  // Source row
+  html += '<div class="app-rule-row">';
+  html += '<span class="app-rule-keyword">When</span>';
+  html += '<select class="app-rule-select app-rule-source-type" data-rule-idx="' + index + '">';
+  for (var et = 0; et < appKnownEntityTypes.length; et++) {
+    var st = appKnownEntityTypes[et];
+    html += '<option value="' + compEscAttr(st) + '"' + (rule.source && rule.source.entityType === st ? ' selected' : '') + '>' + compEscHtml(st) + '</option>';
+  }
+  html += '</select>';
+  html += '<span class="app-rule-keyword">\'s</span>';
+  html += '<select class="app-rule-select app-rule-source-field" data-rule-idx="' + index + '">';
+  var srcType = (rule.source && rule.source.entityType) || appKnownEntityTypes[0];
+  var srcFields = appKnownEntityFields[srcType] || ['name', 'text', 'content', 'description'];
+  for (var sf = 0; sf < srcFields.length; sf++) {
+    html += '<option value="' + compEscAttr(srcFields[sf]) + '"' + (rule.source && rule.source.field === srcFields[sf] ? ' selected' : '') + '>' + compEscHtml(srcFields[sf]) + '</option>';
+  }
+  html += '</select>';
+  html += '</div>';
+
+  // Match row
+  html += '<div class="app-rule-row">';
+  html += '<span class="app-rule-keyword">contains</span>';
+  html += '<select class="app-rule-select app-rule-target-type" data-rule-idx="' + index + '">';
+  for (var tt = 0; tt < appKnownEntityTypes.length; tt++) {
+    var tType = appKnownEntityTypes[tt];
+    html += '<option value="' + compEscAttr(tType) + '"' + (rule.target && rule.target.entityType === tType ? ' selected' : '') + '>' + compEscHtml(tType) + '</option>';
+  }
+  html += '</select>';
+  html += '<span class="app-rule-keyword">\'s</span>';
+  html += '<select class="app-rule-select app-rule-target-field" data-rule-idx="' + index + '">';
+  var tgtType = (rule.target && rule.target.entityType) || appKnownEntityTypes[1];
+  var tgtFields = appKnownEntityFields[tgtType] || ['name', 'text', 'content', 'description'];
+  for (var tf = 0; tf < tgtFields.length; tf++) {
+    html += '<option value="' + compEscAttr(tgtFields[tf]) + '"' + (rule.target && rule.target.matchField === tgtFields[tf] ? ' selected' : '') + '>' + compEscHtml(tgtFields[tf]) + '</option>';
+  }
+  html += '</select>';
+  html += '</div>';
+
+  // Relationship row
+  html += '<div class="app-rule-row">';
+  html += '<span class="app-rule-keyword">create</span>';
+  html += '<select class="app-rule-select app-rule-relationship" data-rule-idx="' + index + '">';
+  var rels = ['depicts', 'set-in', 'voice', 'related-to', 'references'];
+  for (var ri2 = 0; ri2 < rels.length; ri2++) {
+    html += '<option value="' + compEscAttr(rels[ri2]) + '"' + (rule.relationship === rels[ri2] ? ' selected' : '') + '>' + compEscHtml(rels[ri2]) + '</option>';
+  }
+  html += '</select>';
+  html += '<span class="app-rule-keyword">connection</span>';
+  html += '</div>';
+
+  // Match options
+  html += '<div class="app-rule-options">';
+  html += '<label class="app-rule-option"><input type="checkbox" class="app-rule-whole-word" data-rule-idx="' + index + '"' + ((rule.matchOptions && rule.matchOptions.wholeWord !== false) || !rule.matchOptions ? ' checked' : '') + '> Whole word</label>';
+  html += '<label class="app-rule-option"><input type="checkbox" class="app-rule-case-sensitive" data-rule-idx="' + index + '"' + (rule.matchOptions && rule.matchOptions.caseSensitive ? ' checked' : '') + '> Case sensitive</label>';
+  html += '</div>';
+
+  html += '</div>'; // .app-rule-builder
+  html += '</div>'; // .app-rule-card
+  return html;
+}
+
+/**
+ * Create a default empty rule.
+ */
+function createDefaultRule() {
+  return {
+    id: 'rule-' + Date.now() + '-' + Math.random().toString(36).substr(2, 6),
+    name: '',
+    enabled: true,
+    type: 'text-match',
+    source: { entityType: 'shot', field: 'shotText' },
+    target: { entityType: 'character', matchField: 'name' },
+    relationship: 'depicts',
+    matchOptions: { caseSensitive: false, wholeWord: true },
+  };
+}
+
+/**
+ * Preset rule configurations for common patterns.
+ */
+var rulePresets = {
+  'character-in-shot': {
+    name: 'Character names in shot descriptions',
+    type: 'text-match',
+    source: { entityType: 'shot', field: 'shotText' },
+    target: { entityType: 'character', matchField: 'name' },
+    relationship: 'depicts',
+    matchOptions: { caseSensitive: false, wholeWord: true },
+  },
+  'location-in-shot': {
+    name: 'Location names in shot descriptions',
+    type: 'text-match',
+    source: { entityType: 'shot', field: 'shotText' },
+    target: { entityType: 'location', matchField: 'name' },
+    relationship: 'set-in',
+    matchOptions: { caseSensitive: false, wholeWord: true },
+  },
+  'character-in-dialogue': {
+    name: 'Character name in dialogue text',
+    type: 'text-match',
+    source: { entityType: 'dialogue', field: 'characterName' },
+    target: { entityType: 'character', matchField: 'name' },
+    relationship: 'voice',
+    matchOptions: { caseSensitive: false, wholeWord: true },
+  },
+};
+
+/**
+ * Open the rules modal. Loads rules from the server first.
+ */
+async function openRulesModal() {
+  if (!compData || !compData.id) return;
+
+  // Load existing rules
+  try {
+    var resp = await fetch('/api/app/' + encodeURIComponent(compData.id) + '/rules');
+    if (resp.ok) {
+      var rulesDoc = await resp.json();
+      appBindingRules = rulesDoc.rules || [];
+    }
+  } catch (err) {
+    console.error('Failed to load rules:', err);
+  }
+
+  // Re-render the rules list
+  var listEl = document.getElementById('app-rules-list');
+  if (listEl) {
+    if (appBindingRules.length === 0) {
+      listEl.innerHTML = '<div class="app-rules-empty"><p>No rules yet. Add a rule to automatically detect connections.</p></div>';
+    } else {
+      var html = '';
+      for (var ri = 0; ri < appBindingRules.length; ri++) {
+        html += renderRuleCard(appBindingRules[ri], ri);
+      }
+      listEl.innerHTML = html;
+    }
+  }
+
+  // Show modal
+  var modal = document.getElementById('app-rules-modal');
+  if (modal) {
+    modal.style.display = 'flex';
+    document.body.style.overflow = 'hidden';
+    wireRulesModalEvents();
+  }
+}
+
+function closeRulesModal() {
+  var modal = document.getElementById('app-rules-modal');
+  if (modal) {
+    modal.style.display = 'none';
+    document.body.style.overflow = '';
+  }
+}
+
+/**
+ * Wire up all interactive elements in the rules modal.
+ */
+function wireRulesModalEvents() {
+  var modal = document.getElementById('app-rules-modal');
+  if (!modal) return;
+
+  // Backdrop click
+  var backdrop = modal.querySelector('#app-rules-modal-backdrop');
+  if (backdrop) {
+    backdrop.addEventListener('click', closeRulesModal);
+  }
+
+  // Cancel
+  var cancelBtn = modal.querySelector('#app-rules-cancel-btn');
+  if (cancelBtn) {
+    cancelBtn.addEventListener('click', closeRulesModal);
+  }
+
+  // Add rule
+  var addBtn = modal.querySelector('#app-rules-add-btn');
+  if (addBtn) {
+    addBtn.addEventListener('click', function() {
+      appBindingRules.push(createDefaultRule());
+      refreshRulesList();
+    });
+  }
+
+  // Presets
+  modal.querySelectorAll('.app-rules-preset-btn').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      var presetKey = btn.getAttribute('data-preset');
+      var preset = rulePresets[presetKey];
+      if (preset) {
+        // Check if a similar rule already exists
+        var exists = appBindingRules.some(function(r) { return r.name === preset.name; });
+        if (exists) {
+          toast('Rule already exists: ' + preset.name, 'info');
+          return;
+        }
+        var newRule = Object.assign({}, createDefaultRule(), preset);
+        appBindingRules.push(newRule);
+        refreshRulesList();
+      }
+    });
+  });
+
+  // Save
+  var saveBtn = modal.querySelector('#app-rules-save-btn');
+  if (saveBtn) {
+    saveBtn.addEventListener('click', async function() {
+      collectRulesFromForm();
+      try {
+        var resp = await fetch('/api/app/' + encodeURIComponent(compData.id) + '/rules', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ rules: appBindingRules }),
+        });
+        if (resp.ok) {
+          toast('Rules saved', 'success');
+          closeRulesModal();
+        } else {
+          var err = await resp.json();
+          toast('Failed to save rules: ' + (err.error || 'unknown'), 'error');
+        }
+      } catch (err2) {
+        toast('Failed to save rules', 'error');
+      }
+    });
+  }
+
+  // Wire delete buttons and field changes
+  wireRuleCardEvents(modal);
+}
+
+/**
+ * Wire events on individual rule cards (delete, field changes).
+ */
+function wireRuleCardEvents(container) {
+  // Delete buttons
+  container.querySelectorAll('.app-rule-delete').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      var idx = parseInt(btn.getAttribute('data-rule-idx'), 10);
+      if (!isNaN(idx) && idx >= 0 && idx < appBindingRules.length) {
+        appBindingRules.splice(idx, 1);
+        refreshRulesList();
+      }
+    });
+  });
+
+  // Source type change → update source field options
+  container.querySelectorAll('.app-rule-source-type').forEach(function(sel) {
+    sel.addEventListener('change', function() {
+      var idx = parseInt(sel.getAttribute('data-rule-idx'), 10);
+      if (!isNaN(idx) && appBindingRules[idx]) {
+        collectRulesFromForm();
+        refreshRulesList();
+      }
+    });
+  });
+
+  // Target type change → update target field options
+  container.querySelectorAll('.app-rule-target-type').forEach(function(sel) {
+    sel.addEventListener('change', function() {
+      var idx = parseInt(sel.getAttribute('data-rule-idx'), 10);
+      if (!isNaN(idx) && appBindingRules[idx]) {
+        collectRulesFromForm();
+        refreshRulesList();
+      }
+    });
+  });
+}
+
+/**
+ * Collect current form values into appBindingRules.
+ */
+function collectRulesFromForm() {
+  var modal = document.getElementById('app-rules-modal');
+  if (!modal) return;
+
+  var cards = modal.querySelectorAll('.app-rule-card');
+  cards.forEach(function(card, idx) {
+    if (idx >= appBindingRules.length) return;
+    var rule = appBindingRules[idx];
+
+    var nameInput = card.querySelector('.app-rule-name');
+    if (nameInput) rule.name = nameInput.value;
+
+    var enabledCb = card.querySelector('.app-rule-enabled');
+    if (enabledCb) rule.enabled = enabledCb.checked;
+
+    var srcType = card.querySelector('.app-rule-source-type');
+    if (srcType) rule.source.entityType = srcType.value;
+
+    var srcField = card.querySelector('.app-rule-source-field');
+    if (srcField) rule.source.field = srcField.value;
+
+    var tgtType = card.querySelector('.app-rule-target-type');
+    if (tgtType) rule.target.entityType = tgtType.value;
+
+    var tgtField = card.querySelector('.app-rule-target-field');
+    if (tgtField) rule.target.matchField = tgtField.value;
+
+    var relSelect = card.querySelector('.app-rule-relationship');
+    if (relSelect) rule.relationship = relSelect.value;
+
+    var wholeWord = card.querySelector('.app-rule-whole-word');
+    if (wholeWord) {
+      if (!rule.matchOptions) rule.matchOptions = {};
+      rule.matchOptions.wholeWord = wholeWord.checked;
+    }
+
+    var caseSensitive = card.querySelector('.app-rule-case-sensitive');
+    if (caseSensitive) {
+      if (!rule.matchOptions) rule.matchOptions = {};
+      rule.matchOptions.caseSensitive = caseSensitive.checked;
+    }
+  });
+}
+
+/**
+ * Re-render the rules list inside the modal and re-wire events.
+ */
+function refreshRulesList() {
+  var listEl = document.getElementById('app-rules-list');
+  if (!listEl) return;
+  if (appBindingRules.length === 0) {
+    listEl.innerHTML = '<div class="app-rules-empty"><p>No rules yet. Add a rule to automatically detect connections.</p></div>';
+  } else {
+    var html = '';
+    for (var ri = 0; ri < appBindingRules.length; ri++) {
+      html += renderRuleCard(appBindingRules[ri], ri);
+    }
+    listEl.innerHTML = html;
+  }
+  wireRuleCardEvents(listEl);
+}
+
+// ── Auto-Scan ────────────────────────────────────────────────
+
+/**
+ * Run auto-scan: execute the pipeline's binding rules against its data.
+ * Shows progress in the status span and toasts the result.
+ */
+async function runAutoScan() {
+  if (!compData || !compData.id) return;
+
+  var statusEl = document.getElementById('app-conn-scan-status');
+  var scanBtn = document.getElementById('app-conn-auto-scan');
+  if (scanBtn) scanBtn.disabled = true;
+  if (statusEl) statusEl.textContent = 'Scanning...';
+
+  try {
+    var resp = await fetch('/api/app/' + encodeURIComponent(compData.id) + '/rules/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+    var data = await resp.json();
+
+    if (!resp.ok) {
+      toast('Scan failed: ' + (data.error || 'unknown'), 'error');
+      if (statusEl) statusEl.textContent = 'Failed';
+      return;
+    }
+
+    if (data.message === 'No rules configured') {
+      toast('No rules configured yet — click Rules to set up auto-detection.', 'info');
+      if (statusEl) statusEl.textContent = 'No rules';
+      return;
+    }
+
+    var msg = data.added + ' connection' + (data.added === 1 ? '' : 's') + ' found';
+    if (data.replaced > 0) msg += ' (' + data.replaced + ' updated)';
+    toast(msg, data.added > 0 ? 'success' : 'info');
+    if (statusEl) statusEl.textContent = msg;
+
+  } catch (err) {
+    toast('Scan failed: ' + (err.message || err), 'error');
+    if (statusEl) statusEl.textContent = 'Error';
+  } finally {
+    if (scanBtn) scanBtn.disabled = false;
+  }
+}
+
+// ── Inline Chat Command ──────────────────────────────────────
+
+/**
+ * Send a message to the chat agent from the app command bar.
+ * Streams the response into a response area below the input.
+ */
+async function sendAppCommand(message, pipelineId, root) {
+  var responseEl = root.querySelector('#app-command-response');
+  var inputEl = root.querySelector('#app-command-input');
+  var spinnerEl = root.querySelector('#app-command-spinner');
+  if (!responseEl) return;
+
+  responseEl.style.display = 'block';
+  responseEl.style.opacity = '1';
+  responseEl.innerHTML = '<div class="app-command-thinking">Thinking...</div>';
+  if (inputEl) inputEl.disabled = true;
+  if (spinnerEl) spinnerEl.style.display = 'flex';
+
+  try {
+    var resp = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        message: message,
+        history: [],
+        activeCompositionId: pipelineId,
+      }),
+    });
+
+    if (!resp.ok) {
+      var errData = await resp.json();
+      responseEl.innerHTML = '<div class="app-command-error">Error: ' + compEscHtml(errData.error || 'Request failed') + '</div>';
+      return;
+    }
+
+    // Read SSE stream
+    var reader = resp.body.getReader();
+    var decoder = new TextDecoder();
+    var buffer = '';
+    var accumulatedText = '';
+    var toolNames = [];
+
+    responseEl.innerHTML = '';
+
+    function processChunk() {
+      return reader.read().then(function(result) {
+        if (result.done) return;
+
+        buffer += decoder.decode(result.value, { stream: true });
+        var lines = buffer.split('\n');
+        buffer = '';
+
+        var eventType = null;
+        for (var i = 0; i < lines.length; i++) {
+          var line = lines[i];
+          if (line.startsWith('event: ')) {
+            eventType = line.slice(7).trim();
+          } else if (line.startsWith('data: ')) {
+            try {
+              var data = JSON.parse(line.slice(6));
+              if (eventType === 'token' && data.token) {
+                accumulatedText += data.token;
+              } else if (eventType === 'tool_start' && data.tool) {
+                toolNames.push(data.tool);
+              } else if (eventType === 'done') {
+                if (data.fullText) accumulatedText = data.fullText;
+              }
+            } catch (e) { /* skip parse errors */ }
+          }
+        }
+
+        // Render accumulated text
+        var html = '';
+        if (toolNames.length > 0) {
+          html += '<div class="app-command-tools">';
+          for (var ti = 0; ti < toolNames.length; ti++) {
+            html += '<span class="app-command-tool-pill">' + compEscHtml(toolNames[ti]) + '</span>';
+          }
+          html += '</div>';
+        }
+        if (accumulatedText) {
+          // Simple markdown-to-html (bold, code, newlines)
+          var rendered = compEscHtml(accumulatedText)
+            .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+            .replace(/`([^`]+)`/g, '<code>$1</code>')
+            .replace(/\n/g, '<br>');
+          html += '<div class="app-command-text">' + rendered + '</div>';
+        } else if (toolNames.length > 0) {
+          html += '<div class="app-command-thinking">Working...</div>';
+        }
+        responseEl.innerHTML = html;
+        responseEl.scrollTop = responseEl.scrollHeight;
+
+        return processChunk();
+      });
+    }
+
+    await processChunk();
+
+    // Final render
+    if (!accumulatedText && toolNames.length > 0) {
+      responseEl.innerHTML += '<div class="app-command-text">Done. Changes applied.</div>';
+    }
+
+  } catch (err) {
+    responseEl.innerHTML = '<div class="app-command-error">Error: ' + compEscHtml(err.message || String(err)) + '</div>';
+  } finally {
+    if (spinnerEl) spinnerEl.style.display = 'none';
+    if (inputEl) inputEl.disabled = false;
+    if (inputEl) inputEl.focus();
+
+    // Auto-hide after a delay if short response
+    setTimeout(function() {
+      if (responseEl && responseEl.scrollHeight < 100) {
+        responseEl.style.opacity = '0.5';
+      }
+    }, 10000);
+  }
+}
+
+// ── Git status section for app sidebar ──────────────────────────────
+function loadAppGitStatus(compId, container) {
+  fetch('/api/compositions/' + encodeURIComponent(compId) + '/git-status')
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (!data.isRepo) {
+        // Not a git repo — just show the GitHub Desktop button which will init
+        container.innerHTML =
+          '<button class="app-action-btn app-action-secondary app-action-github" id="app-open-github-desktop">' +
+          '&#x1F4BB; Open in GitHub Desktop</button>';
+        wireGitHubDesktopBtn(compId, container);
+        return;
+      }
+
+      var html = '';
+
+      // Status indicator
+      var statusColor = data.dirty ? '#f59e0b' : '#10b981';
+      var statusIcon = data.dirty ? '●' : '✓';
+      var statusText = data.dirty ? 'Uncommitted changes' : 'Clean';
+      html += '<div class="app-git-status-line">';
+      html += '<span style="color:' + statusColor + ';">' + statusIcon + ' ' + statusText + '</span>';
+      html += '<span class="app-git-branch">on ' + compEscHtml(data.branch || 'main') + '</span>';
+      html += '</div>';
+
+      // If dirty — show smart commit button
+      if (data.dirty) {
+        html += '<button class="app-action-btn app-action-commit" id="app-smart-commit">&#x1F4DD; Commit &amp; Push</button>';
+      }
+
+      // GitHub Desktop button
+      html += '<button class="app-action-btn app-action-secondary app-action-github" id="app-open-github-desktop">&#x1F4BB; Open in GitHub Desktop</button>';
+
+      // Recent commits
+      if (data.recentCommits && data.recentCommits.length > 0) {
+        html += '<div class="app-git-commits">';
+        data.recentCommits.slice(0, 3).forEach(function(c) {
+          html += '<div class="app-git-commit-line">' + compEscHtml(c) + '</div>';
+        });
+        html += '</div>';
+      }
+
+      container.innerHTML = html;
+
+      // Wire smart commit
+      var commitBtn = container.querySelector('#app-smart-commit');
+      if (commitBtn) {
+        commitBtn.addEventListener('click', async function() {
+          commitBtn.disabled = true;
+          commitBtn.innerHTML = '&#x1F916; Generating message...';
+          try {
+            var res = await fetch('/api/compositions/' + encodeURIComponent(compId) + '/git-smart-commit', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({}),
+            });
+            var result = await res.json();
+            if (!res.ok) throw new Error(result.error || 'Commit failed');
+            if (!result.committed) {
+              toast(result.message || 'Nothing to commit', 'info');
+              commitBtn.disabled = false;
+              commitBtn.innerHTML = '&#x1F4DD; Commit &amp; Push';
+              return;
+            }
+            var msg = result.pushed ? 'Committed & pushed!' : 'Committed!';
+            if (result.pushError) msg += ' (push failed: ' + result.pushError + ')';
+            toast(msg, result.pushError ? 'warning' : 'success');
+
+            // Show the commit message briefly
+            commitBtn.innerHTML = '&#x2705; ' + compEscHtml(result.message.split('\n')[0]);
+            commitBtn.style.fontSize = '0.68rem';
+            setTimeout(function() {
+              loadAppGitStatus(compId, container);
+            }, 2500);
+          } catch (err) {
+            toast('Commit failed: ' + (err.message || err), 'error');
+            commitBtn.disabled = false;
+            commitBtn.innerHTML = '&#x1F4DD; Commit &amp; Push';
+          }
+        });
+      }
+
+      wireGitHubDesktopBtn(compId, container);
+    })
+    .catch(function() {
+      container.innerHTML =
+        '<button class="app-action-btn app-action-secondary app-action-github" id="app-open-github-desktop">' +
+        '&#x1F4BB; Open in GitHub Desktop</button>';
+      wireGitHubDesktopBtn(compId, container);
+    });
+}
+
+function wireGitHubDesktopBtn(compId, container) {
+  var ghBtn = container.querySelector('#app-open-github-desktop');
+  if (ghBtn) {
+    ghBtn.addEventListener('click', async function() {
+      ghBtn.disabled = true;
+      ghBtn.textContent = 'Opening...';
+      try {
+        var res = await fetch('/api/compositions/' + encodeURIComponent(compId) + '/open-github-desktop', { method: 'POST' });
+        var data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Failed to open');
+        toast('Opened in GitHub Desktop', 'success');
+      } catch (err) {
+        toast('Could not open: ' + (err.message || err), 'error');
+      }
+      ghBtn.disabled = false;
+      ghBtn.innerHTML = '&#x1F4BB; Open in GitHub Desktop';
     });
   }
 }

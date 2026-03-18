@@ -78,6 +78,9 @@ export { workflowPlayDefinition, workflowPlayHandler } from './workflow-play.js'
 // AI Image Generation tools
 export { nanobananaTool } from './nanobanana.js';
 
+// AI Text-to-Speech tools
+export { ttsSpeakTool, ttsVoicesTool, ttsModelsTool } from './elevenlabs.js';
+
 // Import what we need for allTools array
 import { fileReadDefinition, fileReadHandler } from './file-read.js';
 import { fileWriteDefinition, fileWriteHandler } from './file-write.js';
@@ -113,6 +116,7 @@ import { ffFileDialogDefinition, ffFileDialogHandler } from './ff-file-dialog.js
 import { browserQueryDefinition, browserQueryHandler } from './browser-query.js';
 import { workflowPlayDefinition, workflowPlayHandler } from './workflow-play.js';
 import { nanobananaTool } from './nanobanana.js';
+import { ttsSpeakTool, ttsVoicesTool, ttsModelsTool } from './elevenlabs.js';
 import { definition as skillOptimizeDefinition, handler as skillOptimizeHandler } from './skill-optimize.js';
 
 // Tool definition type
@@ -167,4 +171,8 @@ export const allTools = [
   { definition: workflowPlayDefinition, handler: workflowPlayHandler },
   // AI Image Generation
   { definition: nanobananaTool, handler: nanobananaTool.execute },
+  // AI Text-to-Speech
+  { definition: ttsSpeakTool, handler: ttsSpeakTool.execute },
+  { definition: ttsVoicesTool, handler: ttsVoicesTool.execute },
+  { definition: ttsModelsTool, handler: ttsModelsTool.execute },
 ];

@@ -520,6 +520,11 @@ function switchTab(tab, opts) {
     if (typeof initStoryboard === 'function') {
       initStoryboard();
     }
+  } else if (tab === 'voices') {
+    selectedExtension = null;
+    if (typeof initVoices === 'function') {
+      initVoices();
+    }
   } else if (tab === 'mcp') {
     selectedExtension = null;
     if (typeof initMcp === 'function') {

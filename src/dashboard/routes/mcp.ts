@@ -13,7 +13,153 @@ import { sendJson, readBody } from '../utils.js';
 import { debugLog } from '../../debug-log.js';
 
 export const handleMcpRoutes: RouteHandler = async (req, res, pathname, url, ctx) => {
-  // Only handle /api/mcp/* routes
+
+  // GET /api/env-keys — return masked status of known API keys
+  if (req.method === 'GET' && pathname === '/api/env-keys') {
+    const envPath = join(homedir(), '.woodbury', '.env');
+    const KNOWN_KEYS = ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GROQ_API_KEY', 'GEMINI_API_KEY', 'ELEVENLABS_API_KEY'];
+    const result: Record<string, { set: boolean; masked: string }> = {};
+    for (const key of KNOWN_KEYS) {
+      const val = process.env[key] || '';
+      result[key] = {
+        set: val.length > 0,
+        masked: val.length > 8 ? val.slice(0, 4) + '••••' + val.slice(-4) : val.length > 0 ? '••••••••' : '',
+      };
+    }
+    sendJson(res, 200, { keys: result, envPath });
+    return true;
+  }
+
+  // PUT /api/env-keys — write API keys to ~/.woodbury/.env and hot-update process.env
+  if (req.method === 'PUT' && pathname === '/api/env-keys') {
+    try {
+      const body = await readBody(req);
+      const ALLOWED = ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'GROQ_API_KEY', 'GEMINI_API_KEY', 'ELEVENLABS_API_KEY'];
+      const envPath = join(homedir(), '.woodbury', '.env');
+      const dir = join(homedir(), '.woodbury');
+
+      await mkdir(dir, { recursive: true });
+
+      const existingKeys: Record<string, string> = {};
+      try {
+        const raw = await readFile(envPath, 'utf-8');
+        for (const line of raw.split('\n')) {
+          const trimmed = line.trim();
+          if (!trimmed || trimmed.startsWith('#')) continue;
+          const eq = trimmed.indexOf('=');
+          if (eq > 0) {
+            const k = trimmed.slice(0, eq).trim();
+            let v = trimmed.slice(eq + 1).trim();
+            if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1);
+            existingKeys[k] = v;
+          }
+        }
+      } catch { /* no existing file */ }
+
+      for (const key of ALLOWED) {
+        if (body[key] === undefined) continue;
+        const val = String(body[key]).trim();
+        if (val) {
+          existingKeys[key] = val;
+          process.env[key] = val;
+        } else {
+          delete existingKeys[key];
+          delete process.env[key];
+        }
+      }
+
+      const lines = Object.entries(existingKeys).map(([k, v]) => `${k}="${v.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`);
+      await writeFile(envPath, lines.join('\n') + '\n', 'utf-8');
+
+      debugLog.info('dashboard', 'API keys updated');
+      sendJson(res, 200, { saved: true });
+    } catch (err: any) {
+      sendJson(res, 500, { error: err.message });
+    }
+    return true;
+  }
+
+  // GET /api/elevenlabs/voices — list all ElevenLabs voices with preview URLs
+  if (req.method === 'GET' && pathname === '/api/elevenlabs/voices') {
+    const apiKey = process.env.ELEVENLABS_API_KEY;
+    if (!apiKey) {
+      sendJson(res, 400, { error: 'ELEVENLABS_API_KEY not set. Configure it in Model → API Keys.' });
+      return true;
+    }
+    try {
+      const search = url.searchParams.get('search') || '';
+      const category = url.searchParams.get('category') || '';
+      const params = new URLSearchParams();
+      params.set('page_size', '100');
+      params.set('include_total_count', 'true');
+      if (search) params.set('search', search);
+      if (category) params.set('category', category);
+
+      const apiRes = await fetch(`https://api.elevenlabs.io/v2/voices?${params}`, {
+        headers: { 'xi-api-key': apiKey },
+      });
+
+      if (!apiRes.ok) {
+        // Fall back to v1 if v2 needs higher permissions
+        const v1Res = await fetch('https://api.elevenlabs.io/v1/voices', {
+          headers: { 'xi-api-key': apiKey },
+        });
+        if (!v1Res.ok) {
+          const errText = await v1Res.text();
+          sendJson(res, v1Res.status, { error: `ElevenLabs API error: ${errText}` });
+          return true;
+        }
+        const v1Data = await v1Res.json() as { voices?: Array<Record<string, unknown>> };
+        sendJson(res, 200, { voices: v1Data.voices || [], total: (v1Data.voices || []).length });
+        return true;
+      }
+
+      const data = await apiRes.json() as { voices?: Array<Record<string, unknown>>; total_count?: number };
+      sendJson(res, 200, { voices: data.voices || [], total: data.total_count || (data.voices || []).length });
+    } catch (err: any) {
+      sendJson(res, 500, { error: err.message });
+    }
+    return true;
+  }
+
+  // PUT /api/elevenlabs/default-voice — set default voice in ~/.woodbury/.env
+  if (req.method === 'PUT' && pathname === '/api/elevenlabs/default-voice') {
+    try {
+      const body = await readBody(req);
+      const voiceId = body.voice_id;
+      if (!voiceId) { sendJson(res, 400, { error: 'voice_id required' }); return true; }
+
+      const envPath = join(homedir(), '.woodbury', '.env');
+      const existingKeys: Record<string, string> = {};
+      try {
+        const raw = await readFile(envPath, 'utf-8');
+        for (const line of raw.split('\n')) {
+          const trimmed = line.trim();
+          if (!trimmed || trimmed.startsWith('#')) continue;
+          const eq = trimmed.indexOf('=');
+          if (eq > 0) {
+            const k = trimmed.slice(0, eq).trim();
+            let v = trimmed.slice(eq + 1).trim();
+            if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1);
+            existingKeys[k] = v;
+          }
+        }
+      } catch { /* no file */ }
+
+      existingKeys['ELEVENLABS_DEFAULT_VOICE'] = voiceId;
+      process.env.ELEVENLABS_DEFAULT_VOICE = voiceId;
+
+      const lines = Object.entries(existingKeys).map(([k, v]) => `${k}="${v.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`);
+      await writeFile(envPath, lines.join('\n') + '\n', 'utf-8');
+
+      sendJson(res, 200, { saved: true, voice_id: voiceId });
+    } catch (err: any) {
+      sendJson(res, 500, { error: err.message });
+    }
+    return true;
+  }
+
+  // Only handle /api/mcp/* routes from here on
   if (!pathname.startsWith('/api/mcp')) return false;
 
   // GET /api/mcp/servers — list all known servers with status
@@ -301,6 +447,78 @@ export const handleMcpRoutes: RouteHandler = async (req, res, pathname, url, ctx
     } catch (err) {
       sendJson(res, 500, { error: String(err) });
     }
+    return true;
+  }
+
+  // GET /api/models/available — fetch live model lists from all configured providers
+  if (req.method === 'GET' && pathname === '/api/models/available') {
+    const results: Record<string, { id: string; name: string; provider: string }[]> = {};
+
+    const fetchAnthropicModels = async () => {
+      const key = process.env.ANTHROPIC_API_KEY;
+      if (!key) return [];
+      try {
+        const { default: Anthropic } = await import('@anthropic-ai/sdk');
+        const client = new Anthropic({ apiKey: key });
+        const resp = await client.models.list({ limit: 100 });
+        return (resp.data || []).map((m: any) => ({
+          id: m.id,
+          name: m.display_name || m.id,
+          provider: 'anthropic',
+        }));
+      } catch { return []; }
+    };
+
+    const fetchOpenAIModels = async () => {
+      const key = process.env.OPENAI_API_KEY || process.env.OPEN_AI_KEY;
+      if (!key) return [];
+      try {
+        const { default: OpenAI } = await import('openai');
+        const client = new OpenAI({ apiKey: key });
+        const resp = await client.models.list();
+        const chatPrefixes = ['gpt-4o', 'gpt-4-turbo', 'gpt-4', 'gpt-3.5-turbo', 'o1', 'o3', 'o4'];
+        const excluded = ['-embedding', '-tts', '-whisper', '-dall-e', '-search', '-realtime'];
+        return (resp.data || [])
+          .filter((m: any) => {
+            if (excluded.some(x => m.id.includes(x))) return false;
+            if (m.id.includes(':')) return false; // fine-tuned
+            return chatPrefixes.some(p => m.id.startsWith(p));
+          })
+          .sort((a: any, b: any) => b.created - a.created)
+          .map((m: any) => ({ id: m.id, name: m.id, provider: 'openai' }));
+      } catch { return []; }
+    };
+
+    const fetchGroqModels = async () => {
+      const key = process.env.GROQ_API_KEY || process.env.GROK_API_KEY;
+      if (!key) return [];
+      try {
+        const { default: Groq } = await import('groq-sdk');
+        const client = new Groq({ apiKey: key });
+        const resp = await client.models.list();
+        const excluded = ['whisper', 'tts', 'guard', 'vision'];
+        return (resp.data || [])
+          .filter((m: any) => {
+            if (!m.active && m.active !== undefined) return false;
+            return !excluded.some(x => m.id.toLowerCase().includes(x));
+          })
+          .sort((a: any, b: any) => a.id.localeCompare(b.id))
+          .map((m: any) => ({ id: m.id, name: m.id, provider: 'groq' }));
+      } catch { return []; }
+    };
+
+    const [anthropic, openai, groq] = await Promise.all([
+      fetchAnthropicModels(),
+      fetchOpenAIModels(),
+      fetchGroqModels(),
+    ]);
+
+    results.anthropic = anthropic;
+    results.openai = openai;
+    results.groq = groq;
+
+    const all = [...anthropic, ...openai, ...groq];
+    sendJson(res, 200, { models: all, byProvider: results });
     return true;
   }
 

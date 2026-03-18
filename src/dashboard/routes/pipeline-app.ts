@@ -21,7 +21,7 @@ import { sendJson, readBody, atomicWriteFile } from '../utils.js';
 import { discoverCompositions } from '../../workflow/loader.js';
 import { topoSort, gatherInputVariables, getDownstreamNodes } from '../graph-utils.js';
 import { debugLog } from '../../debug-log.js';
-import { loadBindings, getTargetIds } from '../pipeline-bindings.js';
+import { loadBindings, saveBindings, loadRules, saveRules, applyRules, getTargetIds, type RulesDocument } from '../pipeline-bindings.js';
 
 // ────────────────────────────────────────────────────────────────
 //  Constants
@@ -688,20 +688,32 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
 
   // ── POST /api/app/:id/generate-previs ──────────────────────
   // Generate or regenerate a previs image for a shot element.
-  // Resolves character headshots and location references from the
-  // pipeline's asset data and passes them as reference images to
-  // the nanobanana image generator.
+  //
+  // BEHAVIOR IS DEFINED BY THE PIPELINE: reads actions/generate-image.json
+  // from the pipeline's directory. This config controls:
+  //   - How character/location references are resolved (bindings, fallback)
+  //   - Prompt template and style
+  //   - Model and aspect ratio defaults
+  //
+  // The chat agent can modify that config when the user says things like
+  // "only use characters mentioned in the shot description."
   if (req.method === 'POST' && subPath === '/generate-previs') {
     const body = await readBody(req);
     const elementId: string = body.elementId;
     const promptOverrides: Record<string, string> = body.promptOverrides || {};
-    const model: 'flash' | 'pro' = body.model || 'flash';
-    const aspectRatio: string = body.aspectRatio || '16:9';
 
     if (!elementId) {
       sendJson(res, 400, { error: 'elementId required' });
       return true;
     }
+
+    // Load pipeline's action config (the pipeline owns this behavior)
+    const compositions = await discoverCompositions();
+    const pipelineEntry = compositions.find(c => c.composition.id === pipelineId);
+    const actionConfig = await loadActionConfig(pipelineEntry?.pipelineDir, 'generate-image');
+
+    const model: 'flash' | 'pro' = body.model || actionConfig.generation?.model || 'flash';
+    const aspectRatio: string = body.aspectRatio || actionConfig.generation?.aspectRatio || '16:9';
 
     // Collect all screenplay data from app state
     const screenplay = await collectScreenplayData(pipelineId);
@@ -718,33 +730,64 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
       return true;
     }
 
-    // Gather reference images — character headshots + location landscape
+    // ── Resolve references using the pipeline's action config ──
+    // The config declares HOW to find the right references for each entity type.
+    // This is the key encapsulation: the pipeline defines its own resolution strategy,
+    // the server just executes it.
     const referenceImages: string[] = [];
     const refDescriptions: string[] = [];
 
-    // Try to resolve character bindings first (pipeline-specific connections)
-    // Falls back to previs.characterIds if no bindings exist
+    const refConfig = actionConfig.referenceResolution || {};
+
+    // -- Characters --
+    const charConfig = refConfig.characters || {};
     let characterIds: string[] = [];
 
-    // Check for pipeline bindings
-    const compositions = await discoverCompositions();
-    const pipelineEntry = compositions.find(c => c.composition.id === pipelineId);
-    if (pipelineEntry?.isV2Pipeline && pipelineEntry.pipelineDir) {
-      const bindingsDoc = await loadBindings(pipelineEntry.pipelineDir);
-      if (bindingsDoc.bindings.length > 0) {
-        // Use bindings: "which characters does this shot depict?"
-        characterIds = getTargetIds(bindingsDoc, 'shot', elementId, 'depicts');
-        debugLog.info('generate-previs', `Using ${characterIds.length} characters from bindings for ${elementId}`);
+    if (charConfig.strategy === 'binding-match' && pipelineEntry?.isV2Pipeline && pipelineEntry.pipelineDir) {
+      // Strategy: use bindings to find which characters this shot depicts
+      let bindingsDoc = await loadBindings(pipelineEntry.pipelineDir);
+
+      // Check if THIS specific shot has any character bindings
+      const existingCharBindings = bindingsDoc.bindings.filter(
+        b => b.type === (charConfig.bindingType || 'depicts') &&
+             b.source.entityType === (charConfig.sourceEntityType || 'shot') &&
+             b.source.entityId === elementId
+      );
+
+      // Auto-create bindings from rules if this shot has no bindings yet
+      if (charConfig.autoCreateBindings && existingCharBindings.length === 0) {
+        const rulesDoc = await loadRules(pipelineEntry.pipelineDir);
+        if (rulesDoc.rules.length > 0) {
+          debugLog.info('generate-previs', `Auto-creating bindings for shot ${elementId} from pipeline rules...`);
+          const autoResult = await autoRunRules(pipelineId, pipelineEntry.pipelineDir, rulesDoc);
+          if (autoResult.added > 0) {
+            debugLog.info('generate-previs', `Auto-created ${autoResult.added} bindings`);
+            bindingsDoc = await loadBindings(pipelineEntry.pipelineDir);
+          }
+        }
       }
+
+      characterIds = getTargetIds(
+        bindingsDoc,
+        charConfig.sourceEntityType || 'shot',
+        elementId,
+        charConfig.bindingType || 'depicts',
+      );
+      debugLog.info('generate-previs', `Bindings → ${characterIds.length} characters for ${elementId}`, { characterIds });
+      debugLog.info('generate-previs', `Character assets available: ${Object.keys(screenplay.characterAssets).join(', ')}`);
     }
 
-    // Fall back to previs.characterIds if no bindings found
-    if (characterIds.length === 0) {
+    // Fallback strategy
+    if (characterIds.length === 0 && charConfig.fallback !== 'none') {
       characterIds = previs?.characterIds || [];
+      debugLog.info('generate-previs', `Fallback → ${characterIds.length} characters from previs.characterIds`);
     }
 
     for (const charId of characterIds) {
       const charAsset = screenplay.characterAssets[charId];
+      debugLog.info('generate-previs', `Looking for asset for character "${charId}": ${charAsset ? 'FOUND' : 'NOT FOUND'}`, {
+        charAsset: charAsset ? { id: charAsset.id, filePath: charAsset.filePath } : null,
+      });
       if (charAsset?.filePath && fileExists(charAsset.filePath)) {
         referenceImages.push(charAsset.filePath);
         const charData = screenplay.characters[charId];
@@ -753,16 +796,31 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
           `Reference image ${referenceImages.length} is ${charData?.displayName || charData?.name || charId}` +
           (desc ? ` (${desc.substring(0, 120)})` : '')
         );
+      } else if (charAsset?.filePath) {
+        debugLog.info('generate-previs', `Character asset file does not exist: ${charAsset.filePath}`);
       }
     }
 
-    // Location — check bindings first, fall back to previs.locationId
-    let locationId = previs?.locationId;
-    if (!locationId && pipelineEntry?.isV2Pipeline && pipelineEntry.pipelineDir) {
+    // -- Location --
+    const locConfig = refConfig.locations || {};
+    let locationId: string | undefined = undefined;
+
+    if (locConfig.strategy === 'binding-match' && pipelineEntry?.isV2Pipeline && pipelineEntry.pipelineDir) {
       const bindingsDoc = await loadBindings(pipelineEntry.pipelineDir);
-      const locIds = getTargetIds(bindingsDoc, 'shot', elementId, 'set-in');
+      const locIds = getTargetIds(
+        bindingsDoc,
+        locConfig.sourceEntityType || 'shot',
+        elementId,
+        locConfig.bindingType || 'set-in',
+      );
       if (locIds.length > 0) locationId = locIds[0];
     }
+
+    // Location fallback
+    if (!locationId && locConfig.fallback !== 'none') {
+      locationId = previs?.locationId;
+    }
+
     if (locationId) {
       const locAsset = screenplay.locationAssets[locationId];
       if (locAsset?.filePath && fileExists(locAsset.filePath)) {
@@ -775,24 +833,17 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
       }
     }
 
-    // Build the generation prompt following the Nano Banana prompting guide:
-    //   Formula: [Reference images] + [Relationship instruction] + [New scenario]
-    //   With: [Subject] + [Action] + [Location/context] + [Composition] + [Style]
-    //   Best practices: narrative descriptions (not keyword lists), positive framing,
-    //   specific camera/lens/lighting, color grading, materiality emphasis.
+    // ── Build prompt using pipeline's config ──
     const shotText = element.shotText || element.content || '';
     const previsDescription = promptOverrides.description || previs?.description || shotText;
     const cameraIntent = promptOverrides.cameraIntent || previs?.cameraIntent || '';
     const composition = promptOverrides.composition || previs?.composition || '';
     const lighting = promptOverrides.lighting || previs?.lighting || '';
 
-    // Derive camera/lens details from shot metadata
     const frameSize = element.frameSize || '';
     const cameraMovement = element.cameraMovement || '';
-    const duration = previs?.durationSeconds || 0;
 
-    // Map frame sizes to lens descriptions for the prompt
-    const lensMap: Record<string, string> = {
+    const lensMap: Record<string, string> = actionConfig.frameSizeLensMap || {
       'WIDE': 'wide-angle lens (24mm), deep depth of field',
       'EXTREME WIDE': 'ultra wide-angle lens (16mm), expansive depth of field',
       'MEDIUM': 'standard lens (50mm), natural perspective with moderate depth of field',
@@ -802,8 +853,7 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
     };
     const lensDesc = lensMap[frameSize.toUpperCase()] || '';
 
-    // Map camera movements to cinematic technique descriptions
-    const movementMap: Record<string, string> = {
+    const movementMap: Record<string, string> = actionConfig.cameraMovementMap || {
       'STATIC': 'locked-off camera on a tripod, perfectly still frame',
       'PAN': 'smooth horizontal pan following the action',
       'TILT': 'gentle vertical tilt revealing the scene',
@@ -820,22 +870,20 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
 
     let prompt = '';
 
-    // [Reference images] + [Relationship instruction]
+    // Reference instruction from config
+    const refInstruction = actionConfig.referenceInstruction
+      || 'Using the attached reference images as visual guides for character appearance and location setting. The characters in this frame must match these references exactly — same face, hair, body type, clothing, and features. The environment should be consistent with the location reference.';
+
     if (referenceImages.length > 0) {
-      prompt += 'Using the attached reference images as visual guides for character appearance and location setting: ';
-      prompt += refDescriptions.join('. ') + '. ';
-      prompt += 'The characters in this frame must match these references exactly — same face, hair, body type, clothing, and features. ';
-      prompt += 'The environment should be consistent with the location reference.\n\n';
+      prompt += refInstruction + '\n' + refDescriptions.join('. ') + '.\n\n';
     }
 
-    // [Subject] + [Action] — narrative scene description
     prompt += previsDescription;
     if (previsDescription !== shotText && shotText) {
       prompt += ` The camera captures: ${shotText}`;
     }
     prompt += '\n\n';
 
-    // [Composition] — camera, lens, and framing
     if (lensDesc || movementDesc || composition) {
       prompt += 'Shot on a cinema camera';
       if (lensDesc) prompt += ` with a ${lensDesc}`;
@@ -845,7 +893,6 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
       prompt += '\n\n';
     }
 
-    // [Lighting]
     if (lighting) {
       prompt += `Lighting: ${lighting}. `;
     }
@@ -854,10 +901,10 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
     }
     if (lighting || cameraIntent) prompt += '\n\n';
 
-    // [Style] — cinematic film stock and color grading
-    prompt += 'Style: Cinematic previsualization frame, shot on 35mm film with subtle grain. ';
-    prompt += 'Professional cinematography with rich color grading, deep shadows, and controlled highlights. ';
-    prompt += 'The image should feel like a single frame from a feature film.';
+    // Style from config or default
+    const stylePrompt = actionConfig.prompt?.sections?.find((s: any) => s.id === 'style')?.template
+      || 'Style: Cinematic previsualization frame, shot on 35mm film with subtle grain. Professional cinematography with rich color grading, deep shadows, and controlled highlights. The image should feel like a single frame from a feature film.';
+    prompt += stylePrompt;
 
     // Import and call nanobanana
     let nanobananaTool: typeof import('../../loop/tools/nanobanana.js').nanobanana;
@@ -875,7 +922,9 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
     const outputPath = join(previsDir, `previs_${elementId}_${Date.now().toString(36)}.png`);
 
     try {
-      debugLog.info('generate-previs', `Generating previs for ${elementId} with ${referenceImages.length} reference images`);
+      debugLog.info('generate-previs', `Generating previs for ${elementId} with ${referenceImages.length} reference images`, {
+        referenceImages,
+      });
       const result = await nanobananaTool({
         action: 'generate' as const,
         prompt,
@@ -915,8 +964,267 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
     return true;
   }
 
+  // ── GET /api/app/:id/rules ───────────────────────────────────
+  // Get binding rules for this pipeline
+  if (req.method === 'GET' && subPath === '/rules') {
+    const compositions = await discoverCompositions();
+    const entry = compositions.find(c => c.composition.id === pipelineId);
+    if (entry?.isV2Pipeline && entry.pipelineDir) {
+      const rulesDoc = await loadRules(entry.pipelineDir);
+      sendJson(res, 200, rulesDoc);
+    } else {
+      sendJson(res, 200, { version: '1.0', pipelineId, rules: [] });
+    }
+    return true;
+  }
+
+  // ── PUT /api/app/:id/rules ───────────────────────────────────
+  // Save binding rules for this pipeline
+  if (req.method === 'PUT' && subPath === '/rules') {
+    const compositions = await discoverCompositions();
+    const entry = compositions.find(c => c.composition.id === pipelineId);
+    if (!entry?.isV2Pipeline || !entry.pipelineDir) {
+      sendJson(res, 400, { error: 'Not a v2 pipeline' });
+      return true;
+    }
+    const body = await readBody(req);
+    const rulesDoc: RulesDocument = {
+      version: '1.0',
+      pipelineId,
+      rules: body.rules || [],
+    };
+    await saveRules(entry.pipelineDir, rulesDoc);
+    sendJson(res, 200, rulesDoc);
+    return true;
+  }
+
+  // ── POST /api/app/:id/rules/run ──────────────────────────────
+  // Execute binding rules against current pipeline data.
+  // Scans node outputs for entities, applies text-match rules,
+  // and creates new bindings. No hardcoded domain logic — everything
+  // comes from the pipeline's own rules configuration.
+  if (req.method === 'POST' && subPath === '/rules/run') {
+    const compositions = await discoverCompositions();
+    const entry = compositions.find(c => c.composition.id === pipelineId);
+    if (!entry?.isV2Pipeline || !entry.pipelineDir) {
+      sendJson(res, 400, { error: 'Not a v2 pipeline' });
+      return true;
+    }
+
+    const rulesDoc = await loadRules(entry.pipelineDir);
+    if (rulesDoc.rules.length === 0) {
+      sendJson(res, 200, { added: 0, removed: 0, message: 'No rules configured' });
+      return true;
+    }
+
+    const result = await autoRunRules(pipelineId, entry.pipelineDir, rulesDoc);
+
+    debugLog.info('rules-run', `Applied ${rulesDoc.rules.length} rules: ${result.added} added, ${result.replaced} replaced`);
+    sendJson(res, 200, {
+      rulesApplied: rulesDoc.rules.length,
+      added: result.added,
+      replaced: result.replaced,
+      totalBindings: result.totalBindings,
+    });
+    return true;
+  }
+
+
+  // ── PUT /api/app/:id/element/:elementId ──────────────────────
+  // Update a single element's field (e.g., shot description)
+  const elementMatch = subPath.match(/^\/element\/([^/]+)$/);
+  if (req.method === 'PUT' && elementMatch) {
+    const elementId = decodeURIComponent(elementMatch[1]);
+    const body = await readBody(req);
+    const { field, value, elementType } = body;
+
+    if (!field || value === undefined) {
+      sendJson(res, 400, { error: 'field and value required' });
+      return true;
+    }
+
+    // Find and update the element in app state
+    const dir = join(APP_STATE_DIR, pipelineId);
+    let files: string[];
+    try {
+      files = await readdir(dir);
+    } catch {
+      sendJson(res, 404, { error: 'No app state found' });
+      return true;
+    }
+
+    let updated = false;
+    for (const file of files) {
+      if (!file.endsWith('.json') || file === '_manifest.json') continue;
+      const filePath = join(dir, file);
+      try {
+        const raw = await readFile(filePath, 'utf-8');
+        const data = JSON.parse(raw);
+        if (updateElementField(data, elementId, field, value)) {
+          await writeFile(filePath, JSON.stringify(data, null, 2));
+          updated = true;
+          debugLog.info('element-update', `Updated ${elementType} ${elementId}.${field} in ${file}`);
+          break;
+        }
+      } catch { /* skip */ }
+    }
+
+    if (!updated) {
+      sendJson(res, 404, { error: 'Element not found: ' + elementId });
+      return true;
+    }
+
+    // Update manifest to mark as manually edited
+    const manifest = await loadManifest(pipelineId);
+    if (manifest) {
+      // Find which node contains this element and mark it edited
+      // For now, just update the timestamp
+      await saveManifest(manifest);
+    }
+
+    sendJson(res, 200, { success: true, elementId, field, value });
+    return true;
+  }
+
   return false;
 };
+
+// ────────────────────────────────────────────────────────────────
+//  Auto-run rules — shared by /rules/run and generate-previs
+// ────────────────────────────────────────────────────────────────
+
+/**
+ * Run binding rules against a pipeline's app state data.
+ * Discovers entities automatically and applies text-match rules.
+ * Returns the number of bindings added/replaced.
+ */
+async function autoRunRules(
+  pipelineId: string,
+  pipelineDir: string,
+  rulesDoc: RulesDocument,
+): Promise<{ added: number; replaced: number; totalBindings: number }> {
+  // Load all node outputs from app state
+  const stateDir = join(APP_STATE_DIR, pipelineId);
+  let nodeDataFiles: string[] = [];
+  try { nodeDataFiles = await readdir(stateDir); } catch { /* empty */ }
+
+  const sourceEntities: Array<{ entityType: string; entityId: string; data: Record<string, any> }> = [];
+  const targetEntities: Array<{ entityType: string; entityId: string; data: Record<string, any> }> = [];
+
+  const sourceTypes = new Set(rulesDoc.rules.map(r => r.source.entityType));
+  const targetTypes = new Set(rulesDoc.rules.map(r => r.target.entityType));
+
+  for (const f of nodeDataFiles) {
+    if (!f.endsWith('.json') || f.startsWith('_')) continue;
+    try {
+      const raw = await readFile(join(stateDir, f), 'utf-8');
+      const nodeData = JSON.parse(raw);
+      // App state files store data at the top level (not under outputs)
+      // Try nodeData.outputs first (pipeline run format), fall back to nodeData itself
+      const outputs = nodeData.outputs || nodeData;
+      scanForEntities(outputs, sourceTypes, sourceEntities);
+      scanForEntities(outputs, targetTypes, targetEntities);
+    } catch { /* skip */ }
+  }
+
+  debugLog.info('auto-run-rules', `Discovered ${sourceEntities.length} source entities, ${targetEntities.length} target entities`);
+
+  const newBindings = applyRules(rulesDoc.rules, sourceEntities, targetEntities);
+
+  const bindingsDoc = await loadBindings(pipelineDir);
+  const manualBindings = bindingsDoc.bindings.filter(b => !b.origin.startsWith('auto:'));
+  const manualKeys = new Set(
+    manualBindings.map(b => `${b.source.entityId}:${b.target.entityId}:${b.type}`)
+  );
+  const uniqueNew = newBindings.filter(b => {
+    const key = `${b.source.entityId}:${b.target.entityId}:${b.type}`;
+    return !manualKeys.has(key);
+  });
+
+  const oldAutoCount = bindingsDoc.bindings.filter(b => b.origin.startsWith('auto:')).length;
+  bindingsDoc.bindings = [...manualBindings, ...uniqueNew];
+  bindingsDoc.pipelineId = pipelineId;
+  await saveBindings(pipelineDir, bindingsDoc);
+
+  return {
+    added: uniqueNew.length,
+    replaced: oldAutoCount,
+    totalBindings: bindingsDoc.bindings.length,
+  };
+}
+
+// ────────────────────────────────────────────────────────────────
+//  Entity scanner — extract typed entities from node outputs
+// ────────────────────────────────────────────────────────────────
+
+/**
+ * Recursively scan node outputs for arrays of objects that match
+ * the expected entity types. Uses heuristics: array key name,
+ * item.type field, or singular form of the key.
+ */
+function scanForEntities(
+  obj: any,
+  targetTypes: Set<string>,
+  results: Array<{ entityType: string; entityId: string; data: Record<string, any> }>,
+  seenIds = new Set<string>(),
+) {
+  if (!obj || typeof obj !== 'object') return;
+  for (const key of Object.keys(obj)) {
+    const val = obj[key];
+    if (Array.isArray(val) && val.length > 0 && val[0] && typeof val[0] === 'object') {
+      // Determine entity type from:
+      // 1. item.type field (e.g., { type: "shot", ... })
+      // 2. singular of array key (e.g., "characters" → "character")
+      // 3. the key itself
+      for (const item of val) {
+        const itemType: string = (
+          item.type ||
+          key.replace(/s$/, '') ||
+          key
+        ).toLowerCase();
+
+        if (!targetTypes.has(itemType)) continue;
+
+        const itemId = item.id || item.libraryId || item.assetId || item.slug;
+        if (!itemId || seenIds.has(itemId)) continue;
+        seenIds.add(itemId);
+
+        results.push({
+          entityType: itemType,
+          entityId: itemId,
+          data: item,
+        });
+      }
+    }
+    // Recurse into nested objects (but not arrays — already handled)
+    if (val && typeof val === 'object' && !Array.isArray(val)) {
+      scanForEntities(val, targetTypes, results, seenIds);
+    }
+  }
+}
+
+// ────────────────────────────────────────────────────────────────
+//  Action config loader — reads pipeline-owned behavior configs
+// ────────────────────────────────────────────────────────────────
+
+/**
+ * Load an action config from the pipeline's actions/ directory.
+ * Returns the config or a safe empty default if not found.
+ *
+ * Action configs live at <pipelineDir>/actions/<actionId>.json.
+ * They define pipeline-specific behavior that the server executes.
+ * The chat agent can modify these files when the user asks for changes.
+ */
+async function loadActionConfig(pipelineDir: string | undefined, actionId: string): Promise<Record<string, any>> {
+  if (!pipelineDir) return {};
+  const configPath = join(pipelineDir, 'actions', `${actionId}.json`);
+  try {
+    const raw = await readFile(configPath, 'utf-8');
+    return JSON.parse(raw);
+  } catch {
+    return {};
+  }
+}
 
 // ────────────────────────────────────────────────────────────────
 //  Screenplay data helpers — resolve references for previs gen
@@ -997,6 +1305,10 @@ async function collectScreenplayData(pipelineId: string): Promise<ScreenplayData
       if (k === 'assets' && typeof v === 'object' && !Array.isArray(v) && v.assets) {
         if (Array.isArray(v.assets) && v.assets.length > allAssets.length) allAssets = v.assets;
       }
+      // Also check for assetCollection wrapper (common in screenplay pipelines)
+      if (k === 'assetCollection' && typeof v === 'object' && !Array.isArray(v) && v.assets) {
+        if (Array.isArray(v.assets) && v.assets.length > allAssets.length) allAssets = v.assets;
+      }
 
       if (typeof v === 'object' && !Array.isArray(v)) {
         extractScreenplayFields(v, depth + 1);
@@ -1005,6 +1317,8 @@ async function collectScreenplayData(pipelineId: string): Promise<ScreenplayData
   }
 
   if (allElements.length === 0) return null;
+
+  debugLog.info('collectScreenplayData', `Found ${allAssets.length} assets, ${allCharacters.length} characters, ${allElements.length} elements`);
 
   // Build lookup maps
   const characters: Record<string, any> = {};
@@ -1039,6 +1353,8 @@ async function collectScreenplayData(pipelineId: string): Promise<ScreenplayData
       locationAssets[meta.locationId] = asset;
     }
   }
+
+  debugLog.info('collectScreenplayData', `Mapped ${Object.keys(characterAssets).length} character assets: ${Object.keys(characterAssets).join(', ')}`);
 
   return { characters, locations, elementMap, previsMap, characterAssets, locationAssets, assetMap };
 }
@@ -1083,6 +1399,38 @@ async function updatePrevisAsset(
  * Recursively walk an object to find and update the previs shot matching elementId.
  * Updates the asset's filePath or creates a new asset entry.
  */
+
+/**
+ * Recursively walk an object to find and update an element by ID.
+ * Updates the specified field on the element.
+ */
+function updateElementField(obj: any, elementId: string, field: string, value: any): boolean {
+  if (!obj || typeof obj !== 'object') return false;
+  if (Array.isArray(obj)) {
+    for (const item of obj) {
+      // Check if this item is the element we're looking for
+      if (item?.id === elementId) {
+        item[field] = value;
+        item._editedAt = new Date().toISOString();
+        return true;
+      }
+      if (updateElementField(item, elementId, field, value)) return true;
+    }
+    return false;
+  }
+  // Check if this object is the element
+  if (obj.id === elementId) {
+    obj[field] = value;
+    obj._editedAt = new Date().toISOString();
+    return true;
+  }
+  // Recurse into object properties
+  for (const k of Object.keys(obj)) {
+    if (updateElementField(obj[k], elementId, field, value)) return true;
+  }
+  return false;
+}
+
 function updatePrevisInObj(obj: any, elementId: string, newFilePath: string): boolean {
   if (!obj || typeof obj !== 'object') return false;
   if (Array.isArray(obj)) {

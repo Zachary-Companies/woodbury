@@ -294,6 +294,18 @@ async function buildCompositionContext(ctx: DashboardContext, compositionId: str
     if (isV2 && pipelineDir) sections.push(`Pipeline directory: ${pipelineDir}`);
     if (comp.description) sections.push(comp.description);
 
+    // Load pipeline's own CLAUDE.md documentation (the pipeline's instruction manual)
+    if (isV2 && pipelineDir) {
+      try {
+        const claudeMd = await readFile(join(pipelineDir, 'CLAUDE.md'), 'utf-8');
+        if (claudeMd.trim()) {
+          sections.push('\n### Pipeline Documentation (CLAUDE.md)');
+          // Include up to 4000 chars — this is the pipeline's own instructions
+          sections.push(claudeMd.length > 4000 ? claudeMd.slice(0, 4000) + '\n... (truncated)' : claudeMd);
+        }
+      } catch { /* no CLAUDE.md, that's fine */ }
+    }
+
     // Pipeline documentation summary
     const docs = comp.metadata?.generatedPipelineDocs;
     if (docs && docs.length > 0) {
@@ -382,6 +394,36 @@ async function buildCompositionContext(ctx: DashboardContext, compositionId: str
         }
         sections.push('\nWhen you start a task, update its status in TODO.json. Add new items as you discover work.');
       }
+    }
+
+    // v2: Include action configs — pipeline-owned behavior definitions
+    if (isV2 && pipelineDir) {
+      try {
+        const actionsDir = join(pipelineDir, 'actions');
+        let actionFiles: string[] = [];
+        try { actionFiles = (await readdir(actionsDir)).filter(f => f.endsWith('.json')); } catch { /* no actions dir */ }
+
+        if (actionFiles.length > 0) {
+          sections.push('\n### Action Configs (Pipeline-Owned Behavior)');
+          sections.push(`Actions directory: \`${pipelineDir}/actions/\``);
+          sections.push('These files control how UI buttons behave. Edit them to change behavior.');
+          for (const af of actionFiles) {
+            try {
+              const raw = await readFile(join(actionsDir, af), 'utf-8');
+              const config = JSON.parse(raw);
+              sections.push(`\n**${af}** — ${config.label || config.id || af}`);
+              if (config.description) sections.push(`  ${config.description}`);
+              if (config.referenceResolution) {
+                const refs = config.referenceResolution;
+                for (const [key, val] of Object.entries(refs)) {
+                  const v = val as any;
+                  sections.push(`  - ${key}: strategy="${v.strategy}", fallback="${v.fallback || 'default'}"`);
+                }
+              }
+            } catch { /* skip */ }
+          }
+        }
+      } catch { /* actions loading is best-effort */ }
     }
 
     // v2: Include bindings context — custom data connections between entities
@@ -493,12 +535,46 @@ async function buildCompositionContext(ctx: DashboardContext, compositionId: str
       sections.push('- After editing files, sync the graph: POST /api/compositions/:id/sync');
       sections.push('Each __script_file__ node maps to a .ts file in `src/`. Edit the file to change the node behavior.');
       sections.push('');
-      sections.push('### Bindings Management');
-      sections.push('- Create bindings to connect entities across nodes (e.g., which characters are in each shot)');
-      sections.push('- Edit `bindings/bindings.json` or use the API endpoints');
-      sections.push('- Create auto-binding rules in `bindings/rules.json` to automatically detect relationships');
-      sections.push('- Define custom views in `bindings/views.json` for specialized app mode rendering');
-      sections.push('- When the user asks about character/shot/location relationships, check and update bindings');
+      sections.push('### Actions (Pipeline-Owned Behavior)');
+      sections.push(`Action configs in \`${pipelineDir}/actions/\` control how UI buttons (Regen, Generate, etc.) behave.`);
+      sections.push('Each action is a JSON file that the server reads at execution time. Edit them to change behavior.');
+      sections.push('');
+      sections.push('**`actions/generate-image.json`** — Controls the Regen/Generate Image button:');
+      sections.push('- `referenceResolution.characters.strategy` — "binding-match" (use bindings) or "all" (use all characters)');
+      sections.push('- `referenceResolution.characters.fallback` — "none" (no fallback) or uses previs.characterIds');
+      sections.push('- `referenceResolution.characters.autoCreateBindings` — auto-run binding rules if no bindings exist');
+      sections.push('- `referenceResolution.locations` — same pattern for location references');
+      sections.push('- `referenceInstruction` — text prepended to the prompt when reference images are included');
+      sections.push('- `prompt.sections` — ordered prompt template sections (references, scene, camera, lighting, style)');
+      sections.push('- `frameSizeLensMap` / `cameraMovementMap` — maps frame sizes and movements to lens/technique descriptions');
+      sections.push('- `generation.model` / `generation.aspectRatio` — defaults for the image generator');
+      sections.push('');
+      sections.push('When the user says things like "only use characters mentioned in the shot" or "change the style to anime",');
+      sections.push('read the action config, modify the relevant fields, and write it back. The server reads it fresh each time.');
+      sections.push('');
+      sections.push('**How the Regen/Generate button works (full stack):**');
+      sections.push('1. Client: `compositions-app.js` has `generatePrevisImage()` which calls `POST /api/app/:id/generate-previs`');
+      sections.push('2. Server: `src/dashboard/routes/pipeline-app.ts` handles generate-previs:');
+      sections.push('   - Reads `actions/generate-image.json` from the pipeline directory');
+      sections.push('   - Resolves references per the config (binding-match strategy uses bindings, auto-runs rules if needed)');
+      sections.push('   - Builds the prompt from config templates + shot/element data');
+      sections.push('   - Calls nanobanana image generation with the prompt + reference images');
+      sections.push('3. Bindings: `src/dashboard/pipeline-bindings.ts` has `applyRules()` / `matchValues()` for text matching');
+      sections.push('4. Entity scan: `scanForEntities()` in pipeline-app.ts discovers entities from app state node outputs');
+      sections.push('');
+      sections.push('**To change how references are resolved:** edit `actions/generate-image.json` (referenceResolution)');
+      sections.push('**To change which names match:** edit `bindings/rules.json` (matchField, matchOptions)');
+      sections.push('**To change the prompt/style:** edit `actions/generate-image.json` (prompt.sections, referenceInstruction)');
+      sections.push('**To change model/aspect ratio:** edit `actions/generate-image.json` (generation)');
+      sections.push('**To change the server logic itself:** edit `src/dashboard/routes/pipeline-app.ts` (generate-previs endpoint)');
+      sections.push('**To change the UI rendering:** edit `src/config-dashboard/compositions-app.js`');
+      sections.push('');
+      sections.push('### Bindings & Rules');
+      sections.push('- `bindings/bindings.json` — semantic connections between entities (shot→character, shot→location)');
+      sections.push('- `bindings/rules.json` — auto-detection rules (e.g., match character names in shot text → create depicts binding)');
+      sections.push('- `bindings/views.json` — custom view configurations for app mode rendering');
+      sections.push('- The generate-image action uses bindings to resolve which references to include per-shot');
+      sections.push('- When the user asks about character/shot/location relationships, check and update bindings or rules');
       sections.push('');
       sections.push('### Testing (REQUIRED for v2 pipelines)');
       sections.push('- Every node file (e.g. `src/fetch-data.ts`) must have a test file (`src/fetch-data.test.ts`)');

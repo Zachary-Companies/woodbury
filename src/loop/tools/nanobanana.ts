@@ -12,8 +12,8 @@ import * as path from 'path';
 import * as os from 'os';
 
 const MODELS = {
-  flash: 'gemini-2.0-flash-exp-image-generation',
-  pro: 'gemini-2.5-flash-image',
+  flash: 'gemini-3.1-flash-image-preview',
+  pro: 'nano-banana-pro-preview',
 } as const;
 
 const ASPECT_RATIOS = ['1:1', '2:3', '3:2', '3:4', '4:3', '4:5', '5:4', '9:16', '16:9', '21:9'] as const;

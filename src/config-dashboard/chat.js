@@ -392,13 +392,19 @@
       '<div class="chat-panel">' +
         '<div class="chat-panel-header">' +
           '<span>Woodbury Assistant</span>' +
-          '<div class="chat-temp-control">' +
-            '<button class="chat-temp-btn" id="chat-temp-btn" title="Temperature">' +
-              '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
-                '<path d="M14 14.76V3.5a2.5 2.5 0 0 0-5 0v11.26a4.5 4.5 0 1 0 5 0z"/>' +
-              '</svg>' +
-              '<span id="chat-temp-value">0.7</span>' +
-            '</button>' +
+          '<div class="chat-header-actions">' +
+            '<div class="chat-run-indicator" id="chat-run-indicator" aria-live="polite">' +
+              '<span class="chat-run-indicator-spinner" aria-hidden="true"></span>' +
+              '<span class="chat-run-indicator-text" id="chat-run-indicator-text">Idle</span>' +
+            '</div>' +
+            '<div class="chat-temp-control">' +
+              '<button class="chat-temp-btn" id="chat-temp-btn" title="Temperature">' +
+                '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+                  '<path d="M14 14.76V3.5a2.5 2.5 0 0 0-5 0v11.26a4.5 4.5 0 1 0 5 0z"/>' +
+                '</svg>' +
+                '<span id="chat-temp-value">0.7</span>' +
+              '</button>' +
+            '</div>' +
           '</div>' +
         '</div>' +
         '<div class="chat-messages" id="chat-messages">' +
@@ -575,6 +581,7 @@
 
     chatInitialized = true;
     renderTaskPanel();
+  syncRunIndicator();
 
     // Load session list for sidebar
     refreshSessionList();
@@ -606,7 +613,10 @@
     chatHistory.push({ role: 'user', content: text });
 
     isSending = true;
+    taskPanelState.phase = 'running';
     updateSendButton();
+    syncRunIndicator();
+    renderTaskPanel();
 
     // Create the assistant message bubble (will be streamed into)
     var assistantBubble = appendMessage('assistant', '');
@@ -1055,8 +1065,11 @@
       chatHistory.push({ role: 'assistant', content: finalText });
     }
     isSending = false;
+    taskPanelState.phase = 'idle';
     abortController = null;
     updateSendButton();
+    syncRunIndicator();
+    renderTaskPanel();
     var input = document.getElementById('chat-input');
     if (input) input.focus();
 
@@ -1117,8 +1130,27 @@
     var btn = document.getElementById('chat-send-btn');
     if (btn) {
       btn.disabled = isSending;
-      btn.textContent = isSending ? '...' : 'Send';
+      btn.textContent = isSending ? 'Working...' : 'Send';
     }
+  }
+
+  function getRunIndicatorLabel() {
+    if (!isSending) return 'Idle';
+    var phase = String(taskPanelState.phase || '').trim().toLowerCase();
+    if (!phase || phase === 'idle' || phase === 'running') {
+      return 'Agent Running';
+    }
+    return humanizePhaseName(phase);
+  }
+
+  function syncRunIndicator() {
+    var indicator = document.getElementById('chat-run-indicator');
+    var label = document.getElementById('chat-run-indicator-text');
+    if (!indicator || !label) return;
+
+    var active = !!isSending;
+    indicator.classList.toggle('active', active);
+    label.textContent = getRunIndicatorLabel();
   }
 
   function resizeChatInput(input) {
@@ -1249,6 +1281,8 @@
     var transitionEl = document.getElementById('chat-skill-transition-list');
     var recoveryEl = document.getElementById('chat-recovery-list');
     var policyEl = document.getElementById('chat-skill-policy-list');
+
+    syncRunIndicator();
 
     if (phaseEl) phaseEl.textContent = humanizePhaseName(taskPanelState.phase || 'idle');
     if (taskCountEl) taskCountEl.textContent = String(taskPanelState.taskOrder.length);
