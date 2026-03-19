@@ -1352,7 +1352,14 @@ function renderAppScreenplayView(timeline, state) {
 
   // Header
   html += '<div class="nle-header">';
+  html += '<div class="nle-title-row" style="display:flex;align-items:baseline;gap:12px;">';
   html += '<h1 class="nle-title">' + compEscHtml(timeline.title || 'Untitled Screenplay') + '</h1>';
+  // Show project folder
+  var _projectFolder = (compData && compData.metadata && compData.metadata.projectFolder) || '';
+  if (_projectFolder) {
+    html += '<span style="font-size:0.7rem;color:#6366f1;opacity:0.6;font-weight:400;" title="' + compEscAttr(_projectFolder) + '">&#x1f4c1; ' + compEscHtml(_projectFolder.split('/').pop() || _projectFolder) + '</span>';
+  }
+  html += '</div>';
   if (timeline.logline) {
     html += '<p class="nle-logline">' + compEscHtml(timeline.logline) + '</p>';
   }
@@ -1883,8 +1890,9 @@ async function renderCompositionAppPage() {
   }
 
   if (!_customViewRendered) {
-    // Use React for screenplay and data views when available
-    if (window.WoodburyReact && (appViewMode === 'screenplay' || appViewMode === 'data') && detectScreenplayData(appState)) {
+    // Use React for all app views when available
+    console.log('[woodbury] React check:', !!window.WoodburyReact, 'viewMode:', appViewMode, 'hasData:', detectScreenplayData(appState));
+    if (window.WoodburyReact && detectScreenplayData(appState)) {
       html += '<div id="react-pipeline-root" style="height:100%;"></div>';
       setTimeout(function() {
         var reactRoot = document.getElementById('react-pipeline-root');
