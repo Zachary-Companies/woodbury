@@ -2,7 +2,7 @@
  * VoicesView — manage voice assignments for characters, preview TTS.
  */
 import React, { useState, useEffect, useCallback } from 'react';
-import { usePipelineStore, type Character } from '../stores/pipeline-store';
+import { usePipeline, type Character } from '../stores/PipelineProvider';
 
 interface VoiceOption {
   voice_id: string;
@@ -13,7 +13,7 @@ interface VoiceOption {
 }
 
 export function VoicesView() {
-  const { projectData, pipelineId } = usePipelineStore();
+  const { project: projectData, pipelineId } = usePipeline();
   const [voices, setVoices] = useState<VoiceOption[]>([]);
   const [loadingVoices, setLoadingVoices] = useState(true);
   const [bindings, setBindings] = useState<any[]>([]);

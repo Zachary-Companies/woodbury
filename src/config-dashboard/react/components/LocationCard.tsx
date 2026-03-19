@@ -2,16 +2,17 @@
  * LocationCard — displays a location with image and enrich button.
  */
 import React, { useState } from 'react';
-import { enrichEntity, type Location } from '../stores/pipeline-store';
+import { usePipeline, type Location } from '../stores/PipelineProvider';
 
 export function LocationCard({ location }: { location: Location }) {
+  const { enrichLocation } = usePipeline();
   const [enriching, setEnriching] = useState(false);
   const hasDescription = location.description && location.description.length > 20;
 
   const handleEnrich = async () => {
     setEnriching(true);
     try {
-      await enrichEntity('locations', location.id);
+      await enrichLocation(location.id);
     } catch (err: any) {
       console.error('Enrich failed:', err);
     }

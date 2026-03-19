@@ -2,10 +2,11 @@
  * CharacterCard — displays a character with headshot, traits, and enrich button.
  */
 import React, { useState } from 'react';
-import { enrichEntity, type Character } from '../stores/pipeline-store';
+import { usePipeline, type Character } from '../stores/PipelineProvider';
 import { CharacterEditor } from './CharacterEditor';
 
 export function CharacterCard({ character, pipelineId }: { character: Character; pipelineId: string }) {
+  const { enrichCharacter } = usePipeline();
   const [enriching, setEnriching] = useState(false);
   const [showEditor, setShowEditor] = useState(false);
   const hasDescription = character.description && character.description.length > 20;
@@ -13,7 +14,7 @@ export function CharacterCard({ character, pipelineId }: { character: Character;
   const handleEnrich = async () => {
     setEnriching(true);
     try {
-      await enrichEntity('characters', character.id);
+      await enrichCharacter(character.id);
     } catch (err: any) {
       console.error('Enrich failed:', err);
     }

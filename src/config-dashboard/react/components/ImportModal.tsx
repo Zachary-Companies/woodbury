@@ -2,7 +2,7 @@
  * ImportModal — upload/paste screenplay, preview parse results, set project folder, import.
  */
 import React, { useState, useRef, useCallback } from 'react';
-import { saveProjectData, clearProject, setState, loadPipeline, getState } from '../stores/pipeline-store';
+import { usePipeline } from '../stores/PipelineProvider';
 
 interface ParseResult {
   metadata: Record<string, string>;
@@ -112,6 +112,7 @@ function parseFountain(text: string): ParseResult {
 // ── Component ────────────────────────────────────────────────
 
 export function ImportModal({ onClose }: { onClose: () => void }) {
+  const pipeline = usePipeline();
   const [tab, setTab] = useState<'paste' | 'file'>('paste');
   const [text, setText] = useState('');
   const [fileName, setFileName] = useState('');
@@ -132,7 +133,7 @@ export function ImportModal({ onClose }: { onClose: () => void }) {
       // Send to server for extraction
       try {
         const buffer = await file.arrayBuffer();
-        const res = await fetch(`/api/app/${encodeURIComponent(getState().pipelineId)}/extract-pdf-text`, {
+        const res = await fetch(`/api/app/${encodeURIComponent(pipeline.pipelineId)}/extract-pdf-text`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/pdf' },
           body: buffer,
@@ -179,7 +180,7 @@ export function ImportModal({ onClose }: { onClose: () => void }) {
     setError('');
 
     try {
-      const { pipelineId } = getState();
+      const pipelineId = pipeline.pipelineId;
 
       // Save project folder to composition metadata
       await fetch(`/api/compositions/${encodeURIComponent(pipelineId)}`, {
@@ -189,7 +190,7 @@ export function ImportModal({ onClose }: { onClose: () => void }) {
       });
 
       // Clear old state
-      await clearProject();
+      await pipeline.clearProject();
 
       // Build character array
       const charArray = Object.values(parseResult.characters).map((c, i) => ({
@@ -263,7 +264,7 @@ export function ImportModal({ onClose }: { onClose: () => void }) {
       });
 
       // Reload pipeline
-      await loadPipeline(pipelineId);
+      await pipeline.reload();
       onClose();
     } catch (err: any) {
       setError('Import failed: ' + err.message);

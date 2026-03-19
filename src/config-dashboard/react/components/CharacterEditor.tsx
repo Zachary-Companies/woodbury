@@ -2,10 +2,10 @@
  * CharacterEditor — modal for editing a character's full details.
  */
 import React, { useState, useCallback } from 'react';
-import { saveProjectData, usePipelineStore, type Character } from '../stores/pipeline-store';
+import { usePipeline, type Character } from '../stores/PipelineProvider';
 
 export function CharacterEditor({ character, onClose }: { character: Character; onClose: () => void }) {
-  const { projectData } = usePipelineStore();
+  const { project: projectData, updateCharacter, saveProject } = usePipeline();
   const [form, setForm] = useState<Character>({ ...character });
   const [saving, setSaving] = useState(false);
 
@@ -16,11 +16,11 @@ export function CharacterEditor({ character, onClose }: { character: Character; 
   const handleSave = useCallback(async () => {
     if (!projectData) return;
     setSaving(true);
-    const updated = projectData.characters.map(c => c.id === form.id ? form : c);
-    await saveProjectData({ characters: updated });
+    updateCharacter(form.id, form);
+    await saveProject();
     setSaving(false);
     onClose();
-  }, [form, projectData, onClose]);
+  }, [form, projectData, updateCharacter, saveProject, onClose]);
 
   return (
     <div className="fixed inset-0 bg-black/60 z-[10001] flex items-center justify-center backdrop-blur-sm" onClick={e => e.target === e.currentTarget && onClose()}>

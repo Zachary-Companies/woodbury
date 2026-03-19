@@ -3,7 +3,7 @@
  * Displays scenes with dialogue, action, characters, and locations.
  */
 import React, { useState, useMemo, useRef, useCallback } from 'react';
-import { usePipelineStore, enrichEntity, generateAssets, type Character, type Location, type Section, type Element } from '../stores/pipeline-store';
+import { usePipeline, type Character, type Location, type Section, type Element } from '../stores/PipelineProvider';
 
 // ── Character color hash ─────────────────────────────────────
 
@@ -213,7 +213,8 @@ function Toolbar({ projectData, onAction }: {
 // ── Main ScreenplayView ──────────────────────────────────────
 
 export function ScreenplayView() {
-  const { projectData, loading, error, pipelineId } = usePipelineStore();
+  const pipeline = usePipeline();
+  const { project: projectData, loading, error, pipelineId } = pipeline;
   const [activeSceneId, setActiveSceneId] = useState<string | null>(null);
   const [actionStatus, setActionStatus] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
@@ -295,7 +296,7 @@ export function ScreenplayView() {
           for (const c of projectData?.characters || []) {
             if (!c.description || c.description.length < 20) {
               setActionStatus(`Enriching ${c.name}...`);
-              await enrichEntity('characters', c.id);
+              await pipeline.enrichCharacter(c.id);
             }
           }
           break;
@@ -303,15 +304,15 @@ export function ScreenplayView() {
           for (const l of projectData?.locations || []) {
             if (!l.description || l.description.length < 20) {
               setActionStatus(`Enriching ${l.name}...`);
-              await enrichEntity('locations', l.id);
+              await pipeline.enrichLocation(l.id);
             }
           }
           break;
         case 'generate-headshots':
-          await generateAssets('characters');
+          await pipeline.generateCharacterImages();
           break;
         case 'generate-locations':
-          await generateAssets('locations');
+          await pipeline.generateLocationImages();
           break;
       }
       setActionStatus(null);

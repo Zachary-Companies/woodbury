@@ -15,7 +15,7 @@ await build({
   bundle: true,
   outfile: join(__dirname, '..', 'react-app.js'),
   format: 'iife',
-  globalName: 'WoodburyReact',
+  // No globalName — index.tsx sets window.WoodburyReact directly
   platform: 'browser',
   target: ['es2020'],
   jsx: 'automatic',

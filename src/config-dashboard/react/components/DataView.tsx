@@ -2,14 +2,15 @@
  * DataView — displays characters and locations as card grids with enrich/generate actions.
  */
 import React, { useState, useCallback } from 'react';
-import { usePipelineStore, generateAssets } from '../stores/pipeline-store';
+import { usePipeline } from '../stores/PipelineProvider';
 import { CharacterCard } from './CharacterCard';
 import { LocationCard } from './LocationCard';
 
 type Tab = 'characters' | 'locations' | 'metadata' | 'sections';
 
 export function DataView() {
-  const { projectData, pipelineId, loading } = usePipelineStore();
+  const pipeline = usePipeline();
+  const { project: projectData, pipelineId, loading } = pipeline;
   const [activeTab, setActiveTab] = useState<Tab>('characters');
   const [filter, setFilter] = useState('');
   const [generating, setGenerating] = useState<string | null>(null);
@@ -17,7 +18,7 @@ export function DataView() {
   const handleGenerate = useCallback(async (type: 'characters' | 'locations') => {
     setGenerating(type);
     try {
-      await generateAssets(type);
+      await (type === 'characters' ? pipeline.generateCharacterImages() : pipeline.generateLocationImages());
     } catch (err: any) {
       console.error('Generation failed:', err);
     }
