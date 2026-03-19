@@ -4,7 +4,6 @@
  */
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { PipelineProvider, usePipeline } from '../stores/PipelineProvider';
-import { usePipelineStore, loadPipeline, clearProject, setState } from '../stores/pipeline-store';
 import { ScreenplayView } from './ScreenplayView';
 import { DataView } from './DataView';
 import { VoicesView } from './VoicesView';
@@ -29,28 +28,22 @@ export function PipelineApp({ pipelineId }: { pipelineId: string }) {
 }
 
 function PipelineAppInner({ pipelineId }: { pipelineId: string }) {
-  const { project: projectData, pipelineName, loading, projectFolder } = usePipeline();
-  // Also sync to the old store for backward compat with vanilla views
-  const { activeView } = usePipelineStore();
+  const pipeline = usePipeline();
+  const { project: projectData, pipelineName, loading, projectFolder } = pipeline;
   const [showImport, setShowImport] = useState(false);
   const [currentView, setCurrentView] = useState<ViewMode>('screenplay');
 
-  useEffect(() => {
-    loadPipeline(pipelineId);
-  }, [pipelineId]);
-
   const handleViewChange = useCallback((view: ViewMode) => {
     setCurrentView(view);
-    setState({ activeView: view });
   }, []);
 
   const handleNewProject = useCallback(async () => {
     if (projectData && projectData.elements?.length > 0) {
       if (!confirm('This will clear all current project data. Continue?')) return;
     }
-    await clearProject();
-    await loadPipeline(pipelineId);
-  }, [pipelineId, projectData]);
+    await pipeline.clearProject();
+    await pipeline.reload();
+  }, [pipeline, projectData]);
 
   const title = projectData?.metadata?.title || pipelineName || 'Pipeline';
   const charCount = projectData?.characters?.length || 0;
@@ -143,7 +136,7 @@ function PipelineAppInner({ pipelineId }: { pipelineId: string }) {
  */
 function VanillaViewBridge({ viewName, pipelineId }: { viewName: string; pipelineId: string }) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const { projectData } = usePipelineStore();
+  const { project: projectData } = usePipeline();
 
   useEffect(() => {
     const container = containerRef.current;
