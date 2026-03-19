@@ -1883,7 +1883,18 @@ async function renderCompositionAppPage() {
   }
 
   if (!_customViewRendered) {
-    if (appViewMode === 'screenplay' && detectScreenplayData(appState)) {
+    if (appViewMode === 'screenplay' && detectScreenplayData(appState) && window.WoodburyReact) {
+      // Use React screenplay view
+      html += '<div id="react-screenplay-root" style="height:100%;"></div>';
+      // Mount React after DOM update
+      setTimeout(function() {
+        var reactRoot = document.getElementById('react-screenplay-root');
+        if (reactRoot && window.WoodburyReact) {
+          window.WoodburyReact.mountScreenplay(reactRoot, compData.id);
+        }
+      }, 0);
+    } else if (appViewMode === 'screenplay' && detectScreenplayData(appState)) {
+      // Fallback to vanilla JS if React not loaded
       var timeline = stitchScreenplayTimeline(appState);
       html += renderAppScreenplayView(timeline, appState);
     } else if (appActiveSection) {
