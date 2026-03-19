@@ -2,10 +2,11 @@
  * PipelineApp — the main React shell for pipeline app mode.
  * Manages view switching between Screenplay, Data, Editor, Script, Voices.
  */
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { usePipelineStore, loadPipeline, clearProject, setState } from '../stores/pipeline-store';
 import { ScreenplayView } from './ScreenplayView';
 import { DataView } from './DataView';
+import { VoicesView } from './VoicesView';
 import { ImportModal } from './ImportModal';
 
 type ViewMode = 'screenplay' | 'data' | 'editor' | 'script' | 'voices';
@@ -112,9 +113,9 @@ export function PipelineApp({ pipelineId }: { pipelineId: string }) {
           <>
             {currentView === 'screenplay' && <ScreenplayView />}
             {currentView === 'data' && <DataView />}
-            {currentView === 'editor' && <PlaceholderView label="Editor" description="The NLE timeline editor will be converted to React in a future update." />}
-            {currentView === 'script' && <PlaceholderView label="Script Editor" description="The Monaco-based Fountain editor will be converted to React in a future update." />}
-            {currentView === 'voices' && <PlaceholderView label="Voices" description="Voice assignment and TTS settings will be converted to React in a future update." />}
+            {currentView === 'voices' && <VoicesView />}
+            {currentView === 'editor' && <VanillaViewBridge viewName="editor" pipelineId={pipelineId} />}
+            {currentView === 'script' && <VanillaViewBridge viewName="script-editor" pipelineId={pipelineId} />}
           </>
         )}
       </div>
@@ -125,12 +126,69 @@ export function PipelineApp({ pipelineId }: { pipelineId: string }) {
   );
 }
 
-function PlaceholderView({ label, description }: { label: string; description: string }) {
+/**
+ * VanillaViewBridge — loads a vanilla JS pipeline custom view (editor, script-editor)
+ * by fetching its JS/CSS and executing it in a container div.
+ */
+function VanillaViewBridge({ viewName, pipelineId }: { viewName: string; pipelineId: string }) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const { projectData } = usePipelineStore();
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    // Load the custom view's CSS
+    const cssLink = document.createElement('link');
+    cssLink.rel = 'stylesheet';
+    cssLink.href = `/api/app/${encodeURIComponent(pipelineId)}/view/${encodeURIComponent(viewName)}/view.css`;
+    document.head.appendChild(cssLink);
+
+    // Create a scoped container
+    const scope = document.createElement('div');
+    scope.className = 'pipeline-view-scope';
+    scope.setAttribute('data-pipeline-view', viewName);
+    scope.style.height = '100%';
+    scope.style.display = 'flex';
+    scope.style.flexDirection = 'column';
+    container.appendChild(scope);
+
+    // Load and execute the view JS
+    const script = document.createElement('script');
+    script.src = `/api/app/${encodeURIComponent(pipelineId)}/view/${encodeURIComponent(viewName)}/view.js`;
+    script.onload = () => {
+      // The view JS registers itself via window.registerPipelineView
+      // Then we need to render it — check if it registered
+      const views = (window as any)._pipelineCustomViews || [];
+      const view = views.find((v: any) => v.name === viewName);
+      if (view && view.render) {
+        // Build app state for the view
+        const appState = {
+          nodeData: {},
+          pipelineId,
+          pipelineName: projectData?.metadata?.title || '',
+        } as any;
+
+        // Render
+        const data = view.stitch ? view.stitch(appState) : appState;
+        scope.innerHTML = view.render(data, appState);
+
+        // Wire events
+        if (view.wireEvents) {
+          view.wireEvents(scope, appState);
+        }
+      }
+    };
+    document.body.appendChild(script);
+
+    return () => {
+      cssLink.remove();
+      script.remove();
+      container.innerHTML = '';
+    };
+  }, [viewName, pipelineId]);
+
   return (
-    <div className="flex flex-col items-center justify-center h-full text-slate-500 gap-3">
-      <h2 className="text-lg font-semibold text-slate-400">{label}</h2>
-      <p className="text-sm max-w-md text-center">{description}</p>
-      <p className="text-xs text-slate-600">Use the vanilla JS version from the sidebar views in the meantime.</p>
-    </div>
+    <div ref={containerRef} className="h-full overflow-hidden" style={{ padding: 0 }} />
   );
 }

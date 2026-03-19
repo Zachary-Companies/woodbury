@@ -42,12 +42,24 @@ function SceneStrip({ scenes, activeScene, onSelect }: {
 
 // ── Dialogue Block ───────────────────────────────────────────
 
-function DialogueBlock({ element, character }: { element: Element; character?: Character }) {
+function DialogueBlock({ element, character, onEdit }: { element: Element; character?: Character; onEdit?: (id: string, field: string, value: string) => void }) {
   const name = element.characterName || 'UNKNOWN';
   const color = charColor(name);
+  const [editing, setEditing] = useState(false);
+  const [editText, setEditText] = useState('');
+
+  const handleDoubleClick = () => {
+    setEditText(element.lines?.join('\n') || element.content || '');
+    setEditing(true);
+  };
+
+  const handleSave = () => {
+    if (onEdit) onEdit(element.id, 'content', editText);
+    setEditing(false);
+  };
 
   return (
-    <div className="my-3 ml-16">
+    <div className="my-3 ml-16 group">
       <div className="flex items-center gap-2 mb-0.5" style={{ borderLeft: `3px solid ${color}`, paddingLeft: 10 }}>
         {character?.imagePath && (
           <img
@@ -65,11 +77,27 @@ function DialogueBlock({ element, character }: { element: Element; character?: C
           </span>
         )}
       </div>
-      <div className="ml-[13px] pl-3 text-[13px] text-slate-300 leading-relaxed">
-        {element.lines ? element.lines.map((line, i) => (
-          <p key={i} className="mb-0.5">{line}</p>
-        )) : <p>{element.content}</p>}
-      </div>
+      {editing ? (
+        <div className="ml-[13px] pl-3 mt-1">
+          <textarea
+            value={editText}
+            onChange={e => setEditText(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter' && e.metaKey) handleSave(); if (e.key === 'Escape') setEditing(false); }}
+            className="w-full bg-[#0f1219] border border-indigo-500/30 rounded px-2 py-1 text-[13px] text-slate-300 outline-none resize-y min-h-[40px]"
+            autoFocus
+          />
+          <div className="flex gap-1 mt-1">
+            <button onClick={handleSave} className="px-2 py-0.5 rounded text-[10px] bg-indigo-500/15 text-indigo-300 border border-indigo-500/25">Save (⌘↵)</button>
+            <button onClick={() => setEditing(false)} className="px-2 py-0.5 rounded text-[10px] text-slate-500 border border-white/5">Cancel</button>
+          </div>
+        </div>
+      ) : (
+        <div className="ml-[13px] pl-3 text-[13px] text-slate-300 leading-relaxed cursor-text" onDoubleClick={handleDoubleClick} title="Double-click to edit">
+          {element.lines ? element.lines.map((line, i) => (
+            <p key={i} className="mb-0.5">{line}</p>
+          )) : <p>{element.content}</p>}
+        </div>
+      )}
     </div>
   );
 }
@@ -223,18 +251,37 @@ export function ScreenplayView() {
     return result;
   }, [projectData?.sections]);
 
-  // Group elements by scene (simple heuristic: scene headings in elements)
+  // Group elements by scene using scene heading matching
   const sceneElements = useMemo(() => {
-    // For now, distribute elements evenly across scenes
-    // TODO: Use elementStart indices from sections
     const all = projectData?.elements || [];
     if (scenes.length === 0) return new Map<string, Element[]>();
 
     const map = new Map<string, Element[]>();
-    const perScene = Math.ceil(all.length / scenes.length);
-    scenes.forEach((scene, i) => {
-      map.set(scene.id || `scene-${i}`, all.slice(i * perScene, (i + 1) * perScene));
-    });
+    // Initialize empty arrays for all scenes
+    scenes.forEach((scene, i) => map.set(scene.id || `scene-${i}`, []));
+
+    // Strategy: walk through elements and assign to scenes based on
+    // finding action elements that match scene headings
+    let currentSceneIdx = 0;
+    const sceneHeadings = scenes.map(s => (s.title || '').toUpperCase().trim());
+
+    for (const elem of all) {
+      // Check if this element is a scene heading (matches a scene title)
+      if (elem.type === 'action' && elem.content) {
+        const upper = elem.content.toUpperCase().trim();
+        const matchIdx = sceneHeadings.findIndex((h, i) => i >= currentSceneIdx && (h === upper || upper.startsWith(h.substring(0, 20))));
+        if (matchIdx >= 0 && matchIdx >= currentSceneIdx) {
+          currentSceneIdx = matchIdx;
+          // Don't add the heading itself as an element (it's the scene card title)
+          continue;
+        }
+      }
+
+      const sceneId = scenes[currentSceneIdx]?.id || `scene-${currentSceneIdx}`;
+      const arr = map.get(sceneId);
+      if (arr) arr.push(elem);
+    }
+
     return map;
   }, [scenes, projectData?.elements]);
 
