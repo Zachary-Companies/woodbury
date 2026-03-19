@@ -2410,6 +2410,19 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
         }
       }
 
+      // Save image paths back into project.json
+      for (const r of results) {
+        if (!r.path) continue;
+        if (r.type === 'character') {
+          const char = project.characters?.find((c: any) => c.name === r.name);
+          if (char) char.imagePath = r.path;
+        } else if (r.type === 'location') {
+          const loc = project.locations?.find((l: any) => l.name === r.name);
+          if (loc) loc.imagePath = r.path;
+        }
+      }
+      await saveProjectFile(pfolder, project);
+
       const succeeded = results.filter(r => r.path).length;
       const failed = results.filter(r => r.error).length;
       sendJson(res, 200, { success: true, generated: succeeded, failed, results });

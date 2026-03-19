@@ -1181,13 +1181,20 @@ function stitchScreenplayTimeline(state) {
   var charMap = {};
   if (allCharacters) {
     for (var ci = 0; ci < allCharacters.length; ci++) {
-      charMap[allCharacters[ci].id] = allCharacters[ci];
+      var c = allCharacters[ci];
+      charMap[c.id] = c;
+      if (c.name) charMap[c.name] = c;
+      if (c.name) charMap[c.name.toUpperCase()] = c;
+      if (c.displayName) charMap[c.displayName] = c;
     }
   }
   var locMap = {};
   if (allLocations) {
     for (var li = 0; li < allLocations.length; li++) {
-      locMap[allLocations[li].id] = allLocations[li];
+      var l = allLocations[li];
+      locMap[l.id] = l;
+      if (l.name) locMap[l.name] = l;
+      if (l.name) locMap[l.name.toUpperCase()] = l;
     }
   }
   var assetMap = {};
@@ -1435,6 +1442,12 @@ function renderNLEScene(scene, timeline) {
 
   // Scene header
   html += '<div class="nle-scene-header">';
+  // Location image banner
+  var sceneLocName = scene.location || scene.heading || scene.title || '';
+  var sceneLocObj = sceneLocName ? (timeline.locations[sceneLocName] || null) : null;
+  if (sceneLocObj && sceneLocObj.imagePath) {
+    html += '<div class="nle-scene-location-img"><img src="/api/file?path=' + encodeURIComponent(sceneLocObj.imagePath) + '" alt="" /></div>';
+  }
   html += '<div class="nle-scene-header-left">';
   html += '<h3 class="nle-scene-title">' + compEscHtml(scene.title) + '</h3>';
   if (scene.heading) {
@@ -1675,6 +1688,11 @@ function renderNLEElement(elem, timeline) {
       charConnAttrs = ' data-conn-entity-type="character" data-conn-entity-id="' + compEscAttr(elem.characterId) + '" data-conn-entity-label="' + compEscAttr(charName) + '"';
     }
     html += '<div class="nle-dialogue-header" style="border-left-color:' + charColor + '">';
+    // Character headshot thumbnail
+    var charObj = timeline.characters[charName] || timeline.characters[elem.characterId] || null;
+    if (charObj && charObj.imagePath) {
+      html += '<img class="nle-dialogue-avatar" src="/api/file?path=' + encodeURIComponent(charObj.imagePath) + '" alt="" />';
+    }
     html += '<span class="nle-dialogue-character nle-editable' + (charConnSel ? ' app-conn-selected' : '') + '" style="color:' + charColor + '"' + charConnAttrs;
     html += ' data-nle-edit-type="dialogue" data-nle-edit-field="characterName" data-nle-edit-element-id="' + compEscAttr(elem.id || '') + '" title="Click to edit character name"';
     html += '>' + compEscHtml(charName) + '</span>';
