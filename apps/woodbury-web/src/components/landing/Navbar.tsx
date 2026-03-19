@@ -31,6 +31,9 @@ export default function Navbar() {
           <a href="/#use-cases" className="text-sm text-slate-400 transition-colors hover:text-white">
             Use Cases
           </a>
+          <a href="/#pipelines" className="text-sm text-slate-400 transition-colors hover:text-white">
+            Pipelines
+          </a>
           <a href="/extensions" className="text-sm text-slate-400 transition-colors hover:text-white">
             Extensions
           </a>
@@ -86,6 +89,9 @@ export default function Navbar() {
             </a>
             <a href="/#use-cases" onClick={() => setMobileOpen(false)} className="text-sm text-slate-400 hover:text-white">
               Use Cases
+            </a>
+            <a href="/#pipelines" onClick={() => setMobileOpen(false)} className="text-sm text-slate-400 hover:text-white">
+              Pipelines
             </a>
             <a href="/extensions" onClick={() => setMobileOpen(false)} className="text-sm text-slate-400 hover:text-white">
               Extensions

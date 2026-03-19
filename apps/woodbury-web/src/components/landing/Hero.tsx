@@ -28,8 +28,8 @@ export default function Hero() {
 
         {/* Subtitle */}
         <p className="mx-auto mt-6 max-w-2xl text-center text-lg leading-relaxed text-slate-400">
-          Record your actions, replay them with AI. Woodbury turns your workflows
-          into automated pipelines — built for everyone, not just developers.
+          Record your actions, replay them with AI. Build creative pipelines that generate
+          screenplays, videos, voiceovers, and more — built for everyone, not just developers.
         </p>
 
         {/* CTA buttons */}

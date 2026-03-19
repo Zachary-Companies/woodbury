@@ -31,6 +31,9 @@ export default function Footer() {
                 <a href="/#use-cases" className="text-sm text-slate-400 transition-colors hover:text-white">
                   Use Cases
                 </a>
+                <a href="/#pipelines" className="text-sm text-slate-400 transition-colors hover:text-white">
+                  Pipelines
+                </a>
                 <a href="/extensions" className="text-sm text-slate-400 transition-colors hover:text-white">
                   Extensions
                 </a>
