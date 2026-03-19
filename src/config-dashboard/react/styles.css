@@ -1,0 +1,56 @@
+/*
+ * React Component Styles
+ * Fallback styles for when Tailwind CDN is unavailable.
+ * These match the Tailwind classes used in our React components.
+ */
+
+/* ── Root container ────────────────────────────────────────── */
+#react-pipeline-root {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  color: #e2e8f0;
+  background: #0f172a;
+  height: 100%;
+}
+
+/* ── Animation ─────────────────────────────────────────────── */
+@keyframes pulse {
+  50% { opacity: 0.5; }
+}
+.animate-pulse { animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
+
+/* ── Line clamp ────────────────────────────────────────────── */
+.line-clamp-2 {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.line-clamp-3 {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* ── Truncate ──────────────────────────────────────────────── */
+.truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── Scrollbar ─────────────────────────────────────────────── */
+#react-pipeline-root ::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+#react-pipeline-root ::-webkit-scrollbar-track {
+  background: transparent;
+}
+#react-pipeline-root ::-webkit-scrollbar-thumb {
+  background: rgba(100, 116, 139, 0.2);
+  border-radius: 3px;
+}
+#react-pipeline-root ::-webkit-scrollbar-thumb:hover {
+  background: rgba(100, 116, 139, 0.4);
+}

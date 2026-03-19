@@ -5,6 +5,17 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Woodbury Config Dashboard</title>
   <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="react/styles.css">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    // Configure Tailwind to not conflict with existing styles
+    tailwind.config = {
+      prefix: '',
+      important: '#react-pipeline-root',
+      corePlugins: { preflight: false },
+      theme: { extend: {} },
+    };
+  </script>
   <script src="https://cdn.jsdelivr.net/npm/marked@15.0.12/marked.min.js"></script>
 </head>
 <body>

@@ -3,9 +3,11 @@
  */
 import React, { useState } from 'react';
 import { enrichEntity, type Character } from '../stores/pipeline-store';
+import { CharacterEditor } from './CharacterEditor';
 
 export function CharacterCard({ character, pipelineId }: { character: Character; pipelineId: string }) {
   const [enriching, setEnriching] = useState(false);
+  const [showEditor, setShowEditor] = useState(false);
   const hasDescription = character.description && character.description.length > 20;
 
   const handleEnrich = async () => {
@@ -87,6 +89,17 @@ export function CharacterCard({ character, pipelineId }: { character: Character;
       >
         {enriching ? '⏳ Enriching...' : hasDescription ? '✅ Enriched' : '✨ Enrich with AI'}
       </button>
+
+      {/* Edit button */}
+      <button
+        onClick={() => setShowEditor(true)}
+        className="w-full py-1 rounded text-[10px] text-slate-500 border border-white/5 hover:text-slate-300 hover:bg-white/[0.03] transition-colors"
+      >
+        ✏️ Edit Details
+      </button>
+
+      {/* Editor modal */}
+      {showEditor && <CharacterEditor character={character} onClose={() => setShowEditor(false)} />}
     </div>
   );
 }

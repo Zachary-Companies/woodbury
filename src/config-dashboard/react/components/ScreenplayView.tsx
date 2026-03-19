@@ -216,6 +216,7 @@ export function ScreenplayView() {
   const { projectData, loading, error, pipelineId } = usePipelineStore();
   const [activeSceneId, setActiveSceneId] = useState<string | null>(null);
   const [actionStatus, setActionStatus] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
   const contentRef = useRef<HTMLDivElement>(null);
 
   // Build character/location lookup maps
@@ -362,9 +363,18 @@ export function ScreenplayView() {
         </div>
       </div>
 
-      {/* Toolbar */}
-      <div className="flex-shrink-0 px-4">
-        <Toolbar projectData={projectData} onAction={handleAction} />
+      {/* Toolbar + Search */}
+      <div className="flex-shrink-0 px-4 flex items-center gap-2">
+        <div className="flex-1">
+          <Toolbar projectData={projectData} onAction={handleAction} />
+        </div>
+        <input
+          type="text"
+          value={searchQuery}
+          onChange={e => setSearchQuery(e.target.value)}
+          placeholder="Search dialogue, characters, action..."
+          className="w-52 px-3 py-1.5 rounded-md text-xs bg-white/[0.03] border border-white/5 text-slate-300 placeholder-slate-600 outline-none focus:border-indigo-500/30"
+        />
       </div>
 
       {/* Status bar */}
@@ -385,12 +395,26 @@ export function ScreenplayView() {
 
       {/* Content */}
       <div ref={contentRef} className="flex-1 overflow-y-auto px-4 py-4">
-        {/* Group by acts */}
+        {/* Group by acts, filter by search */}
         {(() => {
           let currentAct = '';
+          const query = searchQuery.toLowerCase().trim();
+
           return scenes.map((scene, i) => {
             const id = scene.id || `scene-${i}`;
             const elements = sceneElements.get(id) || [];
+
+            // Filter by search query
+            if (query) {
+              const sceneMatches = (scene.title || '').toLowerCase().includes(query);
+              const elemMatches = elements.some(e =>
+                (e.content || '').toLowerCase().includes(query) ||
+                (e.characterName || '').toLowerCase().includes(query) ||
+                (e.lines || []).some(l => l.toLowerCase().includes(query))
+              );
+              if (!sceneMatches && !elemMatches) return null;
+            }
+
             const showActHeader = scene.actTitle && scene.actTitle !== currentAct;
             if (scene.actTitle) currentAct = scene.actTitle;
 
@@ -404,7 +428,7 @@ export function ScreenplayView() {
                 <SceneCard scene={scene} elements={elements} charMap={charMap} locMap={locMap} />
               </React.Fragment>
             );
-          });
+          }).filter(Boolean);
         })()}
       </div>
     </div>
