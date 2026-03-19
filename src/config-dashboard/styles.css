@@ -9032,7 +9032,7 @@ textarea.wf-se-input {
 /* ── Navigation ─────────────────────────────────────────────── */
 
 .app-nav {
-  flex: 1;
+  height: auto;
   padding: 0.5rem 0;
   overflow-y: auto;
 }
