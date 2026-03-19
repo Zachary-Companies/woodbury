@@ -1883,14 +1883,13 @@ async function renderCompositionAppPage() {
   }
 
   if (!_customViewRendered) {
-    if (appViewMode === 'screenplay' && detectScreenplayData(appState) && window.WoodburyReact) {
-      // Use React screenplay view
-      html += '<div id="react-screenplay-root" style="height:100%;"></div>';
-      // Mount React after DOM update
+    // Use React for screenplay and data views when available
+    if (window.WoodburyReact && (appViewMode === 'screenplay' || appViewMode === 'data') && detectScreenplayData(appState)) {
+      html += '<div id="react-pipeline-root" style="height:100%;"></div>';
       setTimeout(function() {
-        var reactRoot = document.getElementById('react-screenplay-root');
+        var reactRoot = document.getElementById('react-pipeline-root');
         if (reactRoot && window.WoodburyReact) {
-          window.WoodburyReact.mountScreenplay(reactRoot, compData.id);
+          window.WoodburyReact.mountPipelineApp(reactRoot, compData.id);
         }
       }, 0);
     } else if (appViewMode === 'screenplay' && detectScreenplayData(appState)) {
