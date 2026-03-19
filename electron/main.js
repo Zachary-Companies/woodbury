@@ -154,6 +154,9 @@ function createWindow(url) {
     show: false, // Show after ready-to-show to avoid flash
   });
 
+  // Disable HTTP cache to ensure fresh JS/CSS on every load
+  mainWindow.webContents.session.clearCache();
+
   mainWindow.loadURL(url);
 
   mainWindow.once('ready-to-show', () => {

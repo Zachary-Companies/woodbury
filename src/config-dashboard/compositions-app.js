@@ -1100,14 +1100,23 @@ function _walkForScreenplay(obj, found, depth) {
 function stitchScreenplayTimeline(state) {
   if (!state || !state.nodeData) return null;
 
-  // Collect all relevant data from any node
+  // Collect all relevant data — prioritize assembly node (node-15) first
   var allSections = null, allElements = null, allPrevis = null;
   var allCharacters = null, allLocations = null, allAssets = null;
   var metadata = null;
 
+  // First pass: extract from assembly node (node-15) — this is the single source of truth
+  var assemblyNode = state.nodeData['node-15'] || state.nodeData['node-16'];
+  if (assemblyNode) {
+    var aOut = assemblyNode.outputs || assemblyNode;
+    _extractScreenplayFields(aOut, 0);
+  }
+
+  // Second pass: only fill in gaps from other nodes (don't override assembly data)
   for (var nodeId in state.nodeData) {
-    var outputs = state.nodeData[nodeId].outputs;
-    if (!outputs) continue;
+    if (nodeId === 'node-15' || nodeId === 'node-16') continue;
+    var outputs = state.nodeData[nodeId].outputs || state.nodeData[nodeId];
+    if (!outputs || typeof outputs !== 'object') continue;
     _extractScreenplayFields(outputs, 0);
   }
 
@@ -5193,54 +5202,51 @@ function showImportScriptModal() {
       _fountainSource: parsedData._rawText,
     };
 
-    // Save to all nodes sequentially
-    var saves = [
-      { nodeId: NODE_MAP.metadata, outputs: metadataOutput },
-      { nodeId: NODE_MAP.characters, outputs: charactersOutput },
-      { nodeId: NODE_MAP.locations, outputs: locationsOutput },
-      { nodeId: NODE_MAP.sections, outputs: sectionsOutput },
-      { nodeId: NODE_MAP.elements, outputs: elementsOutput },
-      { nodeId: NODE_MAP.assembly, outputs: assemblyOutput },
-    ];
+    // Save directly to project.json in the project folder
+    // This is the single source of truth — no per-node files needed
 
-    // First clear old state so no stale data remains
+    // Build project.json data
+    var projectData = {
+      version: '1.0',
+      pipelineId: pid,
+      createdAt: new Date().toISOString(),
+      metadata: metadataOutput.metadata,
+      characters: charArray,
+      locations: locArray,
+      sections: sectionsOutput.sections,
+      elements: elementsOutput.elements,
+      previsualizations: { shots: [] },
+      assets: [],
+      _fountainSource: parsedData._rawText,
+    };
+
+    // First clear old state
     btn.textContent = 'Clearing old data...';
     fetch('/api/app/' + encodeURIComponent(pid) + '/state', { method: 'DELETE' })
     .then(function(r) { return r.json(); })
     .then(function() {
-    var completed = 0;
-    function saveNext() {
-      if (completed >= saves.length) {
+      btn.textContent = 'Saving to project folder...';
+      // Try direct project.json write first
+      return fetch('/api/app/' + encodeURIComponent(pid) + '/project', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ project: projectData }),
+      });
+    })
+    .then(function(r) {
+      if (!r.ok) throw new Error('Failed to save assembly data');
+      return r.json();
+    })
+    .then(function() {
         // All done
         overlay.remove();
         toast('Imported: ' + charArray.length + ' characters, ' + parsedData.locations.length + ' locations, ' + parsedData.elements.length + ' elements', 'success');
         // Hard reload to pick up all new data cleanly
         setTimeout(function() { window.location.reload(); }, 300);
-        return;
-      }
-      var save = saves[completed];
-      fetch('/api/app/' + encodeURIComponent(pid) + '/state/' + encodeURIComponent(save.nodeId), {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ outputs: save.outputs }),
-      }).then(function(r) {
-        if (!r.ok) throw new Error('Failed to save ' + save.nodeId);
-        return r.json();
-      }).then(function() {
-        completed++;
-        btn.textContent = 'Importing... (' + completed + '/' + saves.length + ')';
-        saveNext();
-      }).catch(function(err) {
-        btn.textContent = 'Import to Pipeline';
-        btn.disabled = false;
-        showError('Failed to save: ' + err.message);
-      });
-    }
-    saveNext();
   }).catch(function(err) {
-    btn.textContent = 'Import to Pipeline';
+    btn.textContent = 'Import &amp; Create Project';
     btn.disabled = false;
-    showError('Failed to clear old data: ' + err.message);
+    showError('Import failed: ' + err.message);
   });
   });
 

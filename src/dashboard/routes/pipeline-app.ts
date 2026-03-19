@@ -152,6 +152,141 @@ function nodeDataPath(pipelineId: string, nodeId: string): string {
   return join(projectDir(pipelineId), `${safe}.json`);
 }
 
+// ── Project-folder-based storage ─────────────────────────────
+// When a pipeline has metadata.projectFolder set, data lives in
+// {projectFolder}/project.json instead of per-node files.
+
+/** Map pipeline node IDs to project.json top-level keys */
+const NODE_KEY_MAP: Record<string, string | string[]> = {
+  'node-4':  'metadata',
+  'node-5':  'characters',
+  'node-6':  'locations',
+  'node-7':  'sections',
+  'node-8':  'processedSections',
+  'node-9':  'sceneContent',
+  'node-10': 'elements',
+  'node-11': 'productionMetadata',
+  'node-12': 'assets',
+  'node-13': 'previsualizations',
+  'node-14': 'ruleEnforcement',
+  'node-15': '_assembly', // special: reads/writes entire project
+  'node-16': '_output',   // special: reads/writes entire project
+  'node-17': 'dialogueAudio',
+};
+
+function projectFilePath(projectFolder: string): string {
+  return join(projectFolder, 'project.json');
+}
+
+async function loadProjectFile(projectFolder: string): Promise<Record<string, any> | null> {
+  try {
+    const raw = await readFile(projectFilePath(projectFolder), 'utf-8');
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+async function saveProjectFile(projectFolder: string, data: Record<string, any>): Promise<void> {
+  data.updatedAt = new Date().toISOString();
+  if (!data.version) data.version = '1.0';
+  await mkdir(projectFolder, { recursive: true });
+  await atomicWriteFile(projectFilePath(projectFolder), JSON.stringify(data, null, 2));
+}
+
+/**
+ * Merge a node's outputs into project.json using the NODE_KEY_MAP.
+ * For assembly nodes (node-15/16), merges all top-level keys from scriptPackage.
+ */
+async function mergeIntoProject(projectFolder: string, nodeId: string, outputs: Record<string, unknown>): Promise<void> {
+  const project = (await loadProjectFile(projectFolder)) || { version: '1.0', createdAt: new Date().toISOString() };
+  const keyMapping = NODE_KEY_MAP[nodeId];
+
+  if (keyMapping === '_assembly' || keyMapping === '_output') {
+    // Assembly/output node — merge all sub-keys
+    // Handle scriptPackage wrapper
+    const sp = (outputs as any).scriptPackage;
+    const source = sp?.script || sp || outputs;
+    for (const k of ['metadata', 'characters', 'locations', 'sections', 'elements', 'previsualizations', 'assets', 'productionMetadata']) {
+      if (source[k] !== undefined) project[k] = source[k];
+    }
+    // Also save raw fields
+    if ((outputs as any)._fountainSource) project._fountainSource = (outputs as any)._fountainSource;
+    if (sp?.previsualizations) project.previsualizations = sp.previsualizations;
+    if (sp?.assets) project.assets = sp.assets;
+  } else if (keyMapping && typeof keyMapping === 'string') {
+    // Single key mapping — merge the output's matching key
+    const val = outputs[keyMapping];
+    if (val !== undefined) {
+      project[keyMapping] = val;
+    } else {
+      // If outputs doesn't have the expected key, try merging all keys
+      for (const k of Object.keys(outputs)) {
+        project[k] = outputs[k];
+      }
+    }
+  } else {
+    // Unknown node — store raw outputs under nodeId key
+    project[`_node_${nodeId}`] = outputs;
+  }
+
+  await saveProjectFile(projectFolder, project);
+}
+
+/**
+ * Convert a project.json into the nodeData format expected by the UI.
+ * Creates virtual "node" entries so the existing stitcher/renderers work.
+ */
+function projectToNodeData(project: Record<string, any>): Record<string, AppNodeData> {
+  const now = project.updatedAt || new Date().toISOString();
+  const nodeData: Record<string, AppNodeData> = {};
+
+  // Map project keys back to node IDs
+  if (project.metadata) {
+    nodeData['node-4'] = { outputs: { metadata: project.metadata }, updatedAt: now, manuallyEdited: false };
+  }
+  if (project.characters) {
+    nodeData['node-5'] = { outputs: { characters: project.characters }, updatedAt: now, manuallyEdited: false };
+  }
+  if (project.locations) {
+    nodeData['node-6'] = { outputs: { locations: project.locations }, updatedAt: now, manuallyEdited: false };
+  }
+  if (project.sections) {
+    nodeData['node-7'] = { outputs: { sections: project.sections }, updatedAt: now, manuallyEdited: false };
+  }
+  if (project.elements) {
+    nodeData['node-10'] = { outputs: { elements: project.elements }, updatedAt: now, manuallyEdited: false };
+  }
+  if (project.assets) {
+    nodeData['node-12'] = { outputs: { assetCollection: project.assets }, updatedAt: now, manuallyEdited: false };
+  }
+  if (project.previsualizations) {
+    nodeData['node-13'] = { outputs: { previsualizations: project.previsualizations }, updatedAt: now, manuallyEdited: false };
+  }
+
+  // Also create an assembly node with the full scriptPackage
+  nodeData['node-15'] = {
+    outputs: {
+      scriptPackage: {
+        script: {
+          metadata: project.metadata || {},
+          characters: project.characters || [],
+          locations: project.locations || [],
+          sections: project.sections || [],
+          elements: project.elements || [],
+        },
+        previsualizations: project.previsualizations || { shots: [] },
+        assets: project.assets || [],
+      },
+      _fountainSource: project._fountainSource || '',
+    },
+    updatedAt: now,
+    manuallyEdited: false,
+  };
+
+  return nodeData;
+}
+
 async function loadManifest(pipelineId: string): Promise<AppManifest | null> {
   try {
     const raw = await readFile(manifestPath(pipelineId), 'utf-8');
@@ -180,9 +315,34 @@ async function saveNodeData(pipelineId: string, nodeId: string, outputs: Record<
   await atomicWriteFile(nodeDataPath(pipelineId, nodeId), JSON.stringify(outputs, null, 2));
 }
 
-/** Load full app state by reading manifest + all node files */
+/** Load full app state — checks project folder first, falls back to node files */
 async function loadAppState(pipelineId: string): Promise<AppState | null> {
   const manifest = await loadManifest(pipelineId);
+
+  // Check if pipeline has a project folder with project.json
+  let pfolder: string | null = null;
+  try {
+    const compositions = await discoverCompositions();
+    const entry = compositions.find((c: any) => c.composition?.id === pipelineId);
+    pfolder = entry?.composition?.metadata?.projectFolder || null;
+  } catch { /* ignore */ }
+
+  if (pfolder) {
+    const project = await loadProjectFile(pfolder);
+    if (project) {
+      const nodeData = projectToNodeData(project);
+      return {
+        pipelineId,
+        pipelineName: manifest?.pipelineName || project.metadata?.title || pipelineId,
+        sourceRunId: manifest?.sourceRunId || null,
+        nodeData,
+        staleNodes: manifest?.staleNodes || [],
+        lastRunAt: manifest?.lastRunAt || null,
+      };
+    }
+  }
+
+  // Fall back to legacy per-node files
   if (!manifest) return null;
 
   const nodeData: Record<string, AppNodeData> = {};
@@ -191,6 +351,38 @@ async function loadAppState(pipelineId: string): Promise<AppState | null> {
     if (outputs) {
       nodeData[nodeId] = { outputs, ...meta };
     }
+  }
+
+  // Migration: if we have node data but no project.json and there IS a project folder,
+  // consolidate into project.json
+  if (pfolder && Object.keys(nodeData).length > 0) {
+    debugLog.info('pipeline-app', `Migrating ${Object.keys(nodeData).length} node files to project.json for ${pipelineId}`);
+    const project: Record<string, any> = { version: '1.0', pipelineId, createdAt: new Date().toISOString() };
+    for (const [nodeId, data] of Object.entries(nodeData)) {
+      const key = NODE_KEY_MAP[nodeId];
+      if (key === '_assembly' || key === '_output') {
+        const sp = (data.outputs as any)?.scriptPackage;
+        const source = sp?.script || sp || data.outputs;
+        for (const k of ['metadata', 'characters', 'locations', 'sections', 'elements', 'previsualizations', 'assets']) {
+          if (source?.[k] !== undefined) project[k] = source[k];
+        }
+        if ((data.outputs as any)?._fountainSource) project._fountainSource = (data.outputs as any)._fountainSource;
+      } else if (key && typeof key === 'string') {
+        const val = data.outputs?.[key];
+        if (val !== undefined) project[key] = val;
+      }
+    }
+    await saveProjectFile(pfolder, project);
+    // Clean up old node files (keep manifest + saves)
+    try {
+      const dir = projectDir(pipelineId);
+      const entries = await readdir(dir);
+      for (const entry of entries) {
+        if (entry.startsWith('node-') || entry.startsWith('var-')) {
+          await rm(join(dir, entry));
+        }
+      }
+    } catch { /* best effort */ }
   }
 
   return {
@@ -310,19 +502,24 @@ export async function persistAppStateFromRun(
       );
     }
 
-    // Write per-node files for nodes that produced output
+    // Check for project folder
+    let pfolder: string | null = null;
+    try {
+      const compositions = await discoverCompositions();
+      const entry = compositions.find((c: any) => c.composition?.id === pipelineId);
+      pfolder = entry?.composition?.metadata?.projectFolder || null;
+    } catch { /* ignore */ }
+
+    // Write outputs — to project.json if project folder exists, else per-node files
     for (const nodeId of executionOrder) {
       const outputs = nodeOutputs[nodeId];
       if (!outputs || Object.keys(outputs).length === 0) continue;
 
-      // Don't overwrite manually-edited nodes unless they were re-executed
-      const existing = manifest.nodes[nodeId];
-      if (existing?.manuallyEdited) {
-        // Node was manually edited but re-executed — update with fresh data
-        // (this happens during "refresh stale" flows)
+      if (pfolder) {
+        await mergeIntoProject(pfolder, nodeId, outputs);
+      } else {
+        await saveNodeData(pipelineId, nodeId, outputs);
       }
-
-      await saveNodeData(pipelineId, nodeId, outputs);
       manifest.nodes[nodeId] = {
         updatedAt: now,
         manuallyEdited: false,
@@ -593,6 +790,19 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
   // ── DELETE /api/app/:id/state ─────────────────────────────
   // Clears all project state (preserves saves/ directory)
   if (req.method === 'DELETE' && subPath === '/state') {
+    // Clear project.json if project folder exists
+    let pfolder: string | null = null;
+    try {
+      const compositions = await discoverCompositions();
+      const entry = compositions.find((c: any) => c.composition?.id === pipelineId);
+      pfolder = entry?.composition?.metadata?.projectFolder || null;
+    } catch { /* ignore */ }
+
+    if (pfolder) {
+      try { await rm(projectFilePath(pfolder)); } catch { /* may not exist */ }
+    }
+
+    // Also clear legacy app-state node files
     const dir = projectDir(pipelineId);
     try {
       const entries = await readdir(dir);
@@ -608,9 +818,40 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
       }
     } catch (e: any) {
       if (e.code !== 'ENOENT') throw e;
-      // Directory doesn't exist — nothing to clear
     }
     sendJson(res, 200, { success: true });
+    return true;
+  }
+
+  // ── PUT /api/app/:id/project — write project.json directly ──
+  if (req.method === 'PUT' && subPath === '/project') {
+    const body = await readBody(req);
+    let pfolder: string | null = null;
+    try {
+      const compositions = await discoverCompositions();
+      const entry = compositions.find((c: any) => c.composition?.id === pipelineId);
+      pfolder = entry?.composition?.metadata?.projectFolder || null;
+    } catch { /* ignore */ }
+
+    if (!pfolder) {
+      sendJson(res, 400, { error: 'No project folder set for this pipeline' });
+      return true;
+    }
+
+    const projectData = body.project || body;
+    projectData.pipelineId = pipelineId;
+    await saveProjectFile(pfolder, projectData);
+
+    // Update manifest
+    let manifest = await loadManifest(pipelineId);
+    if (!manifest) {
+      const pipeline = await findPipeline(ctx.workDir, pipelineId);
+      manifest = { pipelineId, pipelineName: pipeline?.name || pipelineId, sourceRunId: null, staleNodes: [], lastRunAt: null, nodes: {} };
+    }
+    manifest.nodes['node-15'] = { updatedAt: new Date().toISOString(), manuallyEdited: true };
+    await saveManifest(manifest);
+
+    sendJson(res, 200, { success: true, projectFolder: pfolder });
     return true;
   }
 
@@ -636,9 +877,20 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
       };
     }
 
-    // Write just this node's data file
+    // Write data — prefer project.json if project folder exists
     const outputs = body.outputs || body;
-    await saveNodeData(pipelineId, nodeId, outputs);
+    let pfolder: string | null = null;
+    try {
+      const compositions = await discoverCompositions();
+      const entry = compositions.find((c: any) => c.composition?.id === pipelineId);
+      pfolder = entry?.composition?.metadata?.projectFolder || null;
+    } catch { /* ignore */ }
+
+    if (pfolder) {
+      await mergeIntoProject(pfolder, nodeId, outputs);
+    } else {
+      await saveNodeData(pipelineId, nodeId, outputs);
+    }
 
     // Update manifest metadata for this node
     manifest.nodes[nodeId] = {
