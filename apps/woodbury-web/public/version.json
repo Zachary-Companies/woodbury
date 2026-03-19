@@ -1,10 +1,10 @@
 {
-  "version": "1.2.3",
-  "releaseDate": "2026-03-14",
+  "version": "1.2.4",
+  "releaseDate": "2026-03-18",
   "downloadUrls": {
-    "mac": "https://github.com/Zachary-Companies/woodbury/releases/latest/download/Woodbury-1.2.3-arm64.dmg",
-    "windows": "https://github.com/Zachary-Companies/woodbury/releases/latest/download/Woodbury-Setup-1.2.3.exe"
+    "mac": "https://github.com/Zachary-Companies/woodbury/releases/latest/download/Woodbury-1.2.4-arm64.dmg",
+    "windows": "https://github.com/Zachary-Companies/woodbury/releases/latest/download/Woodbury-Setup-1.2.4.exe"
   },
-  "releaseNotes": "Contract-driven pipeline decomposition, per-node script pre-planning, generation progress indicators, pipeline sidebar timestamps, auto-generated pipeline documentation, rich port presentation metadata.",
+  "releaseNotes": "Pipeline logo generation, home page app cards, configurable nav tabs, NLE editor render panel, dialog inspector, keyframe animation, audio persistence, scrubber bar, collapsible panels.",
   "releaseUrl": "https://github.com/Zachary-Companies/woodbury/releases/latest"
 }
