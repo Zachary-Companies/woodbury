@@ -121,5 +121,30 @@ export const handleToolsRoutes: RouteHandler = async (req, res, pathname, url, c
     return true;
   }
 
+  // POST /api/tools/:toolName — execute a tool by name
+  const toolExecMatch = pathname.match(/^\/api\/tools\/([^/]+)$/);
+  if (req.method === 'POST' && toolExecMatch) {
+    const toolName = decodeURIComponent(toolExecMatch[1]);
+    try {
+      await ctx.extensionManager?.whenReady();
+      const tools = ctx.extensionManager?.getAllTools() ?? [];
+      const tool = tools.find(t => t.definition.name === toolName);
+
+      if (!tool) {
+        sendJson(res, 404, { error: `Tool not found: ${toolName}` });
+        return true;
+      }
+
+      const body = await readBody(req);
+      // Tool handlers expect (params, context) - provide a minimal context
+      const toolContext = { workingDirectory: ctx.workDir } as any;
+      const result = await tool.handler(body, toolContext);
+      sendJson(res, 200, { success: true, result });
+    } catch (err) {
+      sendJson(res, 500, { error: String((err as Error).message) });
+    }
+    return true;
+  }
+
   return false;
 };

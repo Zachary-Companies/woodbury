@@ -27,9 +27,185 @@ var appSchema = null;
 var appState = null;
 var appBindings = null; // BindingsDocument { version, pipelineId, bindings[] }
 var appActiveSection = null;
-var appViewMode = 'data'; // 'data' | 'screenplay'
+var appViewMode = 'data'; // 'data' | 'screenplay' | 'voices'
+// Voice view moved to pipeline-local: {pipelineDir}/views/voices/
 var appConnectionMode = false; // When true, entities become selectable for binding creation
 var appConnectionSelections = []; // Array of { entityType, entityId, label, sectionId, data }
+var appNodesPanelCollapsed = false; // Collapsible "Node" panel state
+var appCustomViews = []; // Pipeline-local custom views: [{ name, label, icon, loaded, detect, stitch, render, wireEvents }]
+var appCustomViewsLoaded = false; // Whether we've loaded custom views for this pipeline
+var appCustomViewsPipelineId = null; // Which pipeline the custom views were loaded for
+
+// ────────────────────────────────────────────────────────────────
+//  Pipeline-local custom view registration API
+// ────────────────────────────────────────────────────────────────
+
+// Global API for pipeline-local views to register themselves.
+//
+// Usage in {pipelineDir}/views/my-view/view.js:
+//
+//   window.registerPipelineView({
+//     name: 'my-view',         // Must match directory name
+//     label: 'My View',        // Display name for toggle button
+//     icon: '<svg .../>',      // Optional SVG icon HTML
+//     detect: function(state) { return true/false; },
+//     stitch: function(state) { return stitchedData; },
+//     render: function(data, state) { return '<div>...</div>'; },
+//     wireEvents: function(root, state) { ... },
+//   });
+window.registerPipelineView = function(viewDef) {
+  if (!viewDef || !viewDef.name) {
+    console.error('[pipeline-view] registerPipelineView: missing name');
+    return;
+  }
+  // Find the placeholder entry and fill it in
+  var found = false;
+  for (var i = 0; i < appCustomViews.length; i++) {
+    if (appCustomViews[i].name === viewDef.name) {
+      appCustomViews[i].label = viewDef.label || appCustomViews[i].label;
+      appCustomViews[i].icon = viewDef.icon || appCustomViews[i].icon || '';
+      appCustomViews[i].detect = viewDef.detect || function() { return true; };
+      appCustomViews[i].stitch = viewDef.stitch || function(s) { return s; };
+      appCustomViews[i].render = viewDef.render || function() { return '<div>Custom view</div>'; };
+      appCustomViews[i].wireEvents = viewDef.wireEvents || function() {};
+      appCustomViews[i].loaded = true;
+      found = true;
+      break;
+    }
+  }
+  if (!found) {
+    // Direct registration (not pre-discovered)
+    appCustomViews.push({
+      name: viewDef.name,
+      label: viewDef.label || viewDef.name,
+      icon: viewDef.icon || '',
+      hasCSS: false,
+      loaded: true,
+      detect: viewDef.detect || function() { return true; },
+      stitch: viewDef.stitch || function(s) { return s; },
+      render: viewDef.render || function() { return '<div>Custom view</div>'; },
+      wireEvents: viewDef.wireEvents || function() {},
+    });
+  }
+  console.log('[pipeline-view] Registered:', viewDef.name);
+};
+
+/**
+ * Discover and load pipeline-local custom views.
+ * Fetches the view manifest, then dynamically loads each view's JS (and CSS).
+ */
+async function loadPipelineCustomViews(pipelineId) {
+  try {
+    var res = await fetch('/api/app/' + encodeURIComponent(pipelineId) + '/views');
+    if (!res.ok) return;
+    var data = await res.json();
+    var views = data.views || [];
+
+    if (views.length === 0) return;
+
+    // Create placeholder entries so registerPipelineView can find them
+    for (var i = 0; i < views.length; i++) {
+      var v = views[i];
+      var existing = appCustomViews.find(function(cv) { return cv.name === v.name; });
+      if (!existing) {
+        appCustomViews.push({
+          name: v.name,
+          label: v.label || v.name,
+          icon: v.icon || '',
+          hasCSS: v.hasCSS,
+          description: v.description,
+          loaded: false,
+          detect: function() { return true; },
+          stitch: function(s) { return s; },
+          render: function() { return '<div class="app-empty-state">View loading...</div>'; },
+          wireEvents: function() {},
+        });
+      }
+    }
+
+    // Load CSS files — scoped to this view's container so they don't leak
+    for (var ci = 0; ci < views.length; ci++) {
+      if (views[ci].hasCSS) {
+        (function(viewName) {
+          var cssId = 'pipeline-view-css-' + viewName;
+          if (document.getElementById(cssId)) return;
+          // Fetch CSS, prepend scoping selector to every rule
+          fetch('/api/app/' + encodeURIComponent(pipelineId) + '/view-file/' + encodeURIComponent(viewName) + '/view.css')
+            .then(function(r) { return r.text(); })
+            .then(function(css) {
+              var scope = '.pipeline-view-scope[data-pipeline-view="' + viewName + '"]';
+              // Strip CSS comments, then scope each selector block
+              var stripped = css.replace(/\/\*[\s\S]*?\*\//g, '');
+              // Parse rule by rule: find selector { ... } blocks
+              var scoped = '';
+              var depth = 0;
+              var buf = '';
+              var inRule = false;
+              for (var ci2 = 0; ci2 < stripped.length; ci2++) {
+                var ch = stripped[ci2];
+                if (ch === '{') {
+                  if (depth === 0) {
+                    // buf contains the selector — scope it
+                    var sels = buf.split(',').map(function(s) {
+                      s = s.trim();
+                      if (!s || s.startsWith('@')) return s;
+                      return scope + ' ' + s;
+                    }).join(', ');
+                    scoped += sels + ' {';
+                    buf = '';
+                    inRule = true;
+                  } else {
+                    scoped += ch;
+                  }
+                  depth++;
+                } else if (ch === '}') {
+                  depth--;
+                  if (depth <= 0) {
+                    scoped += buf + '}';
+                    buf = '';
+                    inRule = false;
+                    depth = 0;
+                  } else {
+                    scoped += ch;
+                  }
+                } else if (inRule) {
+                  buf += ch;
+                } else {
+                  buf += ch;
+                }
+              }
+              var style = document.createElement('style');
+              style.id = cssId;
+              style.textContent = scoped;
+              document.head.appendChild(style);
+            })
+            .catch(function(err) { console.error('[pipeline-view] CSS load error:', viewName, err); });
+        })(views[ci].name);
+      }
+    }
+
+    // Load JS files (these call window.registerPipelineView when they execute)
+    var loadPromises = views.map(function(v) {
+      return new Promise(function(resolve) {
+        var scriptId = 'pipeline-view-js-' + v.name;
+        if (document.getElementById(scriptId)) { resolve(); return; }
+        var script = document.createElement('script');
+        script.id = scriptId;
+        script.src = '/api/app/' + encodeURIComponent(pipelineId) + '/view-file/' + encodeURIComponent(v.name) + '/view.js';
+        script.onload = resolve;
+        script.onerror = function() {
+          console.error('[pipeline-view] Failed to load:', v.name);
+          resolve();
+        };
+        document.body.appendChild(script);
+      });
+    });
+
+    await Promise.all(loadPromises);
+  } catch (err) {
+    console.error('[pipeline-view] Failed to discover views:', err);
+  }
+}
 
 // ────────────────────────────────────────────────────────────────
 //  API helpers
@@ -121,6 +297,39 @@ function appIcon(type) {
 // ────────────────────────────────────────────────────────────────
 //  Sidebar rendering
 // ────────────────────────────────────────────────────────────────
+/**
+ * Render a single navigation item for the sidebar.
+ */
+function renderAppNavItem(section, state, staleSet) {
+  var isActive = appActiveSection === section.id;
+  var isStale = section.nodeId && staleSet.has(section.nodeId);
+  var hasData = section.nodeId && state.nodeData && state.nodeData[section.nodeId];
+  var itemCount = '';
+  if (hasData) {
+    var outputs = state.nodeData[section.nodeId].outputs;
+    var firstKey = Object.keys(outputs)[0];
+    var firstVal = firstKey ? outputs[firstKey] : null;
+    if (Array.isArray(firstVal)) {
+      itemCount = ' (' + firstVal.length + ')';
+    } else if (firstVal && typeof firstVal === 'object') {
+      itemCount = ' (' + Object.keys(firstVal).length + ')';
+    }
+  }
+
+  var html = '<button class="app-nav-item' + (isActive ? ' active' : '') + (isStale ? ' stale' : '') + '"';
+  html += ' data-app-section="' + compEscAttr(section.id) + '"';
+  html += ' title="' + compEscAttr(section.label) + '">';
+  html += appIcon(section.icon);
+  html += '<span class="app-nav-label">' + compEscHtml(section.label) + compEscHtml(itemCount) + '</span>';
+  if (isStale) {
+    html += '<span class="app-nav-stale" title="Data has changed upstream — needs refresh">&#x26A0;</span>';
+  }
+  if (section.type === 'node-output' && hasData && state.nodeData[section.nodeId].manuallyEdited) {
+    html += '<span class="app-nav-edited" title="Manually edited">&#x270E;</span>';
+  }
+  html += '</button>';
+  return html;
+}
 
 function renderAppSidebar(schema, state) {
   var staleSet = new Set(state.staleNodes || []);
@@ -136,48 +345,69 @@ function renderAppSidebar(schema, state) {
 
   // Navigation
   html += '<nav class="app-nav" aria-label="App sections">';
+
+  // Separate Overview from other sections
+  var overviewSection = null;
+  var nodeSections = [];
   for (var i = 0; i < schema.sections.length; i++) {
     var section = schema.sections[i];
-    var isActive = appActiveSection === section.id;
-    var isStale = section.nodeId && staleSet.has(section.nodeId);
-    var hasData = section.nodeId && state.nodeData && state.nodeData[section.nodeId];
-    var itemCount = '';
-    if (hasData) {
-      var outputs = state.nodeData[section.nodeId].outputs;
-      var firstKey = Object.keys(outputs)[0];
-      var firstVal = firstKey ? outputs[firstKey] : null;
-      if (Array.isArray(firstVal)) {
-        itemCount = ' (' + firstVal.length + ')';
-      } else if (firstVal && typeof firstVal === 'object') {
-        itemCount = ' (' + Object.keys(firstVal).length + ')';
-      }
+    if (section.type === 'overview') {
+      overviewSection = section;
+    } else {
+      nodeSections.push(section);
     }
-
-    html += '<button class="app-nav-item' + (isActive ? ' active' : '') + (isStale ? ' stale' : '') + '"';
-    html += ' data-app-section="' + compEscAttr(section.id) + '"';
-    html += ' title="' + compEscAttr(section.label) + '">';
-    html += appIcon(section.icon);
-    html += '<span class="app-nav-label">' + compEscHtml(section.label) + compEscHtml(itemCount) + '</span>';
-    if (isStale) {
-      html += '<span class="app-nav-stale" title="Data has changed upstream — needs refresh">&#x26A0;</span>';
-    }
-    if (section.type === 'node-output' && hasData && state.nodeData[section.nodeId].manuallyEdited) {
-      html += '<span class="app-nav-edited" title="Manually edited">&#x270E;</span>';
-    }
-    html += '</button>';
   }
+
+  // Render Overview section first (outside the collapsible panel)
+  if (overviewSection) {
+    html += renderAppNavItem(overviewSection, state, staleSet);
+  }
+
+  // Render "Node" collapsible panel containing Settings through Final Assembly
+  if (nodeSections.length > 0) {
+    html += '<div class="app-nav-panel' + (appNodesPanelCollapsed ? ' collapsed' : '') + '" data-panel="nodes">';
+    html += '<button class="app-nav-panel-header" id="app-nodes-panel-toggle">';
+    html += '<span class="app-nav-panel-icon">' + (appNodesPanelCollapsed ? '&#x25B6;' : '&#x25BC;') + '</span>';
+    html += '<span class="app-nav-panel-title">Node</span>';
+    html += '<span class="app-nav-panel-count">' + nodeSections.length + '</span>';
+    html += '</button>';
+    html += '<div class="app-nav-panel-body"' + (appNodesPanelCollapsed ? ' style="display:none;"' : '') + '>';
+    for (var j = 0; j < nodeSections.length; j++) {
+      html += renderAppNavItem(nodeSections[j], state, staleSet);
+    }
+    html += '</div>';
+    html += '</div>';
+  }
+
   html += '</nav>';
 
   // View mode toggle
+  // Collect available views: built-in + pipeline-local custom views
   var hasScreenplayData = detectScreenplayData(state);
-  if (hasScreenplayData) {
+  var availableCustomViews = appCustomViews.filter(function(cv) {
+    try { return cv.loaded && cv.detect(state); } catch(e) { return false; }
+  });
+  var hasMultipleViews = hasScreenplayData || availableCustomViews.length > 0;
+
+  if (hasMultipleViews) {
     html += '<div class="app-view-toggle">';
+    // Data view (always available)
     html += '<button class="app-view-toggle-btn' + (appViewMode === 'data' ? ' active' : '') + '" data-app-view-mode="data">';
     html += '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" width="14" height="14"><rect x="2" y="2" width="5" height="5" rx="1"/><rect x="9" y="2" width="5" height="5" rx="1"/><rect x="2" y="9" width="5" height="5" rx="1"/><rect x="9" y="9" width="5" height="5" rx="1"/></svg>';
     html += ' Data</button>';
-    html += '<button class="app-view-toggle-btn' + (appViewMode === 'screenplay' ? ' active' : '') + '" data-app-view-mode="screenplay">';
-    html += '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" width="14" height="14"><rect x="1" y="2" width="14" height="12" rx="1.5"/><path d="M5 5h6M5 8h4M5 11h5"/></svg>';
-    html += ' Screenplay</button>';
+    // Screenplay (built-in, shown if data matches)
+    if (hasScreenplayData) {
+      html += '<button class="app-view-toggle-btn' + (appViewMode === 'screenplay' ? ' active' : '') + '" data-app-view-mode="screenplay">';
+      html += '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" width="14" height="14"><rect x="1" y="2" width="14" height="12" rx="1.5"/><path d="M5 5h6M5 8h4M5 11h5"/></svg>';
+      html += ' Screenplay</button>';
+    }
+    // Pipeline-local custom views
+    for (var cvi = 0; cvi < availableCustomViews.length; cvi++) {
+      var cv = availableCustomViews[cvi];
+      html += '<button class="app-view-toggle-btn' + (appViewMode === 'custom:' + cv.name ? ' active' : '') + '" data-app-view-mode="custom:' + compEscAttr(cv.name) + '">';
+      if (cv.icon) html += cv.icon + ' ';
+      html += compEscHtml(cv.label) + '</button>';
+    }
     html += '</div>';
   }
 
@@ -206,13 +436,23 @@ function renderAppSidebar(schema, state) {
   html += '<button class="app-action-btn" id="app-run-pipeline">&#x25b6; Run Pipeline</button>';
   html += '<button class="app-action-btn app-action-secondary" id="app-open-editor">Open Editor</button>';
   html += '<button class="app-action-btn app-action-secondary" id="app-open-form">Open Form</button>';
+
+  // ── Save / Load controls ──
+  html += '<div class="app-save-section">';
+  html += '<div class="app-save-row">';
+  html += '<button class="app-action-btn app-action-save" id="app-save-state">&#x1F4BE; Save</button>';
+  html += '<button class="app-action-btn app-action-load" id="app-load-state">&#x1F4C2; Load</button>';
+  html += '</div>';
+  html += '<div id="app-save-panel" style="display:none;"></div>';
+  html += '</div>';
+
   html += '<div class="app-git-section" id="app-git-section"></div>';
   html += '</div>';
 
   // Command bar — sends to the chat agent with pipeline context
   html += '<div class="app-command-bar">';
   html += '<div class="app-command-input-wrap">';
-  html += '<input type="text" class="app-command-input" id="app-command-input" placeholder="Ask the AI to change something..." />';
+  html += '<textarea class="app-command-input" id="app-command-input" rows="3" placeholder="Ask the AI to change something... (Shift+Enter for new line)"></textarea>';
   html += '<div class="app-command-spinner" id="app-command-spinner" style="display:none;"><span class="app-command-spinner-dot"></span><span class="app-command-spinner-dot"></span><span class="app-command-spinner-dot"></span></div>';
   html += '</div>';
   html += '<div class="app-command-response" id="app-command-response" style="display:none;"></div>';
@@ -1073,6 +1313,11 @@ function renderAppScreenplayView(timeline, state) {
   html += '<span class="nle-stat">' + timeline.totalElements + ' elements</span>';
   html += '<span class="nle-stat">' + timeline.totalPrevis + ' previs shots</span>';
   html += '</div>';
+  // Toolbar with action buttons
+  html += '<div class="nle-toolbar">';
+  html += '<button class="nle-toolbar-btn" id="nle-render-all-dialogue" title="Generate audio for all dialogue using assigned character voices">';
+  html += '&#x1f50a; Render All Dialogue</button>';
+  html += '</div>';
   html += '</div>';
 
   // Scene navigation strip
@@ -1375,6 +1620,8 @@ function renderNLEElement(elem, timeline) {
     }
     // Edit button to open full dialogue editor
     html += '<button class="nle-dialogue-edit-btn" data-nle-edit-dialogue="' + compEscAttr(elem.id || '') + '" title="Edit dialogue">&#x270E;</button>';
+    // TTS button to generate speech for this dialogue
+    html += '<button class="nle-dialogue-tts-btn" data-nle-tts-dialogue="' + compEscAttr(elem.id || '') + '" data-nle-tts-character="' + compEscAttr(elem.characterId || elem.characterName || '') + '" title="Generate speech">&#x1f50a;</button>';
     html += '</div>';
     html += '<div class="nle-dialogue-content" style="border-left-color:' + charColor + '">';
     var lines = elem.lines || [elem.content];
@@ -1408,6 +1655,20 @@ function renderNLEElement(elem, timeline) {
 }
 
 /** Generate a consistent color for a character name */
+
+// ────────────────────────────────────────────────────────────────
+//  Voices Assignment View
+// ────────────────────────────────────────────────────────────────
+
+/**
+ * Render the voice assignment view.
+ * Shows all characters with their current voice assignments and allows
+ * assigning ElevenLabs voices to each character.
+ */
+// renderAppVoicesView, findVoiceBinding, loadVoicesForAssignment,
+// saveVoiceAssignment, previewVoice — all moved to pipeline-local view:
+// {pipelineDir}/views/voices/view.js
+
 function nleCharColor(name) {
   var colors = [
     '#7c9ef7', '#f7a07c', '#7cf7b8', '#f77cc4', '#c49ef7',
@@ -1432,6 +1693,31 @@ async function renderCompositionAppPage() {
   var main = document.querySelector('#main');
   if (!main) return;
 
+  // Restore .app-content styles if a previous view (e.g. Editor) overrode them
+  var appContent = main.closest('.app-content') || document.querySelector('.app-content');
+  if (appContent && appContent.getAttribute('data-ed-override') === 'true') {
+    appContent.style.padding = '';
+    appContent.style.overflow = '';
+    appContent.removeAttribute('data-ed-override');
+  }
+
+  // Restore sub-view from hash on initial load (e.g. #compositions/id/app/screenplay)
+  if (window._hashAppSubView) {
+    var sv = window._hashAppSubView;
+    if (sv === 'data' || sv === 'screenplay') {
+      appViewMode = sv;
+    } else if (sv.startsWith('custom:') || appCustomViews.some(function(cv) { return cv.name === sv; })) {
+      appViewMode = sv.startsWith('custom:') ? sv : 'custom:' + sv;
+    } else {
+      appViewMode = sv;
+    }
+    if (window._hashAppSubId) {
+      appActiveSection = window._hashAppSubId;
+    }
+    window._hashAppSubView = null;
+    window._hashAppSubId = null;
+  }
+
   // Show loading state
   main.innerHTML = '<div class="app-loading"><div class="spinner"></div> Loading app...</div>';
 
@@ -1444,6 +1730,16 @@ async function renderCompositionAppPage() {
   appSchema = results[0];
   appState = results[1];
   appBindings = results[2];
+
+  // Load pipeline-local custom views (once per pipeline, reset on pipeline change)
+  if (!appCustomViewsLoaded || appCustomViewsPipelineId !== compData.id) {
+    appCustomViews = [];
+    appCustomViewsLoaded = true;
+    appCustomViewsPipelineId = compData.id;
+    // Remove previously injected custom view scripts/styles
+    document.querySelectorAll('[id^="pipeline-view-js-"], [id^="pipeline-view-css-"]').forEach(function(el) { el.remove(); });
+    try { await loadPipelineCustomViews(compData.id); } catch(e) { console.error('[pipeline-view] load error:', e); }
+  }
 
   if (!appSchema) {
     main.innerHTML = '<div class="app-error">Failed to load pipeline schema.</div>';
@@ -1481,20 +1777,44 @@ async function renderCompositionAppPage() {
 
   // Content area
   html += '<div class="app-content">';
-  if (appViewMode === 'screenplay' && detectScreenplayData(appState)) {
-    var timeline = stitchScreenplayTimeline(appState);
-    html += renderAppScreenplayView(timeline, appState);
-  } else if (appActiveSection) {
-    var activeSection = appSchema.sections.find(function(s) { return s.id === appActiveSection; });
-    if (activeSection) {
-      html += renderAppSectionContent(activeSection, appState);
+  var _customViewRendered = false;
+
+  // Check for pipeline-local custom view first
+  if (appViewMode.startsWith('custom:')) {
+    var _customName = appViewMode.slice(7);
+    var _customView = appCustomViews.find(function(cv) { return cv.name === _customName && cv.loaded; });
+    if (_customView) {
+      try {
+        var _customData = _customView.stitch(appState);
+        // Wrap in a scoped container so view CSS doesn't leak to other pipelines
+        html += '<div class="pipeline-view-scope" data-pipeline-view="' + compEscAttr(_customName) + '">';
+        html += _customView.render(_customData, appState);
+        html += '</div>';
+        _customViewRendered = true;
+      } catch (e) {
+        console.error('[pipeline-view] Render error for ' + _customName + ':', e);
+        html += '<div class="app-error">Custom view "' + compEscHtml(_customView.label) + '" failed to render: ' + compEscHtml(e.message || String(e)) + '</div>';
+        _customViewRendered = true;
+      }
     }
-  } else {
-    html += '<div class="app-empty-state">';
-    html += '<div class="app-empty-icon">&#x1f680;</div>';
-    html += '<h3>Welcome to ' + compEscHtml(appSchema.name) + '</h3>';
-    html += '<p>Run the pipeline to get started, then explore and edit the results here.</p>';
-    html += '</div>';
+  }
+
+  if (!_customViewRendered) {
+    if (appViewMode === 'screenplay' && detectScreenplayData(appState)) {
+      var timeline = stitchScreenplayTimeline(appState);
+      html += renderAppScreenplayView(timeline, appState);
+    } else if (appActiveSection) {
+      var activeSection = appSchema.sections.find(function(s) { return s.id === appActiveSection; });
+      if (activeSection) {
+        html += renderAppSectionContent(activeSection, appState);
+      }
+    } else {
+      html += '<div class="app-empty-state">';
+      html += '<div class="app-empty-icon">&#x1f680;</div>';
+      html += '<h3>Welcome to ' + compEscHtml(appSchema.name) + '</h3>';
+      html += '<p>Run the pipeline to get started, then explore and edit the results here.</p>';
+      html += '</div>';
+    }
   }
   html += '</div>';
   html += '</div>';
@@ -1515,6 +1835,17 @@ async function renderCompositionAppPage() {
 
   main.innerHTML = html;
   wireAppActions(main);
+
+  // Wire custom view events if a custom view is active
+  if (appViewMode.startsWith('custom:')) {
+    var _cvName = appViewMode.slice(7);
+    var _cv = appCustomViews.find(function(cv) { return cv.name === _cvName && cv.loaded; });
+    if (_cv && _cv.wireEvents) {
+      try { _cv.wireEvents(main, appState); } catch(e) {
+        console.error('[pipeline-view] wireEvents error for ' + _cvName + ':', e);
+      }
+    }
+  }
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -1723,9 +2054,23 @@ function wireAppActions(root) {
   root.querySelectorAll('.app-nav-item').forEach(function(btn) {
     btn.addEventListener('click', function() {
       appActiveSection = btn.getAttribute('data-app-section');
+      // Deep link: #compositions/{id}/app/data/{sectionId}
+      var hashSubView = appViewMode.startsWith('custom:') ? appViewMode.slice(7) : appViewMode;
+      if (typeof updateHash === 'function') {
+        updateHash('compositions', compData.id, 'app', hashSubView, appActiveSection);
+      }
       renderCompositionAppPage();
     });
   });
+
+  // Node panel toggle (collapsible)
+  var nodesPanelToggle = root.querySelector('#app-nodes-panel-toggle');
+  if (nodesPanelToggle) {
+    nodesPanelToggle.addEventListener('click', function() {
+      appNodesPanelCollapsed = !appNodesPanelCollapsed;
+      renderCompositionAppPage();
+    });
+  }
 
   // View mode toggle
   root.querySelectorAll('.app-view-toggle-btn').forEach(function(btn) {
@@ -1733,6 +2078,11 @@ function wireAppActions(root) {
       var mode = btn.getAttribute('data-app-view-mode');
       if (mode && mode !== appViewMode) {
         appViewMode = mode;
+        // Update hash for deep linking (e.g. #compositions/id/app/screenplay)
+        var hashSubView = mode.startsWith('custom:') ? mode.slice(7) : mode;
+        if (typeof updateHash === 'function') {
+          updateHash('compositions', compData.id, 'app', hashSubView);
+        }
         renderCompositionAppPage();
       }
     });
@@ -1755,6 +2105,9 @@ function wireAppActions(root) {
       selectComposition(compData.id, 'form');
     });
   }
+
+  // ── Save / Load buttons ──
+  wireAppSaveLoad(root);
 
   // Git status section in sidebar
   var gitSection = root.querySelector('#app-git-section');
@@ -1893,12 +2246,19 @@ function wireAppActions(root) {
   var commandInput = root.querySelector('#app-command-input');
   if (commandInput) {
     commandInput.addEventListener('keydown', function(e) {
-      if (e.key === 'Enter') {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
         var text = commandInput.value.trim();
         if (!text || !compData) return;
         commandInput.value = '';
+        commandInput.style.height = '';
         sendAppCommand(text, compData.id, root);
       }
+    });
+    // Auto-resize textarea as user types
+    commandInput.addEventListener('input', function() {
+      commandInput.style.height = '';
+      commandInput.style.height = Math.min(commandInput.scrollHeight, 200) + 'px';
     });
   }
 
@@ -2212,6 +2572,260 @@ function wireAppActions(root) {
       openDialogueEditModal(elemData, root);
     });
   });
+
+  // ── Dialogue TTS Button ──────────────────────────────────────────────────
+  // Wire up TTS buttons to generate speech for dialogue using character's voice
+  root.querySelectorAll('.nle-dialogue-tts-btn').forEach(function(btn) {
+    btn.addEventListener('click', async function(e) {
+      e.stopPropagation();
+      var elementId = btn.getAttribute('data-nle-tts-dialogue');
+      var characterId = btn.getAttribute('data-nle-tts-character');
+      if (!elementId) return;
+      
+      // Find the dialogue element and get its data
+      var dialogueEl = root.querySelector('[data-nle-element-id="' + elementId + '"]');
+      if (!dialogueEl) return;
+      
+      var dataAttr = dialogueEl.getAttribute('data-nle-element-data');
+      var elemData;
+      try {
+        elemData = JSON.parse(dataAttr);
+      } catch (err) {
+        toast('Could not load dialogue data', 'error');
+        return;
+      }
+      
+      // Get the dialogue text
+      var dialogueText = (elemData.lines || []).join(' ');
+      if (!dialogueText.trim()) {
+        toast('No dialogue text to speak', 'error');
+        return;
+      }
+      
+      // Find the character's voice binding by characterId
+      var voiceId = null;
+      var voiceName = null;
+      if (appBindings && appBindings.bindings && characterId) {
+        for (var i = 0; i < appBindings.bindings.length; i++) {
+          var b = appBindings.bindings[i];
+          if (b.type === 'voice' && b.source && b.source.entityType === 'character' && b.source.entityId === characterId) {
+            voiceId = b.target ? b.target.entityId : null;
+            voiceName = b.metadata ? b.metadata.voiceName : null;
+            break;
+          }
+        }
+      }
+      
+      if (!voiceId) {
+        toast('No voice assigned to ' + (elemData.characterName || 'this character') + '. Go to Voices view to assign one.', 'error');
+        return;
+      }
+      
+      // Get character data for voice description (to add emotion)
+      var voiceDescription = '';
+      if (appState && appState.nodeData) {
+        for (var nodeId in appState.nodeData) {
+          var outputs = appState.nodeData[nodeId].outputs;
+          if (outputs && outputs.characters && Array.isArray(outputs.characters)) {
+            var char = outputs.characters.find(function(c) { return c.id === characterId; });
+            if (char) {
+              // Build voice description from character traits
+              var descParts = [];
+              if (char.voiceTraits) {
+                if (typeof char.voiceTraits === 'string') {
+                  descParts.push(char.voiceTraits);
+                } else if (char.voiceTraits.description) {
+                  descParts.push(char.voiceTraits.description);
+                }
+              }
+              if (char.voice) {
+                if (typeof char.voice === 'string') {
+                  descParts.push(char.voice);
+                } else if (char.voice.description) {
+                  descParts.push(char.voice.description);
+                }
+              }
+              // Add modifiers as emotional context
+              if (elemData.modifiers && elemData.modifiers.length > 0) {
+                descParts.push('(' + elemData.modifiers.join(', ') + ')');
+              }
+              voiceDescription = descParts.join('. ');
+              break;
+            }
+          }
+        }
+      }
+      
+      // Show loading state
+      var originalText = btn.innerHTML;
+      btn.disabled = true;
+      btn.innerHTML = '&#x23F3;';
+      btn.classList.add('nle-tts-generating');
+      
+      try {
+        // Build the text with emotional context if available
+        var textToSpeak = dialogueText;
+
+        // Call the generate-dialogue-audio endpoint which:
+        // 1. Generates TTS audio
+        // 2. Saves audio file to project directory
+        // 3. Persists as a dialogue-audio asset in app state
+        var resp = await fetch('/api/app/' + encodeURIComponent(compData.id) + '/generate-dialogue-audio', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            elementId: elementId,
+            text: textToSpeak,
+            voiceId: voiceId,
+            characterName: elemData.characterName || '',
+            characterId: characterId || '',
+          }),
+        });
+
+        if (!resp.ok) {
+          var errData = await resp.json().catch(function() { return {}; });
+          throw new Error(errData.error || 'Failed to generate audio');
+        }
+
+        var result = await resp.json();
+        if (!result.success) throw new Error(result.error || 'Failed to generate audio');
+
+        // Play the audio
+        var audioUrl = '/api/file?path=' + encodeURIComponent(result.filePath);
+        var audio = new Audio(audioUrl);
+        audio.play();
+
+        toast('Playing dialogue as ' + (voiceName || elemData.characterName || 'character') + ' (saved to project)', 'success');
+
+      } catch (err) {
+        toast('TTS failed: ' + (err.message || err), 'error');
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = originalText;
+        btn.classList.remove('nle-tts-generating');
+      }
+    });
+  });
+
+  // ── Render All Dialogue Button ──────────────────────────────────────────
+  // Generate audio for all dialogue elements using assigned character voices
+  var renderAllBtn = root.querySelector('#nle-render-all-dialogue');
+  if (renderAllBtn) {
+    renderAllBtn.addEventListener('click', async function() {
+      if (!compData || !appState || !appBindings) {
+        toast('Pipeline data not loaded', 'error');
+        return;
+      }
+
+      // Collect all dialogue elements from the timeline
+      var allDialogues = [];
+      root.querySelectorAll('.nle-element--dialogue').forEach(function(el) {
+        var dataAttr = el.getAttribute('data-nle-element-data');
+        if (dataAttr) {
+          try {
+            var elemData = JSON.parse(dataAttr);
+            allDialogues.push(elemData);
+          } catch (e) { /* skip */ }
+        }
+      });
+
+      if (allDialogues.length === 0) {
+        toast('No dialogue elements found', 'error');
+        return;
+      }
+
+      // Check which dialogues have voice bindings
+      var dialoguesWithVoices = [];
+      var dialoguesWithoutVoices = [];
+      for (var di = 0; di < allDialogues.length; di++) {
+        var d = allDialogues[di];
+        var charId = d.characterId || d.characterName;
+        var voiceId = null;
+        if (appBindings && appBindings.bindings && charId) {
+          for (var bi = 0; bi < appBindings.bindings.length; bi++) {
+            var b = appBindings.bindings[bi];
+            if (b.type === 'voice' && b.source && b.source.entityType === 'character' && b.source.entityId === charId) {
+              voiceId = b.target ? b.target.entityId : null;
+              break;
+            }
+          }
+        }
+        if (voiceId) {
+          dialoguesWithVoices.push({ dialogue: d, voiceId: voiceId });
+        } else {
+          dialoguesWithoutVoices.push(d);
+        }
+      }
+
+      if (dialoguesWithVoices.length === 0) {
+        toast('No characters have voices assigned. Go to Voices view to assign voices first.', 'error');
+        return;
+      }
+
+      // Confirm with user
+      var confirmMsg = 'Generate audio for ' + dialoguesWithVoices.length + ' dialogue' + (dialoguesWithVoices.length === 1 ? '' : 's') + '?';
+      if (dialoguesWithoutVoices.length > 0) {
+        confirmMsg += '\n\n(' + dialoguesWithoutVoices.length + ' dialogue' + (dialoguesWithoutVoices.length === 1 ? '' : 's') + ' will be skipped - no voice assigned)';
+      }
+      if (!confirm(confirmMsg)) return;
+
+      // Show progress
+      var originalText = renderAllBtn.innerHTML;
+      renderAllBtn.disabled = true;
+      renderAllBtn.innerHTML = '&#x23F3; Rendering 0/' + dialoguesWithVoices.length + '...';
+      renderAllBtn.classList.add('nle-generating');
+
+      var successCount = 0;
+      var failCount = 0;
+
+      for (var i = 0; i < dialoguesWithVoices.length; i++) {
+        var item = dialoguesWithVoices[i];
+        var dialogueText = (item.dialogue.lines || []).join(' ');
+        if (!dialogueText.trim()) {
+          failCount++;
+          continue;
+        }
+
+        renderAllBtn.innerHTML = '&#x23F3; Rendering ' + (i + 1) + '/' + dialoguesWithVoices.length + '...';
+
+        try {
+          var resp = await fetch('/api/app/' + encodeURIComponent(compData.id) + '/generate-dialogue-audio', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              elementId: item.dialogue.id,
+              text: dialogueText,
+              voiceId: item.voiceId,
+              characterName: item.dialogue.characterName || '',
+              characterId: item.dialogue.characterId || '',
+            }),
+          });
+
+          if (!resp.ok) throw new Error('API error');
+
+          var result = await resp.json();
+          if (result.success) {
+            successCount++;
+          } else {
+            failCount++;
+          }
+        } catch (err) {
+          failCount++;
+        }
+      }
+
+      // Done
+      renderAllBtn.disabled = false;
+      renderAllBtn.innerHTML = originalText;
+      renderAllBtn.classList.remove('nle-generating');
+
+      var resultMsg = 'Generated ' + successCount + ' audio file' + (successCount === 1 ? '' : 's') + ' (saved to project)';
+      if (failCount > 0) {
+        resultMsg += ' (' + failCount + ' failed)';
+      }
+      toast(resultMsg, failCount > 0 ? 'warning' : 'success');
+    });
+  }
 
   // Wire up existing composition result actions (copy, tabs, filters)
   if (typeof wireCompositionResultActions === 'function') {
@@ -3639,6 +4253,330 @@ async function sendAppCommand(message, pipelineId, root) {
       }
     }, 10000);
   }
+}
+
+// ── Save / Load system ──────────────────────────────────────────────
+
+function wireAppSaveLoad(root) {
+  var saveBtn = root.querySelector('#app-save-state');
+  var loadBtn = root.querySelector('#app-load-state');
+  var panel = root.querySelector('#app-save-panel');
+  if (!saveBtn || !loadBtn || !panel || !compData) return;
+
+  saveBtn.addEventListener('click', function() {
+    if (panel.style.display !== 'none' && panel.getAttribute('data-mode') === 'save') {
+      panel.style.display = 'none';
+      return;
+    }
+    showSavePanel(panel);
+  });
+
+  loadBtn.addEventListener('click', function() {
+    if (panel.style.display !== 'none' && panel.getAttribute('data-mode') === 'load') {
+      panel.style.display = 'none';
+      return;
+    }
+    showLoadPanel(panel);
+  });
+}
+
+function showSavePanel(panel) {
+  panel.setAttribute('data-mode', 'save');
+  panel.style.display = 'block';
+
+  var html = '<div class="app-save-form">';
+  html += '<input type="text" class="app-save-name-input" id="app-save-name" placeholder="Save name (e.g. \'Final draft\')" />';
+  html += '<input type="text" class="app-save-desc-input" id="app-save-desc" placeholder="Description (optional)" />';
+  html += '<div class="app-save-form-row">';
+  html += '<button class="app-save-confirm-btn" id="app-save-confirm">&#x1F4BE; Save Here</button>';
+  html += '<button class="app-save-path-btn" id="app-save-to-path">&#x1F4C1; Save to Folder...</button>';
+  html += '</div>';
+  html += '<div class="app-save-status" id="app-save-status"></div>';
+  html += '</div>';
+  panel.innerHTML = html;
+
+  var confirmBtn = panel.querySelector('#app-save-confirm');
+  var pathBtn = panel.querySelector('#app-save-to-path');
+  var statusEl = panel.querySelector('#app-save-status');
+
+  confirmBtn.addEventListener('click', function() {
+    doSave(null, statusEl, confirmBtn, panel);
+  });
+
+  pathBtn.addEventListener('click', function() {
+    openFolderPicker(function(selectedPath) {
+      doSave(selectedPath, statusEl, pathBtn, panel);
+    });
+  });
+}
+
+function doSave(customPath, statusEl, triggerBtn, panel) {
+  if (!compData) return;
+  var nameInput = panel.querySelector('#app-save-name');
+  var descInput = panel.querySelector('#app-save-desc');
+  var name = (nameInput && nameInput.value.trim()) || '';
+  var desc = (descInput && descInput.value.trim()) || '';
+
+  triggerBtn.disabled = true;
+  triggerBtn.textContent = 'Saving...';
+  statusEl.textContent = '';
+  statusEl.className = 'app-save-status';
+
+  var body = { name: name || undefined, description: desc || undefined };
+  if (customPath) body.path = customPath;
+
+  fetch('/api/app/' + encodeURIComponent(compData.id) + '/saves', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, data: d }; }); })
+  .then(function(res) {
+    triggerBtn.disabled = false;
+    triggerBtn.textContent = triggerBtn.id === 'app-save-confirm' ? '\u{1F4BE} Save Here' : '\u{1F4C1} Save to Folder...';
+    if (!res.ok) {
+      statusEl.textContent = '\u2717 ' + (res.data.error || 'Save failed');
+      statusEl.className = 'app-save-status app-save-error';
+      return;
+    }
+    statusEl.textContent = '\u2713 Saved' + (res.data.path ? ' to ' + res.data.path : '');
+    statusEl.className = 'app-save-status app-save-ok';
+    toast('State saved: ' + (res.data.name || 'Untitled'), 'success');
+    setTimeout(function() { panel.style.display = 'none'; }, 1500);
+  })
+  .catch(function(err) {
+    triggerBtn.disabled = false;
+    triggerBtn.textContent = triggerBtn.id === 'app-save-confirm' ? '\u{1F4BE} Save Here' : '\u{1F4C1} Save to Folder...';
+    statusEl.textContent = '\u2717 ' + err.message;
+    statusEl.className = 'app-save-status app-save-error';
+  });
+}
+
+function showLoadPanel(panel) {
+  panel.setAttribute('data-mode', 'load');
+  panel.style.display = 'block';
+  panel.innerHTML = '<div class="app-save-loading">Loading saves...</div>';
+
+  fetch('/api/app/' + encodeURIComponent(compData.id) + '/saves')
+  .then(function(r) { return r.json(); })
+  .then(function(data) {
+    var saves = data.saves || [];
+    var html = '<div class="app-load-list">';
+
+    // Load from path option
+    html += '<button class="app-load-from-path-btn" id="app-load-from-path">&#x1F4C1; Load from Folder...</button>';
+
+    if (saves.length === 0) {
+      html += '<div class="app-save-empty">No saves yet. Click Save to create one.</div>';
+    } else {
+      for (var i = 0; i < saves.length; i++) {
+        var s = saves[i];
+        var dateStr = s.createdAt ? new Date(s.createdAt).toLocaleString() : 'Unknown date';
+        var sizeStr = s.size > 1048576 ? (s.size / 1048576).toFixed(1) + ' MB' : (s.size / 1024).toFixed(0) + ' KB';
+
+        html += '<div class="app-save-item" data-save-id="' + compEscAttr(s.id) + '">';
+        html += '<div class="app-save-item-header">';
+        html += '<span class="app-save-item-name">' + compEscHtml(s.name || s.id) + '</span>';
+        html += '<span class="app-save-item-date">' + compEscHtml(dateStr) + '</span>';
+        html += '</div>';
+        if (s.description) {
+          html += '<div class="app-save-item-desc">' + compEscHtml(s.description) + '</div>';
+        }
+        html += '<div class="app-save-item-meta">';
+        html += '<span>' + s.nodeCount + ' nodes</span>';
+        html += '<span>' + sizeStr + '</span>';
+        html += '</div>';
+        html += '<div class="app-save-item-actions">';
+        html += '<button class="app-save-item-load" data-save-id="' + compEscAttr(s.id) + '">Load</button>';
+        html += '<button class="app-save-item-delete" data-save-id="' + compEscAttr(s.id) + '">Delete</button>';
+        html += '</div>';
+        html += '</div>';
+      }
+    }
+
+    html += '<div class="app-save-status" id="app-load-status"></div>';
+    html += '</div>';
+    panel.innerHTML = html;
+
+    // Wire load buttons
+    panel.querySelectorAll('.app-save-item-load').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        var saveId = btn.getAttribute('data-save-id');
+        if (!confirm('Load this save? Your current state will be replaced.')) return;
+        btn.disabled = true;
+        btn.textContent = 'Loading...';
+        fetch('/api/app/' + encodeURIComponent(compData.id) + '/saves/' + encodeURIComponent(saveId) + '/load', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: '{}',
+        })
+        .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, data: d }; }); })
+        .then(function(res) {
+          if (!res.ok) {
+            toast('Load failed: ' + (res.data.error || 'Unknown error'), 'error');
+            btn.disabled = false;
+            btn.textContent = 'Load';
+            return;
+          }
+          toast('State loaded successfully', 'success');
+          // Refresh the whole app view
+          renderCompositionAppPage();
+        })
+        .catch(function(err) {
+          toast('Load failed: ' + err.message, 'error');
+          btn.disabled = false;
+          btn.textContent = 'Load';
+        });
+      });
+    });
+
+    // Wire delete buttons
+    panel.querySelectorAll('.app-save-item-delete').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        var saveId = btn.getAttribute('data-save-id');
+        if (!confirm('Delete this save? This cannot be undone.')) return;
+        btn.disabled = true;
+        btn.textContent = 'Deleting...';
+        fetch('/api/app/' + encodeURIComponent(compData.id) + '/saves/' + encodeURIComponent(saveId), {
+          method: 'DELETE',
+        })
+        .then(function(r) { return r.json(); })
+        .then(function() {
+          toast('Save deleted', 'success');
+          showLoadPanel(panel); // Refresh list
+        })
+        .catch(function(err) {
+          toast('Delete failed: ' + err.message, 'error');
+          btn.disabled = false;
+          btn.textContent = 'Delete';
+        });
+      });
+    });
+
+    // Wire load from path
+    var pathBtn = panel.querySelector('#app-load-from-path');
+    if (pathBtn) {
+      pathBtn.addEventListener('click', function() {
+        openFolderPicker(function(selectedPath) {
+          if (!confirm('Load state from this path? Your current state will be replaced.')) return;
+          pathBtn.disabled = true;
+          pathBtn.textContent = 'Loading...';
+          fetch('/api/app/' + encodeURIComponent(compData.id) + '/saves/load-from-path', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path: selectedPath }),
+          })
+          .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, data: d }; }); })
+          .then(function(res) {
+            if (!res.ok) {
+              toast('Load failed: ' + (res.data.error || 'Unknown error'), 'error');
+              pathBtn.disabled = false;
+              pathBtn.textContent = '\u{1F4C1} Load from Folder...';
+              return;
+            }
+            toast('State loaded from ' + selectedPath, 'success');
+            renderCompositionAppPage();
+          })
+          .catch(function(err) {
+            toast('Load failed: ' + err.message, 'error');
+            pathBtn.disabled = false;
+            pathBtn.textContent = '\u{1F4C1} Load from Folder...';
+          });
+        });
+      });
+    }
+  })
+  .catch(function(err) {
+    panel.innerHTML = '<div class="app-save-empty">Failed to load saves: ' + err.message + '</div>';
+  });
+}
+
+// ── Folder Picker Modal ──────────────────────────────────────────────
+
+function openFolderPicker(onSelect) {
+  // Remove any existing picker
+  var existing = document.querySelector('.folder-picker-overlay');
+  if (existing) existing.remove();
+
+  var overlay = document.createElement('div');
+  overlay.className = 'folder-picker-overlay';
+  overlay.innerHTML = '<div class="folder-picker-modal">'
+    + '<div class="folder-picker-header">'
+    + '<h3>Choose Folder</h3>'
+    + '<button class="folder-picker-close">&times;</button>'
+    + '</div>'
+    + '<div class="folder-picker-path" id="fp-current-path"></div>'
+    + '<div class="folder-picker-list" id="fp-list">Loading...</div>'
+    + '<div class="folder-picker-footer">'
+    + '<button class="folder-picker-cancel-btn" id="fp-cancel">Cancel</button>'
+    + '<button class="folder-picker-select-btn" id="fp-select">Select This Folder</button>'
+    + '</div>'
+    + '</div>';
+  document.body.appendChild(overlay);
+
+  var currentPath = '';
+  var listEl = overlay.querySelector('#fp-list');
+  var pathEl = overlay.querySelector('#fp-current-path');
+
+  function browseTo(dir) {
+    listEl.innerHTML = '<div style="color:#64748b;padding:12px;font-size:0.7rem;">Loading...</div>';
+    fetch('/api/browse', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: dir || undefined }),
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      currentPath = data.current || dir;
+      pathEl.textContent = currentPath;
+
+      var html = '';
+      // Parent directory
+      if (data.parent && data.parent !== currentPath) {
+        html += '<div class="folder-picker-item folder-picker-parent" data-path="' + compEscAttr(data.parent) + '">'
+          + '&#x1F4C1; ..'
+          + '</div>';
+      }
+      var dirs = data.dirs || [];
+      if (dirs.length === 0 && !data.parent) {
+        html += '<div style="color:#475569;padding:8px;font-size:0.65rem;font-style:italic;">No subdirectories</div>';
+      }
+      for (var i = 0; i < dirs.length; i++) {
+        html += '<div class="folder-picker-item" data-path="' + compEscAttr(dirs[i].path) + '">'
+          + '&#x1F4C1; ' + compEscHtml(dirs[i].name)
+          + '</div>';
+      }
+      listEl.innerHTML = html;
+
+      // Wire clicks to navigate
+      listEl.querySelectorAll('.folder-picker-item').forEach(function(item) {
+        item.addEventListener('click', function() {
+          browseTo(item.getAttribute('data-path'));
+        });
+      });
+    })
+    .catch(function(err) {
+      listEl.innerHTML = '<div style="color:#f87171;padding:8px;font-size:0.65rem;">Error: ' + err.message + '</div>';
+    });
+  }
+
+  // Start at home directory
+  browseTo('');
+
+  // Close handlers
+  overlay.querySelector('.folder-picker-close').addEventListener('click', function() { overlay.remove(); });
+  overlay.querySelector('#fp-cancel').addEventListener('click', function() { overlay.remove(); });
+  overlay.addEventListener('click', function(e) {
+    if (e.target === overlay) overlay.remove();
+  });
+
+  // Select handler
+  overlay.querySelector('#fp-select').addEventListener('click', function() {
+    if (currentPath) {
+      overlay.remove();
+      onSelect(currentPath);
+    }
+  });
 }
 
 // ── Git status section for app sidebar ──────────────────────────────

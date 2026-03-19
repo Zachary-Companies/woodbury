@@ -23,6 +23,7 @@ import {
   type InferenceServer,
 } from '../inference/index.js';
 import * as socialStorage from '../social/storage.js';
+import { decayMemories, consolidateMemories } from '../file-memory-store.js';
 
 import type { DashboardContext, DashboardHandle } from './types.js';
 import { createDashboardContext } from './context.js';
@@ -305,6 +306,23 @@ export async function startDashboard(
   }
   startScheduler();
 
+  // Memory maintenance (decay + consolidation, runs every 6 hours)
+  const MEMORY_MAINTENANCE_INTERVAL = 6 * 60 * 60 * 1000; // 6 hours
+  async function runMemoryMaintenance(): Promise<void> {
+    try {
+      const decay = await decayMemories();
+      const consolidation = await consolidateMemories();
+      if (decay.decayed > 0 || decay.pruned > 0 || consolidation.consolidated > 0) {
+        debugLog.info('memory', `Maintenance: ${decay.decayed} decayed, ${decay.pruned} pruned, ${consolidation.consolidated} consolidated`);
+      }
+    } catch (err) {
+      debugLog.error('memory', `Maintenance failed: ${err}`);
+    }
+  }
+  // Run once on startup (after a short delay to not block boot)
+  setTimeout(runMemoryMaintenance, 10_000);
+  const memoryTimer = setInterval(runMemoryMaintenance, MEMORY_MAINTENANCE_INTERVAL);
+
   // Inference server (background, non-blocking)
   startInferenceServer(ctx);
 
@@ -366,6 +384,7 @@ export async function startDashboard(
     close: async () => {
       relayHandle?.stop();
       stopScheduler();
+      clearInterval(memoryTimer);
       stopInferenceServer(ctx);
 
       if (ctx.chatAgent) {

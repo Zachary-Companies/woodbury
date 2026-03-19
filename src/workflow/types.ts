@@ -808,6 +808,7 @@ export interface CompositionDocument {
     viewport?: { panX: number; panY: number; zoom: number };
     generatedPipelineDocs?: CompositionGeneratedPipelineDoc[];
     projectNotes?: string;
+    projectFolder?: string;
   };
 }
 

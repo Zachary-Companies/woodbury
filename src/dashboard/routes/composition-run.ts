@@ -493,6 +493,8 @@ function makeScriptExecutionContext(
   };
 
   return {
+    pipelineId: '',   // set by caller
+    projectFolder: '', // set by caller
     llm: {
       generate: async (prompt: string, opts?: { temperature?: number; maxTokens?: number; model?: string }) => {
         const savedTemp = await getSavedTemperature();
@@ -757,6 +759,14 @@ async function runScriptNodeWithAutoFix(options: {
       if (updateCurrentStep && label) updateCurrentStep(label);
     },
   });
+
+  // Expose pipeline ID and project folder to scripts
+  const compId = composition?.id || '';
+  context.pipelineId = compId;
+  if (composition?.metadata?.projectFolder) {
+    context.projectFolder = composition.metadata.projectFolder;
+  }
+
   let runtimeInputs = recomputeInputs ? recomputeInputs() : mergedInputs;
 
   try {
@@ -1583,6 +1593,8 @@ async function executeForEachBodyNode(
           if (label) bodyNs.currentStep = `${label} (iter ${iterIndex + 1})`;
         },
       });
+      context.pipelineId = comp?.id || compId || '';
+      if (comp?.metadata?.projectFolder) context.projectFolder = comp.metadata.projectFolder;
       const result = await executeScriptFile(pipelineDir, scriptFileConfig.file, bodyMergedInputs, context);
 
       bodyNs.status = 'completed';
@@ -2270,6 +2282,8 @@ export const handleCompositionRunRoutes: RouteHandler = async (req, res, pathnam
                     if (label) ns.currentStep = label;
                   },
                 });
+                context.pipelineId = comp?.id || '';
+                if (comp?.metadata?.projectFolder) context.projectFolder = comp.metadata.projectFolder;
                 const result = await executeScriptFile(pipelineDir, scriptFileConfig.file, mergedInputs, context);
 
                 ns.durationMs = Date.now() - scriptStart;

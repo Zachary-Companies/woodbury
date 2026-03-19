@@ -543,6 +543,10 @@ function updateHash(tab, workflowId, view) {
     parts.push(workflowId);
     if (view && view !== 'visual') parts.push(view);
   }
+  // Append deeper sub-path segments if provided as extra arguments
+  for (var hi = 3; hi < arguments.length; hi++) {
+    if (arguments[hi]) parts.push(arguments[hi]);
+  }
   var newHash = '#' + parts.join('/');
   if (window.location.hash !== newHash) {
     history.replaceState(null, '', newHash);
@@ -557,6 +561,9 @@ function parseHash() {
     tab: parts[0] || 'home',
     workflowId: parts[1] || null,
     view: parts[2] || null,
+    subView: parts[3] || null,
+    subId: parts[4] || null,
+    extra: parts.slice(5),
   };
 }
 
@@ -583,6 +590,11 @@ function handleHash() {
 
   // If compositions tab with a composition ID, select it
   if (tab === 'compositions' && state.workflowId) {
+    // Pass sub-view state to the app view via global so renderCompositionAppPage can read it
+    if (state.view === 'app' && state.subView) {
+      window._hashAppSubView = state.subView;
+      window._hashAppSubId = state.subId || null;
+    }
     if (typeof selectComposition === 'function' && (selectedComposition !== state.workflowId || state.view === 'form' || document.body.classList.contains('composition-form-mode'))) {
       selectComposition(state.workflowId, state.view || null);
     }

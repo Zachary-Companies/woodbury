@@ -12,9 +12,10 @@
  *   POST /api/app/:id/refresh-stale  — re-run only stale downstream nodes
  */
 
-import { readFile, writeFile, mkdir, readdir, access } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, readdir, access, cp, rm, stat } from 'node:fs/promises';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { join, basename } from 'node:path';
+import { join, basename, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import type { DashboardContext, RouteHandler } from '../types.js';
 import { sendJson, readBody, atomicWriteFile } from '../utils.js';
@@ -119,6 +120,29 @@ function projectDir(pipelineId: string): string {
 
 function manifestPath(pipelineId: string): string {
   return join(projectDir(pipelineId), '_manifest.json');
+}
+
+/**
+ * Resolve the external project folder for a pipeline (e.g. ~/Documents/The Last Jump).
+ * Falls back to the pipeline's workflow dir, then app-state dir.
+ */
+async function resolveProjectFolder(pipelineId: string): Promise<string> {
+  // Check pipeline.json for metadata.projectFolder
+  try {
+    const compositions = await discoverCompositions();
+    const entry = compositions.find(c => c.composition.id === pipelineId);
+    if (entry) {
+      const pipelineJson = entry.composition;
+      const folder = pipelineJson?.metadata?.projectFolder;
+      if (folder && typeof folder === 'string') {
+        await mkdir(folder, { recursive: true });
+        return folder;
+      }
+      // Fall back to pipeline directory
+      if (entry.pipelineDir) return entry.pipelineDir;
+    }
+  } catch { /* ignore */ }
+  return join(APP_STATE_DIR, pipelineId);
 }
 
 function nodeDataPath(pipelineId: string, nodeId: string): string {
@@ -650,6 +674,284 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
     return true;
   }
 
+  // ── GET /api/app/:id/saves ──────────────────────────────
+  // List all saved snapshots for this pipeline
+  if (req.method === 'GET' && subPath === '/saves') {
+    const savesDir = join(projectDir(pipelineId), 'saves');
+    try {
+      await mkdir(savesDir, { recursive: true });
+      const entries = await readdir(savesDir);
+      const saves: Array<{
+        id: string;
+        name: string;
+        description: string;
+        createdAt: string;
+        nodeCount: number;
+        size: number;
+      }> = [];
+
+      for (const entry of entries) {
+        try {
+          const metaPath = join(savesDir, entry, '_save-meta.json');
+          const raw = await readFile(metaPath, 'utf-8');
+          const meta = JSON.parse(raw);
+          // Calculate approximate size
+          const saveFiles = await readdir(join(savesDir, entry));
+          let totalSize = 0;
+          for (const f of saveFiles) {
+            try {
+              const s = await stat(join(savesDir, entry, f));
+              totalSize += s.size;
+            } catch { /* skip */ }
+          }
+          saves.push({
+            id: entry,
+            name: meta.name || entry,
+            description: meta.description || '',
+            createdAt: meta.createdAt || '',
+            nodeCount: meta.nodeCount || 0,
+            size: totalSize,
+          });
+        } catch { /* skip invalid entries */ }
+      }
+
+      // Sort newest first
+      saves.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+      sendJson(res, 200, { saves });
+    } catch {
+      sendJson(res, 200, { saves: [] });
+    }
+    return true;
+  }
+
+  // ── POST /api/app/:id/saves ──────────────────────────────
+  // Create a new save (snapshot current state)
+  if (req.method === 'POST' && subPath === '/saves') {
+    const body = await readBody(req);
+    const name: string = body.name || `Save ${new Date().toLocaleString()}`;
+    const description: string = body.description || '';
+    const customPath: string | undefined = body.path; // optional: save to custom location
+
+    const state = await loadAppState(pipelineId);
+    if (!state) {
+      sendJson(res, 404, { error: 'No app state to save' });
+      return true;
+    }
+
+    const saveId = `save-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const targetDir = customPath
+      ? resolve(customPath)
+      : join(projectDir(pipelineId), 'saves', saveId);
+
+    try {
+      await mkdir(targetDir, { recursive: true });
+
+      // Copy all node data files
+      const srcDir = projectDir(pipelineId);
+      const files = await readdir(srcDir);
+      let nodeCount = 0;
+      for (const f of files) {
+        if (f === 'saves' || f.startsWith('.')) continue; // skip saves dir and hidden files
+        const srcPath = join(srcDir, f);
+        const s = await stat(srcPath);
+        if (s.isFile()) {
+          await cp(srcPath, join(targetDir, f));
+          if (f.endsWith('.json') && f !== '_manifest.json') nodeCount++;
+        }
+      }
+
+      // Copy previs directory if it exists
+      const previsDir = join(srcDir, 'previs');
+      try {
+        await access(previsDir);
+        await cp(previsDir, join(targetDir, 'previs'), { recursive: true });
+      } catch { /* no previs dir */ }
+
+      // Also copy bindings from the pipeline source if present
+      const compositions = await discoverCompositions();
+      const entry = compositions.find((d: any) => d?.composition?.id === pipelineId);
+      if (entry?.pipelineDir) {
+        const bindingsPath = join(entry.pipelineDir, 'bindings', 'bindings.json');
+        try {
+          await access(bindingsPath);
+          await mkdir(join(targetDir, 'bindings'), { recursive: true });
+          await cp(bindingsPath, join(targetDir, 'bindings', 'bindings.json'));
+        } catch { /* no bindings */ }
+      }
+
+      // Write save metadata
+      const saveMeta = {
+        id: saveId,
+        name,
+        description,
+        createdAt: new Date().toISOString(),
+        pipelineId,
+        pipelineName: state.pipelineName,
+        sourceRunId: state.sourceRunId,
+        nodeCount,
+        savedTo: targetDir,
+      };
+      await atomicWriteFile(join(targetDir, '_save-meta.json'), JSON.stringify(saveMeta, null, 2));
+
+      debugLog.info('pipeline-app', `Saved snapshot "${name}" for ${pipelineId} → ${targetDir}`);
+      sendJson(res, 200, { saved: true, saveId, path: targetDir, ...saveMeta });
+    } catch (err: any) {
+      sendJson(res, 500, { error: `Failed to save: ${err.message}` });
+    }
+    return true;
+  }
+
+  // ── POST /api/app/:id/saves/:saveId/load ──────────────────
+  // Restore app state from a save
+  const loadMatch = subPath.match(/^\/saves\/([^/]+)\/load$/);
+  if (req.method === 'POST' && loadMatch) {
+    const saveId = decodeURIComponent(loadMatch[1]);
+    const body = await readBody(req);
+
+    // Support loading from a custom path OR from the saves directory
+    const sourceDir = body.path
+      ? resolve(body.path)
+      : join(projectDir(pipelineId), 'saves', saveId);
+
+    try {
+      // Verify save exists
+      const metaPath = join(sourceDir, '_save-meta.json');
+      await access(metaPath);
+
+      const destDir = projectDir(pipelineId);
+
+      // Clear current state (but preserve saves directory)
+      const existingFiles = await readdir(destDir);
+      for (const f of existingFiles) {
+        if (f === 'saves' || f.startsWith('.')) continue;
+        const fullPath = join(destDir, f);
+        const s = await stat(fullPath);
+        if (s.isFile()) {
+          await rm(fullPath);
+        } else if (s.isDirectory() && f === 'previs') {
+          await rm(fullPath, { recursive: true });
+        }
+      }
+
+      // Copy save files into current state
+      const saveFiles = await readdir(sourceDir);
+      for (const f of saveFiles) {
+        if (f === '_save-meta.json') continue; // don't copy meta into active state
+        const srcPath = join(sourceDir, f);
+        const s = await stat(srcPath);
+        if (s.isFile()) {
+          await cp(srcPath, join(destDir, f));
+        } else if (s.isDirectory() && f === 'previs') {
+          await cp(srcPath, join(destDir, f), { recursive: true });
+        }
+      }
+
+      // Restore bindings to pipeline source if present
+      const savedBindings = join(sourceDir, 'bindings', 'bindings.json');
+      try {
+        await access(savedBindings);
+        const compositions = await discoverCompositions();
+        const entry = compositions.find((d: any) => d?.composition?.id === pipelineId);
+        if (entry?.pipelineDir) {
+          const bindingsDest = join(entry.pipelineDir, 'bindings');
+          await mkdir(bindingsDest, { recursive: true });
+          await cp(savedBindings, join(bindingsDest, 'bindings.json'));
+        }
+      } catch { /* no bindings in save */ }
+
+      // Load and return the restored state
+      const restored = await loadAppState(pipelineId);
+      debugLog.info('pipeline-app', `Loaded save "${saveId}" for ${pipelineId} from ${sourceDir}`);
+      sendJson(res, 200, { loaded: true, state: restored });
+    } catch (err: any) {
+      sendJson(res, 500, { error: `Failed to load save: ${err.message}` });
+    }
+    return true;
+  }
+
+  // ── DELETE /api/app/:id/saves/:saveId ──────────────────────
+  const deleteMatch = subPath.match(/^\/saves\/([^/]+)$/);
+  if (req.method === 'DELETE' && deleteMatch) {
+    const saveId = decodeURIComponent(deleteMatch[1]);
+    const saveDir = join(projectDir(pipelineId), 'saves', saveId);
+    try {
+      await rm(saveDir, { recursive: true });
+      debugLog.info('pipeline-app', `Deleted save "${saveId}" for ${pipelineId}`);
+      sendJson(res, 200, { deleted: true });
+    } catch (err: any) {
+      sendJson(res, 500, { error: `Failed to delete: ${err.message}` });
+    }
+    return true;
+  }
+
+  // ── POST /api/app/:id/saves/load-from-path ────────────────
+  // Load state from an arbitrary path on the filesystem
+  if (req.method === 'POST' && subPath === '/saves/load-from-path') {
+    const body = await readBody(req);
+    const loadPath: string = body.path;
+    if (!loadPath) {
+      sendJson(res, 400, { error: 'path is required' });
+      return true;
+    }
+
+    const sourceDir = resolve(loadPath);
+    try {
+      // Check if it's a valid save (has manifest or save meta)
+      let isValid = false;
+      try { await access(join(sourceDir, '_manifest.json')); isValid = true; } catch {}
+      try { await access(join(sourceDir, '_save-meta.json')); isValid = true; } catch {}
+      if (!isValid) {
+        sendJson(res, 400, { error: 'Not a valid save directory — no _manifest.json or _save-meta.json found' });
+        return true;
+      }
+
+      const destDir = projectDir(pipelineId);
+      await mkdir(destDir, { recursive: true });
+
+      // Clear current state (preserve saves)
+      const existingFiles = await readdir(destDir);
+      for (const f of existingFiles) {
+        if (f === 'saves' || f.startsWith('.')) continue;
+        const fullPath = join(destDir, f);
+        const s = await stat(fullPath);
+        if (s.isFile()) await rm(fullPath);
+        else if (s.isDirectory() && f === 'previs') await rm(fullPath, { recursive: true });
+      }
+
+      // Copy files from source
+      const sourceFiles = await readdir(sourceDir);
+      for (const f of sourceFiles) {
+        if (f === '_save-meta.json') continue;
+        const srcPath = join(sourceDir, f);
+        const s = await stat(srcPath);
+        if (s.isFile()) await cp(srcPath, join(destDir, f));
+        else if (s.isDirectory() && (f === 'previs' || f === 'bindings')) {
+          await cp(srcPath, join(destDir, f), { recursive: true });
+        }
+      }
+
+      // Restore bindings if present
+      const savedBindings = join(sourceDir, 'bindings', 'bindings.json');
+      try {
+        await access(savedBindings);
+        const compositions = await discoverCompositions();
+        const entry = compositions.find((d: any) => d?.composition?.id === pipelineId);
+        if (entry?.pipelineDir) {
+          const bindingsDest = join(entry.pipelineDir, 'bindings');
+          await mkdir(bindingsDest, { recursive: true });
+          await cp(savedBindings, join(bindingsDest, 'bindings.json'));
+        }
+      } catch { /* no bindings */ }
+
+      const restored = await loadAppState(pipelineId);
+      debugLog.info('pipeline-app', `Loaded state from path: ${sourceDir}`);
+      sendJson(res, 200, { loaded: true, path: sourceDir, state: restored });
+    } catch (err: any) {
+      sendJson(res, 500, { error: `Failed to load from path: ${err.message}` });
+    }
+    return true;
+  }
+
   // ── GET /api/app/:id/node/:nodeId ────────────────────────
   // Load a single node's output data (fast — reads one file)
   const nodeMatch = subPath.match(/^\/node\/([^/]+)$/);
@@ -916,8 +1218,9 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
       return true;
     }
 
-    // Create output directory
-    const previsDir = join(APP_STATE_DIR, pipelineId, 'previs');
+    // Create output directory in the project folder
+    const projFolder = await resolveProjectFolder(pipelineId);
+    const previsDir = join(projFolder, 'assets', 'previs');
     await mkdir(previsDir, { recursive: true });
     const outputPath = join(previsDir, `previs_${elementId}_${Date.now().toString(36)}.png`);
 
@@ -960,6 +1263,381 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
     } catch (err) {
       debugLog.info('generate-previs', `Error: ${err}`);
       sendJson(res, 500, { error: 'Generation failed: ' + (err instanceof Error ? err.message : String(err)) });
+    }
+    return true;
+  }
+
+  // ── POST /api/app/:id/generate-dialogue-audio ──────────────
+  // Generate TTS audio for a dialogue element, save to project, persist as asset.
+  if (req.method === 'POST' && subPath === '/generate-dialogue-audio') {
+    const body = await readBody(req);
+    const elementId: string = body.elementId;
+    const text: string = body.text;
+    const voiceId: string = body.voiceId;
+    const characterName: string = body.characterName || '';
+    const characterId: string = body.characterId || '';
+
+    if (!elementId || !text || !voiceId) {
+      sendJson(res, 400, { error: 'elementId, text, and voiceId are required' });
+      return true;
+    }
+
+    // Create output directory in the project folder
+    const projFolder2 = await resolveProjectFolder(pipelineId);
+    const audioDir = join(projFolder2, 'audio');
+    await mkdir(audioDir, { recursive: true });
+    const outputPath = join(audioDir, `dialogue_${elementId}_${Date.now().toString(36)}.mp3`);
+
+    try {
+      // Call TTS tool via extension manager
+      await ctx.extensionManager?.whenReady();
+      const tools = ctx.extensionManager?.getAllTools() ?? [];
+      const ttsTool = tools.find(t => t.definition.name === 'tts_speak');
+
+      if (!ttsTool) {
+        sendJson(res, 500, { error: 'TTS tool not available. Check that ElevenLabs extension is loaded.' });
+        return true;
+      }
+
+      const ttsResult = await ttsTool.handler({
+        text,
+        voice_id: voiceId,
+        output_path: outputPath,
+        output_format: 'mp3_44100_128',
+      }, { workingDirectory: audioDir } as any);
+
+      const audioData = typeof ttsResult === 'string' ? JSON.parse(ttsResult) : ttsResult;
+      if (!audioData.success) {
+        sendJson(res, 500, { error: audioData.error || 'TTS generation failed' });
+        return true;
+      }
+
+      const filePath = audioData.audio_path || outputPath;
+
+      // Build the asset entry
+      const assetId = 'ast_da_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+      const asset = {
+        id: assetId,
+        type: 'dialogue-audio',
+        name: `Dialogue: ${characterName || elementId}`,
+        description: text.substring(0, 200),
+        filePath,
+        metadata: {
+          dialogueElementId: elementId,
+          characterId,
+          characterName,
+          voiceId,
+          text: text.substring(0, 500),
+          generatedAt: new Date().toISOString(),
+        },
+      };
+
+      // Add to the asset collection in app state (or update existing)
+      await addDialogueAudioAsset(pipelineId, asset);
+
+      sendJson(res, 200, {
+        success: true,
+        elementId,
+        filePath,
+        assetId,
+        characterName,
+      });
+    } catch (err) {
+      debugLog.info('generate-dialogue-audio', `Error: ${err}`);
+      sendJson(res, 500, { error: 'TTS failed: ' + (err instanceof Error ? err.message : String(err)) });
+    }
+    return true;
+  }
+
+  // ── POST /api/app/:id/import-audio ──────────────────────────
+  // Copy an audio file into the pipeline's audio directory.
+  // Accepts { sourcePath: "/absolute/path/to/file.mp3" }
+  // Returns { success, filePath } with the new project-local path.
+  if (req.method === 'POST' && subPath === '/import-audio') {
+    const body = await readBody(req);
+    const sourcePath: string = body.sourcePath;
+    if (!sourcePath) {
+      sendJson(res, 400, { error: 'sourcePath required' });
+      return true;
+    }
+
+    try {
+      // Verify source exists
+      await access(sourcePath);
+
+      // Create audio dir inside the project folder
+      const projFolder = await resolveProjectFolder(pipelineId);
+      const audioDir = join(projFolder, 'audio');
+      await mkdir(audioDir, { recursive: true });
+
+      // Build a unique destination filename
+      const srcBase = basename(sourcePath);
+      const dotIdx = srcBase.lastIndexOf('.');
+      const name = dotIdx > 0 ? srcBase.substring(0, dotIdx) : srcBase;
+      const ext = dotIdx > 0 ? srcBase.substring(dotIdx) : '';
+      const safeName = name.replace(/[^a-zA-Z0-9_\-. ]/g, '_').substring(0, 80);
+      const destName = safeName + '_' + Date.now().toString(36) + ext;
+      const destPath = join(audioDir, destName);
+
+      await cp(sourcePath, destPath);
+
+      // Detect audio duration via ffprobe (if available)
+      let duration: number | null = null;
+      try {
+        const { execSync } = await import('node:child_process');
+        const probe = execSync(
+          `ffprobe -v error -show_entries format=duration -of csv=p=0 "${destPath}"`,
+          { timeout: 5000, encoding: 'utf-8' }
+        ).trim();
+        const parsed = parseFloat(probe);
+        if (parsed > 0 && isFinite(parsed)) duration = parsed;
+      } catch {
+        // ffprobe not available — try size-based estimate for MP3 (128kbps ~ 16KB/s)
+        try {
+          const fileStat = await stat(destPath);
+          const sizeKb = fileStat.size / 1024;
+          if (ext.toLowerCase() === '.mp3') duration = sizeKb / 16;
+          else if (ext.toLowerCase() === '.wav') duration = sizeKb / 176; // 44.1kHz 16-bit stereo
+          else duration = sizeKb / 16; // rough default
+        } catch { /* ignore */ }
+      }
+
+      sendJson(res, 200, { success: true, filePath: destPath, fileName: srcBase, duration });
+    } catch (err) {
+      sendJson(res, 500, { error: 'Import failed: ' + (err instanceof Error ? err.message : String(err)) });
+    }
+    return true;
+  }
+
+  // ── POST /api/app/:id/render-video ──────────────────────────
+  // Render the NLE timeline to a video file via ffmpeg.
+  if (req.method === 'POST' && subPath === '/render-video') {
+    const body = await readBody(req);
+    const settings = body.settings || {};
+    const clips: any[] = body.clips || [];
+    const dialogAudioMap: Record<string, string> = body.dialogAudioMap || {};
+
+    const resX: number = settings.resolutionX || 1920;
+    const resY: number = settings.resolutionY || 1080;
+    const fps: number = settings.fps || 24;
+    const format: string = settings.format || 'mp4';
+    const quality: string = settings.quality || 'medium';
+    const startTime: number = settings.startTime || 0;
+    const endTime: number = settings.endTime || 120;
+    const totalDuration = endTime - startTime;
+
+    if (totalDuration <= 0) {
+      sendJson(res, 400, { error: 'Invalid time range' });
+      return true;
+    }
+
+    try {
+      const projFolder = await resolveProjectFolder(pipelineId);
+      const renderDir = join(projFolder, 'renders');
+      await mkdir(renderDir, { recursive: true });
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      const ext = format === 'webm' ? 'webm' : format === 'mov' ? 'mov' : 'mp4';
+      const outputPath = join(renderDir, `render_${timestamp}.${ext}`);
+
+      // CRF mapping
+      const crfMap: Record<string, number> = { high: 18, medium: 23, low: 28 };
+      const crf = crfMap[quality] || 23;
+
+      // Separate clips by type
+      const visualClips = clips
+        .filter((c: any) => c.trackId === 'visuals' && c.filePath)
+        .sort((a: any, b: any) => a.startTime - b.startTime);
+
+      const audioClips: any[] = [];
+      // Dialog audio from dialogAudioMap
+      clips.filter((c: any) => c.type === 'dialog' && c.elementId && dialogAudioMap[c.elementId])
+        .forEach((c: any) => {
+          audioClips.push({
+            path: dialogAudioMap[c.elementId],
+            startTime: c.startTime - startTime,
+            duration: c.duration,
+            volume: (c.volume != null ? c.volume : 100) / 100,
+            fadeIn: c.fadeIn || 0,
+            fadeOut: c.fadeOut || 0,
+          });
+        });
+      // Music/SFX/Ambience clips with file paths
+      clips.filter((c: any) => (c.type === 'music' || c.type === 'sfx' || c.type === 'ambience') && c.filePath)
+        .forEach((c: any) => {
+          audioClips.push({
+            path: c.filePath,
+            startTime: c.startTime - startTime,
+            duration: c.duration,
+            volume: (c.volume != null ? c.volume : 100) / 100,
+            fadeIn: c.fadeIn || 0,
+            fadeOut: c.fadeOut || 0,
+          });
+        });
+
+      if (visualClips.length === 0) {
+        sendJson(res, 400, { error: 'No visual clips with images to render' });
+        return true;
+      }
+
+      // Build ffmpeg command
+      const ffmpegArgs: string[] = [];
+
+      // Add visual inputs (images looped for their duration)
+      for (const vc of visualClips) {
+        const clipDur = Math.min(vc.startTime + vc.duration, endTime) - Math.max(vc.startTime, startTime);
+        if (clipDur <= 0) continue;
+        ffmpegArgs.push('-loop', '1', '-t', String(clipDur), '-i', vc.filePath);
+      }
+
+      const numVisuals = visualClips.length;
+
+      // Add audio inputs
+      for (const ac of audioClips) {
+        ffmpegArgs.push('-i', ac.path);
+      }
+
+      const numAudio = audioClips.length;
+
+      // Build filter complex
+      const filterParts: string[] = [];
+      let concatInputs = '';
+
+      for (let i = 0; i < numVisuals; i++) {
+        filterParts.push(`[${i}:v]fps=${fps},scale=${resX}:${resY}:force_original_aspect_ratio=decrease,pad=${resX}:${resY}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1[v${i}]`);
+        concatInputs += `[v${i}]`;
+      }
+
+      filterParts.push(`${concatInputs}concat=n=${numVisuals}:v=1:a=0[vout]`);
+
+      // Mix audio
+      if (numAudio > 0) {
+        let amixInputs = '';
+        for (let i = 0; i < numAudio; i++) {
+          const audioIdx = numVisuals + i;
+          const ac = audioClips[i];
+          let volFilter = `volume=${ac.volume}`;
+          if (ac.fadeIn > 0) volFilter += `,afade=t=in:d=${ac.fadeIn}`;
+          if (ac.fadeOut > 0) volFilter += `,afade=t=out:st=${Math.max(0, ac.duration - ac.fadeOut)}:d=${ac.fadeOut}`;
+          // Delay audio to its start position and trim
+          const delayMs = Math.max(0, Math.round(ac.startTime * 1000));
+          filterParts.push(`[${audioIdx}:a]atrim=0:${ac.duration},${volFilter},adelay=${delayMs}|${delayMs},apad[a${i}]`);
+          amixInputs += `[a${i}]`;
+        }
+        if (numAudio === 1) {
+          filterParts.push(`${amixInputs}atrim=0:${totalDuration}[aout]`);
+        } else {
+          filterParts.push(`${amixInputs}amix=inputs=${numAudio}:duration=longest:dropout_transition=2,atrim=0:${totalDuration}[aout]`);
+        }
+      } else {
+        // Generate silent audio
+        filterParts.push(`anullsrc=r=44100:cl=stereo,atrim=0:${totalDuration}[aout]`);
+      }
+
+      const filterComplex = filterParts.join(';');
+
+      // Codec settings
+      const isWebm = format === 'webm';
+      const videoCodec = isWebm ? 'libvpx-vp9' : 'libx264';
+      const audioCodec = isWebm ? 'libopus' : 'aac';
+
+      ffmpegArgs.push(
+        '-filter_complex', filterComplex,
+        '-map', '[vout]',
+        '-map', '[aout]',
+        '-c:v', videoCodec,
+        ...(isWebm ? ['-b:v', '2M'] : ['-preset', 'medium', '-crf', String(crf)]),
+        '-c:a', audioCodec,
+        '-b:a', '192k',
+        '-t', String(totalDuration),
+        '-pix_fmt', 'yuv420p',
+        ...(isWebm ? [] : ['-movflags', '+faststart']),
+        '-y',
+        outputPath,
+      );
+
+      debugLog.info('render-video', `Starting render: ${numVisuals} visual clips, ${numAudio} audio clips, ${totalDuration}s, ${resX}x${resY} @ ${fps}fps`);
+
+      const ffmpegBin = '/opt/homebrew/bin/ffmpeg';
+      const ffproc = spawn(ffmpegBin, ffmpegArgs, { stdio: ['pipe', 'pipe', 'pipe'] });
+
+      // Store process for potential cancellation
+      (ctx as any)._renderProcess = ffproc;
+
+      let stderrLog = '';
+      ffproc.stderr?.on('data', (chunk: Buffer) => {
+        stderrLog += chunk.toString();
+      });
+
+      await new Promise<void>((resolve, reject) => {
+        ffproc.on('close', (code: number | null) => {
+          (ctx as any)._renderProcess = null;
+          if (code === 0) resolve();
+          else {
+            const lines = stderrLog.trim().split('\n');
+            const lastLines = lines.slice(-5).join('\n');
+            reject(new Error(`ffmpeg exited with code ${code}: ${lastLines}`));
+          }
+        });
+        ffproc.on('error', (err: Error) => {
+          (ctx as any)._renderProcess = null;
+          reject(err);
+        });
+      });
+
+      const outputStat = await stat(outputPath);
+      const fileSizeMB = (outputStat.size / (1024 * 1024)).toFixed(1);
+
+      debugLog.info('render-video', `Render complete: ${outputPath} (${fileSizeMB}MB)`);
+
+      sendJson(res, 200, {
+        success: true,
+        videoPath: outputPath,
+        duration: totalDuration,
+        fileSize: outputStat.size,
+        fileSizeMB,
+        scenes: numVisuals,
+        audioTracks: numAudio,
+      });
+    } catch (err) {
+      debugLog.error('render-video', `Render failed: ${err}`);
+      sendJson(res, 500, { error: 'Render failed: ' + (err instanceof Error ? err.message : String(err)) });
+    }
+    return true;
+  }
+
+  // ── POST /api/app/:id/render-cancel ────────────────────────
+  if (req.method === 'POST' && subPath === '/render-cancel') {
+    const proc = (ctx as any)._renderProcess as ChildProcess | null;
+    if (proc) {
+      proc.kill('SIGTERM');
+      (ctx as any)._renderProcess = null;
+    }
+    sendJson(res, 200, { success: true });
+    return true;
+  }
+
+  // ── POST /api/app/:id/open-path ─────────────────────────────
+  // Open a file or folder in the system file manager (Finder on macOS).
+  if (req.method === 'POST' && subPath === '/open-path') {
+    const body = await readBody(req);
+    const targetPath: string = body.path;
+    if (!targetPath) {
+      sendJson(res, 400, { error: 'path required' });
+      return true;
+    }
+    try {
+      const { exec } = await import('node:child_process');
+      if (process.platform === 'darwin') {
+        // -R reveals the file in Finder
+        exec(`open -R "${targetPath.replace(/"/g, '\\"')}"`);
+      } else if (process.platform === 'win32') {
+        exec(`explorer /select,"${targetPath.replace(/"/g, '\\"')}"`);
+      } else {
+        exec(`xdg-open "${targetPath.replace(/"/g, '\\"')}"`);
+      }
+      sendJson(res, 200, { success: true });
+    } catch (err) {
+      sendJson(res, 500, { error: (err instanceof Error ? err.message : String(err)) });
     }
     return true;
   }
@@ -1086,6 +1764,95 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
     return true;
   }
 
+  // ── GET /api/app/:id/views — discover pipeline-local custom views ──
+  if (req.method === 'GET' && subPath === '/views') {
+    const compositions = await discoverCompositions();
+    const entry = compositions.find((c: any) => c.composition.id === pipelineId);
+    if (!entry || !entry.pipelineDir) {
+      sendJson(res, 200, { views: [] });
+      return true;
+    }
+
+    const viewsDir = join(entry.pipelineDir, 'views');
+    const views: Array<{ name: string; label: string; icon?: string; hasCSS: boolean; description?: string }> = [];
+
+    try {
+      const entries = await readdir(viewsDir, { withFileTypes: true });
+      for (const ent of entries) {
+        if (!ent.isDirectory()) continue;
+        const viewDir = join(viewsDir, ent.name);
+
+        // Must have a view.js
+        const jsPath = join(viewDir, 'view.js');
+        try { await access(jsPath); } catch { continue; }
+
+        // Check for optional manifest.json
+        let manifest: any = { name: ent.name, label: ent.name };
+        try {
+          const raw = await readFile(join(viewDir, 'manifest.json'), 'utf-8');
+          manifest = { ...manifest, ...JSON.parse(raw) };
+        } catch { /* no manifest, use defaults */ }
+
+        // Check for optional view.css
+        let hasCSS = false;
+        try { await access(join(viewDir, 'view.css')); hasCSS = true; } catch { /* no css */ }
+
+        views.push({
+          name: ent.name,
+          label: manifest.label || manifest.name || ent.name,
+          icon: manifest.icon,
+          hasCSS,
+          description: manifest.description,
+        });
+      }
+    } catch { /* no views directory */ }
+
+    sendJson(res, 200, { views });
+    return true;
+  }
+
+  // ── GET /api/app/:id/view-file/:viewName/:fileName — serve pipeline-local view files ──
+  const viewFileMatch = subPath.match(/^\/view-file\/([^/]+)\/([^/]+)$/);
+  if (req.method === 'GET' && viewFileMatch) {
+    const viewName = decodeURIComponent(viewFileMatch[1]);
+    const fileName = decodeURIComponent(viewFileMatch[2]);
+
+    // Only allow safe file names (no path traversal)
+    if (fileName.includes('..') || fileName.includes('/') || viewName.includes('..') || viewName.includes('/')) {
+      sendJson(res, 400, { error: 'Invalid file name' });
+      return true;
+    }
+
+    // Only serve .js and .css files
+    const allowed = ['.js', '.css'];
+    const ext = fileName.substring(fileName.lastIndexOf('.'));
+    if (!allowed.includes(ext)) {
+      sendJson(res, 400, { error: 'Only .js and .css files are allowed' });
+      return true;
+    }
+
+    const compositions = await discoverCompositions();
+    const entry = compositions.find((c: any) => c.composition.id === pipelineId);
+    if (!entry || !entry.pipelineDir) {
+      sendJson(res, 404, { error: 'Pipeline not found' });
+      return true;
+    }
+
+    const filePath = join(entry.pipelineDir, 'views', viewName, fileName);
+    try {
+      const content = await readFile(filePath, 'utf-8');
+      const mimeType = ext === '.js' ? 'application/javascript' : 'text/css';
+      res.writeHead(200, {
+        'Content-Type': mimeType + '; charset=utf-8',
+        'Cache-Control': 'no-cache',
+      });
+      res.end(content);
+    } catch {
+      sendJson(res, 404, { error: 'View file not found' });
+    }
+    return true;
+  }
+
   return false;
 };
 
@@ -1114,6 +1881,10 @@ async function autoRunRules(
   const sourceTypes = new Set(rulesDoc.rules.map(r => r.source.entityType));
   const targetTypes = new Set(rulesDoc.rules.map(r => r.target.entityType));
 
+  // Track seen IDs across all files to prevent duplicates
+  const seenSourceIds = new Set<string>();
+  const seenTargetIds = new Set<string>();
+
   for (const f of nodeDataFiles) {
     if (!f.endsWith('.json') || f.startsWith('_')) continue;
     try {
@@ -1122,8 +1893,8 @@ async function autoRunRules(
       // App state files store data at the top level (not under outputs)
       // Try nodeData.outputs first (pipeline run format), fall back to nodeData itself
       const outputs = nodeData.outputs || nodeData;
-      scanForEntities(outputs, sourceTypes, sourceEntities);
-      scanForEntities(outputs, targetTypes, targetEntities);
+      scanForEntities(outputs, sourceTypes, sourceEntities, seenSourceIds);
+      scanForEntities(outputs, targetTypes, targetEntities, seenTargetIds);
     } catch { /* skip */ }
   }
 
@@ -1131,15 +1902,24 @@ async function autoRunRules(
 
   const newBindings = applyRules(rulesDoc.rules, sourceEntities, targetEntities);
 
+  // Deduplicate: first against manual bindings, then within newBindings itself
   const bindingsDoc = await loadBindings(pipelineDir);
   const manualBindings = bindingsDoc.bindings.filter(b => !b.origin.startsWith('auto:'));
-  const manualKeys = new Set(
+  
+  // Build a set of all existing keys (manual bindings)
+  const existingKeys = new Set(
     manualBindings.map(b => `${b.source.entityId}:${b.target.entityId}:${b.type}`)
   );
-  const uniqueNew = newBindings.filter(b => {
+  
+  // Deduplicate newBindings: skip if already in existingKeys OR already seen in this batch
+  const uniqueNew = [];
+  for (const b of newBindings) {
     const key = `${b.source.entityId}:${b.target.entityId}:${b.type}`;
-    return !manualKeys.has(key);
-  });
+    if (!existingKeys.has(key)) {
+      existingKeys.add(key); // Mark as seen so subsequent duplicates are skipped
+      uniqueNew.push(b);
+    }
+  }
 
   const oldAutoCount = bindingsDoc.bindings.filter(b => b.origin.startsWith('auto:')).length;
   bindingsDoc.bindings = [...manualBindings, ...uniqueNew];
@@ -1166,7 +1946,7 @@ function scanForEntities(
   obj: any,
   targetTypes: Set<string>,
   results: Array<{ entityType: string; entityId: string; data: Record<string, any> }>,
-  seenIds = new Set<string>(),
+  seenIds: Set<string>,
 ) {
   if (!obj || typeof obj !== 'object') return;
   for (const key of Object.keys(obj)) {
@@ -1380,19 +2160,60 @@ async function updatePrevisAsset(
   let files: string[];
   try { files = await readdir(dir); } catch { return; }
 
+  let updatedShots = false;
+  let updatedAsset = false;
+
   for (const file of files) {
     if (!file.endsWith('.json') || file === '_manifest.json') continue;
     const filePath = join(dir, file);
     try {
       const raw = await readFile(filePath, 'utf-8');
       const data = JSON.parse(raw);
-      if (updatePrevisInObj(data, elementId, newFilePath)) {
+      let changed = false;
+
+      // Update the previs shots entry (_generatedFilePath)
+      if (!updatedShots && updatePrevisInObj(data, elementId, newFilePath)) {
+        updatedShots = true;
+        changed = true;
+        debugLog.info('generate-previs', `Updated previs shot in ${file} for ${elementId}`);
+      }
+
+      // Update the asset in assetCollection (filePath on the asset itself)
+      if (!updatedAsset && updatePrevisAssetFilePath(data, elementId, newFilePath)) {
+        updatedAsset = true;
+        changed = true;
+        debugLog.info('generate-previs', `Updated asset filePath in ${file} for ${elementId}`);
+      }
+
+      if (changed) {
         await writeFile(filePath, JSON.stringify(data, null, 2));
-        debugLog.info('generate-previs', `Updated previs asset in ${file} for ${elementId}`);
-        return;
       }
     } catch { /* skip */ }
+
+    if (updatedShots && updatedAsset) return;
   }
+}
+
+/**
+ * Update the filePath on a previs-frame asset in an assetCollection.
+ * Matches assets where metadata.shotElementId === elementId.
+ */
+function updatePrevisAssetFilePath(obj: any, elementId: string, newFilePath: string): boolean {
+  if (!obj || typeof obj !== 'object') return false;
+  if (Array.isArray(obj)) {
+    for (const item of obj) {
+      if (item?.type === 'previs-frame' && item?.metadata?.shotElementId === elementId) {
+        item.filePath = newFilePath;
+        return true;
+      }
+      if (updatePrevisAssetFilePath(item, elementId, newFilePath)) return true;
+    }
+    return false;
+  }
+  for (const k of Object.keys(obj)) {
+    if (updatePrevisAssetFilePath(obj[k], elementId, newFilePath)) return true;
+  }
+  return false;
 }
 
 /**
@@ -1447,6 +2268,68 @@ function updatePrevisInObj(obj: any, elementId: string, newFilePath: string): bo
   }
   for (const k of Object.keys(obj)) {
     if (updatePrevisInObj(obj[k], elementId, newFilePath)) return true;
+  }
+  return false;
+}
+
+/**
+ * Add or update a dialogue-audio asset in the app state.
+ * Finds the node file containing the assetCollection and adds the asset,
+ * replacing any existing asset for the same dialogueElementId.
+ */
+async function addDialogueAudioAsset(pipelineId: string, asset: any): Promise<void> {
+  const dir = join(APP_STATE_DIR, pipelineId);
+  let files: string[];
+  try { files = await readdir(dir); } catch { return; }
+
+  for (const file of files) {
+    if (!file.endsWith('.json') || file === '_manifest.json') continue;
+    const filePath = join(dir, file);
+    try {
+      const raw = await readFile(filePath, 'utf-8');
+      const data = JSON.parse(raw);
+      if (insertDialogueAudioInObj(data, asset)) {
+        await writeFile(filePath, JSON.stringify(data, null, 2));
+        debugLog.info('generate-dialogue-audio', `Added dialogue-audio asset to ${file} for ${asset.metadata?.dialogueElementId}`);
+        return;
+      }
+    } catch { /* skip */ }
+  }
+
+  // If no assetCollection found in any node, log a warning
+  debugLog.info('generate-dialogue-audio', `No assetCollection found in any node for pipeline ${pipelineId}`);
+}
+
+/**
+ * Recursively walk an object to find an `assetCollection` with an `assets` array.
+ * Remove any existing dialogue-audio for the same dialogueElementId, then append the new asset.
+ */
+function insertDialogueAudioInObj(obj: any, asset: any): boolean {
+  if (!obj || typeof obj !== 'object') return false;
+  if (Array.isArray(obj)) {
+    for (const item of obj) {
+      if (insertDialogueAudioInObj(item, asset)) return true;
+    }
+    return false;
+  }
+  // Check if this object has an assets array (assetCollection or similar)
+  if (obj.assetCollection && Array.isArray(obj.assetCollection.assets)) {
+    const assets: any[] = obj.assetCollection.assets;
+    const dialogueElementId = asset.metadata?.dialogueElementId;
+    // Remove any existing dialogue-audio for this same element
+    if (dialogueElementId) {
+      for (let i = assets.length - 1; i >= 0; i--) {
+        if (assets[i]?.type === 'dialogue-audio' &&
+            assets[i]?.metadata?.dialogueElementId === dialogueElementId) {
+          assets.splice(i, 1);
+        }
+      }
+    }
+    assets.push(asset);
+    return true;
+  }
+  for (const k of Object.keys(obj)) {
+    if (insertDialogueAudioInObj(obj[k], asset)) return true;
   }
   return false;
 }

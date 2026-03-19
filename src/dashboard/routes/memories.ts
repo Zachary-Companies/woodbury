@@ -1,142 +1,129 @@
-import { exec } from 'node:child_process';
 import type { DashboardContext, RouteHandler } from '../types.js';
-import { sendJson } from '../utils.js';
-import { GENERAL_MEMORY_CATEGORIES, getSQLiteMemoryStore } from '../../sqlite-memory-store.js';
+import { sendJson, readBody } from '../utils.js';
+import {
+  listMemories,
+  recallMemories,
+  deleteMemory,
+  getMemoryStats,
+  decayMemories,
+  consolidateMemories,
+  saveMemory,
+  MEMORY_CATEGORIES,
+  type MemoryCategory,
+  type Memory,
+} from '../../file-memory-store.js';
 
-const store = getSQLiteMemoryStore();
-const VALID_GENERAL_CATEGORIES = new Set<string>(GENERAL_MEMORY_CATEGORIES);
-const VALID_CLOSURE_TYPES = new Set<string>(['episodic', 'semantic', 'procedural', 'failure', 'failure_pattern', 'preference']);
+const VALID_CATEGORIES = new Set<string>(MEMORY_CATEGORIES);
 
 function parseLimit(value: string | null, fallback: number): number {
   const parsed = Number(value);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    return fallback;
-  }
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
   return Math.min(parsed, 500);
 }
 
 function parseOffset(value: string | null): number {
   const parsed = Number(value);
-  if (!Number.isFinite(parsed) || parsed < 0) {
-    return 0;
-  }
+  if (!Number.isFinite(parsed) || parsed < 0) return 0;
   return parsed;
 }
 
 export const handleMemoryRoutes: RouteHandler = async (req, res, pathname, url, _ctx: DashboardContext) => {
+  // ── Stats ────────────────────────────────────────────────
   if (req.method === 'GET' && pathname === '/api/memories/stats') {
-    sendJson(res, 200, { stats: store.getMemoryStats() });
+    const stats = await getMemoryStats();
+    sendJson(res, 200, { stats });
     return true;
   }
 
-  if (req.method === 'POST' && pathname === '/api/memories/reindex') {
-    const result = store.reindexAllMemories();
-    sendJson(res, 200, { success: true, reindexed: result, stats: store.getMemoryStats() });
+  // ── Decay + Consolidation (manual trigger) ───────────────
+  if (req.method === 'POST' && pathname === '/api/memories/consolidate') {
+    const [decayResult, consolidateResult] = await Promise.all([
+      decayMemories(),
+      consolidateMemories(),
+    ]);
+    const stats = await getMemoryStats();
+    sendJson(res, 200, {
+      success: true,
+      decayed: decayResult.decayed,
+      pruned: decayResult.pruned,
+      consolidated: consolidateResult.consolidated,
+      stats,
+    });
     return true;
   }
 
+  // ── Create memory (manual) ───────────────────────────────
+  if (req.method === 'POST' && pathname === '/api/memories') {
+    const body = JSON.parse(await readBody(req));
+    if (!body.content || !body.category) {
+      sendJson(res, 400, { error: 'content and category are required' });
+      return true;
+    }
+    if (!VALID_CATEGORIES.has(body.category)) {
+      sendJson(res, 400, { error: `Invalid category: ${body.category}` });
+      return true;
+    }
+    const mem = await saveMemory(body.content, body.category as MemoryCategory, {
+      tags: body.tags,
+      source: body.source || 'dashboard',
+      project: body.project,
+      importance: body.importance,
+    });
+    sendJson(res, 201, { memory: mem });
+    return true;
+  }
+
+  // ── List / Search ────────────────────────────────────────
   if (req.method === 'GET' && pathname === '/api/memories') {
-    const scope = url.searchParams.get('scope') === 'closure' ? 'closure' : 'general';
     const query = (url.searchParams.get('query') || '').trim();
+    const category = url.searchParams.get('category');
+    const project = url.searchParams.get('project') || undefined;
     const limit = parseLimit(url.searchParams.get('limit'), 50);
     const offset = parseOffset(url.searchParams.get('offset'));
 
-    if (scope === 'general') {
-      const category = url.searchParams.get('category');
-      if (category && !VALID_GENERAL_CATEGORIES.has(category)) {
-        sendJson(res, 400, { error: `Invalid general memory category: ${category}` });
-        return true;
-      }
+    if (category && !VALID_CATEGORIES.has(category)) {
+      sendJson(res, 400, { error: `Invalid category: ${category}` });
+      return true;
+    }
 
-      const result = store.browseGeneralMemories({
-        query: query || undefined,
-        category: (category as any) || undefined,
-        site: url.searchParams.get('site') || undefined,
-        project: url.searchParams.get('project') || undefined,
+    let items: Memory[];
+    let total: number;
+
+    if (query) {
+      // Semantic-ish search via recallMemories
+      items = await recallMemories(query, {
+        category: (category as MemoryCategory) || undefined,
+        project,
+        limit,
+      });
+      total = items.length;
+    } else {
+      // Browse mode
+      const result = await listMemories({
+        category: (category as MemoryCategory) || undefined,
+        project,
         limit,
         offset,
       });
-      sendJson(res, 200, {
-        scope,
-        total: result.total,
-        items: result.items,
-        stats: store.getMemoryStats(),
-      });
-      return true;
+      items = result.memories;
+      total = result.total;
     }
 
-    const type = url.searchParams.get('type');
-    if (type && !VALID_CLOSURE_TYPES.has(type)) {
-      sendJson(res, 400, { error: `Invalid closure memory type: ${type}` });
-      return true;
-    }
-
-    const result = store.browseClosureMemories({
-      query: query || undefined,
-      type: (type as any) || undefined,
-      limit,
-      offset,
-    });
-    sendJson(res, 200, {
-      scope,
-      total: result.total,
-      items: result.items,
-      stats: store.getMemoryStats(),
-    });
+    const stats = await getMemoryStats();
+    sendJson(res, 200, { total, items, stats });
     return true;
   }
 
-  {
-    const openMatch = pathname.match(/^\/api\/memories\/([^/]+)\/(open|reveal)$/);
-    if (req.method === 'POST' && openMatch) {
-      const id = decodeURIComponent(openMatch[1]);
-      const action = openMatch[2];
-      const scope = url.searchParams.get('scope') === 'closure' ? 'closure' : 'general';
-      const paths = store.getMemoryArtifactPaths(scope, id);
-
-      if (!paths?.markdownPath) {
-        sendJson(res, 404, { error: 'Memory file not found' });
-        return true;
-      }
-
-      try {
-        if (action === 'reveal') {
-          if (process.platform === 'darwin') {
-            exec(`open -R "${paths.markdownPath}"`);
-          } else if (process.platform === 'win32') {
-            exec(`explorer /select,"${paths.markdownPath.replace(/\//g, '\\\\')}"`);
-          } else {
-            exec(`xdg-open "${paths.directoryPath}"`);
-          }
-        } else if (process.platform === 'darwin') {
-          exec(`open "${paths.markdownPath}"`);
-        } else if (process.platform === 'win32') {
-          exec(`start "" "${paths.markdownPath.replace(/\//g, '\\\\')}"`);
-        } else {
-          exec(`xdg-open "${paths.markdownPath}"`);
-        }
-
-        sendJson(res, 200, { success: true, scope, id, action, path: paths.markdownPath });
-      } catch {
-        sendJson(res, 500, { error: `Failed to ${action} memory file` });
-      }
-      return true;
-    }
-  }
-
+  // ── Delete ───────────────────────────────────────────────
   if (req.method === 'DELETE' && pathname.startsWith('/api/memories/')) {
     const id = decodeURIComponent(pathname.replace('/api/memories/', ''));
-    const scope = url.searchParams.get('scope') === 'closure' ? 'closure' : 'general';
-    const deleted = scope === 'closure'
-      ? store.deleteClosureMemory(id)
-      : store.deleteGeneralMemory(id);
-
+    const deleted = await deleteMemory(id);
     if (!deleted) {
       sendJson(res, 404, { error: 'Memory not found' });
       return true;
     }
-
-    sendJson(res, 200, { success: true, deletedId: id, scope, stats: store.getMemoryStats() });
+    const stats = await getMemoryStats();
+    sendJson(res, 200, { success: true, deletedId: id, stats });
     return true;
   }
 

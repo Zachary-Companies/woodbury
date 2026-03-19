@@ -17,6 +17,7 @@ import type { DashboardContext, RouteHandler } from '../types.js';
 import type { CompositionDocument } from '../../workflow/types.js';
 import { sendJson, readBody } from '../utils.js';
 import { readFile, writeFile, readdir, unlink, mkdir } from 'node:fs/promises';
+import { recallMemories, saveMemory, formatMemoriesForPrompt } from '../../file-memory-store.js';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { debugLog } from '../../debug-log.js';
@@ -105,6 +106,107 @@ interface ChatSessionRecord {
 // ────────────────────────────────────────────────────────────────
 //  Local helpers
 // ────────────────────────────────────────────────────────────────
+
+/**
+ * Auto-save memories from a chat interaction.
+ *
+ * Analyzes the user message, agent response, and tool calls to extract
+ * durable knowledge worth remembering:
+ * - Error fixes → error_pattern
+ * - Tool sequences that worked → procedure
+ * - File edits → discovery
+ * - User corrections/preferences → preference
+ */
+async function autoSaveMemories(
+  userMessage: string,
+  agentResponse: string,
+  toolCalls: ChatToolLog[],
+  project?: string,
+): Promise<void> {
+  const toolNames = toolCalls.map(t => t.name);
+  const hasEdits = toolNames.some(t => t === 'Edit' || t === 'Write' || t.includes('edit') || t.includes('write'));
+  const hasErrors = toolCalls.some(t => !t.success);
+  const msg = userMessage.toLowerCase();
+
+  // Don't save trivial interactions
+  if (toolCalls.length === 0) return;
+  if (agentResponse.length < 100) return;
+
+  // Pattern: user reported a bug/error and agent fixed it
+  if (hasErrors || msg.includes('error') || msg.includes('bug') || msg.includes('fix') || msg.includes('broken') || msg.includes("doesn't work") || msg.includes('not working')) {
+    if (hasEdits) {
+      // Extract what was fixed
+      const editTools = toolCalls.filter(t => t.name === 'Edit' || t.name === 'Write');
+      const filesEdited = editTools.map(t => {
+        const path = t.params?.file_path as string || '';
+        return path.split('/').slice(-2).join('/');
+      }).filter(Boolean);
+
+      if (filesEdited.length > 0) {
+        const summary = `Fixed issue: "${userMessage.slice(0, 120)}". ` +
+          `Files edited: ${filesEdited.join(', ')}. ` +
+          `Resolution: ${agentResponse.slice(0, 200)}`;
+        await saveMemory(summary, 'error_pattern', {
+          tags: filesEdited,
+          source: 'chat',
+          project,
+          importance: 0.7,
+        });
+      }
+    }
+  }
+
+  // Pattern: multi-step procedure (3+ tool calls that succeeded)
+  if (toolCalls.length >= 3 && !hasErrors) {
+    const uniqueTools = [...new Set(toolNames)];
+    if (uniqueTools.length >= 2) {
+      const summary = `Procedure for "${userMessage.slice(0, 100)}": ` +
+        `Used ${uniqueTools.join(' → ')} (${toolCalls.length} steps). ` +
+        `Outcome: ${agentResponse.slice(0, 150)}`;
+      await saveMemory(summary, 'procedure', {
+        tags: uniqueTools,
+        source: 'chat',
+        project,
+        importance: 0.6,
+      });
+    }
+  }
+
+  // Pattern: user explicitly stating a preference
+  if (msg.includes('i want') || msg.includes('i prefer') || msg.includes('always') || msg.includes('never') || msg.includes('should be') || msg.includes('make sure')) {
+    await saveMemory(
+      `User preference: "${userMessage.slice(0, 300)}"`,
+      'preference',
+      {
+        tags: ['user-stated'],
+        source: 'chat',
+        project,
+        importance: 0.8,
+      },
+    );
+  }
+
+  // Pattern: discovery about the codebase (agent read files and explained)
+  const readTools = toolCalls.filter(t => t.name === 'Read' || t.name === 'Grep' || t.name === 'Glob');
+  if (readTools.length >= 2 && agentResponse.length > 300) {
+    const filesRead = readTools.map(t => {
+      const path = (t.params?.file_path || t.params?.path || t.params?.pattern || '') as string;
+      return path.split('/').slice(-2).join('/');
+    }).filter(Boolean);
+
+    if (filesRead.length > 0 && (msg.includes('how') || msg.includes('where') || msg.includes('what') || msg.includes('explain'))) {
+      const summary = `Discovery: "${userMessage.slice(0, 100)}". ` +
+        `Key files: ${filesRead.slice(0, 5).join(', ')}. ` +
+        `Finding: ${agentResponse.slice(0, 200)}`;
+      await saveMemory(summary, 'discovery', {
+        tags: filesRead.slice(0, 5),
+        source: 'chat',
+        project,
+        importance: 0.5,
+      });
+    }
+  }
+}
 
 async function appendChatLog(entry: ChatLogEntry): Promise<void> {
   try {
@@ -911,13 +1013,32 @@ export const handleChatRoutes: RouteHandler = async (req, res, pathname, url, ct
         }
       }
 
+      // ── Auto-recall relevant memories ──
+      let memoriesContext = '';
+      try {
+        const relevantMemories = await recallMemories(message, {
+          project: activeCompositionId || undefined,
+          limit: 6,
+        });
+        if (relevantMemories.length > 0) {
+          memoriesContext = formatMemoriesForPrompt(relevantMemories);
+          debugLog.info('chat', `Injected ${relevantMemories.length} relevant memories`);
+        }
+      } catch (err) {
+        debugLog.warn('chat', 'Memory recall failed', { error: String(err) });
+      }
+
+      const messageWithContext = [
+        compositionContext ? `<pipeline_context>${compositionContext}</pipeline_context>` : '',
+        memoriesContext,
+        message,
+      ].filter(Boolean).join('\n\n');
+
       const prompt = buildCompressedPrompt({
         sessionSummary: rollingSummary,
         summaryTurnCount,
         recentTurns: compressedHistory.recentTurns,
-        message: compositionContext
-          ? `<pipeline_context>${compositionContext}</pipeline_context>\n\n${message}`
-          : message,
+        message: messageWithContext,
       });
 
       // Set up SSE response
@@ -1151,6 +1272,15 @@ export const handleChatRoutes: RouteHandler = async (req, res, pathname, url, ct
           aborted: wasAborted,
           error: runError,
         });
+
+        // ── Auto-save memories from this interaction ──
+        if (!runError && !wasAborted && responseContent.length > 50 && toolLogs.length > 0) {
+          try {
+            await autoSaveMemories(message, responseContent, toolLogs, activeCompositionId || undefined);
+          } catch (err) {
+            debugLog.warn('chat', 'Auto-save memories failed', { error: String(err) });
+          }
+        }
       }
     } catch (err) {
       ctx.chatAgentBusy = false;
