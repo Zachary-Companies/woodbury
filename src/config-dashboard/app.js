@@ -650,10 +650,109 @@ async function installUpdate(btn) {
   }
 }
 
+// ── Nav Tab Visibility ────────────────────────────────────────
+// Persists which nav tabs are shown/hidden in localStorage.
+
+var NAV_VISIBILITY_KEY = 'woodbury_nav_visibility';
+var NAV_ALWAYS_VISIBLE = ['home']; // tabs that can't be hidden
+var NAV_DEFAULT_VISIBILITY = {
+  home: true, chat: true, workflows: true, compositions: true,
+  assets: true, memory: true, voices: true,
+  runs: false, training: false, marketplace: false, social: false,
+  skills: false, storyboard: false, mcp: false,
+};
+
+function loadNavVisibility() {
+  try {
+    var raw = localStorage.getItem(NAV_VISIBILITY_KEY);
+    return raw ? JSON.parse(raw) : NAV_DEFAULT_VISIBILITY;
+  } catch { return null; }
+}
+
+function saveNavVisibility(vis) {
+  try { localStorage.setItem(NAV_VISIBILITY_KEY, JSON.stringify(vis)); } catch {}
+}
+
+function applyNavVisibility() {
+  var vis = loadNavVisibility();
+  document.querySelectorAll('.nav-tab').forEach(function(btn) {
+    var tab = btn.dataset.tab;
+    if (NAV_ALWAYS_VISIBLE.indexOf(tab) !== -1) return;
+    btn.style.display = vis[tab] === false ? 'none' : '';
+  });
+}
+
+function showNavConfigMenu(anchorX, anchorY) {
+  // Remove existing
+  var existing = document.getElementById('nav-config-menu');
+  if (existing) { existing.remove(); return; }
+
+  var vis = loadNavVisibility() || {};
+  var tabs = [];
+  document.querySelectorAll('.nav-tab').forEach(function(btn) {
+    tabs.push({ id: btn.dataset.tab, label: btn.getAttribute('title') || btn.dataset.tab });
+  });
+
+  var menu = document.createElement('div');
+  menu.id = 'nav-config-menu';
+  menu.className = 'nav-config-menu';
+  menu.innerHTML = '<div class="nav-config-title">Show / Hide Tabs</div>';
+
+  tabs.forEach(function(t) {
+    var isAlways = NAV_ALWAYS_VISIBLE.indexOf(t.id) !== -1;
+    var checked = isAlways || vis[t.id] !== false;
+    var row = document.createElement('label');
+    row.className = 'nav-config-row';
+    row.innerHTML =
+      '<input type="checkbox"' + (checked ? ' checked' : '') + (isAlways ? ' disabled' : '') +
+      ' data-nav-tab="' + t.id + '" /> ' + t.label;
+    menu.appendChild(row);
+  });
+
+  // Position near the nav area
+  menu.style.left = anchorX + 'px';
+  menu.style.top = Math.min(anchorY, window.innerHeight - 400) + 'px';
+
+  document.body.appendChild(menu);
+
+  // Listen for changes
+  menu.querySelectorAll('input[data-nav-tab]').forEach(function(cb) {
+    cb.addEventListener('change', function() {
+      var v = loadNavVisibility() || {};
+      v[cb.dataset.navTab] = cb.checked;
+      saveNavVisibility(v);
+      applyNavVisibility();
+    });
+  });
+
+  // Close on outside click
+  setTimeout(function() {
+    function closeMenu(e) {
+      if (!menu.contains(e.target)) {
+        menu.remove();
+        document.removeEventListener('mousedown', closeMenu);
+      }
+    }
+    document.addEventListener('mousedown', closeMenu);
+  }, 0);
+}
+
 document.addEventListener('DOMContentLoaded', () => {
   document.querySelectorAll('.nav-tab').forEach(btn => {
     btn.addEventListener('click', () => switchTab(btn.dataset.tab));
   });
+
+  // Apply saved nav visibility
+  applyNavVisibility();
+
+  // Right-click on nav area opens config menu
+  var navTabs = document.querySelector('.nav-tabs');
+  if (navTabs) {
+    navTabs.addEventListener('contextmenu', function(e) {
+      e.preventDefault();
+      showNavConfigMenu(e.clientX, e.clientY);
+    });
+  }
 
   // Restore state from hash on initial load
   var state = parseHash();

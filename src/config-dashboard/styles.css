@@ -104,6 +104,57 @@ body.composition-form-mode .main {
 }
 .nav-tabs::-webkit-scrollbar { display: none; }
 
+/* ── Nav Config Menu ───────────────────────────────────── */
+.nav-config-menu {
+  position: fixed;
+  z-index: 10000;
+  background: #1a1f2e;
+  border: 1px solid rgba(139, 92, 246, 0.2);
+  border-radius: 8px;
+  padding: 6px 0;
+  min-width: 180px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+.nav-config-title {
+  padding: 6px 14px 4px;
+  font-size: 0.65rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #64748b;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  margin-bottom: 4px;
+}
+
+.nav-config-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 14px;
+  font-size: 0.78rem;
+  color: #e2e8f0;
+  cursor: pointer;
+  transition: background 0.1s;
+}
+
+.nav-config-row:hover {
+  background: rgba(139, 92, 246, 0.08);
+}
+
+.nav-config-row input[type="checkbox"] {
+  accent-color: #7c3aed;
+  width: 14px;
+  height: 14px;
+  cursor: pointer;
+}
+
+.nav-config-row input[disabled] {
+  opacity: 0.4;
+  cursor: default;
+}
+
 .nav-tab {
   position: relative;
   display: flex;
@@ -8078,6 +8129,93 @@ textarea.wf-se-input {
   letter-spacing: 1px;
   margin-bottom: 1rem;
 }
+/* ── Pipeline App Cards ──────────────────────────────────── */
+
+.home-apps-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 2rem;
+}
+
+.home-app-card {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  background:
+    linear-gradient(135deg, rgba(124, 58, 237, 0.06), rgba(99, 102, 241, 0.03)),
+    #1e293b;
+  border: 1px solid rgba(139, 92, 246, 0.15);
+  border-radius: 10px;
+  padding: 0.75rem 1rem;
+  cursor: pointer;
+  transition: border-color 0.15s, transform 0.15s, box-shadow 0.15s;
+}
+
+.home-app-card:hover {
+  border-color: rgba(139, 92, 246, 0.4);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 20px rgba(124, 58, 237, 0.12);
+}
+
+.home-app-logo {
+  width: 44px;
+  height: 44px;
+  border-radius: 9px;
+  object-fit: cover;
+  flex-shrink: 0;
+  border: 1px solid rgba(139, 92, 246, 0.2);
+}
+
+.home-app-logo-placeholder {
+  width: 44px;
+  height: 44px;
+  border-radius: 9px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(139, 92, 246, 0.1);
+  border: 1px solid rgba(139, 92, 246, 0.15);
+  font-size: 1.25rem;
+}
+
+.home-app-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.home-app-name {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #f1f5f9;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.home-app-desc {
+  font-size: 0.7rem;
+  color: #64748b;
+  margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.home-app-arrow {
+  flex-shrink: 0;
+  font-size: 1.25rem;
+  color: #475569;
+  font-weight: 300;
+}
+
+.home-app-card:hover .home-app-arrow {
+  color: #a78bfa;
+}
+
+/* ── What You Can Do ────────────────────────────────────── */
+
 .home-grid {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
@@ -8838,6 +8976,50 @@ textarea.wf-se-input {
   background-clip: text;
   margin: 0 0 0.25rem;
   line-height: 1.3;
+}
+
+.app-sidebar-logo {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 0.5rem;
+}
+
+.app-sidebar-logo-img {
+  width: 56px;
+  height: 56px;
+  border-radius: 10px;
+  object-fit: cover;
+  border: 1px solid rgba(139, 92, 246, 0.2);
+  box-shadow: 0 2px 12px rgba(124, 58, 237, 0.15);
+}
+
+.app-sidebar-title-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.35rem;
+}
+
+.app-sidebar-title-row .app-sidebar-title {
+  flex: 1;
+}
+
+.app-sidebar-logo-btn {
+  flex-shrink: 0;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: #475569;
+  font-size: 0.75rem;
+  cursor: pointer;
+  padding: 2px 4px;
+  line-height: 1;
+  transition: all 0.15s;
+}
+
+.app-sidebar-logo-btn:hover {
+  color: #a78bfa;
+  border-color: rgba(139, 92, 246, 0.3);
+  background: rgba(139, 92, 246, 0.08);
 }
 
 .app-sidebar-desc {

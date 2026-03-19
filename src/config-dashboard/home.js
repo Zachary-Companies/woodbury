@@ -47,6 +47,9 @@
         '</div>' +
       '</div>' +
 
+      // Section: Pipeline Apps (populated dynamically)
+      '<div id="home-pipeline-apps"></div>' +
+
       // Section: What you can do
       '<div class="home-section-title">What you can do</div>' +
       '<div class="home-grid">' +
@@ -144,8 +147,9 @@
       });
     }
 
-    // Fetch stats
+    // Fetch stats and pipeline apps
     fetchStats();
+    fetchPipelineApps();
 
     homeInitialized = true;
   }
@@ -181,6 +185,65 @@
         if (el && data.compositions) {
           el.textContent = data.compositions.length;
         }
+      })
+      .catch(function () {});
+  }
+
+  function fetchPipelineApps() {
+    fetch('/api/compositions')
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        var container = document.getElementById('home-pipeline-apps');
+        if (!container || !data.compositions) return;
+
+        var appPipelines = data.compositions.filter(function (c) {
+          return c.hasViews;
+        });
+
+        if (appPipelines.length === 0) return;
+
+        var html = '<div class="home-section-title">Your Apps</div>';
+        html += '<div class="home-apps-grid">';
+
+        appPipelines.forEach(function (p) {
+          var logoSrc = '';
+          if (p.metadata && p.metadata.logo) {
+            logoSrc = p.metadata.logo.indexOf('data:') === 0 || p.metadata.logo.indexOf('http') === 0
+              ? p.metadata.logo
+              : '/api/file?path=' + encodeURIComponent(p.metadata.logo);
+          }
+
+          html += '<div class="home-app-card" data-comp-id="' + (p.id || '').replace(/"/g, '&quot;') + '">';
+          if (logoSrc) {
+            html += '<img class="home-app-logo" src="' + logoSrc.replace(/"/g, '&quot;') + '" alt="" />';
+          } else {
+            html += '<div class="home-app-logo-placeholder">&#x1f3ac;</div>';
+          }
+          html += '<div class="home-app-info">';
+          html += '<div class="home-app-name">' + (p.name || 'Untitled').replace(/</g, '&lt;') + '</div>';
+          if (p.description) {
+            html += '<div class="home-app-desc">' + p.description.substring(0, 80).replace(/</g, '&lt;') + '</div>';
+          }
+          html += '</div>';
+          html += '<div class="home-app-arrow">&#x203A;</div>';
+          html += '</div>';
+        });
+
+        html += '</div>';
+        container.innerHTML = html;
+
+        // Wire clicks
+        container.querySelectorAll('.home-app-card').forEach(function (card) {
+          card.addEventListener('click', function () {
+            var compId = card.getAttribute('data-comp-id');
+            if (compId && typeof switchTab === 'function') {
+              switchTab('compositions');
+              setTimeout(function () {
+                if (typeof selectComposition === 'function') selectComposition(compId, 'app');
+              }, 100);
+            }
+          });
+        });
       })
       .catch(function () {});
   }

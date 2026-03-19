@@ -809,6 +809,7 @@ export interface CompositionDocument {
     generatedPipelineDocs?: CompositionGeneratedPipelineDoc[];
     projectNotes?: string;
     projectFolder?: string;
+    logo?: string; // file path or data URL for pipeline logo image
   };
 }
 

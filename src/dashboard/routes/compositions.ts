@@ -5,7 +5,7 @@
  */
 import type { DashboardContext, RouteHandler } from '../types.js';
 import { sendJson, readBody, atomicWriteFile } from '../utils.js';
-import { readFile, readdir, unlink, mkdir } from 'node:fs/promises';
+import { readFile, readdir, unlink, mkdir, access } from 'node:fs/promises';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import {
@@ -42,16 +42,29 @@ export const handleCompositionsRoutes: RouteHandler = async (req, res, pathname,
         invalidateCompositionCache();
       }
       const discovered = await discoverCompositions(workDir);
-      const compositions = discovered.map(d => ({
-        id: d.composition.id,
-        name: d.composition.name,
-        description: d.composition.description,
-        folder: d.composition.folder || '',
-        source: d.source,
-        path: d.path,
-        nodeCount: d.composition.nodes.length,
-        edgeCount: d.composition.edges.length,
-        metadata: d.composition.metadata,
+      const compositions = await Promise.all(discovered.map(async d => {
+        // Check if pipeline has custom views directory
+        let hasViews = false;
+        if (d.pipelineDir) {
+          try {
+            const viewsDir = join(d.pipelineDir, 'views');
+            await access(viewsDir);
+            const entries = await readdir(viewsDir, { withFileTypes: true });
+            hasViews = entries.some(e => e.isDirectory());
+          } catch { /* no views */ }
+        }
+        return {
+          id: d.composition.id,
+          name: d.composition.name,
+          description: d.composition.description,
+          folder: d.composition.folder || '',
+          source: d.source,
+          path: d.path,
+          nodeCount: d.composition.nodes.length,
+          edgeCount: d.composition.edges.length,
+          metadata: d.composition.metadata,
+          hasViews,
+        };
       }));
       sendJson(res, 200, { compositions });
     } catch (err) {

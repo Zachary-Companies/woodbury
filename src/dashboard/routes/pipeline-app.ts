@@ -87,6 +87,7 @@ interface AppSchema {
   pipelineId: string;
   name: string;
   description: string;
+  logo?: string;
   sections: AppSection[];
   edges: Array<{ sourceNodeId: string; sourcePort: string; targetNodeId: string; targetPort: string }>;
   executionOrder: string[];
@@ -527,6 +528,7 @@ function deriveAppSchema(pipeline: any): AppSchema {
     pipelineId: pipeline.id,
     name: pipeline.name || 'Untitled Pipeline',
     description: pipeline.description || '',
+    logo: pipeline.metadata?.logo || undefined,
     sections,
     edges: edges.map((e: any) => ({
       sourceNodeId: e.sourceNodeId,
@@ -1637,6 +1639,61 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
       }
       sendJson(res, 200, { success: true });
     } catch (err) {
+      sendJson(res, 500, { error: (err instanceof Error ? err.message : String(err)) });
+    }
+    return true;
+  }
+
+  // ── POST /api/app/:id/generate-logo ─────────────────────────
+  // Generate a logo image for the pipeline via nanobanana.
+  if (req.method === 'POST' && subPath === '/generate-logo') {
+    const body = await readBody(req);
+    const prompt: string = body.prompt;
+    if (!prompt) {
+      sendJson(res, 400, { error: 'prompt required' });
+      return true;
+    }
+
+    try {
+      // Determine output path — prefer project folder, fall back to pipeline dir
+      const projFolder = await resolveProjectFolder(pipelineId);
+      const logoDir = join(projFolder, 'assets');
+      await mkdir(logoDir, { recursive: true });
+      const outputPath = join(logoDir, `pipeline-logo.png`);
+
+      // Call nanobanana
+      await ctx.extensionManager?.whenReady();
+      const tools = ctx.extensionManager?.getAllTools() ?? [];
+      const nbTool = tools.find(t => t.definition.name === 'nanobanana');
+
+      let filePath: string;
+
+      if (nbTool) {
+        const result = await nbTool.handler({
+          action: 'generate',
+          prompt,
+          outputPath,
+          aspectRatio: '1:1',
+        }, { workingDirectory: logoDir } as any);
+        const parsed = typeof result === 'string' ? JSON.parse(result) : result;
+        if (!parsed.success) throw new Error(parsed.error || 'Generation failed');
+        filePath = parsed.imagePath || parsed.filePath || outputPath;
+      } else {
+        // Try direct import
+        const { nanobanana: nb } = await import('../../loop/tools/nanobanana.js');
+        const result = JSON.parse(await nb({
+          action: 'generate',
+          prompt,
+          outputPath,
+          aspectRatio: '1:1',
+        } as any, logoDir));
+        if (!result.success) throw new Error(result.error || 'Generation failed');
+        filePath = result.imagePath || result.filePath || outputPath;
+      }
+
+      sendJson(res, 200, { success: true, filePath });
+    } catch (err) {
+      debugLog.error('generate-logo', `Error: ${err}`);
       sendJson(res, 500, { error: (err instanceof Error ? err.message : String(err)) });
     }
     return true;

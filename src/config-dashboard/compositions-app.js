@@ -335,9 +335,20 @@ function renderAppSidebar(schema, state) {
   var staleSet = new Set(state.staleNodes || []);
   var html = '<div class="app-sidebar">';
 
-  // Title
+  // Title + Logo
   html += '<div class="app-sidebar-header">';
+  if (schema.logo) {
+    var logoSrc = schema.logo.startsWith('data:') || schema.logo.startsWith('http')
+      ? schema.logo
+      : '/api/file?path=' + encodeURIComponent(schema.logo);
+    html += '<div class="app-sidebar-logo">';
+    html += '<img src="' + compEscAttr(logoSrc) + '" alt="" class="app-sidebar-logo-img" />';
+    html += '</div>';
+  }
+  html += '<div class="app-sidebar-title-row">';
   html += '<h2 class="app-sidebar-title">' + compEscHtml(schema.name) + '</h2>';
+  html += '<button class="app-sidebar-logo-btn" id="app-gen-logo-btn" title="Generate pipeline logo">&#x1f3a8;</button>';
+  html += '</div>';
   if (schema.description) {
     html += '<p class="app-sidebar-desc">' + compEscHtml(schema.description) + '</p>';
   }
@@ -2069,6 +2080,14 @@ function wireAppActions(root) {
     nodesPanelToggle.addEventListener('click', function() {
       appNodesPanelCollapsed = !appNodesPanelCollapsed;
       renderCompositionAppPage();
+    });
+  }
+
+  // Generate Logo button
+  var genLogoBtn = root.querySelector('#app-gen-logo-btn');
+  if (genLogoBtn) {
+    genLogoBtn.addEventListener('click', function() {
+      showGenerateLogoModal();
     });
   }
 
@@ -4575,6 +4594,117 @@ function openFolderPicker(onSelect) {
     if (currentPath) {
       overlay.remove();
       onSelect(currentPath);
+    }
+  });
+}
+
+// ── Generate Logo Modal ─────────────────────────────────────────────
+
+function showGenerateLogoModal() {
+  var pid = compData && compData.id;
+  if (!pid) { toast('No pipeline loaded', 'error'); return; }
+
+  // Remove any existing modal
+  var existing = document.getElementById('gen-logo-overlay');
+  if (existing) existing.remove();
+
+  var overlay = document.createElement('div');
+  overlay.id = 'gen-logo-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:10000;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(2px);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;';
+
+  var currentLogo = compData.metadata && compData.metadata.logo;
+  var defaultPrompt = 'A modern, minimal logo icon for "' + (compData.name || 'Pipeline') + '". ' +
+    (compData.description ? compData.description.slice(0, 100) + '. ' : '') +
+    'Clean vector style, dark background, vibrant gradient colors, suitable as a small app icon.';
+
+  var modal = document.createElement('div');
+  modal.style.cssText = 'background:#1a1f2e;border:1px solid rgba(255,255,255,0.08);border-radius:10px;width:420px;max-width:90vw;box-shadow:0 20px 50px rgba(0,0,0,0.5);overflow:hidden;';
+  modal.innerHTML =
+    '<div style="display:flex;justify-content:space-between;align-items:center;padding:14px 18px;border-bottom:1px solid rgba(255,255,255,0.06);">' +
+      '<h3 style="margin:0;font-size:0.85rem;font-weight:600;color:#f1f5f9;">Generate Pipeline Logo</h3>' +
+      '<button id="gen-logo-close" style="background:none;border:none;color:#64748b;font-size:1.2rem;cursor:pointer;padding:2px 6px;border-radius:4px;line-height:1;">&#x2715;</button>' +
+    '</div>' +
+    '<div style="padding:14px 18px;">' +
+      (currentLogo
+        ? '<div style="text-align:center;margin-bottom:12px;"><img src="' +
+          compEscAttr(currentLogo.startsWith('data:') || currentLogo.startsWith('http') ? currentLogo : '/api/file?path=' + encodeURIComponent(currentLogo)) +
+          '" style="width:64px;height:64px;border-radius:10px;border:1px solid rgba(139,92,246,0.2);" /></div>'
+        : '') +
+      '<label style="display:block;font-size:0.72rem;color:#94a3b8;margin-bottom:4px;">Prompt</label>' +
+      '<textarea id="gen-logo-prompt" rows="4" style="width:100%;background:#0f172a;border:1px solid rgba(100,116,139,0.25);border-radius:6px;padding:8px 10px;color:#e2e8f0;font-size:0.75rem;resize:vertical;font-family:inherit;">' + compEscHtml(defaultPrompt) + '</textarea>' +
+      '<div id="gen-logo-preview" style="text-align:center;margin:12px 0;min-height:20px;"></div>' +
+    '</div>' +
+    '<div style="display:flex;justify-content:flex-end;gap:8px;padding:12px 18px;border-top:1px solid rgba(255,255,255,0.06);">' +
+      '<button id="gen-logo-cancel" style="background:rgba(100,116,139,0.12);border:1px solid rgba(100,116,139,0.2);border-radius:6px;padding:8px 16px;color:#94a3b8;font-size:0.72rem;font-weight:500;cursor:pointer;">Cancel</button>' +
+      '<button id="gen-logo-generate" style="background:rgba(99,102,241,0.2);border:1px solid rgba(99,102,241,0.3);border-radius:6px;padding:8px 22px;color:#a5b4fc;font-size:0.72rem;font-weight:600;cursor:pointer;">&#x2728; Generate</button>' +
+    '</div>';
+
+  overlay.appendChild(modal);
+  document.body.appendChild(overlay);
+
+  // Close handlers
+  document.getElementById('gen-logo-close').addEventListener('click', function() { overlay.remove(); });
+  document.getElementById('gen-logo-cancel').addEventListener('click', function() { overlay.remove(); });
+  overlay.addEventListener('click', function(e) { if (e.target === overlay) overlay.remove(); });
+
+  // Generate handler
+  document.getElementById('gen-logo-generate').addEventListener('click', async function() {
+    var btn = this;
+    var prompt = document.getElementById('gen-logo-prompt').value.trim();
+    var previewEl = document.getElementById('gen-logo-preview');
+    if (!prompt) { toast('Enter a prompt', 'error'); return; }
+
+    btn.disabled = true;
+    btn.textContent = 'Generating...';
+    previewEl.innerHTML = '<span style="color:#94a3b8;font-size:0.75rem;">Generating logo...</span>';
+
+    try {
+      // Use nanobanana via the extension tools endpoint
+      var resp = await fetch('/api/app/' + encodeURIComponent(pid) + '/generate-logo', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: prompt }),
+      });
+      var data = await resp.json();
+      if (!resp.ok || !data.success) throw new Error(data.error || 'Generation failed');
+
+      var logoPath = data.filePath;
+
+      // Show preview
+      var imgUrl = '/api/file?path=' + encodeURIComponent(logoPath);
+      previewEl.innerHTML = '<img src="' + compEscAttr(imgUrl) + '" style="width:80px;height:80px;border-radius:12px;border:1px solid rgba(139,92,246,0.3);box-shadow:0 4px 16px rgba(124,58,237,0.2);" />';
+
+      // Update button to "Save"
+      btn.textContent = '✓ Save as Logo';
+      btn.disabled = false;
+      btn.onclick = async function() {
+        btn.disabled = true;
+        btn.textContent = 'Saving...';
+        try {
+          // Update pipeline metadata with logo path
+          compData.metadata = compData.metadata || {};
+          compData.metadata.logo = logoPath;
+          compData.metadata.updatedAt = new Date().toISOString();
+          await fetch('/api/compositions/' + encodeURIComponent(pid), {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ composition: compData }),
+          });
+          // Also update appSchema cache
+          if (typeof appSchema !== 'undefined' && appSchema) appSchema.logo = logoPath;
+          toast('Logo saved!', 'success');
+          overlay.remove();
+          renderCompositionAppPage();
+        } catch (err) {
+          toast('Failed to save: ' + err.message, 'error');
+          btn.disabled = false;
+          btn.textContent = '✓ Save as Logo';
+        }
+      };
+    } catch (err) {
+      previewEl.innerHTML = '<span style="color:#f87171;font-size:0.75rem;">' + compEscHtml(err.message) + '</span>';
+      btn.disabled = false;
+      btn.textContent = '✨ Generate';
     }
   });
 }
