@@ -4605,7 +4605,7 @@ function showImportScriptModal() {
       '.app-import-header h3 { margin:0; font-size:0.85rem; font-weight:600; color:#f1f5f9; }',
       '.app-import-close { background:none; border:none; color:#64748b; font-size:1.2rem; cursor:pointer; padding:2px 6px; border-radius:4px; }',
       '.app-import-close:hover { color:#e2e8f0; }',
-      '.app-import-body { padding:16px 18px; overflow-y:auto; flex:1; }',
+      '.app-import-body { padding:16px 18px; overflow-y:auto; flex:1; min-height:0; }',
       '.app-import-tabs { display:flex; gap:6px; margin-bottom:12px; }',
       '.app-import-tab { padding:6px 14px; border-radius:6px; font-size:0.72rem; font-weight:500; cursor:pointer; border:1px solid rgba(255,255,255,0.08); background:rgba(255,255,255,0.03); color:#94a3b8; transition:all 0.15s; }',
       '.app-import-tab.active { background:rgba(99,102,241,0.15); border-color:rgba(99,102,241,0.3); color:#a5b4fc; }',
@@ -4623,7 +4623,7 @@ function showImportScriptModal() {
       '.app-import-meta-input { width:100%; background:#161822; border:1px solid #1e2130; border-radius:3px; color:#e2e8f0; padding:3px 6px; font-size:0.68rem; outline:none; }',
       '.app-import-meta-input:focus { border-color:rgba(99,102,241,0.5); }',
       '.app-import-error { color:#f87171; font-size:0.72rem; margin-top:8px; padding:8px; background:rgba(248,113,113,0.08); border-radius:4px; }',
-      '.app-import-footer { display:flex; justify-content:flex-end; gap:8px; padding:12px 18px; border-top:1px solid rgba(255,255,255,0.06); }',
+      '.app-import-footer { display:flex; justify-content:flex-end; gap:8px; padding:12px 18px; border-top:1px solid rgba(255,255,255,0.06); flex-shrink:0; }',
       '.app-import-btn { padding:8px 16px; border-radius:6px; font-size:0.72rem; font-weight:500; cursor:pointer; border:1px solid rgba(100,116,139,0.2); background:rgba(100,116,139,0.12); color:#94a3b8; transition:all 0.15s; }',
       '.app-import-btn:hover { background:rgba(100,116,139,0.2); color:#e2e8f0; }',
       '.app-import-btn--primary { background:rgba(99,102,241,0.2); border-color:rgba(99,102,241,0.3); color:#a5b4fc; font-weight:600; }',
@@ -4675,12 +4675,13 @@ function showImportScriptModal() {
     '      </div>',
     '    </div>',
     '  </div>',
-    '  <div id="app-import-folder-bar" style="display:none; padding:10px 18px; background:rgba(139,92,246,0.05); border-top:1px solid rgba(139,92,246,0.12);">',
+    '  <div id="app-import-folder-bar" style="flex-shrink:0; padding:10px 18px; background:rgba(139,92,246,0.08); border-top:1px solid rgba(139,92,246,0.15);">',
     '    <div style="display:flex;gap:6px;align-items:center;">',
-    '      <span style="font-size:0.68rem;color:#a78bfa;font-weight:600;white-space:nowrap;">&#x1f4c1; Project Folder:</span>',
-    '      <input class="app-import-meta-input" id="app-import-meta-folder" placeholder="Select a folder..." style="flex:1;padding:5px 8px;font-size:0.72rem;">',
-    '      <button class="app-import-btn app-import-btn--primary" id="app-import-browse-folder" style="padding:5px 12px;font-size:0.68rem;white-space:nowrap;" type="button">Browse...</button>',
+    '      <span style="font-size:0.72rem;color:#c4b5fd;font-weight:600;white-space:nowrap;">&#x1f4c1; Save To:</span>',
+    '      <input class="app-import-meta-input" id="app-import-meta-folder" placeholder="Click Browse to choose project folder..." style="flex:1;padding:6px 10px;font-size:0.75rem;background:#0f1219;border:1px solid rgba(139,92,246,0.3);">',
+    '      <button class="app-import-btn app-import-btn--primary" id="app-import-browse-folder" style="padding:6px 16px;font-size:0.72rem;white-space:nowrap;" type="button">Browse...</button>',
     '    </div>',
+    '    <div style="font-size:0.6rem;color:#7c3aed;margin-top:3px;opacity:0.7;">All project files (images, audio, renders) will be saved here</div>',
     '  </div>',
     '  <div class="app-import-footer">',
     '    <button class="app-import-btn" id="app-import-cancel">Cancel</button>',
@@ -4989,11 +4990,15 @@ function showImportScriptModal() {
     document.getElementById('app-import-meta-date').value = parsedData.metadata.draftdate || new Date().toISOString().split('T')[0];
     document.getElementById('app-import-meta-genre').value = '';
 
-    // Show folder bar and pre-fill from existing metadata
-    var folderBar = document.getElementById('app-import-folder-bar');
-    if (folderBar) folderBar.style.display = '';
-    var existingFolder = (compData && compData.metadata && compData.metadata.projectFolder) || '';
-    document.getElementById('app-import-meta-folder').value = existingFolder;
+    // Update folder placeholder with script title
+    var scriptTitle = parsedData.metadata.title || 'Untitled';
+    var safeFolderName = scriptTitle.replace(/[^a-zA-Z0-9\s\-]/g, '').trim();
+    var suggestedFolder = '/Users/' + (typeof require !== 'undefined' ? '' : '') + 'andrewporter/Documents/' + safeFolderName;
+    // Use home dir detection
+    try { suggestedFolder = (new URL(window.location.href)).searchParams.get('home') || suggestedFolder; } catch {}
+    // Better: just use ~/Documents/ + title
+    document.getElementById('app-import-meta-folder').value = '';
+    document.getElementById('app-import-meta-folder').placeholder = 'Click Browse to select folder for "' + scriptTitle + '"';
 
     // Enable confirm button
     document.getElementById('app-import-confirm').disabled = false;
@@ -5551,7 +5556,15 @@ function showLoadPanel(panel) {
 // ── Folder Picker Modal ──────────────────────────────────────────────
 
 function openFolderPicker(onSelect) {
-  // Remove any existing picker
+  // Use native OS dialog if available (Electron)
+  if (window.woodburyElectron && window.woodburyElectron.selectFolder) {
+    window.woodburyElectron.selectFolder().then(function(folder) {
+      if (folder) onSelect(folder);
+    });
+    return;
+  }
+
+  // Fallback: custom folder picker modal (for non-Electron environments)
   var existing = document.querySelector('.folder-picker-overlay');
   if (existing) existing.remove();
 
@@ -5628,32 +5641,47 @@ function openFolderPicker(onSelect) {
     if (e.target === overlay) overlay.remove();
   });
 
-  // New Folder handler
-  overlay.querySelector('#fp-new-folder').addEventListener('click', function() {
-    var name = prompt('New folder name:');
-    if (!name || !name.trim()) return;
-    var newPath = currentPath + '/' + name.trim();
-    fetch('/api/browse', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path: currentPath, createDir: name.trim() }),
-    }).then(function(r) { return r.json(); }).then(function(data) {
-      if (data.error) {
-        toast('Failed to create folder: ' + data.error, 'error');
-      } else {
-        browseTo(data.created || newPath);
-      }
-    }).catch(function() {
-      // Fallback: try mkdir directly
-      fetch('/api/mkdir', {
+  // New Folder handler — use inline input instead of prompt() (blocked in Electron)
+  var newFolderBtn = overlay.querySelector('#fp-new-folder');
+  newFolderBtn.addEventListener('click', function() {
+    // Check if inline input already exists
+    var existingInput = listEl.querySelector('.fp-new-folder-input');
+    if (existingInput) { existingInput.focus(); return; }
+
+    // Insert an inline input at the top of the list
+    var inputRow = document.createElement('div');
+    inputRow.style.cssText = 'display:flex;gap:4px;padding:6px 8px;background:rgba(139,92,246,0.08);border-bottom:1px solid rgba(139,92,246,0.15);';
+    inputRow.innerHTML = '<input type="text" class="fp-new-folder-input" placeholder="Folder name..." style="flex:1;background:#0f1219;border:1px solid rgba(139,92,246,0.3);border-radius:4px;padding:4px 8px;color:#e2e8f0;font-size:0.72rem;outline:none;">'
+      + '<button style="padding:4px 10px;border-radius:4px;background:rgba(139,92,246,0.2);border:1px solid rgba(139,92,246,0.3);color:#c4b5fd;font-size:0.68rem;cursor:pointer;" class="fp-create-btn">Create</button>'
+      + '<button style="padding:4px 8px;border-radius:4px;background:none;border:1px solid rgba(255,255,255,0.08);color:#64748b;font-size:0.68rem;cursor:pointer;" class="fp-cancel-new-btn">&times;</button>';
+    listEl.insertBefore(inputRow, listEl.firstChild);
+
+    var input = inputRow.querySelector('.fp-new-folder-input');
+    input.focus();
+
+    function createFolder() {
+      var name = input.value.trim();
+      if (!name) return;
+      fetch('/api/browse', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: newPath }),
-      }).then(function() {
-        browseTo(newPath);
+        body: JSON.stringify({ path: currentPath, createDir: name }),
+      }).then(function(r) { return r.json(); }).then(function(data) {
+        if (data.error) {
+          toast('Failed to create folder: ' + data.error, 'error');
+        } else {
+          browseTo(data.created || (currentPath + '/' + name));
+        }
       }).catch(function(err) {
-        toast('Failed to create folder: ' + err.message, 'error');
+        toast('Failed to create folder: ' + (err.message || err), 'error');
       });
+    }
+
+    inputRow.querySelector('.fp-create-btn').addEventListener('click', createFolder);
+    inputRow.querySelector('.fp-cancel-new-btn').addEventListener('click', function() { inputRow.remove(); });
+    input.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter') createFolder();
+      if (e.key === 'Escape') inputRow.remove();
     });
   });
 
@@ -5995,7 +6023,7 @@ function generateEntityImages(pipelineId, entityKey, btn) {
     // Try to open the save dialog
     if (typeof openFolderPicker === 'function') {
       var pid = pipelineId;
-      openFolderPicker('Select Project Folder', '', function(folder) {
+      openFolderPicker(function(folder) {
         if (!folder) return;
         // Save the project folder
         fetch('/api/compositions/' + encodeURIComponent(pid), {
@@ -6017,25 +6045,23 @@ function generateEntityImages(pipelineId, entityKey, btn) {
   }
 
   btn.disabled = true;
-  btn.innerHTML = '&#x23F3; Running Asset Collection node...';
+  btn.innerHTML = '&#x23F3; Generating ' + entityKey + '...';
 
-  // Invoke node-12 (Asset Collection) via the pipeline execution API
-  fetch('/api/app/' + encodeURIComponent(pipelineId) + '/invoke/node-12', {
+  // Call the generate-assets endpoint directly (uses nanobanana)
+  fetch('/api/app/' + encodeURIComponent(pipelineId) + '/generate-assets', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({}),
+    body: JSON.stringify({ type: entityKey }),
   }).then(function(r) {
-    if (!r.ok) throw new Error('Node invocation failed (status ' + r.status + ')');
+    if (!r.ok) throw new Error('Asset generation failed (status ' + r.status + ')');
     return r.json();
   }).then(function(result) {
-    btn.innerHTML = '&#x2705; Assets generated';
+    btn.innerHTML = '&#x2705; Generated ' + (result.generated || 0) + ' images';
     btn.disabled = false;
-    var msg = 'Asset Collection complete';
-    if (result.outputs && result.outputs.assetCollection) {
-      msg += ' — check the asset library for headshots and location images';
-    }
-    toast(msg, 'success');
-    // Reload to see updated state
+    var msg = 'Generated ' + (result.generated || 0) + ' images';
+    if (result.failed > 0) msg += ' (' + result.failed + ' failed)';
+    toast(msg, result.generated > 0 ? 'success' : 'warning');
+    // Reload to see images
     setTimeout(function() { window.location.reload(); }, 1000);
   }).catch(function(err) {
     btn.innerHTML = origText;

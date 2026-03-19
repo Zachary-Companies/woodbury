@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Tray, Menu, nativeImage, dialog, shell } = require('electron');
+const { app, BrowserWindow, Tray, Menu, nativeImage, dialog, shell, ipcMain } = require('electron');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
@@ -133,7 +133,7 @@ function resolveDashboardWorkDir() {
 
 // ── Window ───────────────────────────────────────────────────
 
-function createWindow(url) {
+async function createWindow(url) {
   const isMac = process.platform === 'darwin';
 
   mainWindow = new BrowserWindow({
@@ -155,7 +155,8 @@ function createWindow(url) {
   });
 
   // Disable HTTP cache to ensure fresh JS/CSS on every load
-  mainWindow.webContents.session.clearCache();
+  await mainWindow.webContents.session.clearCache();
+  await mainWindow.webContents.session.clearStorageData({ storages: ['cachestorage'] });
 
   mainWindow.loadURL(url);
 
@@ -1006,6 +1007,18 @@ app.on('ready', async () => {
   }
 
   createApplicationMenu();
+
+  // IPC: Native folder picker
+  ipcMain.handle('select-folder', async (_event, defaultPath) => {
+    const win = mainWindow || BrowserWindow.getFocusedWindow();
+    const result = await dialog.showOpenDialog(win, {
+      title: 'Select Project Folder',
+      defaultPath: defaultPath || os.homedir(),
+      properties: ['openDirectory', 'createDirectory'],
+    });
+    if (result.canceled || result.filePaths.length === 0) return null;
+    return result.filePaths[0];
+  });
 
   try {
     dashboardHandle = await startBackend();

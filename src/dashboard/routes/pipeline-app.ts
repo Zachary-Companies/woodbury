@@ -2317,6 +2317,108 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
     return true;
   }
 
+  // ── POST /api/app/:id/generate-assets — generate headshots and location shots ──
+  if (req.method === 'POST' && subPath === '/generate-assets') {
+    try {
+      const body = await readBody(req);
+      const entityType = body.type || 'all'; // 'characters', 'locations', or 'all'
+
+      // Get project folder
+      const pfolder = await resolveProjectFolder(pipelineId);
+      const project = await loadProjectFile(pfolder);
+      if (!project) {
+        sendJson(res, 400, { error: 'No project data found' });
+        return true;
+      }
+
+      // Import nanobanana
+      let nanobananaTool: any;
+      try {
+        const { nanobanana: nb } = await import('../../loop/tools/nanobanana.js');
+        nanobananaTool = nb;
+      } catch (err) {
+        sendJson(res, 500, { error: 'Image generation not available: ' + String(err) });
+        return true;
+      }
+
+      const results: Array<{ name: string; type: string; path?: string; error?: string }> = [];
+
+      // Generate character headshots
+      if (entityType === 'characters' || entityType === 'all') {
+        const chars = project.characters || [];
+        const charDir = join(pfolder, 'characters');
+        await mkdir(charDir, { recursive: true });
+
+        for (const char of chars) {
+          try {
+            let prompt = `Professional headshot portrait of ${char.name || 'a person'}`;
+            if (char.description) prompt += `. ${char.description}`;
+            if (char.ageRange) prompt += ` Age: ${char.ageRange}.`;
+            if (char.gender) prompt += ` ${char.gender}.`;
+            if (char.wardrobeNotes) prompt += ` Wearing: ${char.wardrobeNotes}.`;
+            prompt += ' Cinematic lighting, studio portrait, shallow depth of field, 85mm lens. Photorealistic.';
+
+            const safeName = (char.id || char.name || 'char').replace(/[^a-zA-Z0-9_-]/g, '_');
+            const outputPath = join(charDir, `${safeName}.png`);
+
+            const result = await nanobananaTool({
+              action: 'generate' as const,
+              prompt,
+              model: 'flash',
+              aspectRatio: '3:4',
+              outputPath,
+            }, charDir);
+
+            const parsed = typeof result === 'string' ? JSON.parse(result) : result;
+            results.push({ name: char.name, type: 'character', path: parsed.path || outputPath });
+          } catch (err: any) {
+            results.push({ name: char.name, type: 'character', error: err.message || String(err) });
+          }
+        }
+      }
+
+      // Generate location shots
+      if (entityType === 'locations' || entityType === 'all') {
+        const locs = project.locations || [];
+        const locDir = join(pfolder, 'locations');
+        await mkdir(locDir, { recursive: true });
+
+        for (const loc of locs) {
+          try {
+            let prompt = `Cinematic establishing shot of ${loc.name || 'a location'}`;
+            if (loc.description) prompt += `. ${loc.description}`;
+            if (loc.mood) prompt += ` Mood: ${loc.mood}.`;
+            if (loc.atmosphere) prompt += ` ${loc.atmosphere}`;
+            prompt += ' Wide-angle lens, dramatic lighting, film grain, professional cinematography. 35mm film look.';
+
+            const safeName = (loc.id || loc.name || 'loc').replace(/[^a-zA-Z0-9_-]/g, '_');
+            const outputPath = join(locDir, `${safeName}.png`);
+
+            const result = await nanobananaTool({
+              action: 'generate' as const,
+              prompt,
+              model: 'flash',
+              aspectRatio: '16:9',
+              outputPath,
+            }, locDir);
+
+            const parsed = typeof result === 'string' ? JSON.parse(result) : result;
+            results.push({ name: loc.name, type: 'location', path: parsed.path || outputPath });
+          } catch (err: any) {
+            results.push({ name: loc.name, type: 'location', error: err.message || String(err) });
+          }
+        }
+      }
+
+      const succeeded = results.filter(r => r.path).length;
+      const failed = results.filter(r => r.error).length;
+      sendJson(res, 200, { success: true, generated: succeeded, failed, results });
+    } catch (err: any) {
+      sendJson(res, 500, { error: 'Asset generation failed: ' + (err.message || String(err)) });
+    }
+    return true;
+  }
+
   return false;
 };
 

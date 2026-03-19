@@ -1,4 +1,4 @@
-const { contextBridge, webUtils } = require('electron');
+const { contextBridge, webUtils, ipcRenderer } = require('electron');
 
 // Expose minimal info to the renderer.
 // The dashboard is vanilla HTML/JS that talks to localhost APIs,
@@ -13,4 +13,6 @@ contextBridge.exposeInMainWorld('woodburyElectron', {
     } catch {}
     return file.path || null;
   },
+  // Open native OS folder picker dialog
+  selectFolder: (defaultPath) => ipcRenderer.invoke('select-folder', defaultPath),
 });
