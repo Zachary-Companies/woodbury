@@ -47,7 +47,7 @@ function PipelineAppInner({ pipelineId }: { pipelineId: string }) {
 
   const title = projectData?.metadata?.title || pipelineName || 'Pipeline';
   const charCount = projectData?.characters?.length || 0;
-  const sceneCount = usePipelineStore(s => {
+  const sceneCount = (() => {
     let count = 0;
     function countScenes(secs: any[]) {
       for (const s of secs) {
@@ -55,9 +55,9 @@ function PipelineAppInner({ pipelineId }: { pipelineId: string }) {
         if (s.children) countScenes(s.children);
       }
     }
-    countScenes(s.projectData?.sections || []);
+    countScenes(projectData?.sections || []);
     return count;
-  });
+  })();
   const elementCount = projectData?.elements?.length || 0;
 
   return (
