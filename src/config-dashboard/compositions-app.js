@@ -438,6 +438,10 @@ function renderAppSidebar(schema, state) {
 
   // Actions bar
   html += '<div class="app-sidebar-actions">';
+  html += '<button class="app-action-btn app-action-new-project" id="app-new-project">&#x2728; New Project</button>';
+  if (typeof showImportScriptModal === 'function') {
+    html += '<button class="app-action-btn app-action-import" id="app-import-script">&#x1f4c4; Import Script</button>';
+  }
   var staleCount = (state.staleNodes || []).length;
   if (staleCount > 0) {
     html += '<button class="app-action-btn app-action-refresh" id="app-refresh-stale">';
@@ -544,7 +548,8 @@ function renderAppOverviewSection(section, state) {
     return '<div class="app-empty-state">' +
       '<div class="app-empty-icon">&#x1f4cb;</div>' +
       '<h3>No data yet</h3>' +
-      '<p>Run the pipeline to generate outputs, then explore and edit them here.</p>' +
+      '<p>Run the pipeline to generate outputs, or add data manually.</p>' +
+      (section.nodeId ? '<button class="app-action-btn app-add-manual-data" data-app-manual-node="' + compEscAttr(section.nodeId) + '" data-app-manual-section="' + compEscAttr(section.id) + '">&#x270F; Add Data Manually</button>' : '') +
       '</div>';
   }
   var outputs = state.nodeData[section.nodeId].outputs;
@@ -556,7 +561,8 @@ function renderAppNodeSection(section, state) {
     return '<div class="app-empty-state">' +
       '<div class="app-empty-icon">&#x1f4e6;</div>' +
       '<h3>No data for "' + compEscHtml(section.label) + '"</h3>' +
-      '<p>This section will be populated after the pipeline runs.</p>' +
+      '<p>This section will be populated after the pipeline runs, or you can add data manually.</p>' +
+      (section.nodeId ? '<button class="app-action-btn app-add-manual-data" data-app-manual-node="' + compEscAttr(section.nodeId) + '" data-app-manual-section="' + compEscAttr(section.id) + '">&#x270F; Add Data Manually</button>' : '') +
       '</div>';
   }
 
@@ -609,6 +615,11 @@ function renderAppOutputsEditable(outputs, section, sectionKey) {
     html += '<div class="app-output-editor" data-app-editor-key="' + compEscAttr(key) + '" style="display:none;">';
     html += renderAppFieldEditor(value, key, section.nodeId || '');
     html += '</div>';
+
+    // + Add Item button for arrays of objects
+    if (Array.isArray(value) && value.length > 0 && typeof value[0] === 'object' && !Array.isArray(value[0])) {
+      html += '<button class="app-add-item-btn" data-app-add-key="' + compEscAttr(key) + '" data-app-add-node="' + compEscAttr(section.nodeId || '') + '">+ Add Item</button>';
+    }
 
     html += '</div>';
   }
@@ -1326,9 +1337,24 @@ function renderAppScreenplayView(timeline, state) {
   html += '</div>';
   // Toolbar with action buttons
   html += '<div class="nle-toolbar">';
+  html += '<button class="nle-toolbar-btn nle-entity-tab" data-nle-entity="characters">&#x1f465; Characters (' + Object.keys(timeline.characters).length + ')</button>';
+  html += '<button class="nle-toolbar-btn nle-entity-tab" data-nle-entity="locations">&#x1f4cd; Locations (' + Object.keys(timeline.locations).length + ')</button>';
+  html += '<span class="nle-toolbar-sep"></span>';
   html += '<button class="nle-toolbar-btn" id="nle-render-all-dialogue" title="Generate audio for all dialogue using assigned character voices">';
   html += '&#x1f50a; Render All Dialogue</button>';
   html += '</div>';
+  html += '</div>';
+
+  // Entity management panel (hidden by default)
+  html += '<div class="nle-entity-panel" id="nle-entity-panel" style="display:none;">';
+  html += '<div class="nle-entity-panel-header">';
+  html += '<h3 class="nle-entity-panel-title" id="nle-entity-panel-title">Characters</h3>';
+  html += '<div class="nle-entity-panel-actions">';
+  html += '<button class="nle-entity-add-btn" id="nle-entity-add">+ Add</button>';
+  html += '<button class="nle-entity-close-btn" id="nle-entity-close">&times;</button>';
+  html += '</div>';
+  html += '</div>';
+  html += '<div class="nle-entity-panel-body" id="nle-entity-panel-body"></div>';
   html += '</div>';
 
   // Scene navigation strip
@@ -2125,6 +2151,31 @@ function wireAppActions(root) {
     });
   }
 
+  // New Project button
+  var newProjectBtn = root.querySelector('#app-new-project');
+  if (newProjectBtn) {
+    newProjectBtn.addEventListener('click', function() {
+      var hasData = appState && appState.nodeData && Object.keys(appState.nodeData).length > 0;
+      if (hasData) {
+        showNewProjectDialog();
+      } else {
+        resetAndShowForm();
+      }
+    });
+  }
+
+  // Import Script button
+  var importBtn = root.querySelector('#app-import-script');
+  if (importBtn) {
+    importBtn.addEventListener('click', function() {
+      if (typeof showImportScriptModal === 'function') {
+        showImportScriptModal();
+      } else {
+        toast('Import system not loaded', 'error');
+      }
+    });
+  }
+
   // ── Save / Load buttons ──
   wireAppSaveLoad(root);
 
@@ -2175,6 +2226,113 @@ function wireAppActions(root) {
       if (viewEl) viewEl.style.display = 'none';
       if (editorEl) editorEl.style.display = 'block';
       btn.style.display = 'none';
+    });
+  });
+
+  // Add Item buttons (for arrays)
+  root.querySelectorAll('.app-add-item-btn').forEach(function(btn) {
+    btn.addEventListener('click', async function() {
+      var key = btn.getAttribute('data-app-add-key');
+      var nodeId = btn.getAttribute('data-app-add-node');
+      if (!key || !nodeId || !appState || !appState.nodeData || !appState.nodeData[nodeId]) return;
+
+      var currentOutputs = Object.assign({}, appState.nodeData[nodeId].outputs);
+      var arr = currentOutputs[key];
+      if (!Array.isArray(arr) || arr.length === 0) return;
+
+      // Create template from first item's keys
+      var template = {};
+      var sample = arr[0];
+      for (var k in sample) {
+        if (!sample.hasOwnProperty(k)) continue;
+        if (k === 'id' || k === 'elementId') {
+          template[k] = 'new-' + Date.now();
+        } else if (typeof sample[k] === 'string') {
+          template[k] = '';
+        } else if (typeof sample[k] === 'number') {
+          template[k] = 0;
+        } else if (typeof sample[k] === 'boolean') {
+          template[k] = false;
+        } else if (Array.isArray(sample[k])) {
+          template[k] = [];
+        } else if (sample[k] && typeof sample[k] === 'object') {
+          template[k] = {};
+        } else {
+          template[k] = null;
+        }
+      }
+
+      currentOutputs[key] = arr.concat([template]);
+
+      btn.disabled = true;
+      btn.textContent = 'Adding...';
+      try {
+        var result = await saveAppNodeState(compData.id, nodeId, currentOutputs);
+        if (!appState.nodeData) appState.nodeData = {};
+        appState.nodeData[nodeId] = {
+          outputs: currentOutputs,
+          updatedAt: result.updatedAt || new Date().toISOString(),
+          manuallyEdited: true,
+        };
+        appState.staleNodes = result.staleNodes || [];
+        toast('Added new item to ' + key, 'success');
+        renderCompositionAppPage();
+      } catch (err) {
+        toast('Failed to add item: ' + (err.message || err), 'error');
+        btn.disabled = false;
+        btn.textContent = '+ Add Item';
+      }
+    });
+  });
+
+  // Add Data Manually buttons (for empty sections)
+  root.querySelectorAll('.app-add-manual-data').forEach(function(btn) {
+    btn.addEventListener('click', async function() {
+      var nodeId = btn.getAttribute('data-app-manual-node');
+      var sectionId = btn.getAttribute('data-app-manual-section');
+      if (!nodeId || !appSchema) return;
+
+      // Find this section's output ports to scaffold fields
+      var section = appSchema.sections.find(function(s) { return s.id === sectionId; });
+      var scaffold = {};
+      if (section && section.outputPorts && section.outputPorts.length > 0) {
+        section.outputPorts.forEach(function(port) {
+          var portType = (port.type || '').toLowerCase();
+          if (portType === 'array' || portType.indexOf('[]') >= 0) {
+            scaffold[port.name] = [];
+          } else if (portType === 'object') {
+            scaffold[port.name] = {};
+          } else if (portType === 'number') {
+            scaffold[port.name] = 0;
+          } else if (portType === 'boolean') {
+            scaffold[port.name] = false;
+          } else {
+            scaffold[port.name] = '';
+          }
+        });
+      } else {
+        // No port definitions, create a generic editable field
+        scaffold['data'] = '';
+      }
+
+      btn.disabled = true;
+      btn.textContent = 'Creating...';
+      try {
+        var result = await saveAppNodeState(compData.id, nodeId, scaffold);
+        if (!appState.nodeData) appState.nodeData = {};
+        appState.nodeData[nodeId] = {
+          outputs: scaffold,
+          updatedAt: result.updatedAt || new Date().toISOString(),
+          manuallyEdited: true,
+        };
+        appState.staleNodes = result.staleNodes || [];
+        toast('Created editable fields for "' + (section ? section.label : nodeId) + '"', 'success');
+        renderCompositionAppPage();
+      } catch (err) {
+        toast('Failed: ' + (err.message || err), 'error');
+        btn.disabled = false;
+        btn.textContent = '✏ Add Data Manually';
+      }
     });
   });
 
@@ -2844,6 +3002,11 @@ function wireAppActions(root) {
       }
       toast(resultMsg, failCount > 0 ? 'warning' : 'success');
     });
+  }
+
+  // Wire up screenplay entity CRUD (from compositions-screenplay-crud.js)
+  if (typeof wireScreenplayCrud === 'function') {
+    wireScreenplayCrud(root);
   }
 
   // Wire up existing composition result actions (copy, tabs, filters)
@@ -4272,6 +4435,88 @@ async function sendAppCommand(message, pipelineId, root) {
       }
     }, 10000);
   }
+}
+
+// ── New Project ──────────────────────────────────────────────────────
+
+function resetAndShowForm() {
+  if (!compData || !compData.id) return;
+  var pid = compData.id;
+  fetch('/api/app/' + encodeURIComponent(pid) + '/state', { method: 'DELETE' })
+    .then(function() {
+      // Clear in-memory caches
+      appState = null;
+      appActiveSection = null;
+      appViewMode = 'data';
+      if (typeof compRunFormValues !== 'undefined') {
+        compRunFormValues[pid] = {};
+      } else if (typeof window.compRunFormValues !== 'undefined') {
+        window.compRunFormValues[pid] = {};
+      }
+      // Navigate to form
+      if (typeof updateHash === 'function') updateHash('compositions', pid, 'form');
+      if (typeof selectComposition === 'function') selectComposition(pid, 'form');
+    })
+    .catch(function(err) {
+      console.error('Failed to clear state:', err);
+      if (typeof toast === 'function') toast('Failed to reset project', 'error');
+    });
+}
+
+function showNewProjectDialog() {
+  // Remove existing dialog if present
+  var existing = document.getElementById('app-new-project-overlay');
+  if (existing) existing.remove();
+
+  var overlay = document.createElement('div');
+  overlay.id = 'app-new-project-overlay';
+  overlay.className = 'app-new-project-overlay';
+  overlay.innerHTML =
+    '<div class="app-new-project-dialog">' +
+      '<div class="app-new-project-header">' +
+        '<h3>Start New Project</h3>' +
+        '<button class="app-new-project-close" id="app-np-close">&times;</button>' +
+      '</div>' +
+      '<div class="app-new-project-body">' +
+        '<p>You have existing project data. What would you like to do?</p>' +
+      '</div>' +
+      '<div class="app-new-project-footer">' +
+        '<button class="app-np-btn app-np-cancel" id="app-np-cancel">Cancel</button>' +
+        '<button class="app-np-btn app-np-discard" id="app-np-discard">Discard &amp; Start New</button>' +
+        '<button class="app-np-btn app-np-save" id="app-np-save">Save &amp; Start New</button>' +
+      '</div>' +
+    '</div>';
+  document.body.appendChild(overlay);
+
+  function close() { overlay.remove(); }
+
+  overlay.querySelector('#app-np-close').addEventListener('click', close);
+  overlay.querySelector('#app-np-cancel').addEventListener('click', close);
+  overlay.addEventListener('click', function(e) { if (e.target === overlay) close(); });
+
+  overlay.querySelector('#app-np-discard').addEventListener('click', function() {
+    close();
+    resetAndShowForm();
+  });
+
+  overlay.querySelector('#app-np-save').addEventListener('click', function() {
+    // Auto-save with timestamp, then reset
+    var pid = compData.id;
+    var saveName = 'auto-' + new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    fetch('/api/app/' + encodeURIComponent(pid) + '/saves', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: saveName, description: 'Auto-save before New Project' })
+    })
+    .then(function() {
+      close();
+      if (typeof toast === 'function') toast('Saved as "' + saveName + '"', 'success');
+      resetAndShowForm();
+    })
+    .catch(function() {
+      if (typeof toast === 'function') toast('Failed to save — project not reset', 'error');
+    });
+  });
 }
 
 // ── Save / Load system ──────────────────────────────────────────────

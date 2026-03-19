@@ -590,6 +590,30 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
     return true;
   }
 
+  // ── DELETE /api/app/:id/state ─────────────────────────────
+  // Clears all project state (preserves saves/ directory)
+  if (req.method === 'DELETE' && subPath === '/state') {
+    const dir = projectDir(pipelineId);
+    try {
+      const entries = await readdir(dir);
+      for (const entry of entries) {
+        if (entry === 'saves' || entry.startsWith('.')) continue;
+        const fullPath = join(dir, entry);
+        const s = await stat(fullPath);
+        if (s.isFile()) {
+          await rm(fullPath);
+        } else if (s.isDirectory()) {
+          await rm(fullPath, { recursive: true });
+        }
+      }
+    } catch (e: any) {
+      if (e.code !== 'ENOENT') throw e;
+      // Directory doesn't exist — nothing to clear
+    }
+    sendJson(res, 200, { success: true });
+    return true;
+  }
+
   // ── PUT /api/app/:id/state/:nodeId ───────────────────────
   // Saves a single node's data (fast — only writes one file + manifest)
   const stateMatch = subPath.match(/^\/state\/([^/]+)$/);
@@ -1906,6 +1930,32 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
       res.end(content);
     } catch {
       sendJson(res, 404, { error: 'View file not found' });
+    }
+    return true;
+  }
+
+  // ── POST /api/app/:id/extract-pdf-text — extract text from uploaded PDF ──
+  if (req.method === 'POST' && subPath === '/extract-pdf-text') {
+    try {
+      // Read raw body as buffer
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) {
+        chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk);
+      }
+      const pdfBuffer = Buffer.concat(chunks);
+
+      // Use pdfjs-dist directly for reliable text extraction
+      const pdfjsLib = await import('pdfjs-dist/legacy/build/pdf.mjs') as any;
+      const doc = await pdfjsLib.getDocument({ data: new Uint8Array(pdfBuffer) }).promise;
+      let text = '';
+      for (let i = 1; i <= doc.numPages; i++) {
+        const page = await doc.getPage(i);
+        const content = await page.getTextContent();
+        text += content.items.map((item: any) => item.str).join(' ') + '\n';
+      }
+      sendJson(res, 200, { text, pages: doc.numPages });
+    } catch (err: any) {
+      sendJson(res, 500, { error: 'Failed to parse PDF: ' + (err.message || String(err)) });
     }
     return true;
   }
