@@ -2628,6 +2628,7 @@ async function renderCompositionFormPage() {
   html += '</div>';
   html += '<div class="comp-form-hero-actions">';
   html += '<button class="comp-tb-btn" id="comp-form-share-link">&#x1f517; Copy Form Link</button>';
+  html += '<button class="comp-tb-btn" id="comp-form-import-script">&#x1f4c4; Import Script</button>';
   html += '<button class="comp-tb-btn" id="comp-form-open-app">&#x1f4f1; Open as App</button>';
   html += '<button class="comp-tb-btn" id="comp-form-open-editor">Open Editor</button>';
   html += '</div>';
@@ -2665,6 +2666,23 @@ async function renderCompositionFormPage() {
 
   var shareBtn = document.querySelector('#comp-form-share-link');
   if (shareBtn) shareBtn.addEventListener('click', copyCompositionFormShareLink);
+
+  var importBtn = document.querySelector('#comp-form-import-script');
+  if (importBtn) {
+    importBtn.addEventListener('click', function() {
+      // Switch to app mode first, then open import
+      if (typeof updateHash === 'function') updateHash('compositions', compData.id, 'app');
+      selectComposition(compData.id, 'app');
+      // Wait for app to render, then open import modal
+      setTimeout(function() {
+        if (typeof showImportScriptModal === 'function') {
+          showImportScriptModal();
+        } else {
+          toast('Import modal not available — navigate to the App view first', 'warning');
+        }
+      }, 500);
+    });
+  }
 
   var openAppBtn = document.querySelector('#comp-form-open-app');
   if (openAppBtn) {

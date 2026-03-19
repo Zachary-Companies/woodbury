@@ -13,7 +13,7 @@
 
 import type { DashboardContext, RouteHandler } from '../types.js';
 import { sendJson, readBody } from '../utils.js';
-import { readFile, readdir, stat } from 'node:fs/promises';
+import { readFile, readdir, stat, mkdir } from 'node:fs/promises';
 import { join, extname } from 'node:path';
 import { homedir } from 'node:os';
 import { existsSync, createReadStream } from 'node:fs';
@@ -220,6 +220,14 @@ export const handleAppRoutes: RouteHandler = async (req, res, pathname, url, ctx
     try {
       const body = await readBody(req);
       const dir = body?.path || homedir();
+
+      // Create subdirectory if requested
+      if (body?.createDir) {
+        const newDir = join(dir, body.createDir);
+        await mkdir(newDir, { recursive: true });
+        sendJson(res, 200, { created: newDir, current: newDir, parent: dir, dirs: [] });
+        return true;
+      }
 
       const entries = await readdir(dir, { withFileTypes: true });
       const dirs: Array<{ name: string; path: string }> = [];

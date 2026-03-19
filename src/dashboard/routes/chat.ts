@@ -797,6 +797,33 @@ When the user's message contains a <conversation_history> block, treat it as pri
 
 export const handleChatRoutes: RouteHandler = async (req, res, pathname, url, ctx) => {
 
+  // POST /api/chat/one-shot — simple non-streaming LLM call for enrichment/generation
+  if (req.method === 'POST' && pathname === '/api/chat/one-shot') {
+    try {
+      const body = await readBody(req);
+      const message = body.message || body.prompt || '';
+      if (!message) { sendJson(res, 400, { error: 'message is required' }); return true; }
+
+      const { runPrompt } = await import('../../loop/llm-service.js');
+      const model = body.model || process.env.WOODBURY_GENERATION_MODEL || 'claude-sonnet-4-20250514';
+      const provider = body.provider || (process.env.ANTHROPIC_API_KEY ? 'anthropic' : process.env.OPENAI_API_KEY ? 'openai' : 'anthropic');
+
+      const result = await runPrompt(
+        [
+          { role: 'system', content: body.system || 'You are a helpful assistant. Return only the requested format.' },
+          { role: 'user', content: message },
+        ],
+        model,
+        { provider, maxTokens: body.maxTokens || 2000, temperature: body.temperature ?? 0.7 } as any,
+      );
+
+      sendJson(res, 200, { response: result.content || '', model, provider });
+    } catch (err: any) {
+      sendJson(res, 500, { error: String(err.message || err) });
+    }
+    return true;
+  }
+
   // GET /api/chat/sessions — list all saved sessions
   if (req.method === 'GET' && pathname === '/api/chat/sessions') {
     try {

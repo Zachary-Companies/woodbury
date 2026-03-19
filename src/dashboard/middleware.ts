@@ -48,10 +48,17 @@ export async function serveStaticFiles(
   try {
     const content = await readFile(fullPath);
     const ext = extname(fullPath);
-    res.writeHead(200, {
+    const headers: Record<string, string> = {
       'Content-Type': MIME_TYPES[ext] || 'application/octet-stream',
       'Access-Control-Allow-Origin': '*',
-    });
+    };
+    // Prevent Electron from caching JS/HTML files
+    if (ext === '.js' || ext === '.html' || ext === '.css') {
+      headers['Cache-Control'] = 'no-cache, no-store, must-revalidate';
+      headers['Pragma'] = 'no-cache';
+      headers['Expires'] = '0';
+    }
+    res.writeHead(200, headers);
     res.end(content);
     return true;
   } catch {

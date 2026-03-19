@@ -1944,16 +1944,121 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
       }
       const pdfBuffer = Buffer.concat(chunks);
 
-      // Use pdfjs-dist directly for reliable text extraction
+      // Use pdfjs-dist with spatial awareness to preserve screenplay formatting
       const pdfjsLib = await import('pdfjs-dist/legacy/build/pdf.mjs') as any;
       const doc = await pdfjsLib.getDocument({ data: new Uint8Array(pdfBuffer) }).promise;
-      let text = '';
+
+      // Get page width from first page to determine column positions
+      const page1 = await doc.getPage(1);
+      const viewport = page1.getViewport({ scale: 1 });
+      const pageWidth = viewport.width; // typically ~612 for letter
+      const pageHeight = viewport.height;
+
+      let fullText = '';
+
       for (let i = 1; i <= doc.numPages; i++) {
         const page = await doc.getPage(i);
         const content = await page.getTextContent();
-        text += content.items.map((item: any) => item.str).join(' ') + '\n';
+
+        // Group items by Y position (same line)
+        interface TextItem { str: string; x: number; y: number; width: number; fontSize: number; }
+        const items: TextItem[] = content.items
+          .filter((item: any) => item.str && item.str.trim())
+          .map((item: any) => ({
+            str: item.str,
+            x: item.transform[4],          // horizontal position
+            y: Math.round(item.transform[5]), // vertical position (round to group)
+            width: item.width,
+            fontSize: Math.abs(item.transform[0]),
+          }));
+
+        // Sort by Y descending (top to bottom), then X ascending (left to right)
+        items.sort((a, b) => b.y - a.y || a.x - b.x);
+
+        // Group into lines by Y proximity
+        const lines: TextItem[][] = [];
+        let currentLine: TextItem[] = [];
+        let lastY = -1;
+        for (const item of items) {
+          if (lastY >= 0 && Math.abs(item.y - lastY) > 3) {
+            if (currentLine.length) lines.push(currentLine);
+            currentLine = [];
+          }
+          currentLine.push(item);
+          lastY = item.y;
+        }
+        if (currentLine.length) lines.push(currentLine);
+
+        // Reconstruct lines preserving indentation
+        for (const lineItems of lines) {
+          lineItems.sort((a, b) => a.x - b.x);
+          const firstX = lineItems[0].x;
+
+          // Build the line text, preserving gaps between items
+          let lineText = '';
+          for (let j = 0; j < lineItems.length; j++) {
+            if (j > 0) {
+              const gap = lineItems[j].x - (lineItems[j-1].x + lineItems[j-1].width);
+              if (gap > 10) lineText += '  '; // wide gap = intentional spacing
+              else if (gap > 2) lineText += ' ';
+            }
+            lineText += lineItems[j].str;
+          }
+
+          // Determine element type from x-position
+          // Standard screenplay PDF positions (letter size, 612pt width):
+          //   Action/Scene heading: x≈108 (1.5" left margin)
+          //   Dialogue: x≈180 (2.5")
+          //   Character name: x≈252 (3.5", centered)
+          //   Parenthetical: x≈216 (3.0")
+          //   Transition: x≈400+ (right-aligned)
+          //   Page numbers: x≈507 (right margin)
+
+          const trimmed = lineText.trim();
+          if (!trimmed) { fullText += '\n'; continue; }
+
+          // Skip page numbers (single numbers near right margin)
+          if (/^\d+\.?$/.test(trimmed) && firstX > pageWidth * 0.7) continue;
+          // Skip CONTINUED markers
+          if (/^(CONTINUED|MORE|\(CONTINUED\)|\(MORE\))$/i.test(trimmed)) continue;
+
+          // Classify by x-position using adaptive thresholds based on page width
+          const actionX = pageWidth * 0.17;    // ~108 on letter
+          const dialogueX = pageWidth * 0.27;  // ~165 on letter
+          const parenthX = pageWidth * 0.33;   // ~202 on letter
+          const characterX = pageWidth * 0.38; // ~232 on letter
+          const transitionX = pageWidth * 0.60; // ~367 on letter
+
+          if (firstX >= transitionX) {
+            // Transition (right-aligned)
+            fullText += '\n' + trimmed + '\n';
+          } else if (firstX >= characterX) {
+            // Character name (centered)
+            fullText += '\n' + trimmed + '\n';
+          } else if (firstX >= parenthX) {
+            // Parenthetical
+            if (!trimmed.startsWith('(')) fullText += '(' + trimmed + ')\n';
+            else fullText += trimmed + '\n';
+          } else if (firstX >= dialogueX) {
+            // Dialogue
+            fullText += trimmed + '\n';
+          } else {
+            // Action or scene heading (left-aligned)
+            if (/^(INT|EXT|EST|INT\.?\/?EXT)/i.test(trimmed)) {
+              fullText += '\n' + trimmed + '\n';
+            } else {
+              fullText += '\n' + trimmed + '\n';
+            }
+          }
+        }
+
+        fullText += '\n'; // page break
       }
-      sendJson(res, 200, { text, pages: doc.numPages });
+
+      // Clean up excessive blank lines
+      fullText = fullText.replace(/\n{4,}/g, '\n\n\n');
+
+      sendJson(res, 200, { text: fullText.trim(), pages: doc.numPages });
     } catch (err: any) {
       sendJson(res, 500, { error: 'Failed to parse PDF: ' + (err.message || String(err)) });
     }

@@ -829,6 +829,14 @@ function renderAppPanelArray(items, key, sectionKey) {
     html += '</div>';
   }
 
+  // Enrich All button for characters/locations
+  if (key === 'characters' || key === 'locations') {
+    var unenrichedCount = items.filter(function(it) { return !it[descKey] || String(it[descKey]).length <= 20; }).length;
+    html += '<div class="app-panel-enrich-bar">';
+    html += '<button class="app-panel-enrich-all-btn" data-app-enrich-all="' + compEscAttr(key) + '"' + (unenrichedCount === 0 ? ' disabled' : '') + '>&#x2728; Enrich All ' + humanizeVarName(key) + ' with AI' + (unenrichedCount > 0 ? ' (' + unenrichedCount + ' remaining)' : ' (all done)') + '</button>';
+    html += '</div>';
+  }
+
   html += '<div class="app-panel-card-grid" data-panel-cards="' + compEscAttr(key) + '">';
   for (var ci = 0; ci < items.length; ci++) {
     var item = items[ci];
@@ -892,6 +900,12 @@ function renderAppPanelArray(items, key, sectionKey) {
         html += '</div>';
       }
       html += '</div>';
+    }
+
+    // Enrich button (for characters and locations)
+    if ((key === 'characters' || key === 'locations') && idKey && item[idKey]) {
+      var hasDesc = descKey && item[descKey] && String(item[descKey]).length > 20;
+      html += '<button class="app-panel-card-enrich-btn' + (hasDesc ? ' enriched' : '') + '" data-app-enrich-id="' + compEscAttr(String(item[idKey])) + '" data-app-enrich-key="' + compEscAttr(key) + '" data-app-enrich-name="' + compEscAttr(String(itemTitle)) + '">' + (hasDesc ? '&#x2705; Enriched' : '&#x2728; Enrich with AI') + '</button>';
     }
 
     // Raw item button — opens in modal
@@ -1339,6 +1353,11 @@ function renderAppScreenplayView(timeline, state) {
   html += '<div class="nle-toolbar">';
   html += '<button class="nle-toolbar-btn nle-entity-tab" data-nle-entity="characters">&#x1f465; Characters (' + Object.keys(timeline.characters).length + ')</button>';
   html += '<button class="nle-toolbar-btn nle-entity-tab" data-nle-entity="locations">&#x1f4cd; Locations (' + Object.keys(timeline.locations).length + ')</button>';
+  html += '<button class="nle-toolbar-btn nle-enrich-all-btn" data-nle-enrich="characters" title="Use AI to fill in character descriptions, traits, arcs, relationships">&#x2728; Enrich Characters</button>';
+  html += '<button class="nle-toolbar-btn nle-enrich-all-btn" data-nle-enrich="locations" title="Use AI to fill in location descriptions, moods, atmosphere">&#x2728; Enrich Locations</button>';
+  html += '<span class="nle-toolbar-sep"></span>';
+  html += '<button class="nle-toolbar-btn" id="nle-generate-headshots" title="Generate AI headshot images for all characters">&#x1f5bc; Generate Headshots</button>';
+  html += '<button class="nle-toolbar-btn" id="nle-generate-location-shots" title="Generate AI location images for all locations">&#x1f30d; Location Shots</button>';
   html += '<span class="nle-toolbar-sep"></span>';
   html += '<button class="nle-toolbar-btn" id="nle-render-all-dialogue" title="Generate audio for all dialogue using assigned character voices">';
   html += '&#x1f50a; Render All Dialogue</button>';
@@ -2568,6 +2587,51 @@ function wireAppActions(root) {
     });
   });
 
+  // ── Enrich individual item buttons ──────────────────────────
+  root.querySelectorAll('.app-panel-card-enrich-btn:not(.enriched)').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      var entityId = btn.getAttribute('data-app-enrich-id');
+      var entityKey = btn.getAttribute('data-app-enrich-key');
+      var entityName = btn.getAttribute('data-app-enrich-name');
+      if (!entityId || !compData || !compData.id) return;
+
+      btn.classList.add('enriching');
+      btn.innerHTML = '&#x23F3; Enriching ' + compEscHtml(entityName) + '...';
+
+      enrichSingleEntity(compData.id, entityKey, entityId, entityName).then(function(result) {
+        btn.classList.remove('enriching');
+        btn.classList.add('enriched');
+        btn.innerHTML = '&#x2705; Enriched';
+        toast('Enriched ' + entityName, 'success');
+      }).catch(function(err) {
+        btn.classList.remove('enriching');
+        btn.innerHTML = '&#x2728; Enrich with AI';
+        toast('Failed to enrich ' + entityName + ': ' + (err.message || err), 'error');
+      });
+    });
+  });
+
+  // ── Enrich All button ──────────────────────────────────────
+  root.querySelectorAll('.app-panel-enrich-all-btn').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      var entityKey = btn.getAttribute('data-app-enrich-all');
+      if (!entityKey || !compData || !compData.id) return;
+      btn.disabled = true;
+      btn.innerHTML = '&#x23F3; Enriching all ' + humanizeVarName(entityKey) + '...';
+
+      enrichAllEntities(compData.id, entityKey).then(function(result) {
+        btn.innerHTML = '&#x2705; Enriched ' + result.count + ' ' + humanizeVarName(entityKey);
+        toast('Enriched ' + result.count + ' ' + humanizeVarName(entityKey), 'success');
+        // Reload to show updated data
+        setTimeout(function() { window.location.reload(); }, 500);
+      }).catch(function(err) {
+        btn.disabled = false;
+        btn.innerHTML = '&#x2728; Enrich All ' + humanizeVarName(entityKey) + ' with AI';
+        toast('Enrichment failed: ' + (err.message || err), 'error');
+      });
+    });
+  });
+
   /**
    * Find the raw item data for a card by walking the current section's output state.
    * Searches for arrays matching the cardKey within the active section's node data.
@@ -3001,6 +3065,44 @@ function wireAppActions(root) {
         resultMsg += ' (' + failCount + ' failed)';
       }
       toast(resultMsg, failCount > 0 ? 'warning' : 'success');
+    });
+  }
+
+  // Wire up enrich buttons in screenplay toolbar
+  root.querySelectorAll('.nle-enrich-all-btn').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      var entityKey = btn.getAttribute('data-nle-enrich');
+      if (!entityKey || !compData || !compData.id) return;
+      btn.disabled = true;
+      var origText = btn.innerHTML;
+      btn.innerHTML = '&#x23F3; Enriching...';
+      enrichAllEntities(compData.id, entityKey).then(function(result) {
+        btn.innerHTML = '&#x2705; Done (' + result.count + ')';
+        toast('Enriched ' + result.count + ' ' + entityKey, 'success');
+        setTimeout(function() { window.location.reload(); }, 800);
+      }).catch(function(err) {
+        btn.disabled = false;
+        btn.innerHTML = origText;
+        toast('Enrichment failed: ' + (err.message || err), 'error');
+      });
+    });
+  });
+
+  // Wire up Generate Headshots button
+  var headshotBtn = root.querySelector('#nle-generate-headshots');
+  if (headshotBtn) {
+    headshotBtn.addEventListener('click', function() {
+      if (!compData || !compData.id) return;
+      generateEntityImages(compData.id, 'characters', headshotBtn);
+    });
+  }
+
+  // Wire up Generate Location Shots button
+  var locShotBtn = root.querySelector('#nle-generate-location-shots');
+  if (locShotBtn) {
+    locShotBtn.addEventListener('click', function() {
+      if (!compData || !compData.id) return;
+      generateEntityImages(compData.id, 'locations', locShotBtn);
     });
   }
 
@@ -4463,6 +4565,691 @@ function resetAndShowForm() {
     });
 }
 
+// ── Import Script Modal ──────────────────────────────────────────────
+// Pipeline-aware import that distributes parsed data across pipeline nodes
+
+function showImportScriptModal() {
+  var existing = document.getElementById('app-import-overlay');
+  if (existing) existing.remove();
+
+  var pid = (compData && compData.id) ? compData.id : '';
+  if (!pid) { toast('No pipeline loaded', 'error'); return; }
+
+  // Node mapping for screenplay generator pipeline
+  var NODE_MAP = {
+    metadata: 'node-4',
+    characters: 'node-5',
+    locations: 'node-6',
+    sections: 'node-7',
+    elements: 'node-10',
+    assembly: 'node-15',
+  };
+
+  // Inject CSS
+  if (!document.getElementById('app-import-modal-css')) {
+    var s = document.createElement('style');
+    s.id = 'app-import-modal-css';
+    s.textContent = [
+      '#app-import-overlay { position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:10000; display:flex; align-items:center; justify-content:center; backdrop-filter:blur(2px); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }',
+      '.app-import-modal { background:#1a1f2e; border:1px solid rgba(255,255,255,0.08); border-radius:10px; width:700px; max-width:90vw; max-height:85vh; box-shadow:0 20px 50px rgba(0,0,0,0.5); overflow:hidden; display:flex; flex-direction:column; }',
+      '.app-import-header { display:flex; justify-content:space-between; align-items:center; padding:14px 18px; border-bottom:1px solid rgba(255,255,255,0.06); }',
+      '.app-import-header h3 { margin:0; font-size:0.85rem; font-weight:600; color:#f1f5f9; }',
+      '.app-import-close { background:none; border:none; color:#64748b; font-size:1.2rem; cursor:pointer; padding:2px 6px; border-radius:4px; }',
+      '.app-import-close:hover { color:#e2e8f0; }',
+      '.app-import-body { padding:16px 18px; overflow-y:auto; flex:1; }',
+      '.app-import-tabs { display:flex; gap:6px; margin-bottom:12px; }',
+      '.app-import-tab { padding:6px 14px; border-radius:6px; font-size:0.72rem; font-weight:500; cursor:pointer; border:1px solid rgba(255,255,255,0.08); background:rgba(255,255,255,0.03); color:#94a3b8; transition:all 0.15s; }',
+      '.app-import-tab.active { background:rgba(99,102,241,0.15); border-color:rgba(99,102,241,0.3); color:#a5b4fc; }',
+      '.app-import-textarea { width:100%; height:200px; background:#161822; border:1px solid #1e2130; border-radius:6px; color:#e2e8f0; padding:10px; font-size:0.75rem; font-family:"Courier New",monospace; resize:vertical; outline:none; }',
+      '.app-import-textarea:focus { border-color:rgba(99,102,241,0.5); }',
+      '.app-import-dropzone { border:2px dashed rgba(99,102,241,0.25); border-radius:8px; padding:30px; text-align:center; color:#64748b; font-size:0.8rem; cursor:pointer; transition:all 0.2s; }',
+      '.app-import-dropzone:hover, .app-import-dropzone.dragover { border-color:rgba(99,102,241,0.5); background:rgba(99,102,241,0.05); color:#a5b4fc; }',
+      '.app-import-preview { margin-top:12px; background:rgba(0,0,0,0.2); border-radius:6px; padding:12px; max-height:250px; overflow-y:auto; }',
+      '.app-import-preview-title { font-size:0.7rem; font-weight:600; color:#94a3b8; margin-bottom:8px; text-transform:uppercase; letter-spacing:0.05em; }',
+      '.app-import-stat { display:inline-block; margin-right:16px; font-size:0.72rem; color:#cbd5e1; }',
+      '.app-import-stat b { color:#a5b4fc; }',
+      '.app-import-meta-grid { display:grid; grid-template-columns:100px 1fr; gap:4px 8px; margin-top:8px; }',
+      '.app-import-meta-label { font-size:0.68rem; color:#64748b; }',
+      '.app-import-meta-value { font-size:0.68rem; color:#e2e8f0; }',
+      '.app-import-meta-input { width:100%; background:#161822; border:1px solid #1e2130; border-radius:3px; color:#e2e8f0; padding:3px 6px; font-size:0.68rem; outline:none; }',
+      '.app-import-meta-input:focus { border-color:rgba(99,102,241,0.5); }',
+      '.app-import-error { color:#f87171; font-size:0.72rem; margin-top:8px; padding:8px; background:rgba(248,113,113,0.08); border-radius:4px; }',
+      '.app-import-footer { display:flex; justify-content:flex-end; gap:8px; padding:12px 18px; border-top:1px solid rgba(255,255,255,0.06); }',
+      '.app-import-btn { padding:8px 16px; border-radius:6px; font-size:0.72rem; font-weight:500; cursor:pointer; border:1px solid rgba(100,116,139,0.2); background:rgba(100,116,139,0.12); color:#94a3b8; transition:all 0.15s; }',
+      '.app-import-btn:hover { background:rgba(100,116,139,0.2); color:#e2e8f0; }',
+      '.app-import-btn--primary { background:rgba(99,102,241,0.2); border-color:rgba(99,102,241,0.3); color:#a5b4fc; font-weight:600; }',
+      '.app-import-btn--primary:hover { background:rgba(99,102,241,0.35); color:#c7d2fe; }',
+      '.app-import-btn--primary:disabled { opacity:0.5; cursor:not-allowed; }',
+      '.app-import-char-list { display:flex; flex-wrap:wrap; gap:4px; margin-top:4px; }',
+      '.app-import-char-tag { font-size:0.62rem; padding:2px 6px; border-radius:3px; background:rgba(94,234,212,0.1); color:#5eead4; border:1px solid rgba(94,234,212,0.15); }',
+    ].join('\n');
+    document.head.appendChild(s);
+  }
+
+  var overlay = document.createElement('div');
+  overlay.id = 'app-import-overlay';
+  overlay.innerHTML = [
+    '<div class="app-import-modal">',
+    '  <div class="app-import-header">',
+    '    <h3>Import Screenplay</h3>',
+    '    <button class="app-import-close" id="app-import-close">&times;</button>',
+    '  </div>',
+    '  <div class="app-import-body">',
+    '    <div class="app-import-tabs">',
+    '      <button class="app-import-tab active" data-import-tab="paste">Paste Text</button>',
+    '      <button class="app-import-tab" data-import-tab="file">Upload File</button>',
+    '    </div>',
+    '    <div id="app-import-paste-panel">',
+    '      <textarea class="app-import-textarea" id="app-import-text" placeholder="Paste Fountain-formatted screenplay text here...\n\nTitle: My Screenplay\nAuthor: Your Name\n\nINT. KITCHEN - DAY\n\nAction description.\n\nCHARACTER\nDialogue here."></textarea>',
+    '    </div>',
+    '    <div id="app-import-file-panel" style="display:none;">',
+    '      <div class="app-import-dropzone" id="app-import-dropzone">',
+    '        <p>Drop a .fountain, .txt, or .pdf file here</p>',
+    '        <p style="font-size:0.7rem; margin-top:4px; color:#475569;">or click to browse</p>',
+    '        <input type="file" id="app-import-file" accept=".fountain,.txt,.pdf,.fdx" style="display:none;">',
+    '      </div>',
+    '    </div>',
+    '    <div id="app-import-preview" style="display:none;"></div>',
+    '    <div id="app-import-error" style="display:none;"></div>',
+    '    <!-- Metadata override section -->',
+    '    <div id="app-import-meta" style="display:none; margin-top:12px;">',
+    '      <div class="app-import-preview-title">Metadata</div>',
+    '      <div class="app-import-meta-grid">',
+    '        <span class="app-import-meta-label">Title</span>',
+    '        <input class="app-import-meta-input" id="app-import-meta-title" value="">',
+    '        <span class="app-import-meta-label">Author</span>',
+    '        <input class="app-import-meta-input" id="app-import-meta-author" value="">',
+    '        <span class="app-import-meta-label">Draft Date</span>',
+    '        <input class="app-import-meta-input" id="app-import-meta-date" type="date" value="">',
+    '        <span class="app-import-meta-label">Genre</span>',
+    '        <input class="app-import-meta-input" id="app-import-meta-genre" placeholder="e.g. Drama, Thriller">',
+    '      </div>',
+    '    </div>',
+    '  </div>',
+    '  <div id="app-import-folder-bar" style="display:none; padding:10px 18px; background:rgba(139,92,246,0.05); border-top:1px solid rgba(139,92,246,0.12);">',
+    '    <div style="display:flex;gap:6px;align-items:center;">',
+    '      <span style="font-size:0.68rem;color:#a78bfa;font-weight:600;white-space:nowrap;">&#x1f4c1; Project Folder:</span>',
+    '      <input class="app-import-meta-input" id="app-import-meta-folder" placeholder="Select a folder..." style="flex:1;padding:5px 8px;font-size:0.72rem;">',
+    '      <button class="app-import-btn app-import-btn--primary" id="app-import-browse-folder" style="padding:5px 12px;font-size:0.68rem;white-space:nowrap;" type="button">Browse...</button>',
+    '    </div>',
+    '  </div>',
+    '  <div class="app-import-footer">',
+    '    <button class="app-import-btn" id="app-import-cancel">Cancel</button>',
+    '    <button class="app-import-btn" id="app-import-preview-btn">Preview Import</button>',
+    '    <button class="app-import-btn app-import-btn--primary" id="app-import-confirm" disabled>Import &amp; Create Project</button>',
+    '  </div>',
+    '</div>',
+  ].join('');
+  document.body.appendChild(overlay);
+
+  var parsedData = null;
+
+  // Tab switching
+  overlay.querySelectorAll('[data-import-tab]').forEach(function(tab) {
+    tab.addEventListener('click', function() {
+      overlay.querySelectorAll('[data-import-tab]').forEach(function(t) { t.classList.remove('active'); });
+      tab.classList.add('active');
+      var which = tab.getAttribute('data-import-tab');
+      document.getElementById('app-import-paste-panel').style.display = which === 'paste' ? '' : 'none';
+      document.getElementById('app-import-file-panel').style.display = which === 'file' ? '' : 'none';
+    });
+  });
+
+  // Dropzone
+  var dropzone = document.getElementById('app-import-dropzone');
+  var fileInput = document.getElementById('app-import-file');
+  dropzone.addEventListener('click', function() { fileInput.click(); });
+  dropzone.addEventListener('dragover', function(e) { e.preventDefault(); dropzone.classList.add('dragover'); });
+  dropzone.addEventListener('dragleave', function() { dropzone.classList.remove('dragover'); });
+  dropzone.addEventListener('drop', function(e) {
+    e.preventDefault();
+    dropzone.classList.remove('dragover');
+    if (e.dataTransfer.files.length > 0) handleFile(e.dataTransfer.files[0]);
+  });
+  fileInput.addEventListener('change', function() {
+    if (fileInput.files.length > 0) handleFile(fileInput.files[0]);
+  });
+
+  function handleFile(file) {
+    var ext = file.name.split('.').pop().toLowerCase();
+    if (ext === 'pdf') {
+      // Send to server for extraction
+      dropzone.innerHTML = '<p>Extracting text from ' + compEscHtml(file.name) + '...</p>';
+      var reader = new FileReader();
+      reader.onload = function() {
+        fetch('/api/app/' + encodeURIComponent(pid) + '/extract-pdf-text', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/pdf' },
+          body: reader.result,
+        }).then(function(r) { return r.json(); }).then(function(resp) {
+          if (resp.error) {
+            showError('Failed to extract text from ' + file.name + ': ' + resp.error);
+            dropzone.innerHTML = '<p>Drop a .fountain, .txt, or .pdf file here</p>';
+          } else {
+            document.getElementById('app-import-text').value = resp.text;
+            // Switch to paste tab to show text
+            overlay.querySelectorAll('[data-import-tab]').forEach(function(t) { t.classList.remove('active'); });
+            overlay.querySelector('[data-import-tab="paste"]').classList.add('active');
+            document.getElementById('app-import-paste-panel').style.display = '';
+            document.getElementById('app-import-file-panel').style.display = 'none';
+            dropzone.innerHTML = '<p>&#x2705; Extracted ' + resp.pages + ' pages from ' + compEscHtml(file.name) + '</p>';
+            toast('Extracted text from ' + file.name + ' (' + resp.pages + ' pages)', 'success');
+          }
+        }).catch(function(err) {
+          showError('PDF extraction failed: ' + err.message);
+          dropzone.innerHTML = '<p>Drop a .fountain, .txt, or .pdf file here</p>';
+        });
+      };
+      reader.readAsArrayBuffer(file);
+    } else {
+      // Read as text
+      var reader2 = new FileReader();
+      reader2.onload = function() {
+        document.getElementById('app-import-text').value = reader2.result;
+        overlay.querySelectorAll('[data-import-tab]').forEach(function(t) { t.classList.remove('active'); });
+        overlay.querySelector('[data-import-tab="paste"]').classList.add('active');
+        document.getElementById('app-import-paste-panel').style.display = '';
+        document.getElementById('app-import-file-panel').style.display = 'none';
+        dropzone.innerHTML = '<p>&#x2705; Loaded ' + compEscHtml(file.name) + '</p>';
+      };
+      reader2.readAsText(file);
+    }
+  }
+
+  function showError(msg) {
+    var el = document.getElementById('app-import-error');
+    el.style.display = '';
+    el.innerHTML = '<div class="app-import-error">&#x274C; ' + compEscHtml(msg) + '</div>';
+  }
+
+  // Simple Fountain parser (inline, no external deps)
+  function parseFountainText(text) {
+    var lines = text.split('\n');
+    var metadata = {};
+    var characters = {};
+    var locations = [];
+    var sections = [];
+    var elements = [];
+    var currentSection = null;
+    var i = 0;
+
+    // Title page (key: value pairs at the start)
+    while (i < lines.length) {
+      var line = lines[i];
+      var match = line.match(/^(Title|Author|Credit|Source|Draft date|Contact|Copyright|Notes|Revision)\s*:\s*(.*)/i);
+      if (match) {
+        metadata[match[1].toLowerCase().replace(/\s+/g, '')] = match[2].trim();
+        i++;
+      } else if (line.trim() === '') {
+        i++;
+        if (Object.keys(metadata).length > 0) break; // End of title page
+      } else {
+        break;
+      }
+    }
+
+    // Body
+    for (; i < lines.length; i++) {
+      var raw = lines[i];
+      var trimmed = raw.trim();
+      if (!trimmed) continue;
+
+      // Scene heading — standard INT/EXT or forced (. prefix)
+      if (/^(INT|EXT|EST|INT\.?\/?EXT|I\/E)[.\s]/i.test(trimmed) || /^\.[A-Z]/.test(trimmed)) {
+        var heading = trimmed.replace(/^\./, '');
+        var locMatch = heading.match(/^(?:INT|EXT|EST|INT\.?\/?EXT|I\/E)[.\s]+([^-–]+)/i);
+        if (locMatch) {
+          var locName = locMatch[1].trim().replace(/\s*[-–].*$/, '').trim();
+          if (locName && locations.indexOf(locName) === -1) locations.push(locName);
+        }
+        var timeMatch = heading.match(/[-–]\s*(DAY|NIGHT|MORNING|EVENING|AFTERNOON|DAWN|DUSK|LATER|CONTINUOUS|SAME)/i);
+        currentSection = {
+          type: 'scene',
+          title: heading,
+          location: locMatch ? locMatch[1].trim().replace(/\s*[-–].*$/, '').trim() : heading,
+          timeOfDay: timeMatch ? timeMatch[1].toUpperCase() : '',
+          elementStart: elements.length,
+        };
+        sections.push(currentSection);
+        continue;
+      }
+
+      // Secondary scene heading (ALL CAPS short line, blank before, action after)
+      // These are sub-locations like "MAIN MALL", "ELEVATOR", "INSIDE THE ELEVATOR"
+      var prevBlank = (i === 0) || !lines[i - 1].trim();
+      var nextIsAction = (i + 1 < lines.length) && lines[i + 1].trim() && !/^[A-Z][A-Z0-9\s.\-']+$/.test(lines[i + 1].trim());
+      var isShortCaps = /^[A-Z][A-Z0-9\s'\-.,]+$/.test(trimmed) && trimmed.length >= 3 && trimmed.length <= 60;
+      var notCharOrTransition = !/^(FADE|CUT|DISSOLVE|THE END|CONTINUED|MORE)/.test(trimmed);
+      if (prevBlank && isShortCaps && nextIsAction && notCharOrTransition && trimmed.split(/\s+/).length <= 8) {
+        // Check it's not a character name (characters are followed by dialogue, not action)
+        var nextTrimmed = (i + 1 < lines.length) ? lines[i + 1].trim() : '';
+        var looksLikeDialogue = nextTrimmed && !/^[A-Z][A-Z\s]+$/.test(nextTrimmed) && nextTrimmed.length < 80;
+        // If the next non-blank lines look like mixed-case prose (action), this is a scene heading
+        // If they look like short lines (dialogue), skip — let character detection handle it
+        var nextWords = nextTrimmed.split(/\s+/).length;
+        if (nextWords >= 4 || /^[A-Z][a-z]/.test(nextTrimmed)) {
+          currentSection = {
+            type: 'scene',
+            title: trimmed,
+            location: trimmed,
+            timeOfDay: '',
+            elementStart: elements.length,
+          };
+          sections.push(currentSection);
+          continue;
+        }
+      }
+
+      // Transition
+      if (/^(FADE IN|FADE OUT|FADE TO|CUT TO|DISSOLVE TO|SMASH CUT|MATCH CUT).*:?\s*$/i.test(trimmed) || /^>\s/.test(trimmed)) {
+        elements.push({ type: 'transition', content: trimmed.replace(/^>\s*/, '') });
+        continue;
+      }
+
+      // Character name detection (Fountain spec):
+      // 1. Must be ALL CAPS (with optional parenthetical like (V.O.) or (CONT'D))
+      // 2. Previous line must be blank
+      // 3. Next line must be dialogue (non-blank, non-ALL-CAPS text) or parenthetical
+      // 4. Must NOT be a known non-character pattern
+      var prevLineBlank = (i === 0) || !lines[i - 1].trim();
+      var isAllCaps = /^[A-Z][A-Z0-9\s.\-']+(\s*\(.*\))?\s*$/.test(trimmed);
+      var hasDialogueNext = false;
+      if (isAllCaps && i + 1 < lines.length) {
+        var nextLine = lines[i + 1].trim();
+        // Next line is dialogue if it's non-empty and NOT all-caps (unless it's a parenthetical)
+        hasDialogueNext = nextLine.length > 0 && (/^\(/.test(nextLine) || !/^[A-Z][A-Z0-9\s.\-']+$/.test(nextLine));
+      }
+      // Exclusion list: scene headings, transitions, sound effects, locations, common false positives
+      var NON_CHAR = /^(INT|EXT|EST|FADE|CUT|DISSOLVE|THE END|FLASHBACK|CONTINUED|MORE|DING|CLICK|BANG|SLAM|CRASH|BOOM|SMASH|TITLE|SUPER|INTERCUT|MONTAGE|LATER|BACK TO|END OF|SERIES OF|BEGIN|CLOSE ON|ANGLE ON|INSERT|WIDER|REVERSE|POV|TRACKING|ESTABLISHING|AERIAL|TIME CUT|MATCH CUT|JUMP CUT|SPLIT SCREEN)/;
+
+      if (prevLineBlank && isAllCaps && hasDialogueNext && trimmed.length > 1 && trimmed.length < 40 && !NON_CHAR.test(trimmed)) {
+        var charName = trimmed.replace(/\s*\(.*\)$/, '').trim();
+        // Extra validation: skip if it looks like a location/setting (3+ words with common location words)
+        var wordCount = charName.split(/\s+/).length;
+        var looksLikeLocation = wordCount >= 3 && /\b(ROOM|HALL|STREET|OFFICE|HOUSE|BUILDING|STORE|MALL|PARKING|LOT|ELEVATOR|KITCHEN|BATHROOM|BEDROOM|LOBBY|CORRIDOR|STAIRCASE|BASEMENT|ROOF|GARDEN|PARK|BRIDGE|ALLEY|HIGHWAY|HOSPITAL|STATION|AIRPORT|RESTAURANT|BAR|CLUB|CHURCH|SCHOOL|COURT|PRISON|CELL|WAREHOUSE|FACTORY|DOCK|BEACH|FOREST|FIELD|MOUNTAIN|CAVE|TUNNEL|INSIDE|OUTSIDE|FRONT|BACK|SIDE|ENTRANCE|EXIT|GARAGE|PORCH|DECK|BALCONY|WINDOW|DOOR|GATE|FENCE|WALL|FLOOR|CEILING|ATTIC)\b/i.test(charName);
+        if (!looksLikeLocation) {
+          if (!characters[charName]) {
+            characters[charName] = { name: charName, dialogueCount: 0 };
+          }
+          characters[charName].dialogueCount++;
+
+          // Collect dialogue lines
+          var dialogueLines = [];
+          var parenthetical = '';
+          var j = i + 1;
+          while (j < lines.length && lines[j].trim()) {
+            var dline = lines[j].trim();
+            if (/^\(.*\)$/.test(dline)) {
+              parenthetical = dline.replace(/^\(|\)$/g, '');
+            } else if (/^[A-Z][A-Z0-9\s.\-']+$/.test(dline) && dline.length < 40 && !NON_CHAR.test(dline) && (j + 1 >= lines.length || !lines[j - 1].trim() || false)) {
+              break; // Next character — but only if preceded by context break
+            } else {
+              dialogueLines.push(dline);
+            }
+            j++;
+          }
+
+          // Only count as dialogue if we actually found dialogue lines
+          if (dialogueLines.length > 0) {
+            elements.push({
+              type: 'dialogue',
+              characterName: charName,
+              content: dialogueLines.join(' '),
+              lines: dialogueLines,
+              modifiers: parenthetical ? [parenthetical] : [],
+            });
+            i = j - 1;
+            continue;
+          } else {
+            // No dialogue found — revert character count
+            characters[charName].dialogueCount--;
+            if (characters[charName].dialogueCount <= 0) delete characters[charName];
+          }
+        }
+      }
+
+      // Section header
+      if (/^#{1,6}\s+/.test(trimmed)) {
+        var depth = trimmed.match(/^(#+)/)[1].length;
+        sections.push({ type: 'act', title: trimmed.replace(/^#+\s+/, ''), depth: depth });
+        continue;
+      }
+
+      // Action (everything else)
+      elements.push({ type: 'action', content: trimmed });
+    }
+
+    return {
+      metadata: metadata,
+      characters: characters,
+      locations: locations,
+      sections: sections,
+      elements: elements,
+    };
+  }
+
+  // Preview button
+  document.getElementById('app-import-preview-btn').addEventListener('click', function() {
+    var text = document.getElementById('app-import-text').value.trim();
+    if (!text) { showError('No text to parse. Paste a screenplay or upload a file.'); return; }
+
+    parsedData = parseFountainText(text);
+    parsedData._rawText = text;
+
+    var previewEl = document.getElementById('app-import-preview');
+    var metaEl = document.getElementById('app-import-meta');
+    var errorEl = document.getElementById('app-import-error');
+    errorEl.style.display = 'none';
+
+    var charCount = Object.keys(parsedData.characters).length;
+    var dialogueCount = parsedData.elements.filter(function(e) { return e.type === 'dialogue'; }).length;
+    var actionCount = parsedData.elements.filter(function(e) { return e.type === 'action'; }).length;
+    var sceneCount = parsedData.sections.filter(function(s) { return s.type === 'scene'; }).length;
+    var estPages = Math.max(1, Math.round(text.split('\n').length / 55));
+
+    var html = '<div class="app-import-preview">';
+    html += '<div class="app-import-preview-title">Parse Results</div>';
+    html += '<div>';
+    html += '<span class="app-import-stat"><b>' + sceneCount + '</b> scenes</span>';
+    html += '<span class="app-import-stat"><b>' + charCount + '</b> characters</span>';
+    html += '<span class="app-import-stat"><b>' + dialogueCount + '</b> dialogue blocks</span>';
+    html += '<span class="app-import-stat"><b>' + actionCount + '</b> action lines</span>';
+    html += '<span class="app-import-stat"><b>~' + estPages + '</b> pages</span>';
+    html += '<span class="app-import-stat"><b>' + parsedData.locations.length + '</b> locations</span>';
+    html += '</div>';
+
+    if (charCount > 0) {
+      html += '<div style="margin-top:8px;"><span class="app-import-preview-title">Characters</span>';
+      html += '<div class="app-import-char-list">';
+      var sortedChars = Object.values(parsedData.characters).sort(function(a, b) { return b.dialogueCount - a.dialogueCount; });
+      for (var ci = 0; ci < Math.min(sortedChars.length, 30); ci++) {
+        html += '<span class="app-import-char-tag">' + compEscHtml(sortedChars[ci].name) + ' (' + sortedChars[ci].dialogueCount + ')</span>';
+      }
+      if (sortedChars.length > 30) html += '<span class="app-import-char-tag">+' + (sortedChars.length - 30) + ' more</span>';
+      html += '</div></div>';
+    }
+
+    html += '</div>';
+    previewEl.style.display = '';
+    previewEl.innerHTML = html;
+
+    // Fill metadata fields
+    metaEl.style.display = '';
+    document.getElementById('app-import-meta-title').value = parsedData.metadata.title || '';
+    document.getElementById('app-import-meta-author').value = parsedData.metadata.author || '';
+    document.getElementById('app-import-meta-date').value = parsedData.metadata.draftdate || new Date().toISOString().split('T')[0];
+    document.getElementById('app-import-meta-genre').value = '';
+
+    // Show folder bar and pre-fill from existing metadata
+    var folderBar = document.getElementById('app-import-folder-bar');
+    if (folderBar) folderBar.style.display = '';
+    var existingFolder = (compData && compData.metadata && compData.metadata.projectFolder) || '';
+    document.getElementById('app-import-meta-folder').value = existingFolder;
+
+    // Enable confirm button
+    document.getElementById('app-import-confirm').disabled = false;
+  });
+
+  // Browse folder button
+  var browseFolderBtn = document.getElementById('app-import-browse-folder');
+  if (browseFolderBtn) {
+    browseFolderBtn.addEventListener('click', function() {
+      if (typeof openFolderPicker === 'function') {
+        var currentVal = document.getElementById('app-import-meta-folder').value || '';
+        openFolderPicker('Select Project Folder', currentVal, function(folder) {
+          if (folder) document.getElementById('app-import-meta-folder').value = folder;
+        });
+      } else {
+        toast('Folder picker not available', 'error');
+      }
+    });
+  }
+
+  // Import confirm
+  document.getElementById('app-import-confirm').addEventListener('click', function() {
+    if (!parsedData) return;
+    var btn = document.getElementById('app-import-confirm');
+    btn.disabled = true;
+    btn.textContent = 'Importing...';
+
+    // Build structured data for each node
+    var title = document.getElementById('app-import-meta-title').value || 'Untitled';
+    var author = document.getElementById('app-import-meta-author').value || 'Unknown';
+    var draftDate = document.getElementById('app-import-meta-date').value || new Date().toISOString().split('T')[0];
+    var genre = document.getElementById('app-import-meta-genre').value;
+    var projectFolder = document.getElementById('app-import-meta-folder').value || '';
+
+    // Require project folder
+    if (!projectFolder) {
+      btn.disabled = false;
+      btn.textContent = 'Import to Pipeline';
+      var folderInput = document.getElementById('app-import-meta-folder');
+      if (folderInput) {
+        folderInput.style.borderColor = '#f87171';
+        folderInput.focus();
+        folderInput.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+      showError('Please set a project folder before importing. This is where all generated files will be saved.');
+      return;
+    }
+
+    // Save project folder to composition metadata
+    if (projectFolder && pid) {
+      fetch('/api/compositions/' + encodeURIComponent(pid), {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ metadata: { projectFolder: projectFolder } }),
+      }).catch(function() { /* best effort */ });
+      if (compData) {
+        if (!compData.metadata) compData.metadata = {};
+        compData.metadata.projectFolder = projectFolder;
+      }
+    }
+
+    var metadataOutput = {
+      metadata: {
+        title: title,
+        subtitle: null,
+        logline: '',
+        author: [{ name: author, role: 'Writer' }],
+        basedOn: null,
+        language: 'en-US',
+        series: null,
+        commercial: null,
+        runtimeMinutes: Math.max(1, Math.round(parsedData._rawText.split('\n').length / 55)),
+        estimatedPages: Math.max(1, Math.round(parsedData._rawText.split('\n').length / 55)),
+        genre: genre ? genre.split(',').map(function(g) { return g.trim(); }) : [],
+        tone: [],
+        audience: [],
+        draftName: 'Imported',
+        draftDate: draftDate + 'T00:00:00.000Z',
+        version: '1.0.0',
+      },
+    };
+
+    var charArray = Object.values(parsedData.characters).map(function(c, idx) {
+      return {
+        id: 'char-' + (idx + 1),
+        name: c.name,
+        role: c.dialogueCount > 10 ? 'main' : c.dialogueCount > 3 ? 'supporting' : 'minor',
+        description: '',
+        traits: [],
+        arc: '',
+        relationships: [],
+      };
+    });
+    var charactersOutput = { characters: charArray };
+
+    var locArray = parsedData.locations.map(function(loc, idx) {
+      return {
+        id: 'loc-' + (idx + 1),
+        name: loc,
+        description: '',
+        type: /^(INT)/i.test(loc) ? 'interior' : 'exterior',
+        mood: '',
+        timeOfDay: '',
+      };
+    });
+    var locationsOutput = { locations: locArray };
+
+    // Build sections — group scenes into acts if acts exist, otherwise create auto-acts
+    var sceneList = parsedData.sections.filter(function(s) { return s.type === 'scene'; });
+    var actList = parsedData.sections.filter(function(s) { return s.type === 'act'; });
+    var sectionChildren;
+
+    if (actList.length > 0) {
+      // Use explicit act structure
+      sectionChildren = actList.map(function(act, ai) {
+        return {
+          type: 'act',
+          id: 'act-' + (ai + 1),
+          title: act.title,
+          order: ai + 1,
+          children: [],
+        };
+      });
+      // Distribute scenes into acts (scenes go into the most recent act)
+      var currentAct = 0;
+      var actIndices = actList.map(function(a) { return parsedData.sections.indexOf(a); });
+      for (var si2 = 0; si2 < sceneList.length; si2++) {
+        var sceneIdx = parsedData.sections.indexOf(sceneList[si2]);
+        while (currentAct + 1 < actIndices.length && sceneIdx >= actIndices[currentAct + 1]) currentAct++;
+        sectionChildren[currentAct].children.push({
+          type: 'scene',
+          id: 'scene-' + (si2 + 1),
+          title: sceneList[si2].title,
+          location: sceneList[si2].location || '',
+          timeOfDay: sceneList[si2].timeOfDay || '',
+          order: si2 + 1,
+          children: [],
+        });
+      }
+    } else {
+      // Auto-create acts by grouping ~10-15 scenes per act
+      var scenesPerAct = Math.max(5, Math.ceil(sceneList.length / 3));
+      sectionChildren = [];
+      var actNames = ['Act I', 'Act II', 'Act III', 'Act IV', 'Act V'];
+      for (var ai2 = 0; ai2 * scenesPerAct < sceneList.length; ai2++) {
+        var actScenes = sceneList.slice(ai2 * scenesPerAct, (ai2 + 1) * scenesPerAct);
+        sectionChildren.push({
+          type: 'act',
+          id: 'act-' + (ai2 + 1),
+          title: actNames[ai2] || ('Act ' + (ai2 + 1)),
+          order: ai2 + 1,
+          children: actScenes.map(function(s, idx) {
+            return {
+              type: 'scene',
+              id: 'scene-' + (ai2 * scenesPerAct + idx + 1),
+              title: s.title,
+              location: s.location || '',
+              timeOfDay: s.timeOfDay || '',
+              order: ai2 * scenesPerAct + idx + 1,
+              children: [],
+            };
+          }),
+        });
+      }
+    }
+    var sectionsOutput = { sections: sectionChildren };
+
+    // Elements with IDs
+    var elementsOutput = {
+      elements: parsedData.elements.map(function(el, idx) {
+        var base = {
+          id: 'elem-' + (idx + 1),
+          type: el.type,
+          content: el.content || '',
+        };
+        if (el.type === 'dialogue') {
+          base.characterName = el.characterName || '';
+          base.characterId = '';
+          // Try to find character ID
+          for (var ci2 = 0; ci2 < charArray.length; ci2++) {
+            if (charArray[ci2].name === el.characterName) {
+              base.characterId = charArray[ci2].id;
+              break;
+            }
+          }
+          base.lines = el.lines || [el.content];
+          base.modifiers = el.modifiers || [];
+        }
+        return base;
+      }),
+    };
+
+    // Assembly node (full scriptPackage)
+    var assemblyOutput = {
+      scriptPackage: {
+        script: {
+          metadata: metadataOutput.metadata,
+          characters: charArray,
+          locations: locArray,
+          sections: sectionsOutput.sections,
+          elements: elementsOutput.elements,
+        },
+        previsualizations: { shots: [] },
+        assets: [],
+      },
+      _fountainSource: parsedData._rawText,
+    };
+
+    // Save to all nodes sequentially
+    var saves = [
+      { nodeId: NODE_MAP.metadata, outputs: metadataOutput },
+      { nodeId: NODE_MAP.characters, outputs: charactersOutput },
+      { nodeId: NODE_MAP.locations, outputs: locationsOutput },
+      { nodeId: NODE_MAP.sections, outputs: sectionsOutput },
+      { nodeId: NODE_MAP.elements, outputs: elementsOutput },
+      { nodeId: NODE_MAP.assembly, outputs: assemblyOutput },
+    ];
+
+    // First clear old state so no stale data remains
+    btn.textContent = 'Clearing old data...';
+    fetch('/api/app/' + encodeURIComponent(pid) + '/state', { method: 'DELETE' })
+    .then(function(r) { return r.json(); })
+    .then(function() {
+    var completed = 0;
+    function saveNext() {
+      if (completed >= saves.length) {
+        // All done
+        overlay.remove();
+        toast('Imported: ' + charArray.length + ' characters, ' + parsedData.locations.length + ' locations, ' + parsedData.elements.length + ' elements', 'success');
+        // Hard reload to pick up all new data cleanly
+        setTimeout(function() { window.location.reload(); }, 300);
+        return;
+      }
+      var save = saves[completed];
+      fetch('/api/app/' + encodeURIComponent(pid) + '/state/' + encodeURIComponent(save.nodeId), {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ outputs: save.outputs }),
+      }).then(function(r) {
+        if (!r.ok) throw new Error('Failed to save ' + save.nodeId);
+        return r.json();
+      }).then(function() {
+        completed++;
+        btn.textContent = 'Importing... (' + completed + '/' + saves.length + ')';
+        saveNext();
+      }).catch(function(err) {
+        btn.textContent = 'Import to Pipeline';
+        btn.disabled = false;
+        showError('Failed to save: ' + err.message);
+      });
+    }
+    saveNext();
+  }).catch(function(err) {
+    btn.textContent = 'Import to Pipeline';
+    btn.disabled = false;
+    showError('Failed to clear old data: ' + err.message);
+  });
+  });
+
+  // Close handlers
+  document.getElementById('app-import-close').addEventListener('click', function() { overlay.remove(); });
+  document.getElementById('app-import-cancel').addEventListener('click', function() { overlay.remove(); });
+  overlay.addEventListener('click', function(e) { if (e.target === overlay) overlay.remove(); });
+}
+
 function showNewProjectDialog() {
   // Remove existing dialog if present
   var existing = document.getElementById('app-new-project-overlay');
@@ -4772,6 +5559,7 @@ function openFolderPicker(onSelect) {
     + '<div class="folder-picker-path" id="fp-current-path"></div>'
     + '<div class="folder-picker-list" id="fp-list">Loading...</div>'
     + '<div class="folder-picker-footer">'
+    + '<button class="folder-picker-cancel-btn" id="fp-new-folder" style="margin-right:auto;background:rgba(139,92,246,0.1);border-color:rgba(139,92,246,0.25);color:#c4b5fd;">&#x2795; New Folder</button>'
     + '<button class="folder-picker-cancel-btn" id="fp-cancel">Cancel</button>'
     + '<button class="folder-picker-select-btn" id="fp-select">Select This Folder</button>'
     + '</div>'
@@ -4832,6 +5620,35 @@ function openFolderPicker(onSelect) {
   overlay.querySelector('#fp-cancel').addEventListener('click', function() { overlay.remove(); });
   overlay.addEventListener('click', function(e) {
     if (e.target === overlay) overlay.remove();
+  });
+
+  // New Folder handler
+  overlay.querySelector('#fp-new-folder').addEventListener('click', function() {
+    var name = prompt('New folder name:');
+    if (!name || !name.trim()) return;
+    var newPath = currentPath + '/' + name.trim();
+    fetch('/api/browse', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: currentPath, createDir: name.trim() }),
+    }).then(function(r) { return r.json(); }).then(function(data) {
+      if (data.error) {
+        toast('Failed to create folder: ' + data.error, 'error');
+      } else {
+        browseTo(data.created || newPath);
+      }
+    }).catch(function() {
+      // Fallback: try mkdir directly
+      fetch('/api/mkdir', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: newPath }),
+      }).then(function() {
+        browseTo(newPath);
+      }).catch(function(err) {
+        toast('Failed to create folder: ' + err.message, 'error');
+      });
+    });
   });
 
   // Select handler
@@ -4951,6 +5768,273 @@ function showGenerateLogoModal() {
       btn.disabled = false;
       btn.textContent = '✨ Generate';
     }
+  });
+}
+
+// ── AI Enrichment Functions ──────────────────────────────────────────
+
+/**
+ * Enrich a single character or location using AI.
+ * Sends the entity's data + dialogue context to the chat API for analysis.
+ */
+function enrichSingleEntity(pipelineId, entityKey, entityId, entityName) {
+  var nodeId = entityKey === 'characters' ? 'node-5' : 'node-6';
+
+  // Use appState directly — data may be in individual nodes or in the assembly node
+  return Promise.resolve().then(function() {
+    var items = [];
+    var elements = [];
+
+    // Try individual nodes first, then assembly node
+    if (appState && appState.nodeData) {
+      var nd = appState.nodeData;
+      // Characters
+      if (entityKey === 'characters') {
+        items = (nd['node-5'] && nd['node-5'].characters) || (nd['node-5'] && nd['node-5'].outputs && nd['node-5'].outputs.characters) || [];
+      } else {
+        items = (nd['node-6'] && nd['node-6'].locations) || (nd['node-6'] && nd['node-6'].outputs && nd['node-6'].outputs.locations) || [];
+      }
+      // Elements
+      elements = (nd['node-10'] && nd['node-10'].elements) || (nd['node-10'] && nd['node-10'].outputs && nd['node-10'].outputs.elements) || [];
+
+      // Fallback: try assembly node (node-15)
+      if (items.length === 0 || elements.length === 0) {
+        var assembly = nd['node-15'];
+        var sp = assembly && (assembly.scriptPackage || (assembly.outputs && assembly.outputs.scriptPackage));
+        if (sp && sp.script) {
+          if (items.length === 0) items = sp.script[entityKey] || [];
+          if (elements.length === 0) elements = sp.script.elements || [];
+        }
+      }
+    }
+
+    if (items.length === 0) throw new Error('No ' + entityKey + ' data found in pipeline state');
+    var item = items.find(function(it) { return it.id === entityId; });
+    if (!item) throw new Error('Entity not found: ' + entityId);
+
+    // Build context for AI
+    var prompt;
+    if (entityKey === 'characters') {
+      // Collect dialogue samples
+      var dialogues = elements.filter(function(el) { return el.type === 'dialogue' && el.characterName === entityName; });
+      var samples = dialogues.slice(0, 12).map(function(d) { return entityName + ': "' + (d.lines ? d.lines.join(' ') : d.content || '').substring(0, 150) + '"'; }).join('\n');
+      var otherChars = items.filter(function(c) { return c.id !== entityId; }).map(function(c) { return c.name; }).join(', ');
+
+      prompt = 'Analyze this character from a screenplay and provide detailed information.\n\n' +
+        'Character name: ' + entityName + '\nCurrent role: ' + (item.role || 'unknown') + '\n\n' +
+        'Sample dialogue:\n' + samples + '\n\n' +
+        'Other characters: ' + otherChars + '\n\n' +
+        'Provide a JSON object with these fields:\n' +
+        '{\n  "description": "2-3 sentence physical and personality description",\n' +
+        '  "ageRange": "estimated age range",\n  "gender": "Male, Female, or Non-binary",\n' +
+        '  "traits": ["trait1", "trait2", "trait3", "trait4", "trait5"],\n' +
+        '  "arc": "1-2 sentence character arc",\n' +
+        '  "voiceDescription": "How their voice sounds",\n' +
+        '  "wardrobeNotes": "Brief clothing description",\n' +
+        '  "relationships": [{"characterName": "NAME", "type": "relationship type"}]\n}\n\n' +
+        'Return ONLY the JSON object.';
+    } else {
+      // Location
+      var mentions = elements.filter(function(el) { return el.type === 'action' && el.content && el.content.toLowerCase().indexOf(entityName.toLowerCase()) >= 0; });
+      var context = mentions.slice(0, 3).map(function(m) { return m.content.substring(0, 150); }).join('\n');
+
+      prompt = 'Analyze this location from a screenplay:\n\n' +
+        'Location: ' + entityName + '\n' +
+        (context ? 'Context from script:\n' + context + '\n\n' : '') +
+        'Provide a JSON object:\n' +
+        '{\n  "description": "2-3 sentence vivid description",\n' +
+        '  "type": "interior or exterior",\n  "mood": "overall mood/atmosphere",\n' +
+        '  "setting": "time period and geographic context",\n' +
+        '  "atmosphere": "sensory details - lighting, sounds, smells"\n}\n\n' +
+        'Return ONLY the JSON object.';
+    }
+
+    // Send to chat API
+    return fetch('/api/chat/one-shot', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: prompt, pipelineId: pipelineId }),
+    }).then(function(r) { return r.json(); }).then(function(chatResp) {
+      var text = chatResp.response || chatResp.text || chatResp.content || '';
+      var jsonMatch = text.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) throw new Error('AI did not return valid JSON');
+      var enriched = JSON.parse(jsonMatch[0]);
+
+      // Merge enriched data into item
+      var idx = items.findIndex(function(it) { return it.id === entityId; });
+      if (idx < 0) throw new Error('Entity not found after enrichment');
+
+      if (entityKey === 'characters') {
+        if (enriched.description) items[idx].description = enriched.description;
+        if (enriched.ageRange) items[idx].ageRange = enriched.ageRange;
+        if (enriched.gender) items[idx].gender = enriched.gender;
+        if (enriched.traits) items[idx].traits = enriched.traits;
+        if (enriched.arc) items[idx].arc = enriched.arc;
+        if (enriched.voiceDescription) items[idx].voiceDescription = enriched.voiceDescription;
+        if (enriched.wardrobeNotes) items[idx].wardrobeNotes = enriched.wardrobeNotes;
+        if (enriched.relationships) items[idx].relationships = enriched.relationships;
+        items[idx].displayName = entityName.split(' ').map(function(w) { return w.charAt(0).toUpperCase() + w.slice(1).toLowerCase(); }).join(' ');
+      } else {
+        if (enriched.description) items[idx].description = enriched.description;
+        if (enriched.type) items[idx].type = enriched.type;
+        if (enriched.mood) items[idx].mood = enriched.mood;
+        if (enriched.setting) items[idx].setting = enriched.setting;
+        if (enriched.atmosphere) items[idx].atmosphere = enriched.atmosphere;
+      }
+
+      // Save back — save to individual node AND assembly node
+      var outputs = {};
+      outputs[entityKey] = items;
+      // Save to individual node
+      var saveIndividual = fetch('/api/app/' + encodeURIComponent(pipelineId) + '/state/' + encodeURIComponent(nodeId), {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ outputs: outputs }),
+      });
+      // Also update assembly node (node-15) if it exists
+      var saveAssembly = Promise.resolve();
+      if (appState && appState.nodeData && appState.nodeData['node-15']) {
+        var assemblyData = appState.nodeData['node-15'];
+        var sp = assemblyData.scriptPackage || (assemblyData.outputs && assemblyData.outputs.scriptPackage);
+        if (sp && sp.script) {
+          sp.script[entityKey] = items;
+          saveAssembly = fetch('/api/app/' + encodeURIComponent(pipelineId) + '/state/node-15', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ outputs: assemblyData.outputs || assemblyData }),
+          });
+        }
+      }
+      return Promise.all([saveIndividual, saveAssembly]);
+    }).then(function() {
+      // Update appState in memory
+      if (appState && appState.nodeData) {
+        if (!appState.nodeData[nodeId]) appState.nodeData[nodeId] = {};
+        var nd = appState.nodeData[nodeId];
+        if (nd.outputs) nd.outputs[entityKey] = items;
+        else nd[entityKey] = items;
+      }
+      return { success: true };
+    });
+  });
+}
+
+/**
+ * Enrich all unenriched entities of a given type.
+ */
+function enrichAllEntities(pipelineId, entityKey) {
+  // Use appState to find items, same as enrichSingleEntity
+  var items = [];
+  if (appState && appState.nodeData) {
+    var nd = appState.nodeData;
+    var nodeId = entityKey === 'characters' ? 'node-5' : 'node-6';
+    items = (nd[nodeId] && nd[nodeId][entityKey]) || (nd[nodeId] && nd[nodeId].outputs && nd[nodeId].outputs[entityKey]) || [];
+    if (items.length === 0) {
+      var assembly = nd['node-15'];
+      var sp = assembly && (assembly.scriptPackage || (assembly.outputs && assembly.outputs.scriptPackage));
+      if (sp && sp.script) items = sp.script[entityKey] || [];
+    }
+  }
+  return Promise.resolve().then(function() {
+    var unenriched = items.filter(function(it) { return !it.description || String(it.description).length <= 20; });
+
+    if (unenriched.length === 0) return { count: 0 };
+
+    // Process sequentially to avoid overwhelming the API
+    var completed = 0;
+    function processNext() {
+      if (completed >= unenriched.length) return Promise.resolve({ count: completed });
+      var item = unenriched[completed];
+      return enrichSingleEntity(pipelineId, entityKey, item.id, item.name).then(function() {
+        completed++;
+        return processNext();
+      }).catch(function(err) {
+        // Log error but continue
+        console.warn('Failed to enrich ' + item.name + ':', err);
+        completed++;
+        return processNext();
+      });
+    }
+    return processNext();
+  });
+}
+
+// ── Image Generation Functions ───────────────────────────────────────
+
+/**
+ * Invoke the Asset Collection pipeline node (node-12) to generate headshot
+ * and location images. This runs the actual pipeline node which handles
+ * nanobanana generation, asset library creation, project folder saving,
+ * and binding setup.
+ */
+function generateEntityImages(pipelineId, entityKey, btn) {
+  var origText = btn.innerHTML;
+
+  // Check for project folder first
+  var projectFolder = '';
+  if (compData && compData.metadata && compData.metadata.projectFolder) {
+    projectFolder = compData.metadata.projectFolder;
+  }
+  if (!projectFolder && appState && appState.nodeData) {
+    for (var nid in appState.nodeData) {
+      var nd = appState.nodeData[nid];
+      var meta = nd.metadata || (nd.outputs && nd.outputs.metadata);
+      if (meta && meta.projectFolder) { projectFolder = meta.projectFolder; break; }
+    }
+  }
+
+  if (!projectFolder) {
+    // Prompt user to set project folder first via Save dialog
+    toast('Set a project folder first — click Save to choose where to save the project', 'warning');
+    // Try to open the save dialog
+    if (typeof openFolderPicker === 'function') {
+      var pid = pipelineId;
+      openFolderPicker('Select Project Folder', '', function(folder) {
+        if (!folder) return;
+        // Save the project folder
+        fetch('/api/compositions/' + encodeURIComponent(pid), {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ metadata: { projectFolder: folder } }),
+        }).then(function() {
+          if (compData) {
+            if (!compData.metadata) compData.metadata = {};
+            compData.metadata.projectFolder = folder;
+          }
+          toast('Project folder set to ' + folder, 'success');
+          // Now proceed with generation
+          generateEntityImages(pid, entityKey, btn);
+        });
+      });
+    }
+    return;
+  }
+
+  btn.disabled = true;
+  btn.innerHTML = '&#x23F3; Running Asset Collection node...';
+
+  // Invoke node-12 (Asset Collection) via the pipeline execution API
+  fetch('/api/app/' + encodeURIComponent(pipelineId) + '/invoke/node-12', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  }).then(function(r) {
+    if (!r.ok) throw new Error('Node invocation failed (status ' + r.status + ')');
+    return r.json();
+  }).then(function(result) {
+    btn.innerHTML = '&#x2705; Assets generated';
+    btn.disabled = false;
+    var msg = 'Asset Collection complete';
+    if (result.outputs && result.outputs.assetCollection) {
+      msg += ' — check the asset library for headshots and location images';
+    }
+    toast(msg, 'success');
+    // Reload to see updated state
+    setTimeout(function() { window.location.reload(); }, 1000);
+  }).catch(function(err) {
+    btn.innerHTML = origText;
+    btn.disabled = false;
+    toast('Asset generation failed: ' + (err.message || err), 'error');
   });
 }
 
