@@ -3,6 +3,7 @@
  * Manages view switching between Screenplay, Data, Editor, Script, Voices.
  */
 import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { PipelineProvider, usePipeline } from '../stores/PipelineProvider';
 import { usePipelineStore, loadPipeline, clearProject, setState } from '../stores/pipeline-store';
 import { ScreenplayView } from './ScreenplayView';
 import { DataView } from './DataView';
@@ -20,7 +21,17 @@ const VIEW_TABS: Array<{ id: ViewMode; label: string; icon: string }> = [
 ];
 
 export function PipelineApp({ pipelineId }: { pipelineId: string }) {
-  const { projectData, pipelineName, loading, activeView, projectFolder } = usePipelineStore();
+  return (
+    <PipelineProvider pipelineId={pipelineId}>
+      <PipelineAppInner pipelineId={pipelineId} />
+    </PipelineProvider>
+  );
+}
+
+function PipelineAppInner({ pipelineId }: { pipelineId: string }) {
+  const { project: projectData, pipelineName, loading, projectFolder } = usePipeline();
+  // Also sync to the old store for backward compat with vanilla views
+  const { activeView } = usePipelineStore();
   const [showImport, setShowImport] = useState(false);
   const [currentView, setCurrentView] = useState<ViewMode>('screenplay');
 
