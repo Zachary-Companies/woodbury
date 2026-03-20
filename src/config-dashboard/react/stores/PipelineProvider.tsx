@@ -1,18 +1,97 @@
 /**
- * PipelineProvider — React Context provider for centralized pipeline data.
+ * PipelineProvider — Split into 3 contexts for fine-grained re-rendering:
  *
- * This is the single source of truth for all pipeline data in the client.
- * All components read from this context, and all writes go through it.
+ * 1. PipelineIdentity — pipelineId, name, folder, loading/saving state (rarely changes)
+ * 2. ProjectData — characters, locations, elements, sections, previs (changes on edits)
+ * 3. AIOperations — enrichment & generation actions with own progress state
+ *
+ * The legacy `usePipeline()` hook still works — it merges all 3 contexts for backward compat.
  */
-import React, { createContext, useContext, useReducer, useCallback, useEffect, type ReactNode } from 'react';
-import type { ProjectData, Character, Location, Section, Element, ScriptMetadata } from './pipeline-store';
+import React, {
+  createContext, useContext, useReducer, useCallback, useEffect, useRef, useMemo,
+  useState, type ReactNode,
+} from 'react';
+import type { ProjectData, Character, Location, Section, Element, ScriptMetadata, SceneData } from './pipeline-store';
+import { buildScenes } from '../parsers/fountainParser';
 
 // Re-export types
-export type { ProjectData, Character, Location, Section, Element, ScriptMetadata };
+export type { ProjectData, Character, Location, Section, Element, ScriptMetadata, SceneData, SceneShot, SceneDialogue };
 
-// ── State ────────────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════
+// Context 1: Pipeline Identity (rarely changes)
+// ════════════════════════════════════════════════════════════════
 
-export interface PipelineContextState {
+interface IdentityState {
+  pipelineId: string;
+  pipelineName: string;
+  projectFolder: string | null;
+  loading: boolean;
+  saving: boolean;
+  dirty: boolean;
+  error: string | null;
+}
+
+interface IdentityContextValue extends IdentityState {
+  reload: () => Promise<void>;
+  saveProject: () => Promise<void>;
+  clearProject: () => Promise<void>;
+  setProjectFolder: (folder: string) => Promise<void>;
+}
+
+const IdentityContext = createContext<IdentityContextValue | null>(null);
+
+export function usePipelineIdentity(): IdentityContextValue {
+  const ctx = useContext(IdentityContext);
+  if (!ctx) throw new Error('usePipelineIdentity must be used within PipelineProvider');
+  return ctx;
+}
+
+// ════════════════════════════════════════════════════════════════
+// Context 2: Project Data (changes on edits)
+// ════════════════════════════════════════════════════════════════
+
+interface ProjectContextValue {
+  project: ProjectData | null;
+  updateProject: (partial: Partial<ProjectData>) => void;
+  updateCharacter: (id: string, data: Partial<Character>) => void;
+  updateLocation: (id: string, data: Partial<Location>) => void;
+  updateElement: (id: string, data: Partial<Element>) => void;
+}
+
+const ProjectContext = createContext<ProjectContextValue | null>(null);
+
+export function useProjectData(): ProjectContextValue {
+  const ctx = useContext(ProjectContext);
+  if (!ctx) throw new Error('useProjectData must be used within PipelineProvider');
+  return ctx;
+}
+
+// ════════════════════════════════════════════════════════════════
+// Context 3: AI Operations (async, long-running)
+// ════════════════════════════════════════════════════════════════
+
+interface AIOperationsContextValue {
+  enrichCharacter: (id: string) => Promise<void>;
+  enrichLocation: (id: string) => Promise<void>;
+  enrichAllCharacters: () => Promise<void>;
+  enrichAllLocations: () => Promise<void>;
+  generateCharacterImages: () => Promise<any>;
+  generateLocationImages: () => Promise<any>;
+}
+
+const AIOperationsContext = createContext<AIOperationsContextValue | null>(null);
+
+export function useAIOperations(): AIOperationsContextValue {
+  const ctx = useContext(AIOperationsContext);
+  if (!ctx) throw new Error('useAIOperations must be used within PipelineProvider');
+  return ctx;
+}
+
+// ════════════════════════════════════════════════════════════════
+// Reducer (shared state machine)
+// ════════════════════════════════════════════════════════════════
+
+interface FullState {
   pipelineId: string;
   pipelineName: string;
   projectFolder: string | null;
@@ -23,7 +102,7 @@ export interface PipelineContextState {
   dirty: boolean;
 }
 
-const initialState: PipelineContextState = {
+const initialState: FullState = {
   pipelineId: '',
   pipelineName: '',
   projectFolder: null,
@@ -34,11 +113,10 @@ const initialState: PipelineContextState = {
   dirty: false,
 };
 
-// ── Actions ──────────────────────────────────────────────────
-
 type Action =
   | { type: 'LOADING' }
   | { type: 'LOADED'; project: ProjectData; pipelineName: string; projectFolder: string | null }
+  | { type: 'REFRESH'; project: ProjectData; pipelineName: string; projectFolder: string | null }
   | { type: 'ERROR'; error: string }
   | { type: 'SAVING' }
   | { type: 'SAVED' }
@@ -49,12 +127,14 @@ type Action =
   | { type: 'SET_PROJECT_FOLDER'; folder: string }
   | { type: 'CLEAR' };
 
-function reducer(state: PipelineContextState, action: Action): PipelineContextState {
+function reducer(state: FullState, action: Action): FullState {
   switch (action.type) {
     case 'LOADING':
       return { ...state, loading: true, error: null };
     case 'LOADED':
       return { ...state, loading: false, project: action.project, pipelineName: action.pipelineName, projectFolder: action.projectFolder };
+    case 'REFRESH':
+      return { ...state, project: action.project, pipelineName: action.pipelineName, projectFolder: action.projectFolder, dirty: false };
     case 'ERROR':
       return { ...state, loading: false, error: action.error };
     case 'SAVING':
@@ -88,42 +168,19 @@ function reducer(state: PipelineContextState, action: Action): PipelineContextSt
   }
 }
 
-// ── Context ──────────────────────────────────────────────────
-
-interface PipelineContextValue extends PipelineContextState {
-  // Data loading
-  reload: () => Promise<void>;
-
-  // Project-level mutations
-  updateProject: (partial: Partial<ProjectData>) => void;
-  saveProject: () => Promise<void>;
-  clearProject: () => Promise<void>;
-  setProjectFolder: (folder: string) => Promise<void>;
-
-  // Entity mutations
-  updateCharacter: (id: string, data: Partial<Character>) => void;
-  updateLocation: (id: string, data: Partial<Location>) => void;
-  updateElement: (id: string, data: Partial<Element>) => void;
-
-  // AI operations
-  enrichCharacter: (id: string) => Promise<void>;
-  enrichLocation: (id: string) => Promise<void>;
-  enrichAllCharacters: () => Promise<void>;
-  enrichAllLocations: () => Promise<void>;
-  generateCharacterImages: () => Promise<any>;
-  generateLocationImages: () => Promise<any>;
-}
-
-const PipelineContext = createContext<PipelineContextValue | null>(null);
-
-// ── Provider ─────────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════
+// Combined Provider
+// ════════════════════════════════════════════════════════════════
 
 export function PipelineProvider({ pipelineId, children }: { pipelineId: string; children: ReactNode }) {
   const [state, dispatch] = useReducer(reducer, { ...initialState, pipelineId });
 
   // ── Load pipeline data ─────────────────────────────────────
+  const initialLoadDone = useRef(false);
+
   const reload = useCallback(async () => {
-    dispatch({ type: 'LOADING' });
+    const isInitial = !initialLoadDone.current;
+    if (isInitial) dispatch({ type: 'LOADING' });
     try {
       const [schemaRes, stateRes] = await Promise.all([
         fetch(`/api/app/${encodeURIComponent(pipelineId)}/schema`),
@@ -133,6 +190,11 @@ export function PipelineProvider({ pipelineId, children }: { pipelineId: string;
       const appState = await stateRes.json();
       const project = extractProjectData(appState, pipelineId);
 
+      // Auto-compute scenes if not present (migration for existing projects)
+      if (project && (!project.scenes || project.scenes.length === 0)) {
+        project.scenes = computeScenes(project);
+      }
+
       let projectFolder: string | null = null;
       try {
         const compRes = await fetch(`/api/compositions/${encodeURIComponent(pipelineId)}`);
@@ -140,8 +202,9 @@ export function PipelineProvider({ pipelineId, children }: { pipelineId: string;
         projectFolder = comp?.composition?.metadata?.projectFolder || null;
       } catch {}
 
+      initialLoadDone.current = true;
       dispatch({
-        type: 'LOADED',
+        type: isInitial ? 'LOADED' : 'REFRESH',
         project: project || createEmptyProject(pipelineId),
         pipelineName: schema?.name || appState?.pipelineName || pipelineId,
         projectFolder,
@@ -285,58 +348,134 @@ export function PipelineProvider({ pipelineId, children }: { pipelineId: string;
 
   // ── Image Generation ───────────────────────────────────────
   const generateCharacterImages = useCallback(async () => {
-    const res = await fetch(`/api/app/${encodeURIComponent(pipelineId)}/generate-assets`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ type: 'characters' }),
-    });
-    const result = await res.json();
-    await reload(); // Reload to get updated imagePaths
-    return result;
+    const poll = setInterval(() => { reload(); }, 5000);
+    try {
+      const res = await fetch(`/api/app/${encodeURIComponent(pipelineId)}/generate-assets`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'characters' }),
+      });
+      const result = await res.json();
+      if (!res.ok) throw new Error(result.error || 'Generation failed');
+      return result;
+    } finally {
+      clearInterval(poll);
+      await reload();
+    }
   }, [pipelineId, reload]);
 
   const generateLocationImages = useCallback(async () => {
-    const res = await fetch(`/api/app/${encodeURIComponent(pipelineId)}/generate-assets`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ type: 'locations' }),
-    });
-    const result = await res.json();
-    await reload();
-    return result;
+    const poll = setInterval(() => { reload(); }, 5000);
+    try {
+      const res = await fetch(`/api/app/${encodeURIComponent(pipelineId)}/generate-assets`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'locations' }),
+      });
+      const result = await res.json();
+      if (!res.ok) throw new Error(result.error || 'Generation failed');
+      return result;
+    } finally {
+      clearInterval(poll);
+      await reload();
+    }
   }, [pipelineId, reload]);
 
-  // ── Context value ──────────────────────────────────────────
-  const value: PipelineContextValue = {
-    ...state,
+  // ── Memoized context values (only re-create when deps change) ──
+
+  const identityValue = useMemo<IdentityContextValue>(() => ({
+    pipelineId: state.pipelineId,
+    pipelineName: state.pipelineName,
+    projectFolder: state.projectFolder,
+    loading: state.loading,
+    saving: state.saving,
+    dirty: state.dirty,
+    error: state.error,
     reload,
-    updateProject,
     saveProject,
     clearProject: clearProjectAction,
     setProjectFolder,
+  }), [state.pipelineId, state.pipelineName, state.projectFolder, state.loading, state.saving, state.dirty, state.error, reload, saveProject, clearProjectAction, setProjectFolder]);
+
+  const projectValue = useMemo<ProjectContextValue>(() => ({
+    project: state.project,
+    updateProject,
     updateCharacter,
     updateLocation,
     updateElement,
+  }), [state.project, updateProject, updateCharacter, updateLocation, updateElement]);
+
+  const aiValue = useMemo<AIOperationsContextValue>(() => ({
     enrichCharacter,
     enrichLocation,
     enrichAllCharacters,
     enrichAllLocations,
     generateCharacterImages,
     generateLocationImages,
-  };
+  }), [enrichCharacter, enrichLocation, enrichAllCharacters, enrichAllLocations, generateCharacterImages, generateLocationImages]);
 
-  return <PipelineContext.Provider value={value}>{children}</PipelineContext.Provider>;
+  return (
+    <IdentityContext.Provider value={identityValue}>
+      <ProjectContext.Provider value={projectValue}>
+        <AIOperationsContext.Provider value={aiValue}>
+          {children}
+        </AIOperationsContext.Provider>
+      </ProjectContext.Provider>
+    </IdentityContext.Provider>
+  );
 }
 
-// ── Hook ─────────────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════
+// Legacy Hook — merges all 3 contexts (backward compatible)
+// ════════════════════════════════════════════════════════════════
 
+// Keep old state shape for backward compat
+export interface PipelineContextState {
+  pipelineId: string;
+  pipelineName: string;
+  projectFolder: string | null;
+  project: ProjectData | null;
+  loading: boolean;
+  error: string | null;
+  saving: boolean;
+  dirty: boolean;
+}
+
+interface PipelineContextValue extends PipelineContextState {
+  reload: () => Promise<void>;
+  updateProject: (partial: Partial<ProjectData>) => void;
+  saveProject: () => Promise<void>;
+  clearProject: () => Promise<void>;
+  setProjectFolder: (folder: string) => Promise<void>;
+  updateCharacter: (id: string, data: Partial<Character>) => void;
+  updateLocation: (id: string, data: Partial<Location>) => void;
+  updateElement: (id: string, data: Partial<Element>) => void;
+  enrichCharacter: (id: string) => Promise<void>;
+  enrichLocation: (id: string) => Promise<void>;
+  enrichAllCharacters: () => Promise<void>;
+  enrichAllLocations: () => Promise<void>;
+  generateCharacterImages: () => Promise<any>;
+  generateLocationImages: () => Promise<any>;
+}
+
+/**
+ * Legacy hook — subscribes to ALL 3 contexts.
+ * Use the specific hooks (usePipelineIdentity, useProjectData, useAIOperations) for better perf.
+ */
 export function usePipeline(): PipelineContextValue {
-  const ctx = useContext(PipelineContext);
-  if (!ctx) throw new Error('usePipeline must be used within PipelineProvider');
-  return ctx;
+  const identity = usePipelineIdentity();
+  const projectCtx = useProjectData();
+  const ai = useAIOperations();
+  return {
+    ...identity,
+    ...projectCtx,
+    ...ai,
+  };
 }
 
-// ── Helpers ──────────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════
+// Helpers
+// ════════════════════════════════════════════════════════════════
 
 function createEmptyProject(pipelineId: string): ProjectData {
   return {
@@ -388,6 +527,34 @@ function extractProjectData(appState: any, pipelineId: string): ProjectData | nu
   if (!Object.keys(metadata).length) metadata = nd['node-4']?.outputs?.metadata || nd['node-4']?.metadata || {};
 
   return { version: '1.0', pipelineId, metadata, characters, locations, sections, elements, previsualizations: previs, assets, _fountainSource: fountain };
+}
+
+function computeScenes(project: ProjectData): SceneData[] {
+  const scenes = buildScenes({
+    sections: project.sections as any,
+    elements: project.elements as any,
+    characters: project.characters,
+    locations: project.locations,
+  });
+
+  // Link previs paths from previsualizations
+  if (project.previsualizations?.shots) {
+    const previsMap: Record<string, any> = {};
+    for (const p of project.previsualizations.shots) {
+      if (p.shotElementId) previsMap[p.shotElementId] = p;
+    }
+    for (const scene of scenes) {
+      for (const shot of scene.shots) {
+        const prev = previsMap[shot.id];
+        if (prev) {
+          shot.previsPath = prev.filePath || prev._generatedFilePath;
+          shot.generatedAt = prev._generatedAt;
+        }
+      }
+    }
+  }
+
+  return scenes;
 }
 
 function buildCharacterEnrichPrompt(char: Character, project: ProjectData): string {

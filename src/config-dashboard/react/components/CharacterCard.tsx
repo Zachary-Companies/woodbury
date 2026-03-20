@@ -1,12 +1,14 @@
 /**
  * CharacterCard — displays a character with headshot, traits, and enrich button.
+ * Uses React.memo to skip re-renders when character data hasn't changed.
  */
 import React, { useState } from 'react';
-import { usePipeline, type Character } from '../stores/PipelineProvider';
+import { useAIOperations, type Character } from '../stores/PipelineProvider';
 import { CharacterEditor } from './CharacterEditor';
+import { ImageZoom } from './ImageZoom';
 
-export function CharacterCard({ character, pipelineId }: { character: Character; pipelineId: string }) {
-  const { enrichCharacter } = usePipeline();
+export const CharacterCard = React.memo(function CharacterCard({ character, pipelineId }: { character: Character; pipelineId: string }) {
+  const { enrichCharacter } = useAIOperations();
   const [enriching, setEnriching] = useState(false);
   const [showEditor, setShowEditor] = useState(false);
   const hasDescription = character.description && character.description.length > 20;
@@ -26,7 +28,7 @@ export function CharacterCard({ character, pipelineId }: { character: Character;
       {/* Header with image */}
       <div className="flex items-start gap-3">
         {character.imagePath ? (
-          <img
+          <ImageZoom
             src={`/api/file?path=${encodeURIComponent(character.imagePath)}`}
             className="w-16 h-20 rounded-lg object-cover border border-white/10 flex-shrink-0"
             alt={character.name}
@@ -103,4 +105,14 @@ export function CharacterCard({ character, pipelineId }: { character: Character;
       {showEditor && <CharacterEditor character={character} onClose={() => setShowEditor(false)} />}
     </div>
   );
-}
+}, (prev, next) => {
+  // Custom equality: skip re-render if character data is the same
+  const p = prev.character, n = next.character;
+  return p.id === n.id
+    && p.imagePath === n.imagePath
+    && p.description === n.description
+    && p.name === n.name
+    && p.role === n.role
+    && p.voiceDescription === n.voiceDescription
+    && prev.pipelineId === next.pipelineId;
+});

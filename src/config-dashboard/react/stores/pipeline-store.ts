@@ -56,6 +56,39 @@ export interface Element {
   shotText?: string;
 }
 
+// ── Scene-grouped data model ─────────────────────────────────
+
+export interface SceneShot {
+  id: string;
+  shotType: string;           // "WIDE SHOT", "CLOSE-UP", etc.
+  description: string;        // vivid description of what the camera captures
+  characterIds: string[];     // characters visible in this shot
+  previsPath?: string;        // path to generated previs image
+  generatedAt?: string;
+}
+
+export interface SceneDialogue {
+  elementId: string;          // ref to original element
+  characterId: string;
+  characterName: string;
+  lines: string[];
+  modifiers?: string[];
+}
+
+export interface SceneData {
+  id: string;
+  title: string;              // "INT. HERN'S DEPARTMENT STORE - DAY"
+  location: string;           // "HERN'S DEPARTMENT STORE"
+  locationId?: string;        // ref to locations[]
+  timeOfDay?: string;
+  actTitle?: string;
+  characterIds: string[];     // all characters who speak or appear
+  dialogue: SceneDialogue[];  // ordered dialogue in scene
+  actions: string[];          // action/description text
+  shots: SceneShot[];         // camera shots for previs
+  elementRange: [number, number]; // [start, end) indices into elements[]
+}
+
 export interface ScriptMetadata {
   title: string;
   subtitle?: string;
@@ -79,6 +112,7 @@ export interface ProjectData {
   locations: Location[];
   sections: Section[];
   elements: Element[];
+  scenes?: SceneData[];         // scene-grouped view of the data
   previsualizations?: { shots: any[] };
   assets?: any[];
   _fountainSource?: string;

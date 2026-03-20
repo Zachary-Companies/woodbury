@@ -1281,6 +1281,9 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
     const body = await readBody(req);
     const elementId: string = body.elementId;
     const promptOverrides: Record<string, string> = body.promptOverrides || {};
+    // Scene context from client (new scene-grouped model)
+    const sceneId: string | undefined = body.sceneId;
+    const sceneLocationId: string | undefined = body.sceneLocationId;
 
     if (!elementId) {
       sendJson(res, 400, { error: 'elementId required' });
@@ -1357,10 +1360,61 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
       debugLog.info('generate-previs', `Character assets available: ${Object.keys(screenplay.characterAssets).join(', ')}`);
     }
 
-    // Fallback strategy
+    // Strategy 0: from scene-grouped shot data (most authoritative for new model)
+    if (characterIds.length === 0 && screenplay.scenes && sceneId) {
+      const scene = screenplay.scenes.find((s: any) => s.id === sceneId);
+      if (scene) {
+        const shot = scene.shots?.find((s: any) => s.id === elementId);
+        if (shot?.characterIds?.length) {
+          characterIds = shot.characterIds;
+          debugLog.info('generate-previs', `Scene shot → ${characterIds.length} characters from scene.shots[].characterIds`);
+        }
+      }
+    }
+
+    // Fallback strategy 1a: from element's characterIds metadata (set by AI during shot generation)
+    if (characterIds.length === 0 && element.characterIds && Array.isArray(element.characterIds)) {
+      characterIds = element.characterIds;
+      debugLog.info('generate-previs', `Fallback 1a → ${characterIds.length} characters from element.characterIds`);
+    }
+
+    // Fallback strategy 1b: from previs entry
     if (characterIds.length === 0 && charConfig.fallback !== 'none') {
       characterIds = previs?.characterIds || [];
-      debugLog.info('generate-previs', `Fallback → ${characterIds.length} characters from previs.characterIds`);
+      debugLog.info('generate-previs', `Fallback 1b → ${characterIds.length} characters from previs.characterIds`);
+    }
+
+    // Fallback strategy 2: text-match character names in the shot description
+    // Uses word-boundary regex. Sorts candidates longest-name-first to prefer
+    // "GOOD FRANK" over "FRANK" and reduce false positives from short names.
+    if (characterIds.length === 0) {
+      const shotText = (element.content || element.shotText || '').toUpperCase();
+      const candidates = Object.values(screenplay.characters)
+        .map((c: any) => ({
+          id: c.id,
+          names: [c.name, c.displayName].filter(Boolean).map((n: string) => n.toUpperCase()),
+          maxLen: Math.max(...[c.name, c.displayName].filter(Boolean).map((n: string) => n.length)),
+        }))
+        .sort((a, b) => b.maxLen - a.maxLen); // longest names first
+
+      for (const c of candidates) {
+        for (const name of c.names) {
+          if (!name || name.length < 2) continue;
+          try {
+            const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const re = new RegExp(`\\b${escaped}\\b`);
+            if (re.test(shotText)) {
+              if (!characterIds.includes(c.id)) characterIds.push(c.id);
+              break;
+            }
+          } catch { /* skip invalid regex */ }
+        }
+      }
+      // Cap at 4 references to avoid overloading the image generator
+      if (characterIds.length > 4) characterIds = characterIds.slice(0, 4);
+      if (characterIds.length > 0) {
+        debugLog.info('generate-previs', `Fallback 2 (text-match) → ${characterIds.length} characters: ${characterIds.join(', ')}`);
+      }
     }
 
     for (const charId of characterIds) {
@@ -1396,9 +1450,27 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
       if (locIds.length > 0) locationId = locIds[0];
     }
 
-    // Location fallback
+    // Location from scene context (sent by client in new model)
+    if (!locationId && sceneLocationId) {
+      locationId = sceneLocationId;
+      debugLog.info('generate-previs', `Location from scene context: ${locationId}`);
+    }
+
+    // Location fallback 1: from previs entry
     if (!locationId && locConfig.fallback !== 'none') {
       locationId = previs?.locationId;
+    }
+
+    // Location fallback 2: text-match location names in the shot description
+    if (!locationId) {
+      const shotText = (element.content || element.shotText || '').toUpperCase();
+      for (const l of Object.values(screenplay.locations)) {
+        const name = (l.name || '').toUpperCase();
+        if (name && shotText.includes(name)) {
+          locationId = l.id;
+          break;
+        }
+      }
     }
 
     if (locationId) {
@@ -1524,9 +1596,47 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
 
       const filePath = parsed.filePath || outputPath;
 
-      // Update the previs data in app state if we have a previs entry
-      if (previs) {
-        await updatePrevisAsset(pipelineId, elementId, filePath, screenplay);
+      // Update or create the previs data in app state and project.json
+      await updatePrevisAsset(pipelineId, elementId, filePath, screenplay);
+
+      // Also update project.json directly if using project folder
+      if (projFolder) {
+        try {
+          const projJsonPath = join(projFolder, 'project.json');
+          const projRaw = await readFile(projJsonPath, 'utf-8');
+          const projData = JSON.parse(projRaw);
+          if (!projData.previsualizations) projData.previsualizations = { shots: [] };
+          if (!projData.previsualizations.shots) projData.previsualizations.shots = [];
+          const existingIdx = projData.previsualizations.shots.findIndex((s: any) => s.shotElementId === elementId);
+          const previsEntry = {
+            shotElementId: elementId,
+            filePath,
+            _generatedFilePath: filePath,
+            _generatedAt: new Date().toISOString(),
+            description: shotText,
+          };
+          if (existingIdx >= 0) {
+            projData.previsualizations.shots[existingIdx] = { ...projData.previsualizations.shots[existingIdx], ...previsEntry };
+          } else {
+            projData.previsualizations.shots.push(previsEntry);
+          }
+          // Also update scene-grouped shot data if scenes exist
+          if (projData.scenes && Array.isArray(projData.scenes)) {
+            for (const scene of projData.scenes) {
+              if (!scene.shots) continue;
+              const shotIdx = scene.shots.findIndex((s: any) => s.id === elementId);
+              if (shotIdx >= 0) {
+                scene.shots[shotIdx].previsPath = filePath;
+                scene.shots[shotIdx].generatedAt = new Date().toISOString();
+                break;
+              }
+            }
+          }
+
+          await writeFile(projJsonPath, JSON.stringify(projData, null, 2));
+        } catch (e) {
+          debugLog.info('generate-previs', `Failed to update project.json: ${e}`);
+        }
       }
 
       sendJson(res, 200, {
@@ -2370,7 +2480,11 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
             }, charDir);
 
             const parsed = typeof result === 'string' ? JSON.parse(result) : result;
-            results.push({ name: char.name, type: 'character', path: parsed.path || outputPath });
+            const imgPath = parsed.path || outputPath;
+            results.push({ name: char.name, type: 'character', path: imgPath });
+            // Save incrementally so polling clients see new images
+            char.imagePath = imgPath;
+            await saveProjectFile(pfolder, project);
           } catch (err: any) {
             results.push({ name: char.name, type: 'character', error: err.message || String(err) });
           }
@@ -2403,7 +2517,11 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
             }, locDir);
 
             const parsed = typeof result === 'string' ? JSON.parse(result) : result;
-            results.push({ name: loc.name, type: 'location', path: parsed.path || outputPath });
+            const imgPath = parsed.path || outputPath;
+            results.push({ name: loc.name, type: 'location', path: imgPath });
+            // Save incrementally so polling clients see new images
+            loc.imagePath = imgPath;
+            await saveProjectFile(pfolder, project);
           } catch (err: any) {
             results.push({ name: loc.name, type: 'location', error: err.message || String(err) });
           }
@@ -2597,6 +2715,7 @@ interface ScreenplayData {
   characterAssets: Record<string, any>;  // characterId -> asset with filePath
   locationAssets: Record<string, any>;   // locationId -> asset with filePath
   assetMap: Record<string, any>;         // assetId -> asset
+  scenes?: any[];                        // scene-grouped data (SceneData[])
 }
 
 /**
@@ -2606,16 +2725,31 @@ interface ScreenplayData {
  */
 async function collectScreenplayData(pipelineId: string): Promise<ScreenplayData | null> {
   const dir = join(APP_STATE_DIR, pipelineId);
-  let files: string[];
-  try {
-    files = await readdir(dir);
-  } catch { return null; }
 
   let allCharacters: any[] = [];
   let allLocations: any[] = [];
   let allElements: any[] = [];
   let allPrevis: any[] = [];
   let allAssets: any[] = [];
+
+  // Try reading from project.json first (project folder mode)
+  try {
+    const projFolder = await resolveProjectFolder(pipelineId);
+    const projJsonPath = join(projFolder, 'project.json');
+    const projRaw = await readFile(projJsonPath, 'utf-8');
+    const projData = JSON.parse(projRaw);
+    if (projData.characters) allCharacters = projData.characters;
+    if (projData.locations) allLocations = projData.locations;
+    if (projData.elements) allElements = projData.elements;
+    if (projData.previsualizations?.shots) allPrevis = projData.previsualizations.shots;
+    if (projData.assets) allAssets = projData.assets;
+  } catch { /* no project.json, fall through to node state */ }
+
+  // Also scan node state files (may have additional/newer data)
+  let files: string[];
+  try {
+    files = await readdir(dir);
+  } catch { files = []; }
 
   for (const file of files) {
     if (!file.endsWith('.json') || file === '_manifest.json') continue;
@@ -2703,6 +2837,12 @@ async function collectScreenplayData(pipelineId: string): Promise<ScreenplayData
       characterAssets[meta.characterId] = asset;
     }
   }
+  // Fallback: use character.imagePath directly (project.json mode)
+  for (const c of allCharacters) {
+    if (c.imagePath && !characterAssets[c.id]) {
+      characterAssets[c.id] = { id: c.id, filePath: c.imagePath, type: 'character-headshot' };
+    }
+  }
 
   // Map location IDs to their landscape assets
   const locationAssets: Record<string, any> = {};
@@ -2712,10 +2852,27 @@ async function collectScreenplayData(pipelineId: string): Promise<ScreenplayData
       locationAssets[meta.locationId] = asset;
     }
   }
+  // Fallback: use location.imagePath directly (project.json mode)
+  for (const l of allLocations) {
+    if (l.imagePath && !locationAssets[l.id]) {
+      locationAssets[l.id] = { id: l.id, filePath: l.imagePath, type: 'landscape' };
+    }
+  }
 
   debugLog.info('collectScreenplayData', `Mapped ${Object.keys(characterAssets).length} character assets: ${Object.keys(characterAssets).join(', ')}`);
 
-  return { characters, locations, elementMap, previsMap, characterAssets, locationAssets, assetMap };
+  // Load scenes from project.json if available
+  let scenes: any[] | undefined;
+  try {
+    const projFolder = await resolveProjectFolder(pipelineId);
+    const projRaw = await readFile(join(projFolder, 'project.json'), 'utf-8');
+    const projData = JSON.parse(projRaw);
+    if (projData.scenes && Array.isArray(projData.scenes)) {
+      scenes = projData.scenes;
+    }
+  } catch { /* no project.json or no scenes field */ }
+
+  return { characters, locations, elementMap, previsMap, characterAssets, locationAssets, assetMap, scenes };
 }
 
 /** Check if a file path exists synchronously */

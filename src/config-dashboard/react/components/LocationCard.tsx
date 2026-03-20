@@ -1,11 +1,13 @@
 /**
  * LocationCard — displays a location with image and enrich button.
+ * Uses React.memo to skip re-renders when location data hasn't changed.
  */
 import React, { useState } from 'react';
-import { usePipeline, type Location } from '../stores/PipelineProvider';
+import { useAIOperations, type Location } from '../stores/PipelineProvider';
+import { ImageZoom } from './ImageZoom';
 
-export function LocationCard({ location }: { location: Location }) {
-  const { enrichLocation } = usePipeline();
+export const LocationCard = React.memo(function LocationCard({ location }: { location: Location }) {
+  const { enrichLocation } = useAIOperations();
   const [enriching, setEnriching] = useState(false);
   const hasDescription = location.description && location.description.length > 20;
 
@@ -24,7 +26,7 @@ export function LocationCard({ location }: { location: Location }) {
       {/* Location image */}
       {location.imagePath ? (
         <div className="h-24 overflow-hidden">
-          <img
+          <ImageZoom
             src={`/api/file?path=${encodeURIComponent(location.imagePath)}`}
             className="w-full h-full object-cover"
             alt={location.name}
@@ -67,4 +69,10 @@ export function LocationCard({ location }: { location: Location }) {
       </div>
     </div>
   );
-}
+}, (prev, next) => {
+  const p = prev.location, n = next.location;
+  return p.id === n.id
+    && p.imagePath === n.imagePath
+    && p.description === n.description
+    && p.name === n.name;
+});
