@@ -38,11 +38,15 @@ import { handleSkillPolicyRoutes } from './skill-policies.js';
 import { handleMemoryRoutes } from './memories.js';
 import { handleSkillOptimizerRoutes } from './skill-optimizer.js';
 import { handlePipelineAppRoutes } from './pipeline-app.js';
+import { handleProjectRoutes } from './project.js';
 import { handleBindingsRoutes } from './bindings.js';
 
 // ── Handler chain (order matters for overlapping prefixes) ──
 
 const handlers: RouteHandler[] = [
+  // Project data (/api/project/:id/*)
+  handleProjectRoutes,
+
   // Pipeline App Mode (/api/app/:id/*)
   handlePipelineAppRoutes,
 

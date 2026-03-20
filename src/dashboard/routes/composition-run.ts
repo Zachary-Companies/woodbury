@@ -2124,6 +2124,7 @@ export const handleCompositionRunRoutes: RouteHandler = async (req, res, pathnam
           runId,
           nodeOutputs,
           order,
+          ctx,
         ).catch(() => { /* best-effort — don't fail the run */ });
       }
 

@@ -211,8 +211,20 @@ export const handleCompositionsRoutes: RouteHandler = async (req, res, pathname,
       }
 
       const body = await readBody(req);
+
+      // Support metadata-only updates: { metadata: { projectFolder: "..." } }
+      if (body && body.metadata && !body.composition) {
+        const comp = found.composition;
+        comp.metadata = { ...(comp.metadata || {}), ...body.metadata, updatedAt: new Date().toISOString() };
+        await atomicWriteFile(found.path, JSON.stringify(comp, null, 2));
+        found.composition = comp;
+        debugLog.info('dashboard', `Updated composition metadata for "${id}"`, { path: found.path });
+        sendJson(res, 200, { success: true, composition: comp, path: found.path });
+        return true;
+      }
+
       if (!body || !body.composition) {
-        sendJson(res, 400, { error: 'Request body must have a "composition" object' });
+        sendJson(res, 400, { error: 'Request body must have a "composition" object or "metadata" object' });
         return true;
       }
 

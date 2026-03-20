@@ -402,6 +402,9 @@ export async function startDashboard(
         ctx.chatMcpManager = null;
       }
 
+      // Flush all project data to disk before shutdown
+      await ctx.projectState.flushAll().catch(() => {});
+
       return new Promise<void>((resolve) => server.close(() => resolve()));
     },
   };

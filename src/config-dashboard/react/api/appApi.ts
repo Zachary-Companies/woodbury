@@ -1,9 +1,57 @@
 /**
  * Shared API helpers for the pipeline app.
- * Extracted from compositions-app.js for use in React components.
+ *
+ * New endpoints use /api/project/:id (single source of truth).
+ * Legacy /api/app/:id/* endpoints are kept for backward compat during migration.
  */
 
 const enc = encodeURIComponent;
+
+// ── New Project API (single source of truth) ────────────────
+
+/**
+ * Fetch full project data from the ProjectStateManager.
+ * Returns { project, projectFolder, pipelineName, lastRunId, lastRunAt }
+ */
+export async function fetchProject(pipelineId: string) {
+  const res = await fetch(`/api/project/${enc(pipelineId)}`);
+  if (!res.ok) return null;
+  return res.json();
+}
+
+/**
+ * Partial update to project data.
+ * Body can contain any subset of ProjectData fields.
+ */
+export async function patchProject(pipelineId: string, partial: Record<string, any>) {
+  const res = await fetch(`/api/project/${enc(pipelineId)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(partial),
+  });
+  if (!res.ok) throw new Error('Failed to save project');
+  return res.json();
+}
+
+/**
+ * Clear all project data.
+ */
+export async function deleteProject(pipelineId: string) {
+  const res = await fetch(`/api/project/${enc(pipelineId)}`, { method: 'DELETE' });
+  if (!res.ok) throw new Error('Failed to clear project');
+  return res.json();
+}
+
+/**
+ * Force reload project data from disk.
+ */
+export async function reloadProject(pipelineId: string) {
+  const res = await fetch(`/api/project/${enc(pipelineId)}/reload`, { method: 'POST' });
+  if (!res.ok) return null;
+  return res.json();
+}
+
+// ── Legacy App API (kept for backward compat) ───────────────
 
 export async function fetchAppSchema(pipelineId: string) {
   const res = await fetch(`/api/app/${enc(pipelineId)}/schema`);
@@ -92,7 +140,6 @@ export async function loadPipelineCustomViews(pipelineId: string): Promise<any[]
           let scoped = '';
           let depth = 0;
           let buf = '';
-          let inRule = false;
           for (let i = 0; i < stripped.length; i++) {
             const ch = stripped[i];
             if (ch === '{') {
@@ -104,7 +151,6 @@ export async function loadPipelineCustomViews(pipelineId: string): Promise<any[]
                 }).join(', ');
                 scoped += `${sels} {`;
                 buf = '';
-                inRule = true;
               } else {
                 scoped += ch;
               }
@@ -114,7 +160,6 @@ export async function loadPipelineCustomViews(pipelineId: string): Promise<any[]
               if (depth <= 0) {
                 scoped += `${buf}}`;
                 buf = '';
-                inRule = false;
                 depth = 0;
               } else {
                 scoped += ch;

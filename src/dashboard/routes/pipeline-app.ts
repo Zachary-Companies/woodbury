@@ -466,10 +466,11 @@ async function seedFromLatestRun(pipelineId: string, pipelineName: string): Prom
 // ────────────────────────────────────────────────────────────────
 
 /**
- * Persist node outputs from a completed pipeline run as app state.
- * Called automatically after every pipeline run finishes.
- * Preserves manually-edited nodes — only overwrites nodes that were
- * actually re-executed in this run.
+ * Persist node outputs from a completed pipeline run.
+ * Routes through ProjectStateManager when the project is loaded,
+ * falls back to legacy file-based storage otherwise.
+ *
+ * @param ctx - DashboardContext (optional; when provided, uses ProjectStateManager)
  */
 export async function persistAppStateFromRun(
   pipelineId: string,
@@ -477,32 +478,43 @@ export async function persistAppStateFromRun(
   runId: string,
   nodeOutputs: Record<string, Record<string, unknown>>,
   executionOrder: string[],
+  ctx?: DashboardContext,
 ): Promise<void> {
   try {
-    const now = new Date().toISOString();
+    // Try ProjectStateManager first
+    if (ctx?.projectState) {
+      // Ensure project is loaded
+      if (!ctx.projectState.isLoaded(pipelineId)) {
+        try {
+          const compositions = await discoverCompositions();
+          const entry = compositions.find((c: any) => c.composition?.id === pipelineId);
+          const pfolder = entry?.composition?.metadata?.projectFolder;
+          if (pfolder) {
+            await ctx.projectState.load(pipelineId, pipelineName, pfolder);
+          }
+        } catch { /* ignore */ }
+      }
 
-    // Load existing manifest to preserve manual edits
+      if (ctx.projectState.isLoaded(pipelineId)) {
+        ctx.projectState.applyRunOutputs(pipelineId, runId, nodeOutputs, executionOrder);
+        await ctx.projectState.flush(pipelineId);
+        debugLog.info('app-state', `Auto-saved via ProjectStateManager for "${pipelineName}"`, { pipelineId, runId });
+        return;
+      }
+    }
+
+    // Legacy fallback
+    const now = new Date().toISOString();
     let manifest = await loadManifest(pipelineId);
     if (!manifest) {
-      manifest = {
-        pipelineId,
-        pipelineName,
-        sourceRunId: runId,
-        staleNodes: [],
-        lastRunAt: now,
-        nodes: {},
-      };
+      manifest = { pipelineId, pipelineName, sourceRunId: runId, staleNodes: [], lastRunAt: now, nodes: {} };
     } else {
       manifest.sourceRunId = runId;
       manifest.lastRunAt = now;
       manifest.pipelineName = pipelineName;
-      // Clear stale for any nodes that were re-executed
-      manifest.staleNodes = manifest.staleNodes.filter(
-        (sId) => !executionOrder.includes(sId),
-      );
+      manifest.staleNodes = manifest.staleNodes.filter((sId) => !executionOrder.includes(sId));
     }
 
-    // Check for project folder
     let pfolder: string | null = null;
     try {
       const compositions = await discoverCompositions();
@@ -510,32 +522,18 @@ export async function persistAppStateFromRun(
       pfolder = entry?.composition?.metadata?.projectFolder || null;
     } catch { /* ignore */ }
 
-    // Write outputs — to project.json if project folder exists, else per-node files
     for (const nodeId of executionOrder) {
       const outputs = nodeOutputs[nodeId];
       if (!outputs || Object.keys(outputs).length === 0) continue;
-
-      if (pfolder) {
-        await mergeIntoProject(pfolder, nodeId, outputs);
-      } else {
-        await saveNodeData(pipelineId, nodeId, outputs);
-      }
-      manifest.nodes[nodeId] = {
-        updatedAt: now,
-        manuallyEdited: false,
-      };
+      if (pfolder) { await mergeIntoProject(pfolder, nodeId, outputs); }
+      else { await saveNodeData(pipelineId, nodeId, outputs); }
+      manifest.nodes[nodeId] = { updatedAt: now, manuallyEdited: false };
     }
 
     await saveManifest(manifest);
-    debugLog.info('app-state', `Auto-saved app state for "${pipelineName}"`, {
-      pipelineId,
-      runId,
-      nodeCount: Object.keys(manifest.nodes).length,
-    });
+    debugLog.info('app-state', `Auto-saved app state for "${pipelineName}"`, { pipelineId, runId, nodeCount: Object.keys(manifest.nodes).length });
   } catch (err) {
-    debugLog.error('app-state', `Failed to auto-save app state for "${pipelineName}"`, {
-      error: String(err),
-    });
+    debugLog.error('app-state', `Failed to auto-save app state for "${pipelineName}"`, { error: String(err) });
   }
 }
 
@@ -741,6 +739,13 @@ function deriveAppSchema(pipeline: any): AppSchema {
 //  Route handler
 // ────────────────────────────────────────────────────────────────
 
+/** Resolve project folder from ProjectStateManager or composition metadata. */
+async function resolveProjectFolderFromCtx(pipelineId: string, ctx: DashboardContext): Promise<string> {
+  const pfolder = ctx.projectState?.getProjectFolder(pipelineId);
+  if (pfolder) return pfolder;
+  return resolveProjectFolder(pipelineId);
+}
+
 export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, _url, ctx) => {
   // Match /api/app/:id/* patterns
   const appMatch = pathname.match(/^\/api\/app\/([^/]+)(\/.*)?$/);
@@ -762,17 +767,46 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
   }
 
   // ── GET /api/app/:id/state ───────────────────────────────
+  // Now reads from ProjectStateManager when available, falls back to legacy
   if (req.method === 'GET' && subPath === '/state') {
+    // Try ProjectStateManager first
+    let project = ctx.projectState?.get(pipelineId);
+    if (!project) {
+      // Try to load into ProjectStateManager
+      try {
+        const compositions = await discoverCompositions();
+        const entry = compositions.find((c: any) => c.composition?.id === pipelineId);
+        const pfolder = entry?.composition?.metadata?.projectFolder;
+        if (pfolder) {
+          project = await ctx.projectState.load(pipelineId, entry?.composition?.name || pipelineId, pfolder);
+        }
+      } catch { /* ignore */ }
+    }
+
+    if (project) {
+      // Return in the nodeData format the client expects (backward compat during migration)
+      const nodeData = projectToNodeData(project as any);
+      const info = ctx.projectState.getInfo(pipelineId);
+      sendJson(res, 200, {
+        pipelineId,
+        pipelineName: info?.pipelineName || pipelineId,
+        sourceRunId: info?.lastRunId || null,
+        nodeData,
+        staleNodes: [],
+        lastRunAt: info?.lastRunAt || null,
+      });
+      return true;
+    }
+
+    // Legacy fallback: load from disk files
     let state = await loadAppState(pipelineId);
     if (!state) {
-      // Try to seed from latest run
       const pipeline = await findPipeline(ctx.workDir, pipelineId);
       const name = pipeline?.name || pipelineId;
       state = await seedFromLatestRun(pipelineId, name);
       if (state) {
         await saveAppState(state);
       } else {
-        // Return empty state
         state = {
           pipelineId,
           pipelineName: name,
@@ -788,44 +822,58 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
   }
 
   // ── DELETE /api/app/:id/state ─────────────────────────────
-  // Clears all project state (preserves saves/ directory)
+  // Clears all project state
   if (req.method === 'DELETE' && subPath === '/state') {
-    // Clear project.json if project folder exists
-    let pfolder: string | null = null;
-    try {
-      const compositions = await discoverCompositions();
-      const entry = compositions.find((c: any) => c.composition?.id === pipelineId);
-      pfolder = entry?.composition?.metadata?.projectFolder || null;
-    } catch { /* ignore */ }
+    // Clear through ProjectStateManager
+    if (ctx.projectState?.isLoaded(pipelineId)) {
+      await ctx.projectState.clear(pipelineId);
+    } else {
+      // Legacy: clear project.json and node files
+      let pfolder: string | null = null;
+      try {
+        const compositions = await discoverCompositions();
+        const entry = compositions.find((c: any) => c.composition?.id === pipelineId);
+        pfolder = entry?.composition?.metadata?.projectFolder || null;
+      } catch { /* ignore */ }
 
-    if (pfolder) {
-      try { await rm(projectFilePath(pfolder)); } catch { /* may not exist */ }
-    }
-
-    // Also clear legacy app-state node files
-    const dir = projectDir(pipelineId);
-    try {
-      const entries = await readdir(dir);
-      for (const entry of entries) {
-        if (entry === 'saves' || entry.startsWith('.')) continue;
-        const fullPath = join(dir, entry);
-        const s = await stat(fullPath);
-        if (s.isFile()) {
-          await rm(fullPath);
-        } else if (s.isDirectory()) {
-          await rm(fullPath, { recursive: true });
-        }
+      if (pfolder) {
+        try { await rm(projectFilePath(pfolder)); } catch { /* may not exist */ }
       }
-    } catch (e: any) {
-      if (e.code !== 'ENOENT') throw e;
+
+      const dir = projectDir(pipelineId);
+      try {
+        const entries = await readdir(dir);
+        for (const entry of entries) {
+          if (entry === 'saves' || entry.startsWith('.')) continue;
+          const fullPath = join(dir, entry);
+          const s = await stat(fullPath);
+          if (s.isFile()) await rm(fullPath);
+          else if (s.isDirectory()) await rm(fullPath, { recursive: true });
+        }
+      } catch (e: any) {
+        if (e.code !== 'ENOENT') throw e;
+      }
     }
     sendJson(res, 200, { success: true });
     return true;
   }
 
-  // ── PUT /api/app/:id/project — write project.json directly ──
+  // ── PUT /api/app/:id/project — write project data ──
   if (req.method === 'PUT' && subPath === '/project') {
     const body = await readBody(req);
+    const projectData = body.project || body;
+    projectData.pipelineId = pipelineId;
+
+    // Write through ProjectStateManager
+    if (ctx.projectState?.isLoaded(pipelineId)) {
+      ctx.projectState.update(pipelineId, projectData);
+      await ctx.projectState.flush(pipelineId);
+      const pfolder = ctx.projectState.getProjectFolder(pipelineId);
+      sendJson(res, 200, { success: true, projectFolder: pfolder });
+      return true;
+    }
+
+    // Try loading first
     let pfolder: string | null = null;
     try {
       const compositions = await discoverCompositions();
@@ -838,47 +886,56 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
       return true;
     }
 
-    const projectData = body.project || body;
-    projectData.pipelineId = pipelineId;
-    await saveProjectFile(pfolder, projectData);
-
-    // Update manifest
-    let manifest = await loadManifest(pipelineId);
-    if (!manifest) {
-      const pipeline = await findPipeline(ctx.workDir, pipelineId);
-      manifest = { pipelineId, pipelineName: pipeline?.name || pipelineId, sourceRunId: null, staleNodes: [], lastRunAt: null, nodes: {} };
-    }
-    manifest.nodes['node-15'] = { updatedAt: new Date().toISOString(), manuallyEdited: true };
-    await saveManifest(manifest);
+    await ctx.projectState.load(pipelineId, pipelineId, pfolder);
+    ctx.projectState.update(pipelineId, projectData);
+    await ctx.projectState.flush(pipelineId);
 
     sendJson(res, 200, { success: true, projectFolder: pfolder });
     return true;
   }
 
   // ── PUT /api/app/:id/state/:nodeId ───────────────────────
-  // Saves a single node's data (fast — only writes one file + manifest)
+  // Saves a single node's data — routes through ProjectStateManager
   const stateMatch = subPath.match(/^\/state\/([^/]+)$/);
   if (req.method === 'PUT' && stateMatch) {
     const nodeId = decodeURIComponent(stateMatch[1]);
     const body = await readBody(req);
     const now = new Date().toISOString();
+    const outputs = body.outputs || body;
 
-    // Load or create manifest (lightweight — no node data loaded)
-    let manifest = await loadManifest(pipelineId);
-    if (!manifest) {
-      const pipeline = await findPipeline(ctx.workDir, pipelineId);
-      manifest = {
-        pipelineId,
-        pipelineName: pipeline?.name || pipelineId,
-        sourceRunId: null,
-        staleNodes: [],
-        lastRunAt: null,
-        nodes: {},
-      };
+    // Try writing through ProjectStateManager
+    if (ctx.projectState?.isLoaded(pipelineId)) {
+      // Map node outputs to project data fields
+      const partial: Record<string, any> = {};
+      const sp = outputs.scriptPackage;
+      if (sp) {
+        const script = sp.script || sp;
+        if (script.metadata) partial.metadata = script.metadata;
+        if (script.characters) partial.characters = script.characters;
+        if (script.locations) partial.locations = script.locations;
+        if (script.sections) partial.sections = script.sections;
+        if (script.elements) partial.elements = script.elements;
+        if (sp.previsualizations) partial.previsualizations = sp.previsualizations;
+        if (sp.assets) partial.assets = sp.assets;
+        if (outputs._fountainSource) partial._fountainSource = outputs._fountainSource;
+      } else {
+        // Map using NODE_KEY_MAP for individual nodes
+        const keyMapping = NODE_KEY_MAP[nodeId];
+        if (keyMapping && typeof keyMapping === 'string' && keyMapping !== '_assembly' && keyMapping !== '_output') {
+          const val = outputs[keyMapping];
+          if (val !== undefined) partial[keyMapping] = val;
+          else Object.assign(partial, outputs);
+        } else {
+          Object.assign(partial, outputs);
+        }
+      }
+
+      ctx.projectState.update(pipelineId, partial);
+      sendJson(res, 200, { success: true, staleNodes: [], updatedAt: now });
+      return true;
     }
 
-    // Write data — prefer project.json if project folder exists
-    const outputs = body.outputs || body;
+    // Legacy fallback: write to disk directly
     let pfolder: string | null = null;
     try {
       const compositions = await discoverCompositions();
@@ -892,29 +949,7 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
       await saveNodeData(pipelineId, nodeId, outputs);
     }
 
-    // Update manifest metadata for this node
-    manifest.nodes[nodeId] = {
-      updatedAt: now,
-      manuallyEdited: true,
-    };
-
-    // Mark downstream nodes as stale
-    const pipeline = await findPipeline(ctx.workDir, pipelineId);
-    if (pipeline) {
-      const downstream = getDownstreamNodes(nodeId, pipeline.edges || []);
-      const staleSet = new Set(manifest.staleNodes);
-      for (const dsId of downstream) {
-        staleSet.add(dsId);
-      }
-      manifest.staleNodes = [...staleSet];
-    }
-
-    await saveManifest(manifest);
-    sendJson(res, 200, {
-      success: true,
-      staleNodes: manifest.staleNodes,
-      updatedAt: now,
-    });
+    sendJson(res, 200, { success: true, staleNodes: [], updatedAt: now });
     return true;
   }
 
@@ -1299,7 +1334,7 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
     const aspectRatio: string = body.aspectRatio || actionConfig.generation?.aspectRatio || '16:9';
 
     // Collect all screenplay data from app state
-    const screenplay = await collectScreenplayData(pipelineId);
+    const screenplay = await collectScreenplayData(pipelineId, ctx);
     if (!screenplay) {
       sendJson(res, 404, { error: 'No screenplay data found in app state' });
       return true;
@@ -1342,7 +1377,7 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
         const rulesDoc = await loadRules(pipelineEntry.pipelineDir);
         if (rulesDoc.rules.length > 0) {
           debugLog.info('generate-previs', `Auto-creating bindings for shot ${elementId} from pipeline rules...`);
-          const autoResult = await autoRunRules(pipelineId, pipelineEntry.pipelineDir, rulesDoc);
+          const autoResult = await autoRunRules(pipelineId, pipelineEntry.pipelineDir, rulesDoc, ctx);
           if (autoResult.added > 0) {
             debugLog.info('generate-previs', `Auto-created ${autoResult.added} bindings`);
             bindingsDoc = await loadBindings(pipelineEntry.pipelineDir);
@@ -1596,47 +1631,41 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
 
       const filePath = parsed.filePath || outputPath;
 
-      // Update or create the previs data in app state and project.json
-      await updatePrevisAsset(pipelineId, elementId, filePath, screenplay);
-
-      // Also update project.json directly if using project folder
-      if (projFolder) {
-        try {
-          const projJsonPath = join(projFolder, 'project.json');
-          const projRaw = await readFile(projJsonPath, 'utf-8');
-          const projData = JSON.parse(projRaw);
-          if (!projData.previsualizations) projData.previsualizations = { shots: [] };
-          if (!projData.previsualizations.shots) projData.previsualizations.shots = [];
-          const existingIdx = projData.previsualizations.shots.findIndex((s: any) => s.shotElementId === elementId);
-          const previsEntry = {
-            shotElementId: elementId,
-            filePath,
-            _generatedFilePath: filePath,
-            _generatedAt: new Date().toISOString(),
-            description: shotText,
-          };
-          if (existingIdx >= 0) {
-            projData.previsualizations.shots[existingIdx] = { ...projData.previsualizations.shots[existingIdx], ...previsEntry };
-          } else {
-            projData.previsualizations.shots.push(previsEntry);
-          }
-          // Also update scene-grouped shot data if scenes exist
-          if (projData.scenes && Array.isArray(projData.scenes)) {
-            for (const scene of projData.scenes) {
-              if (!scene.shots) continue;
-              const shotIdx = scene.shots.findIndex((s: any) => s.id === elementId);
-              if (shotIdx >= 0) {
-                scene.shots[shotIdx].previsPath = filePath;
-                scene.shots[shotIdx].generatedAt = new Date().toISOString();
-                break;
-              }
+      // Update previs data through ProjectStateManager
+      if (ctx.projectState?.isLoaded(pipelineId)) {
+        const projData = ctx.projectState.get(pipelineId)!;
+        if (!projData.previsualizations) projData.previsualizations = { shots: [] };
+        if (!projData.previsualizations.shots) projData.previsualizations.shots = [];
+        const existingIdx = projData.previsualizations.shots.findIndex((s: any) => s.shotElementId === elementId);
+        const previsEntry = {
+          shotElementId: elementId,
+          filePath,
+          _generatedFilePath: filePath,
+          _generatedAt: new Date().toISOString(),
+          description: shotText,
+        };
+        if (existingIdx >= 0) {
+          projData.previsualizations.shots[existingIdx] = { ...projData.previsualizations.shots[existingIdx], ...previsEntry };
+        } else {
+          projData.previsualizations.shots.push(previsEntry);
+        }
+        // Also update scene-grouped shot data
+        if (projData.scenes && Array.isArray(projData.scenes)) {
+          for (const scene of projData.scenes) {
+            if (!scene.shots) continue;
+            const shotIdx = scene.shots.findIndex((s: any) => s.id === elementId);
+            if (shotIdx >= 0) {
+              scene.shots[shotIdx].previsPath = filePath;
+              scene.shots[shotIdx].generatedAt = new Date().toISOString();
+              break;
             }
           }
-
-          await writeFile(projJsonPath, JSON.stringify(projData, null, 2));
-        } catch (e) {
-          debugLog.info('generate-previs', `Failed to update project.json: ${e}`);
         }
+        ctx.projectState.markDirty(pipelineId, ['previsualizations', 'scenes']);
+        await ctx.projectState.flush(pipelineId);
+      } else {
+        // Legacy: update files directly
+        await updatePrevisAsset(pipelineId, elementId, filePath, screenplay);
       }
 
       sendJson(res, 200, {
@@ -1720,8 +1749,20 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
         },
       };
 
-      // Add to the asset collection in app state (or update existing)
-      await addDialogueAudioAsset(pipelineId, asset);
+      // Add to the asset collection
+      if (ctx.projectState?.isLoaded(pipelineId)) {
+        const projData = ctx.projectState.get(pipelineId)!;
+        if (!projData.dialogueAudio) projData.dialogueAudio = { assets: [] };
+        if (!projData.dialogueAudio.assets) projData.dialogueAudio.assets = [];
+        // Remove existing for same element
+        projData.dialogueAudio.assets = projData.dialogueAudio.assets.filter(
+          (a: any) => a.metadata?.dialogueElementId !== elementId
+        );
+        projData.dialogueAudio.assets.push(asset);
+        ctx.projectState.markDirty(pipelineId, ['dialogueAudio']);
+      } else {
+        await addDialogueAudioAsset(pipelineId, asset);
+      }
 
       sendJson(res, 200, {
         success: true,
@@ -2138,7 +2179,7 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
       return true;
     }
 
-    const result = await autoRunRules(pipelineId, entry.pipelineDir, rulesDoc);
+    const result = await autoRunRules(pipelineId, entry.pipelineDir, rulesDoc, ctx);
 
     debugLog.info('rules-run', `Applied ${rulesDoc.rules.length} rules: ${result.added} added, ${result.replaced} replaced`);
     sendJson(res, 200, {
@@ -2164,13 +2205,24 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
       return true;
     }
 
-    // Find and update the element in app state
+    // Try updating through ProjectStateManager
+    const project = ctx.projectState?.get(pipelineId);
+    if (project) {
+      const elem = project.elements?.find(e => e.id === elementId);
+      if (elem) {
+        (elem as any)[field] = value;
+        (elem as any)._editedAt = new Date().toISOString();
+        ctx.projectState.markDirty(pipelineId, ['elements']);
+        sendJson(res, 200, { success: true, elementId, field, value });
+        return true;
+      }
+    }
+
+    // Legacy fallback: scan node files
     const dir = join(APP_STATE_DIR, pipelineId);
     let files: string[];
-    try {
-      files = await readdir(dir);
-    } catch {
-      sendJson(res, 404, { error: 'No app state found' });
+    try { files = await readdir(dir); } catch {
+      sendJson(res, 404, { error: 'Element not found: ' + elementId });
       return true;
     }
 
@@ -2184,7 +2236,6 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
         if (updateElementField(data, elementId, field, value)) {
           await writeFile(filePath, JSON.stringify(data, null, 2));
           updated = true;
-          debugLog.info('element-update', `Updated ${elementType} ${elementId}.${field} in ${file}`);
           break;
         }
       } catch { /* skip */ }
@@ -2193,14 +2244,6 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
     if (!updated) {
       sendJson(res, 404, { error: 'Element not found: ' + elementId });
       return true;
-    }
-
-    // Update manifest to mark as manually edited
-    const manifest = await loadManifest(pipelineId);
-    if (manifest) {
-      // Find which node contains this element and mark it edited
-      // For now, just update the timestamp
-      await saveManifest(manifest);
     }
 
     sendJson(res, 200, { success: true, elementId, field, value });
@@ -2433,10 +2476,23 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
       const body = await readBody(req);
       const entityType = body.type || 'all'; // 'characters', 'locations', or 'all'
 
-      // Get project folder
-      const pfolder = await resolveProjectFolder(pipelineId);
-      const project = await loadProjectFile(pfolder);
+      // Get project data from ProjectStateManager
+      let project: any = ctx.projectState?.get(pipelineId);
+      let pfolder = ctx.projectState?.getProjectFolder(pipelineId);
+
+      // Fallback: try loading
       if (!project) {
+        try {
+          pfolder = await resolveProjectFolder(pipelineId);
+          const projFile = await loadProjectFile(pfolder);
+          if (pfolder && projFile) {
+            await ctx.projectState.load(pipelineId, pipelineId, pfolder);
+            project = ctx.projectState.get(pipelineId);
+          }
+        } catch { /* ignore */ }
+      }
+
+      if (!project || !pfolder) {
         sendJson(res, 400, { error: 'No project data found' });
         return true;
       }
@@ -2484,7 +2540,8 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
             results.push({ name: char.name, type: 'character', path: imgPath });
             // Save incrementally so polling clients see new images
             char.imagePath = imgPath;
-            await saveProjectFile(pfolder, project);
+            ctx.projectState.update(pipelineId, { characters: project.characters });
+            await ctx.projectState.flush(pipelineId);
           } catch (err: any) {
             results.push({ name: char.name, type: 'character', error: err.message || String(err) });
           }
@@ -2521,25 +2578,16 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
             results.push({ name: loc.name, type: 'location', path: imgPath });
             // Save incrementally so polling clients see new images
             loc.imagePath = imgPath;
-            await saveProjectFile(pfolder, project);
+            ctx.projectState.update(pipelineId, { locations: project.locations });
+            await ctx.projectState.flush(pipelineId);
           } catch (err: any) {
             results.push({ name: loc.name, type: 'location', error: err.message || String(err) });
           }
         }
       }
 
-      // Save image paths back into project.json
-      for (const r of results) {
-        if (!r.path) continue;
-        if (r.type === 'character') {
-          const char = project.characters?.find((c: any) => c.name === r.name);
-          if (char) char.imagePath = r.path;
-        } else if (r.type === 'location') {
-          const loc = project.locations?.find((l: any) => l.name === r.name);
-          if (loc) loc.imagePath = r.path;
-        }
-      }
-      await saveProjectFile(pfolder, project);
+      // Final save — project state is already up to date from incremental saves
+      await ctx.projectState.flush(pipelineId);
 
       const succeeded = results.filter(r => r.path).length;
       const failed = results.filter(r => r.error).length;
@@ -2566,33 +2614,40 @@ async function autoRunRules(
   pipelineId: string,
   pipelineDir: string,
   rulesDoc: RulesDocument,
+  ctx?: DashboardContext,
 ): Promise<{ added: number; replaced: number; totalBindings: number }> {
-  // Load all node outputs from app state
-  const stateDir = join(APP_STATE_DIR, pipelineId);
-  let nodeDataFiles: string[] = [];
-  try { nodeDataFiles = await readdir(stateDir); } catch { /* empty */ }
-
   const sourceEntities: Array<{ entityType: string; entityId: string; data: Record<string, any> }> = [];
   const targetEntities: Array<{ entityType: string; entityId: string; data: Record<string, any> }> = [];
 
   const sourceTypes = new Set(rulesDoc.rules.map(r => r.source.entityType));
   const targetTypes = new Set(rulesDoc.rules.map(r => r.target.entityType));
 
-  // Track seen IDs across all files to prevent duplicates
   const seenSourceIds = new Set<string>();
   const seenTargetIds = new Set<string>();
 
-  for (const f of nodeDataFiles) {
-    if (!f.endsWith('.json') || f.startsWith('_')) continue;
-    try {
-      const raw = await readFile(join(stateDir, f), 'utf-8');
-      const nodeData = JSON.parse(raw);
-      // App state files store data at the top level (not under outputs)
-      // Try nodeData.outputs first (pipeline run format), fall back to nodeData itself
-      const outputs = nodeData.outputs || nodeData;
-      scanForEntities(outputs, sourceTypes, sourceEntities, seenSourceIds);
-      scanForEntities(outputs, targetTypes, targetEntities, seenTargetIds);
-    } catch { /* skip */ }
+  // Try reading from ProjectStateManager first
+  const project = ctx?.projectState?.get(pipelineId);
+  if (project) {
+    // Scan project data for entities
+    const outputs = { characters: project.characters, locations: project.locations, elements: project.elements, scenes: project.scenes, previsualizations: project.previsualizations, assets: project.assets };
+    scanForEntities(outputs, sourceTypes, sourceEntities, seenSourceIds);
+    scanForEntities(outputs, targetTypes, targetEntities, seenTargetIds);
+  } else {
+    // Legacy fallback: read from node state files
+    const stateDir = join(APP_STATE_DIR, pipelineId);
+    let nodeDataFiles: string[] = [];
+    try { nodeDataFiles = await readdir(stateDir); } catch { /* empty */ }
+
+    for (const f of nodeDataFiles) {
+      if (!f.endsWith('.json') || f.startsWith('_')) continue;
+      try {
+        const raw = await readFile(join(stateDir, f), 'utf-8');
+        const nodeData = JSON.parse(raw);
+        const outputs = nodeData.outputs || nodeData;
+        scanForEntities(outputs, sourceTypes, sourceEntities, seenSourceIds);
+        scanForEntities(outputs, targetTypes, targetEntities, seenTargetIds);
+      } catch { /* skip */ }
+    }
   }
 
   debugLog.info('auto-run-rules', `Discovered ${sourceEntities.length} source entities, ${targetEntities.length} target entities`);
@@ -2719,99 +2774,35 @@ interface ScreenplayData {
 }
 
 /**
- * Collect all screenplay-related data from a pipeline's app state.
- * Walks all node outputs looking for characters, locations, elements,
- * previs shots, and assets — then builds lookup maps.
+ * Collect all screenplay-related data from the ProjectStateManager.
+ * Reads from memory — no file scanning needed.
  */
-async function collectScreenplayData(pipelineId: string): Promise<ScreenplayData | null> {
-  const dir = join(APP_STATE_DIR, pipelineId);
-
-  let allCharacters: any[] = [];
-  let allLocations: any[] = [];
-  let allElements: any[] = [];
-  let allPrevis: any[] = [];
-  let allAssets: any[] = [];
-
-  // Try reading from project.json first (project folder mode)
-  try {
-    const projFolder = await resolveProjectFolder(pipelineId);
-    const projJsonPath = join(projFolder, 'project.json');
-    const projRaw = await readFile(projJsonPath, 'utf-8');
-    const projData = JSON.parse(projRaw);
-    if (projData.characters) allCharacters = projData.characters;
-    if (projData.locations) allLocations = projData.locations;
-    if (projData.elements) allElements = projData.elements;
-    if (projData.previsualizations?.shots) allPrevis = projData.previsualizations.shots;
-    if (projData.assets) allAssets = projData.assets;
-  } catch { /* no project.json, fall through to node state */ }
-
-  // Also scan node state files (may have additional/newer data)
-  let files: string[];
-  try {
-    files = await readdir(dir);
-  } catch { files = []; }
-
-  for (const file of files) {
-    if (!file.endsWith('.json') || file === '_manifest.json') continue;
+async function collectScreenplayData(pipelineId: string, ctx: DashboardContext): Promise<ScreenplayData | null> {
+  const project = ctx.projectState?.get(pipelineId);
+  if (!project || !project.elements?.length) {
+    // Try loading if not in memory yet
     try {
-      const raw = await readFile(join(dir, file), 'utf-8');
-      const data = JSON.parse(raw);
-      extractScreenplayFields(data, 0);
-    } catch { /* skip */ }
+      const compositions = await discoverCompositions();
+      const entry = compositions.find((c: any) => c.composition?.id === pipelineId);
+      const pfolder = entry?.composition?.metadata?.projectFolder;
+      if (pfolder) {
+        const loaded = await ctx.projectState.load(pipelineId, entry?.composition?.name || pipelineId, pfolder);
+        if (!loaded.elements?.length) return null;
+        return buildScreenplayMaps(loaded);
+      }
+    } catch { /* ignore */ }
+    return null;
   }
 
-  function extractScreenplayFields(obj: any, depth: number): void {
-    if (!obj || typeof obj !== 'object' || depth > 5) return;
-    if (Array.isArray(obj)) return;
+  return buildScreenplayMaps(project);
+}
 
-    for (const k of Object.keys(obj)) {
-      const v = obj[k];
-      if (!v) continue;
-
-      if (k === 'scriptPackage' && typeof v === 'object' && v.script) {
-        extractScreenplayFields(v, depth + 1);
-        extractScreenplayFields(v.script, depth + 1);
-        continue;
-      }
-      if (k === 'script' && typeof v === 'object' && !Array.isArray(v)) {
-        extractScreenplayFields(v, depth + 1);
-        continue;
-      }
-      if (k === 'characters' && Array.isArray(v) && v.length > 0 && v[0]?.name) {
-        if (v.length > allCharacters.length) allCharacters = v;
-      }
-      if (k === 'locations' && Array.isArray(v) && v.length > 0 && v[0]?.name) {
-        if (v.length > allLocations.length) allLocations = v;
-      }
-      if (k === 'elements' && Array.isArray(v) && v.length > 0 && v[0]?.type && v[0]?.id) {
-        if (v.length > allElements.length) allElements = v;
-      }
-      if (k === 'shots' && Array.isArray(v) && v.length > 0 && v[0]?.shotElementId) {
-        if (v.length > allPrevis.length) allPrevis = v;
-      }
-      if (k === 'previsualizations' && typeof v === 'object' && v.shots) {
-        if (v.shots.length > allPrevis.length) allPrevis = v.shots;
-      }
-      if (k === 'assets' && Array.isArray(v) && v.length > 0 && v[0]?.filePath) {
-        if (v.length > allAssets.length) allAssets = v;
-      }
-      if (k === 'assets' && typeof v === 'object' && !Array.isArray(v) && v.assets) {
-        if (Array.isArray(v.assets) && v.assets.length > allAssets.length) allAssets = v.assets;
-      }
-      // Also check for assetCollection wrapper (common in screenplay pipelines)
-      if (k === 'assetCollection' && typeof v === 'object' && !Array.isArray(v) && v.assets) {
-        if (Array.isArray(v.assets) && v.assets.length > allAssets.length) allAssets = v.assets;
-      }
-
-      if (typeof v === 'object' && !Array.isArray(v)) {
-        extractScreenplayFields(v, depth + 1);
-      }
-    }
-  }
-
-  if (allElements.length === 0) return null;
-
-  debugLog.info('collectScreenplayData', `Found ${allAssets.length} assets, ${allCharacters.length} characters, ${allElements.length} elements`);
+function buildScreenplayMaps(project: any): ScreenplayData {
+  const allCharacters = project.characters || [];
+  const allLocations = project.locations || [];
+  const allElements = project.elements || [];
+  const allPrevis = project.previsualizations?.shots || [];
+  const allAssets = project.assets || [];
 
   // Build lookup maps
   const characters: Record<string, any> = {};
@@ -2837,7 +2828,6 @@ async function collectScreenplayData(pipelineId: string): Promise<ScreenplayData
       characterAssets[meta.characterId] = asset;
     }
   }
-  // Fallback: use character.imagePath directly (project.json mode)
   for (const c of allCharacters) {
     if (c.imagePath && !characterAssets[c.id]) {
       characterAssets[c.id] = { id: c.id, filePath: c.imagePath, type: 'character-headshot' };
@@ -2852,27 +2842,22 @@ async function collectScreenplayData(pipelineId: string): Promise<ScreenplayData
       locationAssets[meta.locationId] = asset;
     }
   }
-  // Fallback: use location.imagePath directly (project.json mode)
   for (const l of allLocations) {
     if (l.imagePath && !locationAssets[l.id]) {
       locationAssets[l.id] = { id: l.id, filePath: l.imagePath, type: 'landscape' };
     }
   }
 
-  debugLog.info('collectScreenplayData', `Mapped ${Object.keys(characterAssets).length} character assets: ${Object.keys(characterAssets).join(', ')}`);
-
-  // Load scenes from project.json if available
-  let scenes: any[] | undefined;
-  try {
-    const projFolder = await resolveProjectFolder(pipelineId);
-    const projRaw = await readFile(join(projFolder, 'project.json'), 'utf-8');
-    const projData = JSON.parse(projRaw);
-    if (projData.scenes && Array.isArray(projData.scenes)) {
-      scenes = projData.scenes;
-    }
-  } catch { /* no project.json or no scenes field */ }
-
-  return { characters, locations, elementMap, previsMap, characterAssets, locationAssets, assetMap, scenes };
+  return {
+    characters,
+    locations,
+    elementMap,
+    previsMap,
+    characterAssets,
+    locationAssets,
+    assetMap,
+    scenes: project.scenes,
+  };
 }
 
 /** Check if a file path exists synchronously */

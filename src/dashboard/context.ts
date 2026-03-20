@@ -9,6 +9,7 @@
 import type { Server } from 'node:http';
 import type { ExtensionManager } from '../extension-manager.js';
 import type { DashboardContext } from './types.js';
+import { ProjectStateManager } from './project-state.js';
 
 /**
  * Create a fresh DashboardContext with all state initialized to defaults.
@@ -61,6 +62,9 @@ export function createDashboardContext(opts: {
 
     // Approvals
     pendingApprovals: new Map(),
+
+    // Project state
+    projectState: new ProjectStateManager(),
 
     // Caches
     registryCache: null,

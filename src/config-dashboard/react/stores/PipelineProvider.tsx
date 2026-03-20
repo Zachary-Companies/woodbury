@@ -14,7 +14,7 @@ import React, {
 import type { ProjectData, Character, Location, Section, Element, ScriptMetadata, SceneData } from './pipeline-store';
 import { buildScenes } from '../parsers/fountainParser';
 
-// Re-export types
+// Re-export types — these come from pipeline-store which re-exports from project-types
 export type { ProjectData, Character, Location, Section, Element, ScriptMetadata, SceneData, SceneShot, SceneDialogue };
 
 // ════════════════════════════════════════════════════════════════
@@ -182,31 +182,46 @@ export function PipelineProvider({ pipelineId, children }: { pipelineId: string;
     const isInitial = !initialLoadDone.current;
     if (isInitial) dispatch({ type: 'LOADING' });
     try {
-      const [schemaRes, stateRes] = await Promise.all([
-        fetch(`/api/app/${encodeURIComponent(pipelineId)}/schema`),
-        fetch(`/api/app/${encodeURIComponent(pipelineId)}/state`),
-      ]);
-      const schema = await schemaRes.json();
-      const appState = await stateRes.json();
-      const project = extractProjectData(appState, pipelineId);
+      // Try new /api/project/:id endpoint first (single source of truth)
+      const projectRes = await fetch(`/api/project/${encodeURIComponent(pipelineId)}`);
 
-      // Auto-compute scenes if not present (migration for existing projects)
+      let project: ProjectData | null = null;
+      let pipelineName = pipelineId;
+      let projectFolder: string | null = null;
+
+      if (projectRes.ok) {
+        const data = await projectRes.json();
+        project = data.project;
+        pipelineName = data.pipelineName || pipelineId;
+        projectFolder = data.projectFolder || null;
+      } else {
+        // Fallback to legacy endpoints
+        const [schemaRes, stateRes] = await Promise.all([
+          fetch(`/api/app/${encodeURIComponent(pipelineId)}/schema`),
+          fetch(`/api/app/${encodeURIComponent(pipelineId)}/state`),
+        ]);
+        const schema = await schemaRes.json();
+        const appState = await stateRes.json();
+        project = extractProjectData(appState, pipelineId);
+        pipelineName = schema?.name || appState?.pipelineName || pipelineId;
+
+        try {
+          const compRes = await fetch(`/api/compositions/${encodeURIComponent(pipelineId)}`);
+          const comp = await compRes.json();
+          projectFolder = comp?.composition?.metadata?.projectFolder || null;
+        } catch {}
+      }
+
+      // Auto-compute scenes if not present
       if (project && (!project.scenes || project.scenes.length === 0)) {
         project.scenes = computeScenes(project);
       }
-
-      let projectFolder: string | null = null;
-      try {
-        const compRes = await fetch(`/api/compositions/${encodeURIComponent(pipelineId)}`);
-        const comp = await compRes.json();
-        projectFolder = comp?.composition?.metadata?.projectFolder || null;
-      } catch {}
 
       initialLoadDone.current = true;
       dispatch({
         type: isInitial ? 'LOADED' : 'REFRESH',
         project: project || createEmptyProject(pipelineId),
-        pipelineName: schema?.name || appState?.pipelineName || pipelineId,
+        pipelineName,
         projectFolder,
       });
     } catch (err: any) {
@@ -221,39 +236,27 @@ export function PipelineProvider({ pipelineId, children }: { pipelineId: string;
     if (!state.project) return;
     dispatch({ type: 'SAVING' });
     try {
-      if (state.projectFolder) {
+      // Use new PATCH /api/project/:id endpoint (single path)
+      const res = await fetch(`/api/project/${encodeURIComponent(pipelineId)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ project: state.project }),
+      });
+
+      if (!res.ok) {
+        // Fallback to legacy PUT endpoint
         await fetch(`/api/app/${encodeURIComponent(pipelineId)}/project`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ project: state.project }),
         });
-      } else {
-        await fetch(`/api/app/${encodeURIComponent(pipelineId)}/state/node-15`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            outputs: {
-              scriptPackage: {
-                script: {
-                  metadata: state.project.metadata,
-                  characters: state.project.characters,
-                  locations: state.project.locations,
-                  sections: state.project.sections,
-                  elements: state.project.elements,
-                },
-                previsualizations: state.project.previsualizations || { shots: [] },
-                assets: state.project.assets || [],
-              },
-              _fountainSource: state.project._fountainSource,
-            },
-          }),
-        });
       }
+
       dispatch({ type: 'SAVED' });
     } catch (err: any) {
       dispatch({ type: 'ERROR', error: 'Save failed: ' + err.message });
     }
-  }, [pipelineId, state.project, state.projectFolder]);
+  }, [pipelineId, state.project]);
 
   // Auto-save when dirty (debounced)
   useEffect(() => {
@@ -264,7 +267,11 @@ export function PipelineProvider({ pipelineId, children }: { pipelineId: string;
 
   // ── Clear project ──────────────────────────────────────────
   const clearProjectAction = useCallback(async () => {
-    await fetch(`/api/app/${encodeURIComponent(pipelineId)}/state`, { method: 'DELETE' });
+    // Try new endpoint first, fall back to legacy
+    const res = await fetch(`/api/project/${encodeURIComponent(pipelineId)}`, { method: 'DELETE' });
+    if (!res.ok) {
+      await fetch(`/api/app/${encodeURIComponent(pipelineId)}/state`, { method: 'DELETE' });
+    }
     dispatch({ type: 'CLEAR' });
   }, [pipelineId]);
 

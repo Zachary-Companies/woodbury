@@ -12,6 +12,7 @@ import type { ExtensionManager } from '../extension-manager.js';
 import type { WorkflowRecorder } from '../workflow/recorder.js';
 import type { ExecutionSnapshotCapture } from '../workflow/execution-snapshots.js';
 import type { InferenceServer } from '../inference/index.js';
+import type { ProjectStateManager } from './project-state.js';
 
 // ────────────────────────────────────────────────────────────────
 //  Route handler signature
@@ -247,6 +248,9 @@ export interface DashboardContext {
 
   // ── Approvals ──
   pendingApprovals: Map<string, any>;
+
+  // ── Project State ──
+  projectState: ProjectStateManager;
 
   // ── Caches ──
   registryCache: any;
