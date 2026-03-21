@@ -13,9 +13,7 @@
  */
 
 import { readFile, writeFile, mkdir, readdir, access, cp, rm, stat } from 'node:fs/promises';
-import { spawn, type ChildProcess } from 'node:child_process';
-import { existsSync } from 'node:fs';
-import { join, basename, resolve } from 'node:path';
+import { join, basename, dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import type { DashboardContext, RouteHandler } from '../types.js';
 import { sendJson, readBody, atomicWriteFile } from '../utils.js';
@@ -23,13 +21,13 @@ import { discoverCompositions } from '../../workflow/loader.js';
 import { topoSort, gatherInputVariables, getDownstreamNodes } from '../graph-utils.js';
 import { debugLog } from '../../debug-log.js';
 import { loadBindings, saveBindings, loadRules, saveRules, applyRules, getTargetIds, type RulesDocument } from '../pipeline-bindings.js';
+import { loadPipelineRoutes } from '../pipeline-route-factory.js';
 
 // ────────────────────────────────────────────────────────────────
 //  Constants
 // ────────────────────────────────────────────────────────────────
 
 const APP_STATE_DIR = join(homedir(), '.woodbury', 'data', 'app-state');
-const RUNS_FILE = join(homedir(), '.woodbury', 'data', 'runs.json');
 
 // Node types that should NOT appear as visible sections in the app
 const HIDDEN_NODE_TYPES = new Set([
@@ -48,15 +46,6 @@ interface AppNodeData {
   outputs: Record<string, unknown>;
   updatedAt: string;
   manuallyEdited: boolean;
-}
-
-interface AppState {
-  pipelineId: string;
-  pipelineName: string;
-  sourceRunId: string | null;
-  nodeData: Record<string, AppNodeData>;
-  staleNodes: string[];
-  lastRunAt: string | null;
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -94,67 +83,30 @@ interface AppSchema {
 }
 
 // ────────────────────────────────────────────────────────────────
-//  Directory-based project storage
-//
-//  Each pipeline's app state is a directory:
-//    ~/.woodbury/data/app-state/{pipeline-id}/
-//      _manifest.json           — metadata, stale nodes, timestamps
-//      {nodeId}.json            — per-node output data
-//
-//  This makes individual node reads/writes fast and avoids loading
-//  the entire project into memory for a single edit.
+//  Project folder resolution
 // ────────────────────────────────────────────────────────────────
-
-interface AppManifest {
-  pipelineId: string;
-  pipelineName: string;
-  sourceRunId: string | null;
-  staleNodes: string[];
-  lastRunAt: string | null;
-  /** Per-node metadata (timestamps, edited flag) — NOT the data itself */
-  nodes: Record<string, { updatedAt: string; manuallyEdited: boolean }>;
-}
-
-function projectDir(pipelineId: string): string {
-  return join(APP_STATE_DIR, pipelineId);
-}
-
-function manifestPath(pipelineId: string): string {
-  return join(projectDir(pipelineId), '_manifest.json');
-}
 
 /**
  * Resolve the external project folder for a pipeline (e.g. ~/Documents/The Last Jump).
- * Falls back to the pipeline's workflow dir, then app-state dir.
+ * Falls back to the pipeline's workflow dir.
  */
 async function resolveProjectFolder(pipelineId: string): Promise<string> {
-  // Check pipeline.json for metadata.projectFolder
   try {
     const compositions = await discoverCompositions();
     const entry = compositions.find(c => c.composition.id === pipelineId);
     if (entry) {
-      const pipelineJson = entry.composition;
-      const folder = pipelineJson?.metadata?.projectFolder;
+      const folder = entry.composition?.metadata?.projectFolder;
       if (folder && typeof folder === 'string') {
         await mkdir(folder, { recursive: true });
         return folder;
       }
-      // Fall back to pipeline directory
       if (entry.pipelineDir) return entry.pipelineDir;
     }
   } catch { /* ignore */ }
   return join(APP_STATE_DIR, pipelineId);
 }
 
-function nodeDataPath(pipelineId: string, nodeId: string): string {
-  // Sanitize nodeId for filesystem safety
-  const safe = nodeId.replace(/[^a-zA-Z0-9_-]/g, '_');
-  return join(projectDir(pipelineId), `${safe}.json`);
-}
-
-// ── Project-folder-based storage ─────────────────────────────
-// When a pipeline has metadata.projectFolder set, data lives in
-// {projectFolder}/project.json instead of per-node files.
+// ── Node-to-project key mapping ──────────────────────────────
 
 /** Map pipeline node IDs to project.json top-level keys */
 const NODE_KEY_MAP: Record<string, string | string[]> = {
@@ -195,45 +147,6 @@ async function saveProjectFile(projectFolder: string, data: Record<string, any>)
 }
 
 /**
- * Merge a node's outputs into project.json using the NODE_KEY_MAP.
- * For assembly nodes (node-15/16), merges all top-level keys from scriptPackage.
- */
-async function mergeIntoProject(projectFolder: string, nodeId: string, outputs: Record<string, unknown>): Promise<void> {
-  const project = (await loadProjectFile(projectFolder)) || { version: '1.0', createdAt: new Date().toISOString() };
-  const keyMapping = NODE_KEY_MAP[nodeId];
-
-  if (keyMapping === '_assembly' || keyMapping === '_output') {
-    // Assembly/output node — merge all sub-keys
-    // Handle scriptPackage wrapper
-    const sp = (outputs as any).scriptPackage;
-    const source = sp?.script || sp || outputs;
-    for (const k of ['metadata', 'characters', 'locations', 'sections', 'elements', 'previsualizations', 'assets', 'productionMetadata']) {
-      if (source[k] !== undefined) project[k] = source[k];
-    }
-    // Also save raw fields
-    if ((outputs as any)._fountainSource) project._fountainSource = (outputs as any)._fountainSource;
-    if (sp?.previsualizations) project.previsualizations = sp.previsualizations;
-    if (sp?.assets) project.assets = sp.assets;
-  } else if (keyMapping && typeof keyMapping === 'string') {
-    // Single key mapping — merge the output's matching key
-    const val = outputs[keyMapping];
-    if (val !== undefined) {
-      project[keyMapping] = val;
-    } else {
-      // If outputs doesn't have the expected key, try merging all keys
-      for (const k of Object.keys(outputs)) {
-        project[k] = outputs[k];
-      }
-    }
-  } else {
-    // Unknown node — store raw outputs under nodeId key
-    project[`_node_${nodeId}`] = outputs;
-  }
-
-  await saveProjectFile(projectFolder, project);
-}
-
-/**
  * Convert a project.json into the nodeData format expected by the UI.
  * Creates virtual "node" entries so the existing stitcher/renderers work.
  */
@@ -264,6 +177,11 @@ function projectToNodeData(project: Record<string, any>): Record<string, AppNode
     nodeData['node-13'] = { outputs: { previsualizations: project.previsualizations }, updatedAt: now, manuallyEdited: false };
   }
 
+  // Scene-grouped data (new model with shots containing previsPath)
+  if (project.scenes) {
+    nodeData['node-14'] = { outputs: { scenes: project.scenes }, updatedAt: now, manuallyEdited: false };
+  }
+
   // Also create an assembly node with the full scriptPackage
   nodeData['node-15'] = {
     outputs: {
@@ -277,6 +195,7 @@ function projectToNodeData(project: Record<string, any>): Record<string, AppNode
         },
         previsualizations: project.previsualizations || { shots: [] },
         assets: project.assets || [],
+        scenes: project.scenes || [],
       },
       _fountainSource: project._fountainSource || '',
     },
@@ -287,178 +206,10 @@ function projectToNodeData(project: Record<string, any>): Record<string, AppNode
   return nodeData;
 }
 
-async function loadManifest(pipelineId: string): Promise<AppManifest | null> {
-  try {
-    const raw = await readFile(manifestPath(pipelineId), 'utf-8');
-    return JSON.parse(raw) as AppManifest;
-  } catch {
-    return null;
-  }
-}
-
-async function saveManifest(manifest: AppManifest): Promise<void> {
-  await mkdir(projectDir(manifest.pipelineId), { recursive: true });
-  await atomicWriteFile(manifestPath(manifest.pipelineId), JSON.stringify(manifest, null, 2));
-}
-
-async function loadNodeData(pipelineId: string, nodeId: string): Promise<Record<string, unknown> | null> {
-  try {
-    const raw = await readFile(nodeDataPath(pipelineId, nodeId), 'utf-8');
-    return JSON.parse(raw);
-  } catch {
-    return null;
-  }
-}
-
-async function saveNodeData(pipelineId: string, nodeId: string, outputs: Record<string, unknown>): Promise<void> {
-  await mkdir(projectDir(pipelineId), { recursive: true });
-  await atomicWriteFile(nodeDataPath(pipelineId, nodeId), JSON.stringify(outputs, null, 2));
-}
-
-/** Load full app state — checks project folder first, falls back to node files */
-async function loadAppState(pipelineId: string): Promise<AppState | null> {
-  const manifest = await loadManifest(pipelineId);
-
-  // Check if pipeline has a project folder with project.json
-  let pfolder: string | null = null;
-  try {
-    const compositions = await discoverCompositions();
-    const entry = compositions.find((c: any) => c.composition?.id === pipelineId);
-    pfolder = entry?.composition?.metadata?.projectFolder || null;
-  } catch { /* ignore */ }
-
-  if (pfolder) {
-    const project = await loadProjectFile(pfolder);
-    if (project) {
-      const nodeData = projectToNodeData(project);
-      return {
-        pipelineId,
-        pipelineName: manifest?.pipelineName || project.metadata?.title || pipelineId,
-        sourceRunId: manifest?.sourceRunId || null,
-        nodeData,
-        staleNodes: manifest?.staleNodes || [],
-        lastRunAt: manifest?.lastRunAt || null,
-      };
-    }
-  }
-
-  // Fall back to legacy per-node files
-  if (!manifest) return null;
-
-  const nodeData: Record<string, AppNodeData> = {};
-  for (const [nodeId, meta] of Object.entries(manifest.nodes)) {
-    const outputs = await loadNodeData(pipelineId, nodeId);
-    if (outputs) {
-      nodeData[nodeId] = { outputs, ...meta };
-    }
-  }
-
-  // Migration: if we have node data but no project.json and there IS a project folder,
-  // consolidate into project.json
-  if (pfolder && Object.keys(nodeData).length > 0) {
-    debugLog.info('pipeline-app', `Migrating ${Object.keys(nodeData).length} node files to project.json for ${pipelineId}`);
-    const project: Record<string, any> = { version: '1.0', pipelineId, createdAt: new Date().toISOString() };
-    for (const [nodeId, data] of Object.entries(nodeData)) {
-      const key = NODE_KEY_MAP[nodeId];
-      if (key === '_assembly' || key === '_output') {
-        const sp = (data.outputs as any)?.scriptPackage;
-        const source = sp?.script || sp || data.outputs;
-        for (const k of ['metadata', 'characters', 'locations', 'sections', 'elements', 'previsualizations', 'assets']) {
-          if (source?.[k] !== undefined) project[k] = source[k];
-        }
-        if ((data.outputs as any)?._fountainSource) project._fountainSource = (data.outputs as any)._fountainSource;
-      } else if (key && typeof key === 'string') {
-        const val = data.outputs?.[key];
-        if (val !== undefined) project[key] = val;
-      }
-    }
-    await saveProjectFile(pfolder, project);
-    // Clean up old node files (keep manifest + saves)
-    try {
-      const dir = projectDir(pipelineId);
-      const entries = await readdir(dir);
-      for (const entry of entries) {
-        if (entry.startsWith('node-') || entry.startsWith('var-')) {
-          await rm(join(dir, entry));
-        }
-      }
-    } catch { /* best effort */ }
-  }
-
-  return {
-    pipelineId: manifest.pipelineId,
-    pipelineName: manifest.pipelineName,
-    sourceRunId: manifest.sourceRunId,
-    nodeData,
-    staleNodes: manifest.staleNodes,
-    lastRunAt: manifest.lastRunAt,
-  };
-}
-
-/** Save full app state: manifest + per-node files */
-async function saveAppState(state: AppState): Promise<void> {
-  const manifest: AppManifest = {
-    pipelineId: state.pipelineId,
-    pipelineName: state.pipelineName,
-    sourceRunId: state.sourceRunId,
-    staleNodes: state.staleNodes,
-    lastRunAt: state.lastRunAt,
-    nodes: {},
-  };
-
-  for (const [nodeId, data] of Object.entries(state.nodeData)) {
-    manifest.nodes[nodeId] = {
-      updatedAt: data.updatedAt,
-      manuallyEdited: data.manuallyEdited,
-    };
-    await saveNodeData(state.pipelineId, nodeId, data.outputs);
-  }
-
-  await saveManifest(manifest);
-}
-
 async function findPipeline(workDir: string, pipelineId: string): Promise<any | null> {
   const discovered = await discoverCompositions(workDir);
   const entry = discovered.find((d: any) => d?.composition?.id === pipelineId);
   return entry?.composition || null;
-}
-
-/** Seed app state from the latest completed run for this pipeline */
-async function seedFromLatestRun(pipelineId: string, pipelineName: string): Promise<AppState | null> {
-  try {
-    const raw = await readFile(RUNS_FILE, 'utf-8');
-    const runs = JSON.parse(raw) as any[];
-    const matching = runs.filter(
-      (r: any) => r.type === 'pipeline' && r.sourceId === pipelineId && r.status === 'completed',
-    );
-    if (matching.length === 0) return null;
-    const latest = matching[matching.length - 1];
-
-    const nodeData: Record<string, AppNodeData> = {};
-    const now = new Date().toISOString();
-    if (Array.isArray(latest.nodeResults)) {
-      for (const nr of latest.nodeResults) {
-        if (nr.outputVariables && Object.keys(nr.outputVariables).length > 0) {
-          nodeData[nr.nodeId] = {
-            outputs: nr.outputVariables,
-            updatedAt: now,
-            manuallyEdited: false,
-          };
-        }
-      }
-    }
-
-    return {
-      pipelineId,
-      pipelineName,
-      sourceRunId: latest.id || null,
-      nodeData,
-      staleNodes: [],
-      lastRunAt: latest.startedAt || now,
-    };
-  } catch {
-    return null;
-  }
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -481,57 +232,30 @@ export async function persistAppStateFromRun(
   ctx?: DashboardContext,
 ): Promise<void> {
   try {
-    // Try ProjectStateManager first
-    if (ctx?.projectState) {
-      // Ensure project is loaded
-      if (!ctx.projectState.isLoaded(pipelineId)) {
-        try {
-          const compositions = await discoverCompositions();
-          const entry = compositions.find((c: any) => c.composition?.id === pipelineId);
-          const pfolder = entry?.composition?.metadata?.projectFolder;
-          if (pfolder) {
-            await ctx.projectState.load(pipelineId, pipelineName, pfolder);
-          }
-        } catch { /* ignore */ }
-      }
-
-      if (ctx.projectState.isLoaded(pipelineId)) {
-        ctx.projectState.applyRunOutputs(pipelineId, runId, nodeOutputs, executionOrder);
-        await ctx.projectState.flush(pipelineId);
-        debugLog.info('app-state', `Auto-saved via ProjectStateManager for "${pipelineName}"`, { pipelineId, runId });
-        return;
-      }
+    if (!ctx?.projectState) {
+      debugLog.info('app-state', `No ProjectStateManager available — skipping auto-save for "${pipelineName}"`);
+      return;
     }
 
-    // Legacy fallback
-    const now = new Date().toISOString();
-    let manifest = await loadManifest(pipelineId);
-    if (!manifest) {
-      manifest = { pipelineId, pipelineName, sourceRunId: runId, staleNodes: [], lastRunAt: now, nodes: {} };
+    // Ensure project is loaded
+    if (!ctx.projectState.isLoaded(pipelineId)) {
+      try {
+        const compositions = await discoverCompositions();
+        const entry = compositions.find((c: any) => c.composition?.id === pipelineId);
+        const pfolder = entry?.composition?.metadata?.projectFolder;
+        if (pfolder) {
+          await ctx.projectState.load(pipelineId, pipelineName, pfolder);
+        }
+      } catch { /* ignore */ }
+    }
+
+    if (ctx.projectState.isLoaded(pipelineId)) {
+      ctx.projectState.applyRunOutputs(pipelineId, runId, nodeOutputs, executionOrder);
+      await ctx.projectState.flush(pipelineId);
+      debugLog.info('app-state', `Auto-saved via ProjectStateManager for "${pipelineName}"`, { pipelineId, runId });
     } else {
-      manifest.sourceRunId = runId;
-      manifest.lastRunAt = now;
-      manifest.pipelineName = pipelineName;
-      manifest.staleNodes = manifest.staleNodes.filter((sId) => !executionOrder.includes(sId));
+      debugLog.info('app-state', `No project folder configured — skipping auto-save for "${pipelineName}"`);
     }
-
-    let pfolder: string | null = null;
-    try {
-      const compositions = await discoverCompositions();
-      const entry = compositions.find((c: any) => c.composition?.id === pipelineId);
-      pfolder = entry?.composition?.metadata?.projectFolder || null;
-    } catch { /* ignore */ }
-
-    for (const nodeId of executionOrder) {
-      const outputs = nodeOutputs[nodeId];
-      if (!outputs || Object.keys(outputs).length === 0) continue;
-      if (pfolder) { await mergeIntoProject(pfolder, nodeId, outputs); }
-      else { await saveNodeData(pipelineId, nodeId, outputs); }
-      manifest.nodes[nodeId] = { updatedAt: now, manuallyEdited: false };
-    }
-
-    await saveManifest(manifest);
-    debugLog.info('app-state', `Auto-saved app state for "${pipelineName}"`, { pipelineId, runId, nodeCount: Object.keys(manifest.nodes).length });
   } catch (err) {
     debugLog.error('app-state', `Failed to auto-save app state for "${pipelineName}"`, { error: String(err) });
   }
@@ -767,10 +491,9 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
   }
 
   // ── GET /api/app/:id/state ───────────────────────────────
-  // Now reads from ProjectStateManager when available, falls back to legacy
+  // Reads from ProjectStateManager, returns in nodeData format for backward compat
   if (req.method === 'GET' && subPath === '/state') {
-    // Try ProjectStateManager first
-    let project = ctx.projectState?.get(pipelineId);
+    let project = ctx.projectState.get(pipelineId);
     if (!project) {
       // Try to load into ProjectStateManager
       try {
@@ -784,7 +507,6 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
     }
 
     if (project) {
-      // Return in the nodeData format the client expects (backward compat during migration)
       const nodeData = projectToNodeData(project as any);
       const info = ctx.projectState.getInfo(pipelineId);
       sendJson(res, 200, {
@@ -795,64 +517,26 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
         staleNodes: [],
         lastRunAt: info?.lastRunAt || null,
       });
-      return true;
-    }
-
-    // Legacy fallback: load from disk files
-    let state = await loadAppState(pipelineId);
-    if (!state) {
+    } else {
+      // No project folder configured — return empty state
       const pipeline = await findPipeline(ctx.workDir, pipelineId);
-      const name = pipeline?.name || pipelineId;
-      state = await seedFromLatestRun(pipelineId, name);
-      if (state) {
-        await saveAppState(state);
-      } else {
-        state = {
-          pipelineId,
-          pipelineName: name,
-          sourceRunId: null,
-          nodeData: {},
-          staleNodes: [],
-          lastRunAt: null,
-        };
-      }
+      sendJson(res, 200, {
+        pipelineId,
+        pipelineName: pipeline?.name || pipelineId,
+        sourceRunId: null,
+        nodeData: {},
+        staleNodes: [],
+        lastRunAt: null,
+      });
     }
-    sendJson(res, 200, state);
     return true;
   }
 
   // ── DELETE /api/app/:id/state ─────────────────────────────
-  // Clears all project state
+  // Clears all project state through ProjectStateManager
   if (req.method === 'DELETE' && subPath === '/state') {
-    // Clear through ProjectStateManager
-    if (ctx.projectState?.isLoaded(pipelineId)) {
+    if (ctx.projectState.isLoaded(pipelineId)) {
       await ctx.projectState.clear(pipelineId);
-    } else {
-      // Legacy: clear project.json and node files
-      let pfolder: string | null = null;
-      try {
-        const compositions = await discoverCompositions();
-        const entry = compositions.find((c: any) => c.composition?.id === pipelineId);
-        pfolder = entry?.composition?.metadata?.projectFolder || null;
-      } catch { /* ignore */ }
-
-      if (pfolder) {
-        try { await rm(projectFilePath(pfolder)); } catch { /* may not exist */ }
-      }
-
-      const dir = projectDir(pipelineId);
-      try {
-        const entries = await readdir(dir);
-        for (const entry of entries) {
-          if (entry === 'saves' || entry.startsWith('.')) continue;
-          const fullPath = join(dir, entry);
-          const s = await stat(fullPath);
-          if (s.isFile()) await rm(fullPath);
-          else if (s.isDirectory()) await rm(fullPath, { recursive: true });
-        }
-      } catch (e: any) {
-        if (e.code !== 'ENOENT') throw e;
-      }
     }
     sendJson(res, 200, { success: true });
     return true;
@@ -903,8 +587,19 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
     const now = new Date().toISOString();
     const outputs = body.outputs || body;
 
-    // Try writing through ProjectStateManager
-    if (ctx.projectState?.isLoaded(pipelineId)) {
+    // Ensure project is loaded
+    if (!ctx.projectState.isLoaded(pipelineId)) {
+      try {
+        const compositions = await discoverCompositions();
+        const entry = compositions.find((c: any) => c.composition?.id === pipelineId);
+        const pfolder = entry?.composition?.metadata?.projectFolder;
+        if (pfolder) {
+          await ctx.projectState.load(pipelineId, entry?.composition?.name || pipelineId, pfolder);
+        }
+      } catch { /* ignore */ }
+    }
+
+    if (ctx.projectState.isLoaded(pipelineId)) {
       // Map node outputs to project data fields
       const partial: Record<string, any> = {};
       const sp = outputs.scriptPackage;
@@ -932,65 +627,36 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
 
       ctx.projectState.update(pipelineId, partial);
       sendJson(res, 200, { success: true, staleNodes: [], updatedAt: now });
-      return true;
-    }
-
-    // Legacy fallback: write to disk directly
-    let pfolder: string | null = null;
-    try {
-      const compositions = await discoverCompositions();
-      const entry = compositions.find((c: any) => c.composition?.id === pipelineId);
-      pfolder = entry?.composition?.metadata?.projectFolder || null;
-    } catch { /* ignore */ }
-
-    if (pfolder) {
-      await mergeIntoProject(pfolder, nodeId, outputs);
     } else {
-      await saveNodeData(pipelineId, nodeId, outputs);
+      sendJson(res, 400, { error: 'No project folder set for this pipeline' });
     }
-
-    sendJson(res, 200, { success: true, staleNodes: [], updatedAt: now });
     return true;
   }
 
   // ── POST /api/app/:id/refresh-from-run ───────────────────
-  // Refresh app state from the latest completed run
+  // Reload project data from disk (data may have been updated by a run)
   if (req.method === 'POST' && subPath === '/refresh-from-run') {
-    const pipeline = await findPipeline(ctx.workDir, pipelineId);
-    const name = pipeline?.name || pipelineId;
-    const state = await seedFromLatestRun(pipelineId, name);
-    if (state) {
-      await saveAppState(state);
-      sendJson(res, 200, state);
+    if (ctx.projectState.isLoaded(pipelineId)) {
+      const project = await ctx.projectState.reload(pipelineId);
+      sendJson(res, 200, { refreshed: true, project });
     } else {
-      sendJson(res, 404, { error: 'No completed runs found for this pipeline' });
+      sendJson(res, 404, { error: 'Project not loaded' });
     }
     return true;
   }
 
   // ── POST /api/app/:id/mark-stale ─────────────────────────
+  // No-op in new architecture (kept for backward compat)
   if (req.method === 'POST' && subPath === '/mark-stale') {
-    const body = await readBody(req);
-    const nodeIds: string[] = Array.isArray(body.nodeIds) ? body.nodeIds : [];
-
-    let manifest = await loadManifest(pipelineId);
-    if (!manifest) {
-      sendJson(res, 404, { error: 'No app state found' });
-      return true;
-    }
-
-    const staleSet = new Set(manifest.staleNodes);
-    for (const id of nodeIds) staleSet.add(id);
-    manifest.staleNodes = [...staleSet];
-    await saveManifest(manifest);
-    sendJson(res, 200, { staleNodes: manifest.staleNodes });
+    sendJson(res, 200, { staleNodes: [] });
     return true;
   }
 
   // ── GET /api/app/:id/saves ──────────────────────────────
   // List all saved snapshots for this pipeline
   if (req.method === 'GET' && subPath === '/saves') {
-    const savesDir = join(projectDir(pipelineId), 'saves');
+    const projFolder = await resolveProjectFolderFromCtx(pipelineId, ctx);
+    const savesDir = join(projFolder, 'saves');
     try {
       await mkdir(savesDir, { recursive: true });
       const entries = await readdir(savesDir);
@@ -1038,47 +704,46 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
   }
 
   // ── POST /api/app/:id/saves ──────────────────────────────
-  // Create a new save (snapshot current state)
+  // Create a new save (snapshot current state from project folder)
   if (req.method === 'POST' && subPath === '/saves') {
     const body = await readBody(req);
     const name: string = body.name || `Save ${new Date().toLocaleString()}`;
     const description: string = body.description || '';
     const customPath: string | undefined = body.path; // optional: save to custom location
 
-    const state = await loadAppState(pipelineId);
-    if (!state) {
-      sendJson(res, 404, { error: 'No app state to save' });
-      return true;
+    // Flush in-memory state to disk before saving
+    if (ctx.projectState.isLoaded(pipelineId)) {
+      await ctx.projectState.flush(pipelineId);
     }
+
+    const projFolder = await resolveProjectFolderFromCtx(pipelineId, ctx);
+    const info = ctx.projectState.getInfo(pipelineId);
+    const pipelineName = info?.pipelineName || pipelineId;
 
     const saveId = `save-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
     const targetDir = customPath
       ? resolve(customPath)
-      : join(projectDir(pipelineId), 'saves', saveId);
+      : join(projFolder, 'saves', saveId);
 
     try {
       await mkdir(targetDir, { recursive: true });
 
-      // Copy all node data files
-      const srcDir = projectDir(pipelineId);
-      const files = await readdir(srcDir);
-      let nodeCount = 0;
+      // Copy all project files from the project folder
+      const files = await readdir(projFolder);
+      let fileCount = 0;
       for (const f of files) {
-        if (f === 'saves' || f.startsWith('.')) continue; // skip saves dir and hidden files
-        const srcPath = join(srcDir, f);
+        if (f === 'saves' || f.startsWith('.')) continue;
+        const srcPath = join(projFolder, f);
         const s = await stat(srcPath);
         if (s.isFile()) {
           await cp(srcPath, join(targetDir, f));
-          if (f.endsWith('.json') && f !== '_manifest.json') nodeCount++;
+          fileCount++;
+        } else if (s.isDirectory()) {
+          // Copy subdirectories (characters, locations, structure, previs, audio, etc.)
+          await cp(srcPath, join(targetDir, f), { recursive: true });
+          fileCount++;
         }
       }
-
-      // Copy previs directory if it exists
-      const previsDir = join(srcDir, 'previs');
-      try {
-        await access(previsDir);
-        await cp(previsDir, join(targetDir, 'previs'), { recursive: true });
-      } catch { /* no previs dir */ }
 
       // Also copy bindings from the pipeline source if present
       const compositions = await discoverCompositions();
@@ -1099,9 +764,9 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
         description,
         createdAt: new Date().toISOString(),
         pipelineId,
-        pipelineName: state.pipelineName,
-        sourceRunId: state.sourceRunId,
-        nodeCount,
+        pipelineName,
+        sourceRunId: info?.lastRunId || null,
+        fileCount,
         savedTo: targetDir,
       };
       await atomicWriteFile(join(targetDir, '_save-meta.json'), JSON.stringify(saveMeta, null, 2));
@@ -1115,47 +780,47 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
   }
 
   // ── POST /api/app/:id/saves/:saveId/load ──────────────────
-  // Restore app state from a save
+  // Restore app state from a save into the project folder
   const loadMatch = subPath.match(/^\/saves\/([^/]+)\/load$/);
   if (req.method === 'POST' && loadMatch) {
     const saveId = decodeURIComponent(loadMatch[1]);
     const body = await readBody(req);
 
+    const projFolder = await resolveProjectFolderFromCtx(pipelineId, ctx);
+
     // Support loading from a custom path OR from the saves directory
     const sourceDir = body.path
       ? resolve(body.path)
-      : join(projectDir(pipelineId), 'saves', saveId);
+      : join(projFolder, 'saves', saveId);
 
     try {
       // Verify save exists
       const metaPath = join(sourceDir, '_save-meta.json');
       await access(metaPath);
 
-      const destDir = projectDir(pipelineId);
-
-      // Clear current state (but preserve saves directory)
-      const existingFiles = await readdir(destDir);
+      // Clear current project folder contents (but preserve saves directory)
+      const existingFiles = await readdir(projFolder);
       for (const f of existingFiles) {
         if (f === 'saves' || f.startsWith('.')) continue;
-        const fullPath = join(destDir, f);
+        const fullPath = join(projFolder, f);
         const s = await stat(fullPath);
         if (s.isFile()) {
           await rm(fullPath);
-        } else if (s.isDirectory() && f === 'previs') {
+        } else if (s.isDirectory()) {
           await rm(fullPath, { recursive: true });
         }
       }
 
-      // Copy save files into current state
+      // Copy save files into project folder
       const saveFiles = await readdir(sourceDir);
       for (const f of saveFiles) {
-        if (f === '_save-meta.json') continue; // don't copy meta into active state
+        if (f === '_save-meta.json') continue;
         const srcPath = join(sourceDir, f);
         const s = await stat(srcPath);
         if (s.isFile()) {
-          await cp(srcPath, join(destDir, f));
-        } else if (s.isDirectory() && f === 'previs') {
-          await cp(srcPath, join(destDir, f), { recursive: true });
+          await cp(srcPath, join(projFolder, f));
+        } else if (s.isDirectory()) {
+          await cp(srcPath, join(projFolder, f), { recursive: true });
         }
       }
 
@@ -1172,10 +837,10 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
         }
       } catch { /* no bindings in save */ }
 
-      // Load and return the restored state
-      const restored = await loadAppState(pipelineId);
+      // Reload from disk into ProjectStateManager
+      const reloaded = await ctx.projectState.reload(pipelineId);
       debugLog.info('pipeline-app', `Loaded save "${saveId}" for ${pipelineId} from ${sourceDir}`);
-      sendJson(res, 200, { loaded: true, state: restored });
+      sendJson(res, 200, { loaded: true, project: reloaded });
     } catch (err: any) {
       sendJson(res, 500, { error: `Failed to load save: ${err.message}` });
     }
@@ -1186,7 +851,8 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
   const deleteMatch = subPath.match(/^\/saves\/([^/]+)$/);
   if (req.method === 'DELETE' && deleteMatch) {
     const saveId = decodeURIComponent(deleteMatch[1]);
-    const saveDir = join(projectDir(pipelineId), 'saves', saveId);
+    const projFolder3 = await resolveProjectFolderFromCtx(pipelineId, ctx);
+    const saveDir = join(projFolder3, 'saves', saveId);
     try {
       await rm(saveDir, { recursive: true });
       debugLog.info('pipeline-app', `Deleted save "${saveId}" for ${pipelineId}`);
@@ -1198,7 +864,7 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
   }
 
   // ── POST /api/app/:id/saves/load-from-path ────────────────
-  // Load state from an arbitrary path on the filesystem
+  // Load state from an arbitrary path into the project folder
   if (req.method === 'POST' && subPath === '/saves/load-from-path') {
     const body = await readBody(req);
     const loadPath: string = body.path;
@@ -1209,26 +875,26 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
 
     const sourceDir = resolve(loadPath);
     try {
-      // Check if it's a valid save (has manifest or save meta)
+      // Check if it's a valid save (has project.json or save meta)
       let isValid = false;
-      try { await access(join(sourceDir, '_manifest.json')); isValid = true; } catch {}
+      try { await access(join(sourceDir, 'project.json')); isValid = true; } catch {}
       try { await access(join(sourceDir, '_save-meta.json')); isValid = true; } catch {}
       if (!isValid) {
-        sendJson(res, 400, { error: 'Not a valid save directory — no _manifest.json or _save-meta.json found' });
+        sendJson(res, 400, { error: 'Not a valid save directory — no project.json or _save-meta.json found' });
         return true;
       }
 
-      const destDir = projectDir(pipelineId);
-      await mkdir(destDir, { recursive: true });
+      const projFolder = await resolveProjectFolderFromCtx(pipelineId, ctx);
+      await mkdir(projFolder, { recursive: true });
 
-      // Clear current state (preserve saves)
-      const existingFiles = await readdir(destDir);
+      // Clear current project folder (preserve saves)
+      const existingFiles = await readdir(projFolder);
       for (const f of existingFiles) {
         if (f === 'saves' || f.startsWith('.')) continue;
-        const fullPath = join(destDir, f);
+        const fullPath = join(projFolder, f);
         const s = await stat(fullPath);
         if (s.isFile()) await rm(fullPath);
-        else if (s.isDirectory() && f === 'previs') await rm(fullPath, { recursive: true });
+        else if (s.isDirectory()) await rm(fullPath, { recursive: true });
       }
 
       // Copy files from source
@@ -1237,9 +903,9 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
         if (f === '_save-meta.json') continue;
         const srcPath = join(sourceDir, f);
         const s = await stat(srcPath);
-        if (s.isFile()) await cp(srcPath, join(destDir, f));
-        else if (s.isDirectory() && (f === 'previs' || f === 'bindings')) {
-          await cp(srcPath, join(destDir, f), { recursive: true });
+        if (s.isFile()) await cp(srcPath, join(projFolder, f));
+        else if (s.isDirectory()) {
+          await cp(srcPath, join(projFolder, f), { recursive: true });
         }
       }
 
@@ -1256,9 +922,10 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
         }
       } catch { /* no bindings */ }
 
-      const restored = await loadAppState(pipelineId);
+      // Reload from disk into ProjectStateManager
+      const reloaded = await ctx.projectState.reload(pipelineId);
       debugLog.info('pipeline-app', `Loaded state from path: ${sourceDir}`);
-      sendJson(res, 200, { loaded: true, path: sourceDir, state: restored });
+      sendJson(res, 200, { loaded: true, path: sourceDir, project: reloaded });
     } catch (err: any) {
       sendJson(res, 500, { error: `Failed to load from path: ${err.message}` });
     }
@@ -1266,23 +933,29 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
   }
 
   // ── GET /api/app/:id/node/:nodeId ────────────────────────
-  // Load a single node's output data (fast — reads one file)
+  // Load a single node's output data from ProjectStateManager
   const nodeMatch = subPath.match(/^\/node\/([^/]+)$/);
   if (req.method === 'GET' && nodeMatch) {
     const nodeId = decodeURIComponent(nodeMatch[1]);
-    const manifest = await loadManifest(pipelineId);
-    const meta = manifest?.nodes[nodeId];
-    const outputs = await loadNodeData(pipelineId, nodeId);
-    if (!outputs) {
+    const project = ctx.projectState.get(pipelineId);
+    if (!project) {
       sendJson(res, 404, { error: 'No data for this node' });
       return true;
+    }
+    // Map nodeId to project data using NODE_KEY_MAP
+    const keyMapping = NODE_KEY_MAP[nodeId];
+    let outputs: Record<string, unknown> = {};
+    if (keyMapping === '_assembly' || keyMapping === '_output') {
+      outputs = projectToNodeData(project as any)[nodeId]?.outputs || {};
+    } else if (keyMapping && typeof keyMapping === 'string') {
+      outputs = { [keyMapping]: (project as any)[keyMapping] };
     }
     sendJson(res, 200, {
       nodeId,
       outputs,
-      updatedAt: meta?.updatedAt || null,
-      manuallyEdited: meta?.manuallyEdited || false,
-      isStale: manifest?.staleNodes.includes(nodeId) || false,
+      updatedAt: project.updatedAt || null,
+      manuallyEdited: false,
+      isStale: false,
     });
     return true;
   }
@@ -1301,747 +974,23 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
     return true;
   }
 
-  // ── POST /api/app/:id/generate-previs ──────────────────────
-  // Generate or regenerate a previs image for a shot element.
-  //
-  // BEHAVIOR IS DEFINED BY THE PIPELINE: reads actions/generate-image.json
-  // from the pipeline's directory. This config controls:
-  //   - How character/location references are resolved (bindings, fallback)
-  //   - Prompt template and style
-  //   - Model and aspect ratio defaults
-  //
-  // The chat agent can modify that config when the user says things like
-  // "only use characters mentioned in the shot description."
-  if (req.method === 'POST' && subPath === '/generate-previs') {
+  // ── PUT /api/app/:id/bindings ─────────────────────────────────
+  // Save bindings for the pipeline
+  if (req.method === 'PUT' && subPath === '/bindings') {
     const body = await readBody(req);
-    const elementId: string = body.elementId;
-    const promptOverrides: Record<string, string> = body.promptOverrides || {};
-    // Scene context from client (new scene-grouped model)
-    const sceneId: string | undefined = body.sceneId;
-    const sceneLocationId: string | undefined = body.sceneLocationId;
-
-    if (!elementId) {
-      sendJson(res, 400, { error: 'elementId required' });
-      return true;
-    }
-
-    // Load pipeline's action config (the pipeline owns this behavior)
     const compositions = await discoverCompositions();
-    const pipelineEntry = compositions.find(c => c.composition.id === pipelineId);
-    const actionConfig = await loadActionConfig(pipelineEntry?.pipelineDir, 'generate-image');
-
-    const model: 'flash' | 'pro' = body.model || actionConfig.generation?.model || 'flash';
-    const aspectRatio: string = body.aspectRatio || actionConfig.generation?.aspectRatio || '16:9';
-
-    // Collect all screenplay data from app state
-    const screenplay = await collectScreenplayData(pipelineId, ctx);
-    if (!screenplay) {
-      sendJson(res, 404, { error: 'No screenplay data found in app state' });
-      return true;
-    }
-
-    // Find the previs entry for this element
-    const previs = screenplay.previsMap[elementId];
-    const element = screenplay.elementMap[elementId];
-    if (!element) {
-      sendJson(res, 404, { error: 'Element not found: ' + elementId });
-      return true;
-    }
-
-    // ── Resolve references using the pipeline's action config ──
-    // The config declares HOW to find the right references for each entity type.
-    // This is the key encapsulation: the pipeline defines its own resolution strategy,
-    // the server just executes it.
-    const referenceImages: string[] = [];
-    const refDescriptions: string[] = [];
-
-    const refConfig = actionConfig.referenceResolution || {};
-
-    // -- Characters --
-    const charConfig = refConfig.characters || {};
-    let characterIds: string[] = [];
-
-    if (charConfig.strategy === 'binding-match' && pipelineEntry?.isV2Pipeline && pipelineEntry.pipelineDir) {
-      // Strategy: use bindings to find which characters this shot depicts
-      let bindingsDoc = await loadBindings(pipelineEntry.pipelineDir);
-
-      // Check if THIS specific shot has any character bindings
-      const existingCharBindings = bindingsDoc.bindings.filter(
-        b => b.type === (charConfig.bindingType || 'depicts') &&
-             b.source.entityType === (charConfig.sourceEntityType || 'shot') &&
-             b.source.entityId === elementId
-      );
-
-      // Auto-create bindings from rules if this shot has no bindings yet
-      if (charConfig.autoCreateBindings && existingCharBindings.length === 0) {
-        const rulesDoc = await loadRules(pipelineEntry.pipelineDir);
-        if (rulesDoc.rules.length > 0) {
-          debugLog.info('generate-previs', `Auto-creating bindings for shot ${elementId} from pipeline rules...`);
-          const autoResult = await autoRunRules(pipelineId, pipelineEntry.pipelineDir, rulesDoc, ctx);
-          if (autoResult.added > 0) {
-            debugLog.info('generate-previs', `Auto-created ${autoResult.added} bindings`);
-            bindingsDoc = await loadBindings(pipelineEntry.pipelineDir);
-          }
-        }
-      }
-
-      characterIds = getTargetIds(
-        bindingsDoc,
-        charConfig.sourceEntityType || 'shot',
-        elementId,
-        charConfig.bindingType || 'depicts',
-      );
-      debugLog.info('generate-previs', `Bindings → ${characterIds.length} characters for ${elementId}`, { characterIds });
-      debugLog.info('generate-previs', `Character assets available: ${Object.keys(screenplay.characterAssets).join(', ')}`);
-    }
-
-    // Strategy 0: from scene-grouped shot data (most authoritative for new model)
-    if (characterIds.length === 0 && screenplay.scenes && sceneId) {
-      const scene = screenplay.scenes.find((s: any) => s.id === sceneId);
-      if (scene) {
-        const shot = scene.shots?.find((s: any) => s.id === elementId);
-        if (shot?.characterIds?.length) {
-          characterIds = shot.characterIds;
-          debugLog.info('generate-previs', `Scene shot → ${characterIds.length} characters from scene.shots[].characterIds`);
-        }
-      }
-    }
-
-    // Fallback strategy 1a: from element's characterIds metadata (set by AI during shot generation)
-    if (characterIds.length === 0 && element.characterIds && Array.isArray(element.characterIds)) {
-      characterIds = element.characterIds;
-      debugLog.info('generate-previs', `Fallback 1a → ${characterIds.length} characters from element.characterIds`);
-    }
-
-    // Fallback strategy 1b: from previs entry
-    if (characterIds.length === 0 && charConfig.fallback !== 'none') {
-      characterIds = previs?.characterIds || [];
-      debugLog.info('generate-previs', `Fallback 1b → ${characterIds.length} characters from previs.characterIds`);
-    }
-
-    // Fallback strategy 2: text-match character names in the shot description
-    // Uses word-boundary regex. Sorts candidates longest-name-first to prefer
-    // "GOOD FRANK" over "FRANK" and reduce false positives from short names.
-    if (characterIds.length === 0) {
-      const shotText = (element.content || element.shotText || '').toUpperCase();
-      const candidates = Object.values(screenplay.characters)
-        .map((c: any) => ({
-          id: c.id,
-          names: [c.name, c.displayName].filter(Boolean).map((n: string) => n.toUpperCase()),
-          maxLen: Math.max(...[c.name, c.displayName].filter(Boolean).map((n: string) => n.length)),
-        }))
-        .sort((a, b) => b.maxLen - a.maxLen); // longest names first
-
-      for (const c of candidates) {
-        for (const name of c.names) {
-          if (!name || name.length < 2) continue;
-          try {
-            const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            const re = new RegExp(`\\b${escaped}\\b`);
-            if (re.test(shotText)) {
-              if (!characterIds.includes(c.id)) characterIds.push(c.id);
-              break;
-            }
-          } catch { /* skip invalid regex */ }
-        }
-      }
-      // Cap at 4 references to avoid overloading the image generator
-      if (characterIds.length > 4) characterIds = characterIds.slice(0, 4);
-      if (characterIds.length > 0) {
-        debugLog.info('generate-previs', `Fallback 2 (text-match) → ${characterIds.length} characters: ${characterIds.join(', ')}`);
-      }
-    }
-
-    for (const charId of characterIds) {
-      const charAsset = screenplay.characterAssets[charId];
-      debugLog.info('generate-previs', `Looking for asset for character "${charId}": ${charAsset ? 'FOUND' : 'NOT FOUND'}`, {
-        charAsset: charAsset ? { id: charAsset.id, filePath: charAsset.filePath } : null,
-      });
-      if (charAsset?.filePath && fileExists(charAsset.filePath)) {
-        referenceImages.push(charAsset.filePath);
-        const charData = screenplay.characters[charId];
-        const desc = charData?.description || charData?.name || charId;
-        refDescriptions.push(
-          `Reference image ${referenceImages.length} is ${charData?.displayName || charData?.name || charId}` +
-          (desc ? ` (${desc.substring(0, 120)})` : '')
-        );
-      } else if (charAsset?.filePath) {
-        debugLog.info('generate-previs', `Character asset file does not exist: ${charAsset.filePath}`);
-      }
-    }
-
-    // -- Location --
-    const locConfig = refConfig.locations || {};
-    let locationId: string | undefined = undefined;
-
-    if (locConfig.strategy === 'binding-match' && pipelineEntry?.isV2Pipeline && pipelineEntry.pipelineDir) {
-      const bindingsDoc = await loadBindings(pipelineEntry.pipelineDir);
-      const locIds = getTargetIds(
-        bindingsDoc,
-        locConfig.sourceEntityType || 'shot',
-        elementId,
-        locConfig.bindingType || 'set-in',
-      );
-      if (locIds.length > 0) locationId = locIds[0];
-    }
-
-    // Location from scene context (sent by client in new model)
-    if (!locationId && sceneLocationId) {
-      locationId = sceneLocationId;
-      debugLog.info('generate-previs', `Location from scene context: ${locationId}`);
-    }
-
-    // Location fallback 1: from previs entry
-    if (!locationId && locConfig.fallback !== 'none') {
-      locationId = previs?.locationId;
-    }
-
-    // Location fallback 2: text-match location names in the shot description
-    if (!locationId) {
-      const shotText = (element.content || element.shotText || '').toUpperCase();
-      for (const l of Object.values(screenplay.locations)) {
-        const name = (l.name || '').toUpperCase();
-        if (name && shotText.includes(name)) {
-          locationId = l.id;
-          break;
-        }
-      }
-    }
-
-    if (locationId) {
-      const locAsset = screenplay.locationAssets[locationId];
-      if (locAsset?.filePath && fileExists(locAsset.filePath)) {
-        referenceImages.push(locAsset.filePath);
-        const locData = screenplay.locations[locationId];
-        refDescriptions.push(
-          `Reference image ${referenceImages.length} is the location "${locData?.name || locationId}"` +
-          (locData?.description ? ` (${locData.description.substring(0, 120)})` : '')
-        );
-      }
-    }
-
-    // ── Build prompt using pipeline's config ──
-    const shotText = element.shotText || element.content || '';
-    const previsDescription = promptOverrides.description || previs?.description || shotText;
-    const cameraIntent = promptOverrides.cameraIntent || previs?.cameraIntent || '';
-    const composition = promptOverrides.composition || previs?.composition || '';
-    const lighting = promptOverrides.lighting || previs?.lighting || '';
-
-    const frameSize = element.frameSize || '';
-    const cameraMovement = element.cameraMovement || '';
-
-    const lensMap: Record<string, string> = actionConfig.frameSizeLensMap || {
-      'WIDE': 'wide-angle lens (24mm), deep depth of field',
-      'EXTREME WIDE': 'ultra wide-angle lens (16mm), expansive depth of field',
-      'MEDIUM': 'standard lens (50mm), natural perspective with moderate depth of field',
-      'MEDIUM CLOSE-UP': '85mm portrait lens, shallow depth of field (f/2.8)',
-      'CLOSE-UP': '85mm portrait lens, very shallow depth of field (f/1.8)',
-      'EXTREME CLOSE-UP': 'macro lens (100mm), extremely shallow depth of field (f/1.4)',
-    };
-    const lensDesc = lensMap[frameSize.toUpperCase()] || '';
-
-    const movementMap: Record<string, string> = actionConfig.cameraMovementMap || {
-      'STATIC': 'locked-off camera on a tripod, perfectly still frame',
-      'PAN': 'smooth horizontal pan following the action',
-      'TILT': 'gentle vertical tilt revealing the scene',
-      'DOLLY': 'dolly tracking shot moving through the space',
-      'SLOW PUSH IN': 'subtle dolly push-in, gradually tightening the frame',
-      'PUSH IN': 'dolly push-in toward the subject',
-      'PULL BACK': 'slow dolly pull-back revealing the wider scene',
-      'TRACKING': 'tracking shot moving alongside the subject',
-      'CRANE': 'crane shot with elevated, sweeping perspective',
-      'HANDHELD': 'handheld camera with slight organic movement',
-      'STEADICAM': 'smooth Steadicam floating through the scene',
-    };
-    const movementDesc = movementMap[cameraMovement.toUpperCase()] || '';
-
-    let prompt = '';
-
-    // Reference instruction from config
-    const refInstruction = actionConfig.referenceInstruction
-      || 'Using the attached reference images as visual guides for character appearance and location setting. The characters in this frame must match these references exactly — same face, hair, body type, clothing, and features. The environment should be consistent with the location reference.';
-
-    if (referenceImages.length > 0) {
-      prompt += refInstruction + '\n' + refDescriptions.join('. ') + '.\n\n';
-    }
-
-    prompt += previsDescription;
-    if (previsDescription !== shotText && shotText) {
-      prompt += ` The camera captures: ${shotText}`;
-    }
-    prompt += '\n\n';
-
-    if (lensDesc || movementDesc || composition) {
-      prompt += 'Shot on a cinema camera';
-      if (lensDesc) prompt += ` with a ${lensDesc}`;
-      prompt += '. ';
-      if (movementDesc) prompt += `Camera technique: ${movementDesc}. `;
-      if (composition) prompt += composition + '. ';
-      prompt += '\n\n';
-    }
-
-    if (lighting) {
-      prompt += `Lighting: ${lighting}. `;
-    }
-    if (cameraIntent && cameraIntent !== composition) {
-      prompt += cameraIntent + '. ';
-    }
-    if (lighting || cameraIntent) prompt += '\n\n';
-
-    // Style from config or default
-    const stylePrompt = actionConfig.prompt?.sections?.find((s: any) => s.id === 'style')?.template
-      || 'Style: Cinematic previsualization frame, shot on 35mm film with subtle grain. Professional cinematography with rich color grading, deep shadows, and controlled highlights. The image should feel like a single frame from a feature film.';
-    prompt += stylePrompt;
-
-    // Import and call nanobanana
-    let nanobananaTool: typeof import('../../loop/tools/nanobanana.js').nanobanana;
-    try {
-      const { nanobanana: nb } = await import('../../loop/tools/nanobanana.js');
-      nanobananaTool = nb;
-    } catch (err) {
-      sendJson(res, 500, { error: 'Image generation not available: ' + String(err) });
-      return true;
-    }
-
-    // Create output directory in the project folder
-    const projFolder = await resolveProjectFolder(pipelineId);
-    const previsDir = join(projFolder, 'assets', 'previs');
-    await mkdir(previsDir, { recursive: true });
-    const outputPath = join(previsDir, `previs_${elementId}_${Date.now().toString(36)}.png`);
-
-    try {
-      debugLog.info('generate-previs', `Generating previs for ${elementId} with ${referenceImages.length} reference images`, {
-        referenceImages,
-      });
-      const result = await nanobananaTool({
-        action: 'generate' as const,
-        prompt,
-        referenceImages: referenceImages.length > 0 ? referenceImages : undefined,
-        model,
-        aspectRatio: aspectRatio as any,
-        outputPath,
-      }, previsDir);
-
-      const parsed = typeof result === 'string' ? JSON.parse(result) : result;
-
-      if (!parsed.success && parsed.error) {
-        sendJson(res, 500, { error: parsed.error });
-        return true;
-      }
-
-      const filePath = parsed.filePath || outputPath;
-
-      // Update previs data through ProjectStateManager
-      if (ctx.projectState?.isLoaded(pipelineId)) {
-        const projData = ctx.projectState.get(pipelineId)!;
-        if (!projData.previsualizations) projData.previsualizations = { shots: [] };
-        if (!projData.previsualizations.shots) projData.previsualizations.shots = [];
-        const existingIdx = projData.previsualizations.shots.findIndex((s: any) => s.shotElementId === elementId);
-        const previsEntry = {
-          shotElementId: elementId,
-          filePath,
-          _generatedFilePath: filePath,
-          _generatedAt: new Date().toISOString(),
-          description: shotText,
-        };
-        if (existingIdx >= 0) {
-          projData.previsualizations.shots[existingIdx] = { ...projData.previsualizations.shots[existingIdx], ...previsEntry };
-        } else {
-          projData.previsualizations.shots.push(previsEntry);
-        }
-        // Also update scene-grouped shot data
-        if (projData.scenes && Array.isArray(projData.scenes)) {
-          for (const scene of projData.scenes) {
-            if (!scene.shots) continue;
-            const shotIdx = scene.shots.findIndex((s: any) => s.id === elementId);
-            if (shotIdx >= 0) {
-              scene.shots[shotIdx].previsPath = filePath;
-              scene.shots[shotIdx].generatedAt = new Date().toISOString();
-              break;
-            }
-          }
-        }
-        ctx.projectState.markDirty(pipelineId, ['previsualizations', 'scenes']);
-        await ctx.projectState.flush(pipelineId);
-      } else {
-        // Legacy: update files directly
-        await updatePrevisAsset(pipelineId, elementId, filePath, screenplay);
-      }
-
-      sendJson(res, 200, {
-        success: true,
-        elementId,
-        filePath,
-        refsUsed: referenceImages.map((r: string) => basename(r)),
-        refCount: { characters: characterIds.length, locations: locationId ? 1 : 0 },
-        prompt: prompt.substring(0, 500),
-        model,
-      });
-    } catch (err) {
-      debugLog.info('generate-previs', `Error: ${err}`);
-      sendJson(res, 500, { error: 'Generation failed: ' + (err instanceof Error ? err.message : String(err)) });
-    }
-    return true;
-  }
-
-  // ── POST /api/app/:id/generate-dialogue-audio ──────────────
-  // Generate TTS audio for a dialogue element, save to project, persist as asset.
-  if (req.method === 'POST' && subPath === '/generate-dialogue-audio') {
-    const body = await readBody(req);
-    const elementId: string = body.elementId;
-    const text: string = body.text;
-    const voiceId: string = body.voiceId;
-    const characterName: string = body.characterName || '';
-    const characterId: string = body.characterId || '';
-
-    if (!elementId || !text || !voiceId) {
-      sendJson(res, 400, { error: 'elementId, text, and voiceId are required' });
-      return true;
-    }
-
-    // Create output directory in the project folder
-    const projFolder2 = await resolveProjectFolder(pipelineId);
-    const audioDir = join(projFolder2, 'audio');
-    await mkdir(audioDir, { recursive: true });
-    const outputPath = join(audioDir, `dialogue_${elementId}_${Date.now().toString(36)}.mp3`);
-
-    try {
-      // Call TTS tool via extension manager
-      await ctx.extensionManager?.whenReady();
-      const tools = ctx.extensionManager?.getAllTools() ?? [];
-      const ttsTool = tools.find(t => t.definition.name === 'tts_speak');
-
-      if (!ttsTool) {
-        sendJson(res, 500, { error: 'TTS tool not available. Check that ElevenLabs extension is loaded.' });
-        return true;
-      }
-
-      const ttsResult = await ttsTool.handler({
-        text,
-        voice_id: voiceId,
-        output_path: outputPath,
-        output_format: 'mp3_44100_128',
-      }, { workingDirectory: audioDir } as any);
-
-      const audioData = typeof ttsResult === 'string' ? JSON.parse(ttsResult) : ttsResult;
-      if (!audioData.success) {
-        sendJson(res, 500, { error: audioData.error || 'TTS generation failed' });
-        return true;
-      }
-
-      const filePath = audioData.audio_path || outputPath;
-
-      // Build the asset entry
-      const assetId = 'ast_da_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-      const asset = {
-        id: assetId,
-        type: 'dialogue-audio',
-        name: `Dialogue: ${characterName || elementId}`,
-        description: text.substring(0, 200),
-        filePath,
-        metadata: {
-          dialogueElementId: elementId,
-          characterId,
-          characterName,
-          voiceId,
-          text: text.substring(0, 500),
-          generatedAt: new Date().toISOString(),
-        },
+    const entry = compositions.find(c => c.composition.id === pipelineId);
+    if (entry?.isV2Pipeline && entry.pipelineDir) {
+      const doc: any = {
+        version: '1.0',
+        pipelineId,
+        bindings: body.bindings || [],
       };
-
-      // Add to the asset collection
-      if (ctx.projectState?.isLoaded(pipelineId)) {
-        const projData = ctx.projectState.get(pipelineId)!;
-        if (!projData.dialogueAudio) projData.dialogueAudio = { assets: [] };
-        if (!projData.dialogueAudio.assets) projData.dialogueAudio.assets = [];
-        // Remove existing for same element
-        projData.dialogueAudio.assets = projData.dialogueAudio.assets.filter(
-          (a: any) => a.metadata?.dialogueElementId !== elementId
-        );
-        projData.dialogueAudio.assets.push(asset);
-        ctx.projectState.markDirty(pipelineId, ['dialogueAudio']);
-      } else {
-        await addDialogueAudioAsset(pipelineId, asset);
-      }
-
-      sendJson(res, 200, {
-        success: true,
-        elementId,
-        filePath,
-        assetId,
-        characterName,
-      });
-    } catch (err) {
-      debugLog.info('generate-dialogue-audio', `Error: ${err}`);
-      sendJson(res, 500, { error: 'TTS failed: ' + (err instanceof Error ? err.message : String(err)) });
+      await saveBindings(entry.pipelineDir, doc);
+      sendJson(res, 200, doc);
+    } else {
+      sendJson(res, 404, { error: 'Pipeline not found or not v2' });
     }
-    return true;
-  }
-
-  // ── POST /api/app/:id/import-audio ──────────────────────────
-  // Copy an audio file into the pipeline's audio directory.
-  // Accepts { sourcePath: "/absolute/path/to/file.mp3" }
-  // Returns { success, filePath } with the new project-local path.
-  if (req.method === 'POST' && subPath === '/import-audio') {
-    const body = await readBody(req);
-    const sourcePath: string = body.sourcePath;
-    if (!sourcePath) {
-      sendJson(res, 400, { error: 'sourcePath required' });
-      return true;
-    }
-
-    try {
-      // Verify source exists
-      await access(sourcePath);
-
-      // Create audio dir inside the project folder
-      const projFolder = await resolveProjectFolder(pipelineId);
-      const audioDir = join(projFolder, 'audio');
-      await mkdir(audioDir, { recursive: true });
-
-      // Build a unique destination filename
-      const srcBase = basename(sourcePath);
-      const dotIdx = srcBase.lastIndexOf('.');
-      const name = dotIdx > 0 ? srcBase.substring(0, dotIdx) : srcBase;
-      const ext = dotIdx > 0 ? srcBase.substring(dotIdx) : '';
-      const safeName = name.replace(/[^a-zA-Z0-9_\-. ]/g, '_').substring(0, 80);
-      const destName = safeName + '_' + Date.now().toString(36) + ext;
-      const destPath = join(audioDir, destName);
-
-      await cp(sourcePath, destPath);
-
-      // Detect audio duration via ffprobe (if available)
-      let duration: number | null = null;
-      try {
-        const { execSync } = await import('node:child_process');
-        const probe = execSync(
-          `ffprobe -v error -show_entries format=duration -of csv=p=0 "${destPath}"`,
-          { timeout: 5000, encoding: 'utf-8' }
-        ).trim();
-        const parsed = parseFloat(probe);
-        if (parsed > 0 && isFinite(parsed)) duration = parsed;
-      } catch {
-        // ffprobe not available — try size-based estimate for MP3 (128kbps ~ 16KB/s)
-        try {
-          const fileStat = await stat(destPath);
-          const sizeKb = fileStat.size / 1024;
-          if (ext.toLowerCase() === '.mp3') duration = sizeKb / 16;
-          else if (ext.toLowerCase() === '.wav') duration = sizeKb / 176; // 44.1kHz 16-bit stereo
-          else duration = sizeKb / 16; // rough default
-        } catch { /* ignore */ }
-      }
-
-      sendJson(res, 200, { success: true, filePath: destPath, fileName: srcBase, duration });
-    } catch (err) {
-      sendJson(res, 500, { error: 'Import failed: ' + (err instanceof Error ? err.message : String(err)) });
-    }
-    return true;
-  }
-
-  // ── POST /api/app/:id/render-video ──────────────────────────
-  // Render the NLE timeline to a video file via ffmpeg.
-  if (req.method === 'POST' && subPath === '/render-video') {
-    const body = await readBody(req);
-    const settings = body.settings || {};
-    const clips: any[] = body.clips || [];
-    const dialogAudioMap: Record<string, string> = body.dialogAudioMap || {};
-
-    const resX: number = settings.resolutionX || 1920;
-    const resY: number = settings.resolutionY || 1080;
-    const fps: number = settings.fps || 24;
-    const format: string = settings.format || 'mp4';
-    const quality: string = settings.quality || 'medium';
-    const startTime: number = settings.startTime || 0;
-    const endTime: number = settings.endTime || 120;
-    const totalDuration = endTime - startTime;
-
-    if (totalDuration <= 0) {
-      sendJson(res, 400, { error: 'Invalid time range' });
-      return true;
-    }
-
-    try {
-      const projFolder = await resolveProjectFolder(pipelineId);
-      const renderDir = join(projFolder, 'renders');
-      await mkdir(renderDir, { recursive: true });
-      const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-      const ext = format === 'webm' ? 'webm' : format === 'mov' ? 'mov' : 'mp4';
-      const outputPath = join(renderDir, `render_${timestamp}.${ext}`);
-
-      // CRF mapping
-      const crfMap: Record<string, number> = { high: 18, medium: 23, low: 28 };
-      const crf = crfMap[quality] || 23;
-
-      // Separate clips by type
-      const visualClips = clips
-        .filter((c: any) => c.trackId === 'visuals' && c.filePath)
-        .sort((a: any, b: any) => a.startTime - b.startTime);
-
-      const audioClips: any[] = [];
-      // Dialog audio from dialogAudioMap
-      clips.filter((c: any) => c.type === 'dialog' && c.elementId && dialogAudioMap[c.elementId])
-        .forEach((c: any) => {
-          audioClips.push({
-            path: dialogAudioMap[c.elementId],
-            startTime: c.startTime - startTime,
-            duration: c.duration,
-            volume: (c.volume != null ? c.volume : 100) / 100,
-            fadeIn: c.fadeIn || 0,
-            fadeOut: c.fadeOut || 0,
-          });
-        });
-      // Music/SFX/Ambience clips with file paths
-      clips.filter((c: any) => (c.type === 'music' || c.type === 'sfx' || c.type === 'ambience') && c.filePath)
-        .forEach((c: any) => {
-          audioClips.push({
-            path: c.filePath,
-            startTime: c.startTime - startTime,
-            duration: c.duration,
-            volume: (c.volume != null ? c.volume : 100) / 100,
-            fadeIn: c.fadeIn || 0,
-            fadeOut: c.fadeOut || 0,
-          });
-        });
-
-      if (visualClips.length === 0) {
-        sendJson(res, 400, { error: 'No visual clips with images to render' });
-        return true;
-      }
-
-      // Build ffmpeg command
-      const ffmpegArgs: string[] = [];
-
-      // Add visual inputs (images looped for their duration)
-      for (const vc of visualClips) {
-        const clipDur = Math.min(vc.startTime + vc.duration, endTime) - Math.max(vc.startTime, startTime);
-        if (clipDur <= 0) continue;
-        ffmpegArgs.push('-loop', '1', '-t', String(clipDur), '-i', vc.filePath);
-      }
-
-      const numVisuals = visualClips.length;
-
-      // Add audio inputs
-      for (const ac of audioClips) {
-        ffmpegArgs.push('-i', ac.path);
-      }
-
-      const numAudio = audioClips.length;
-
-      // Build filter complex
-      const filterParts: string[] = [];
-      let concatInputs = '';
-
-      for (let i = 0; i < numVisuals; i++) {
-        filterParts.push(`[${i}:v]fps=${fps},scale=${resX}:${resY}:force_original_aspect_ratio=decrease,pad=${resX}:${resY}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1[v${i}]`);
-        concatInputs += `[v${i}]`;
-      }
-
-      filterParts.push(`${concatInputs}concat=n=${numVisuals}:v=1:a=0[vout]`);
-
-      // Mix audio
-      if (numAudio > 0) {
-        let amixInputs = '';
-        for (let i = 0; i < numAudio; i++) {
-          const audioIdx = numVisuals + i;
-          const ac = audioClips[i];
-          let volFilter = `volume=${ac.volume}`;
-          if (ac.fadeIn > 0) volFilter += `,afade=t=in:d=${ac.fadeIn}`;
-          if (ac.fadeOut > 0) volFilter += `,afade=t=out:st=${Math.max(0, ac.duration - ac.fadeOut)}:d=${ac.fadeOut}`;
-          // Delay audio to its start position and trim
-          const delayMs = Math.max(0, Math.round(ac.startTime * 1000));
-          filterParts.push(`[${audioIdx}:a]atrim=0:${ac.duration},${volFilter},adelay=${delayMs}|${delayMs},apad[a${i}]`);
-          amixInputs += `[a${i}]`;
-        }
-        if (numAudio === 1) {
-          filterParts.push(`${amixInputs}atrim=0:${totalDuration}[aout]`);
-        } else {
-          filterParts.push(`${amixInputs}amix=inputs=${numAudio}:duration=longest:dropout_transition=2,atrim=0:${totalDuration}[aout]`);
-        }
-      } else {
-        // Generate silent audio
-        filterParts.push(`anullsrc=r=44100:cl=stereo,atrim=0:${totalDuration}[aout]`);
-      }
-
-      const filterComplex = filterParts.join(';');
-
-      // Codec settings
-      const isWebm = format === 'webm';
-      const videoCodec = isWebm ? 'libvpx-vp9' : 'libx264';
-      const audioCodec = isWebm ? 'libopus' : 'aac';
-
-      ffmpegArgs.push(
-        '-filter_complex', filterComplex,
-        '-map', '[vout]',
-        '-map', '[aout]',
-        '-c:v', videoCodec,
-        ...(isWebm ? ['-b:v', '2M'] : ['-preset', 'medium', '-crf', String(crf)]),
-        '-c:a', audioCodec,
-        '-b:a', '192k',
-        '-t', String(totalDuration),
-        '-pix_fmt', 'yuv420p',
-        ...(isWebm ? [] : ['-movflags', '+faststart']),
-        '-y',
-        outputPath,
-      );
-
-      debugLog.info('render-video', `Starting render: ${numVisuals} visual clips, ${numAudio} audio clips, ${totalDuration}s, ${resX}x${resY} @ ${fps}fps`);
-
-      const ffmpegBin = '/opt/homebrew/bin/ffmpeg';
-      const ffproc = spawn(ffmpegBin, ffmpegArgs, { stdio: ['pipe', 'pipe', 'pipe'] });
-
-      // Store process for potential cancellation
-      (ctx as any)._renderProcess = ffproc;
-
-      let stderrLog = '';
-      ffproc.stderr?.on('data', (chunk: Buffer) => {
-        stderrLog += chunk.toString();
-      });
-
-      await new Promise<void>((resolve, reject) => {
-        ffproc.on('close', (code: number | null) => {
-          (ctx as any)._renderProcess = null;
-          if (code === 0) resolve();
-          else {
-            const lines = stderrLog.trim().split('\n');
-            const lastLines = lines.slice(-5).join('\n');
-            reject(new Error(`ffmpeg exited with code ${code}: ${lastLines}`));
-          }
-        });
-        ffproc.on('error', (err: Error) => {
-          (ctx as any)._renderProcess = null;
-          reject(err);
-        });
-      });
-
-      const outputStat = await stat(outputPath);
-      const fileSizeMB = (outputStat.size / (1024 * 1024)).toFixed(1);
-
-      debugLog.info('render-video', `Render complete: ${outputPath} (${fileSizeMB}MB)`);
-
-      sendJson(res, 200, {
-        success: true,
-        videoPath: outputPath,
-        duration: totalDuration,
-        fileSize: outputStat.size,
-        fileSizeMB,
-        scenes: numVisuals,
-        audioTracks: numAudio,
-      });
-    } catch (err) {
-      debugLog.error('render-video', `Render failed: ${err}`);
-      sendJson(res, 500, { error: 'Render failed: ' + (err instanceof Error ? err.message : String(err)) });
-    }
-    return true;
-  }
-
-  // ── POST /api/app/:id/render-cancel ────────────────────────
-  if (req.method === 'POST' && subPath === '/render-cancel') {
-    const proc = (ctx as any)._renderProcess as ChildProcess | null;
-    if (proc) {
-      proc.kill('SIGTERM');
-      (ctx as any)._renderProcess = null;
-    }
-    sendJson(res, 200, { success: true });
     return true;
   }
 
@@ -2066,61 +1015,6 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
       }
       sendJson(res, 200, { success: true });
     } catch (err) {
-      sendJson(res, 500, { error: (err instanceof Error ? err.message : String(err)) });
-    }
-    return true;
-  }
-
-  // ── POST /api/app/:id/generate-logo ─────────────────────────
-  // Generate a logo image for the pipeline via nanobanana.
-  if (req.method === 'POST' && subPath === '/generate-logo') {
-    const body = await readBody(req);
-    const prompt: string = body.prompt;
-    if (!prompt) {
-      sendJson(res, 400, { error: 'prompt required' });
-      return true;
-    }
-
-    try {
-      // Determine output path — prefer project folder, fall back to pipeline dir
-      const projFolder = await resolveProjectFolder(pipelineId);
-      const logoDir = join(projFolder, 'assets');
-      await mkdir(logoDir, { recursive: true });
-      const outputPath = join(logoDir, `pipeline-logo.png`);
-
-      // Call nanobanana
-      await ctx.extensionManager?.whenReady();
-      const tools = ctx.extensionManager?.getAllTools() ?? [];
-      const nbTool = tools.find(t => t.definition.name === 'nanobanana');
-
-      let filePath: string;
-
-      if (nbTool) {
-        const result = await nbTool.handler({
-          action: 'generate',
-          prompt,
-          outputPath,
-          aspectRatio: '1:1',
-        }, { workingDirectory: logoDir } as any);
-        const parsed = typeof result === 'string' ? JSON.parse(result) : result;
-        if (!parsed.success) throw new Error(parsed.error || 'Generation failed');
-        filePath = parsed.imagePath || parsed.filePath || outputPath;
-      } else {
-        // Try direct import
-        const { nanobanana: nb } = await import('../../loop/tools/nanobanana.js');
-        const result = JSON.parse(await nb({
-          action: 'generate',
-          prompt,
-          outputPath,
-          aspectRatio: '1:1',
-        } as any, logoDir));
-        if (!result.success) throw new Error(result.error || 'Generation failed');
-        filePath = result.imagePath || result.filePath || outputPath;
-      }
-
-      sendJson(res, 200, { success: true, filePath });
-    } catch (err) {
-      debugLog.error('generate-logo', `Error: ${err}`);
       sendJson(res, 500, { error: (err instanceof Error ? err.message : String(err)) });
     }
     return true;
@@ -2162,9 +1056,6 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
 
   // ── POST /api/app/:id/rules/run ──────────────────────────────
   // Execute binding rules against current pipeline data.
-  // Scans node outputs for entities, applies text-match rules,
-  // and creates new bindings. No hardcoded domain logic — everything
-  // comes from the pipeline's own rules configuration.
   if (req.method === 'POST' && subPath === '/rules/run') {
     const compositions = await discoverCompositions();
     const entry = compositions.find(c => c.composition.id === pipelineId);
@@ -2191,76 +1082,25 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
     return true;
   }
 
-
-  // ── PUT /api/app/:id/element/:elementId ──────────────────────
-  // Update a single element's field (e.g., shot description)
-  const elementMatch = subPath.match(/^\/element\/([^/]+)$/);
-  if (req.method === 'PUT' && elementMatch) {
-    const elementId = decodeURIComponent(elementMatch[1]);
-    const body = await readBody(req);
-    const { field, value, elementType } = body;
-
-    if (!field || value === undefined) {
-      sendJson(res, 400, { error: 'field and value required' });
-      return true;
-    }
-
-    // Try updating through ProjectStateManager
-    const project = ctx.projectState?.get(pipelineId);
-    if (project) {
-      const elem = project.elements?.find(e => e.id === elementId);
-      if (elem) {
-        (elem as any)[field] = value;
-        (elem as any)._editedAt = new Date().toISOString();
-        ctx.projectState.markDirty(pipelineId, ['elements']);
-        sendJson(res, 200, { success: true, elementId, field, value });
-        return true;
-      }
-    }
-
-    // Legacy fallback: scan node files
-    const dir = join(APP_STATE_DIR, pipelineId);
-    let files: string[];
-    try { files = await readdir(dir); } catch {
-      sendJson(res, 404, { error: 'Element not found: ' + elementId });
-      return true;
-    }
-
-    let updated = false;
-    for (const file of files) {
-      if (!file.endsWith('.json') || file === '_manifest.json') continue;
-      const filePath = join(dir, file);
-      try {
-        const raw = await readFile(filePath, 'utf-8');
-        const data = JSON.parse(raw);
-        if (updateElementField(data, elementId, field, value)) {
-          await writeFile(filePath, JSON.stringify(data, null, 2));
-          updated = true;
-          break;
-        }
-      } catch { /* skip */ }
-    }
-
-    if (!updated) {
-      sendJson(res, 404, { error: 'Element not found: ' + elementId });
-      return true;
-    }
-
-    sendJson(res, 200, { success: true, elementId, field, value });
-    return true;
-  }
-
   // ── GET /api/app/:id/views — discover pipeline-local custom views ──
   if (req.method === 'GET' && subPath === '/views') {
     const compositions = await discoverCompositions();
     const entry = compositions.find((c: any) => c.composition.id === pipelineId);
-    if (!entry || !entry.pipelineDir) {
+    if (!entry) {
       sendJson(res, 200, { views: [] });
       return true;
     }
 
-    const viewsDir = join(entry.pipelineDir, 'views');
-    const views: Array<{ name: string; label: string; icon?: string; hasCSS: boolean; description?: string }> = [];
+    // Resolve the directory containing views — v2 pipelines use pipelineDir,
+    // v1 compositions use the directory containing the .composition.json file
+    const baseDir = entry.pipelineDir || (entry.path ? dirname(entry.path) : null);
+    if (!baseDir) {
+      sendJson(res, 200, { views: [] });
+      return true;
+    }
+
+    const viewsDir = join(baseDir, 'views');
+    const views: Array<{ name: string; label: string; icon?: string; hasCSS: boolean; description?: string; type: string; bundle: string; order?: number }> = [];
 
     try {
       const entries = await readdir(viewsDir, { withFileTypes: true });
@@ -2268,9 +1108,14 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
         if (!ent.isDirectory()) continue;
         const viewDir = join(viewsDir, ent.name);
 
-        // Must have a view.js
+        // Must have a view.js or view.bundle.js
         const jsPath = join(viewDir, 'view.js');
-        try { await access(jsPath); } catch { continue; }
+        const bundlePath = join(viewDir, 'view.bundle.js');
+        let hasJs = false;
+        let hasBundle = false;
+        try { await access(jsPath); hasJs = true; } catch {}
+        try { await access(bundlePath); hasBundle = true; } catch {}
+        if (!hasJs && !hasBundle) continue;
 
         // Check for optional manifest.json
         let manifest: any = { name: ent.name, label: ent.name };
@@ -2289,6 +1134,9 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
           icon: manifest.icon,
           hasCSS,
           description: manifest.description,
+          type: manifest.type || 'vanilla',
+          bundle: manifest.bundle || 'view.js',
+          order: manifest.order,
         });
       }
     } catch { /* no views directory */ }
@@ -2319,12 +1167,13 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
 
     const compositions = await discoverCompositions();
     const entry = compositions.find((c: any) => c.composition.id === pipelineId);
-    if (!entry || !entry.pipelineDir) {
+    const viewBaseDir = entry?.pipelineDir || (entry?.path ? dirname(entry.path) : null);
+    if (!entry || !viewBaseDir) {
       sendJson(res, 404, { error: 'Pipeline not found' });
       return true;
     }
 
-    const filePath = join(entry.pipelineDir, 'views', viewName, fileName);
+    const filePath = join(viewBaseDir, 'views', viewName, fileName);
     try {
       const content = await readFile(filePath, 'utf-8');
       const mimeType = ext === '.js' ? 'application/javascript' : 'text/css';
@@ -2339,270 +1188,30 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
     return true;
   }
 
-  // ── POST /api/app/:id/extract-pdf-text — extract text from uploaded PDF ──
-  if (req.method === 'POST' && subPath === '/extract-pdf-text') {
-    try {
-      // Read raw body as buffer
-      const chunks: Buffer[] = [];
-      for await (const chunk of req) {
-        chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk);
+  // ── Dynamic pipeline routes ──────────────────────────────────
+  // If none of the core routes matched, try loading pipeline-specific routes.
+  // Pipelines ship a routes/index.js that handles their custom endpoints
+  // (e.g., generate-previs, render-dialogue, render-video, etc.)
+  try {
+    const compositions = await discoverCompositions();
+    const entry = compositions.find(c => c.composition.id === pipelineId);
+    const baseDir = entry?.pipelineDir || (entry?.path ? dirname(entry.path) : null);
+    if (baseDir) {
+      const pipelineHandler = await loadPipelineRoutes(pipelineId, baseDir, ctx);
+      if (pipelineHandler) {
+        const handled = await pipelineHandler(req, res, subPath);
+        if (handled) return true;
       }
-      const pdfBuffer = Buffer.concat(chunks);
-
-      // Use pdfjs-dist with spatial awareness to preserve screenplay formatting
-      const pdfjsLib = await import('pdfjs-dist/legacy/build/pdf.mjs') as any;
-      const doc = await pdfjsLib.getDocument({ data: new Uint8Array(pdfBuffer) }).promise;
-
-      // Get page width from first page to determine column positions
-      const page1 = await doc.getPage(1);
-      const viewport = page1.getViewport({ scale: 1 });
-      const pageWidth = viewport.width; // typically ~612 for letter
-      const pageHeight = viewport.height;
-
-      let fullText = '';
-
-      for (let i = 1; i <= doc.numPages; i++) {
-        const page = await doc.getPage(i);
-        const content = await page.getTextContent();
-
-        // Group items by Y position (same line)
-        interface TextItem { str: string; x: number; y: number; width: number; fontSize: number; }
-        const items: TextItem[] = content.items
-          .filter((item: any) => item.str && item.str.trim())
-          .map((item: any) => ({
-            str: item.str,
-            x: item.transform[4],          // horizontal position
-            y: Math.round(item.transform[5]), // vertical position (round to group)
-            width: item.width,
-            fontSize: Math.abs(item.transform[0]),
-          }));
-
-        // Sort by Y descending (top to bottom), then X ascending (left to right)
-        items.sort((a, b) => b.y - a.y || a.x - b.x);
-
-        // Group into lines by Y proximity
-        const lines: TextItem[][] = [];
-        let currentLine: TextItem[] = [];
-        let lastY = -1;
-        for (const item of items) {
-          if (lastY >= 0 && Math.abs(item.y - lastY) > 3) {
-            if (currentLine.length) lines.push(currentLine);
-            currentLine = [];
-          }
-          currentLine.push(item);
-          lastY = item.y;
-        }
-        if (currentLine.length) lines.push(currentLine);
-
-        // Reconstruct lines preserving indentation
-        for (const lineItems of lines) {
-          lineItems.sort((a, b) => a.x - b.x);
-          const firstX = lineItems[0].x;
-
-          // Build the line text, preserving gaps between items
-          let lineText = '';
-          for (let j = 0; j < lineItems.length; j++) {
-            if (j > 0) {
-              const gap = lineItems[j].x - (lineItems[j-1].x + lineItems[j-1].width);
-              if (gap > 10) lineText += '  '; // wide gap = intentional spacing
-              else if (gap > 2) lineText += ' ';
-            }
-            lineText += lineItems[j].str;
-          }
-
-          // Determine element type from x-position
-          // Standard screenplay PDF positions (letter size, 612pt width):
-          //   Action/Scene heading: x≈108 (1.5" left margin)
-          //   Dialogue: x≈180 (2.5")
-          //   Character name: x≈252 (3.5", centered)
-          //   Parenthetical: x≈216 (3.0")
-          //   Transition: x≈400+ (right-aligned)
-          //   Page numbers: x≈507 (right margin)
-
-          const trimmed = lineText.trim();
-          if (!trimmed) { fullText += '\n'; continue; }
-
-          // Skip page numbers (single numbers near right margin)
-          if (/^\d+\.?$/.test(trimmed) && firstX > pageWidth * 0.7) continue;
-          // Skip CONTINUED markers
-          if (/^(CONTINUED|MORE|\(CONTINUED\)|\(MORE\))$/i.test(trimmed)) continue;
-
-          // Classify by x-position using adaptive thresholds based on page width
-          const actionX = pageWidth * 0.17;    // ~108 on letter
-          const dialogueX = pageWidth * 0.27;  // ~165 on letter
-          const parenthX = pageWidth * 0.33;   // ~202 on letter
-          const characterX = pageWidth * 0.38; // ~232 on letter
-          const transitionX = pageWidth * 0.60; // ~367 on letter
-
-          if (firstX >= transitionX) {
-            // Transition (right-aligned)
-            fullText += '\n' + trimmed + '\n';
-          } else if (firstX >= characterX) {
-            // Character name (centered)
-            fullText += '\n' + trimmed + '\n';
-          } else if (firstX >= parenthX) {
-            // Parenthetical
-            if (!trimmed.startsWith('(')) fullText += '(' + trimmed + ')\n';
-            else fullText += trimmed + '\n';
-          } else if (firstX >= dialogueX) {
-            // Dialogue
-            fullText += trimmed + '\n';
-          } else {
-            // Action or scene heading (left-aligned)
-            if (/^(INT|EXT|EST|INT\.?\/?EXT)/i.test(trimmed)) {
-              fullText += '\n' + trimmed + '\n';
-            } else {
-              fullText += '\n' + trimmed + '\n';
-            }
-          }
-        }
-
-        fullText += '\n'; // page break
-      }
-
-      // Clean up excessive blank lines
-      fullText = fullText.replace(/\n{4,}/g, '\n\n\n');
-
-      sendJson(res, 200, { text: fullText.trim(), pages: doc.numPages });
-    } catch (err: any) {
-      sendJson(res, 500, { error: 'Failed to parse PDF: ' + (err.message || String(err)) });
     }
-    return true;
-  }
-
-  // ── POST /api/app/:id/generate-assets — generate headshots and location shots ──
-  if (req.method === 'POST' && subPath === '/generate-assets') {
-    try {
-      const body = await readBody(req);
-      const entityType = body.type || 'all'; // 'characters', 'locations', or 'all'
-
-      // Get project data from ProjectStateManager
-      let project: any = ctx.projectState?.get(pipelineId);
-      let pfolder = ctx.projectState?.getProjectFolder(pipelineId);
-
-      // Fallback: try loading
-      if (!project) {
-        try {
-          pfolder = await resolveProjectFolder(pipelineId);
-          const projFile = await loadProjectFile(pfolder);
-          if (pfolder && projFile) {
-            await ctx.projectState.load(pipelineId, pipelineId, pfolder);
-            project = ctx.projectState.get(pipelineId);
-          }
-        } catch { /* ignore */ }
-      }
-
-      if (!project || !pfolder) {
-        sendJson(res, 400, { error: 'No project data found' });
-        return true;
-      }
-
-      // Import nanobanana
-      let nanobananaTool: any;
-      try {
-        const { nanobanana: nb } = await import('../../loop/tools/nanobanana.js');
-        nanobananaTool = nb;
-      } catch (err) {
-        sendJson(res, 500, { error: 'Image generation not available: ' + String(err) });
-        return true;
-      }
-
-      const results: Array<{ name: string; type: string; path?: string; error?: string }> = [];
-
-      // Generate character headshots
-      if (entityType === 'characters' || entityType === 'all') {
-        const chars = project.characters || [];
-        const charDir = join(pfolder, 'characters');
-        await mkdir(charDir, { recursive: true });
-
-        for (const char of chars) {
-          try {
-            let prompt = `Professional headshot portrait of ${char.name || 'a person'}`;
-            if (char.description) prompt += `. ${char.description}`;
-            if (char.ageRange) prompt += ` Age: ${char.ageRange}.`;
-            if (char.gender) prompt += ` ${char.gender}.`;
-            if (char.wardrobeNotes) prompt += ` Wearing: ${char.wardrobeNotes}.`;
-            prompt += ' Cinematic lighting, studio portrait, shallow depth of field, 85mm lens. Photorealistic.';
-
-            const safeName = (char.id || char.name || 'char').replace(/[^a-zA-Z0-9_-]/g, '_');
-            const outputPath = join(charDir, `${safeName}.png`);
-
-            const result = await nanobananaTool({
-              action: 'generate' as const,
-              prompt,
-              model: 'flash',
-              aspectRatio: '3:4',
-              outputPath,
-            }, charDir);
-
-            const parsed = typeof result === 'string' ? JSON.parse(result) : result;
-            const imgPath = parsed.path || outputPath;
-            results.push({ name: char.name, type: 'character', path: imgPath });
-            // Save incrementally so polling clients see new images
-            char.imagePath = imgPath;
-            ctx.projectState.update(pipelineId, { characters: project.characters });
-            await ctx.projectState.flush(pipelineId);
-          } catch (err: any) {
-            results.push({ name: char.name, type: 'character', error: err.message || String(err) });
-          }
-        }
-      }
-
-      // Generate location shots
-      if (entityType === 'locations' || entityType === 'all') {
-        const locs = project.locations || [];
-        const locDir = join(pfolder, 'locations');
-        await mkdir(locDir, { recursive: true });
-
-        for (const loc of locs) {
-          try {
-            let prompt = `Cinematic establishing shot of ${loc.name || 'a location'}`;
-            if (loc.description) prompt += `. ${loc.description}`;
-            if (loc.mood) prompt += ` Mood: ${loc.mood}.`;
-            if (loc.atmosphere) prompt += ` ${loc.atmosphere}`;
-            prompt += ' Wide-angle lens, dramatic lighting, film grain, professional cinematography. 35mm film look.';
-
-            const safeName = (loc.id || loc.name || 'loc').replace(/[^a-zA-Z0-9_-]/g, '_');
-            const outputPath = join(locDir, `${safeName}.png`);
-
-            const result = await nanobananaTool({
-              action: 'generate' as const,
-              prompt,
-              model: 'flash',
-              aspectRatio: '16:9',
-              outputPath,
-            }, locDir);
-
-            const parsed = typeof result === 'string' ? JSON.parse(result) : result;
-            const imgPath = parsed.path || outputPath;
-            results.push({ name: loc.name, type: 'location', path: imgPath });
-            // Save incrementally so polling clients see new images
-            loc.imagePath = imgPath;
-            ctx.projectState.update(pipelineId, { locations: project.locations });
-            await ctx.projectState.flush(pipelineId);
-          } catch (err: any) {
-            results.push({ name: loc.name, type: 'location', error: err.message || String(err) });
-          }
-        }
-      }
-
-      // Final save — project state is already up to date from incremental saves
-      await ctx.projectState.flush(pipelineId);
-
-      const succeeded = results.filter(r => r.path).length;
-      const failed = results.filter(r => r.error).length;
-      sendJson(res, 200, { success: true, generated: succeeded, failed, results });
-    } catch (err: any) {
-      sendJson(res, 500, { error: 'Asset generation failed: ' + (err.message || String(err)) });
-    }
-    return true;
+  } catch (err) {
+    debugLog.error('pipeline-app', `Error loading pipeline routes for ${pipelineId}`, { error: String(err) });
   }
 
   return false;
 };
 
 // ────────────────────────────────────────────────────────────────
-//  Auto-run rules — shared by /rules/run and generate-previs
+//  Auto-run rules — shared by /rules/run and pipeline routes
 // ────────────────────────────────────────────────────────────────
 
 /**
@@ -2625,29 +1234,12 @@ async function autoRunRules(
   const seenSourceIds = new Set<string>();
   const seenTargetIds = new Set<string>();
 
-  // Try reading from ProjectStateManager first
+  // Read from ProjectStateManager
   const project = ctx?.projectState?.get(pipelineId);
   if (project) {
-    // Scan project data for entities
     const outputs = { characters: project.characters, locations: project.locations, elements: project.elements, scenes: project.scenes, previsualizations: project.previsualizations, assets: project.assets };
     scanForEntities(outputs, sourceTypes, sourceEntities, seenSourceIds);
     scanForEntities(outputs, targetTypes, targetEntities, seenTargetIds);
-  } else {
-    // Legacy fallback: read from node state files
-    const stateDir = join(APP_STATE_DIR, pipelineId);
-    let nodeDataFiles: string[] = [];
-    try { nodeDataFiles = await readdir(stateDir); } catch { /* empty */ }
-
-    for (const f of nodeDataFiles) {
-      if (!f.endsWith('.json') || f.startsWith('_')) continue;
-      try {
-        const raw = await readFile(join(stateDir, f), 'utf-8');
-        const nodeData = JSON.parse(raw);
-        const outputs = nodeData.outputs || nodeData;
-        scanForEntities(outputs, sourceTypes, sourceEntities, seenSourceIds);
-        scanForEntities(outputs, targetTypes, targetEntities, seenTargetIds);
-      } catch { /* skip */ }
-    }
   }
 
   debugLog.info('auto-run-rules', `Discovered ${sourceEntities.length} source entities, ${targetEntities.length} target entities`);
@@ -2691,8 +1283,7 @@ async function autoRunRules(
 
 /**
  * Recursively scan node outputs for arrays of objects that match
- * the expected entity types. Uses heuristics: array key name,
- * item.type field, or singular form of the key.
+ * the expected entity types.
  */
 function scanForEntities(
   obj: any,
@@ -2704,10 +1295,6 @@ function scanForEntities(
   for (const key of Object.keys(obj)) {
     const val = obj[key];
     if (Array.isArray(val) && val.length > 0 && val[0] && typeof val[0] === 'object') {
-      // Determine entity type from:
-      // 1. item.type field (e.g., { type: "shot", ... })
-      // 2. singular of array key (e.g., "characters" → "character")
-      // 3. the key itself
       for (const item of val) {
         const itemType: string = (
           item.type ||
@@ -2733,324 +1320,4 @@ function scanForEntities(
       scanForEntities(val, targetTypes, results, seenIds);
     }
   }
-}
-
-// ────────────────────────────────────────────────────────────────
-//  Action config loader — reads pipeline-owned behavior configs
-// ────────────────────────────────────────────────────────────────
-
-/**
- * Load an action config from the pipeline's actions/ directory.
- * Returns the config or a safe empty default if not found.
- *
- * Action configs live at <pipelineDir>/actions/<actionId>.json.
- * They define pipeline-specific behavior that the server executes.
- * The chat agent can modify these files when the user asks for changes.
- */
-async function loadActionConfig(pipelineDir: string | undefined, actionId: string): Promise<Record<string, any>> {
-  if (!pipelineDir) return {};
-  const configPath = join(pipelineDir, 'actions', `${actionId}.json`);
-  try {
-    const raw = await readFile(configPath, 'utf-8');
-    return JSON.parse(raw);
-  } catch {
-    return {};
-  }
-}
-
-// ────────────────────────────────────────────────────────────────
-//  Screenplay data helpers — resolve references for previs gen
-// ────────────────────────────────────────────────────────────────
-
-interface ScreenplayData {
-  characters: Record<string, any>;
-  locations: Record<string, any>;
-  elementMap: Record<string, any>;
-  previsMap: Record<string, any>;
-  characterAssets: Record<string, any>;  // characterId -> asset with filePath
-  locationAssets: Record<string, any>;   // locationId -> asset with filePath
-  assetMap: Record<string, any>;         // assetId -> asset
-  scenes?: any[];                        // scene-grouped data (SceneData[])
-}
-
-/**
- * Collect all screenplay-related data from the ProjectStateManager.
- * Reads from memory — no file scanning needed.
- */
-async function collectScreenplayData(pipelineId: string, ctx: DashboardContext): Promise<ScreenplayData | null> {
-  const project = ctx.projectState?.get(pipelineId);
-  if (!project || !project.elements?.length) {
-    // Try loading if not in memory yet
-    try {
-      const compositions = await discoverCompositions();
-      const entry = compositions.find((c: any) => c.composition?.id === pipelineId);
-      const pfolder = entry?.composition?.metadata?.projectFolder;
-      if (pfolder) {
-        const loaded = await ctx.projectState.load(pipelineId, entry?.composition?.name || pipelineId, pfolder);
-        if (!loaded.elements?.length) return null;
-        return buildScreenplayMaps(loaded);
-      }
-    } catch { /* ignore */ }
-    return null;
-  }
-
-  return buildScreenplayMaps(project);
-}
-
-function buildScreenplayMaps(project: any): ScreenplayData {
-  const allCharacters = project.characters || [];
-  const allLocations = project.locations || [];
-  const allElements = project.elements || [];
-  const allPrevis = project.previsualizations?.shots || [];
-  const allAssets = project.assets || [];
-
-  // Build lookup maps
-  const characters: Record<string, any> = {};
-  for (const c of allCharacters) characters[c.id] = c;
-
-  const locations: Record<string, any> = {};
-  for (const l of allLocations) locations[l.id] = l;
-
-  const elementMap: Record<string, any> = {};
-  for (const e of allElements) elementMap[e.id] = e;
-
-  const previsMap: Record<string, any> = {};
-  for (const p of allPrevis) previsMap[p.shotElementId] = p;
-
-  const assetMap: Record<string, any> = {};
-  for (const a of allAssets) assetMap[a.id] = a;
-
-  // Map character IDs to their headshot assets
-  const characterAssets: Record<string, any> = {};
-  for (const asset of allAssets) {
-    const meta = asset.metadata || {};
-    if (meta.characterId && (asset.type === 'character-headshot' || asset.name?.toLowerCase().includes('headshot'))) {
-      characterAssets[meta.characterId] = asset;
-    }
-  }
-  for (const c of allCharacters) {
-    if (c.imagePath && !characterAssets[c.id]) {
-      characterAssets[c.id] = { id: c.id, filePath: c.imagePath, type: 'character-headshot' };
-    }
-  }
-
-  // Map location IDs to their landscape assets
-  const locationAssets: Record<string, any> = {};
-  for (const asset of allAssets) {
-    const meta = asset.metadata || {};
-    if (meta.locationId && (asset.type === 'landscape' || asset.name?.toLowerCase().includes('landscape'))) {
-      locationAssets[meta.locationId] = asset;
-    }
-  }
-  for (const l of allLocations) {
-    if (l.imagePath && !locationAssets[l.id]) {
-      locationAssets[l.id] = { id: l.id, filePath: l.imagePath, type: 'landscape' };
-    }
-  }
-
-  return {
-    characters,
-    locations,
-    elementMap,
-    previsMap,
-    characterAssets,
-    locationAssets,
-    assetMap,
-    scenes: project.scenes,
-  };
-}
-
-/** Check if a file path exists synchronously */
-function fileExists(filePath: string): boolean {
-  try { return existsSync(filePath); } catch { return false; }
-}
-
-/**
- * Update the previs asset filePath in the stored app state after regeneration.
- * Finds the previs entry matching this element and updates its assetId's filePath,
- * or adds a new asset entry.
- */
-async function updatePrevisAsset(
-  pipelineId: string,
-  elementId: string,
-  newFilePath: string,
-  screenplay: ScreenplayData
-): Promise<void> {
-  // Find which node file contains the previsualizations
-  const dir = join(APP_STATE_DIR, pipelineId);
-  let files: string[];
-  try { files = await readdir(dir); } catch { return; }
-
-  let updatedShots = false;
-  let updatedAsset = false;
-
-  for (const file of files) {
-    if (!file.endsWith('.json') || file === '_manifest.json') continue;
-    const filePath = join(dir, file);
-    try {
-      const raw = await readFile(filePath, 'utf-8');
-      const data = JSON.parse(raw);
-      let changed = false;
-
-      // Update the previs shots entry (_generatedFilePath)
-      if (!updatedShots && updatePrevisInObj(data, elementId, newFilePath)) {
-        updatedShots = true;
-        changed = true;
-        debugLog.info('generate-previs', `Updated previs shot in ${file} for ${elementId}`);
-      }
-
-      // Update the asset in assetCollection (filePath on the asset itself)
-      if (!updatedAsset && updatePrevisAssetFilePath(data, elementId, newFilePath)) {
-        updatedAsset = true;
-        changed = true;
-        debugLog.info('generate-previs', `Updated asset filePath in ${file} for ${elementId}`);
-      }
-
-      if (changed) {
-        await writeFile(filePath, JSON.stringify(data, null, 2));
-      }
-    } catch { /* skip */ }
-
-    if (updatedShots && updatedAsset) return;
-  }
-}
-
-/**
- * Update the filePath on a previs-frame asset in an assetCollection.
- * Matches assets where metadata.shotElementId === elementId.
- */
-function updatePrevisAssetFilePath(obj: any, elementId: string, newFilePath: string): boolean {
-  if (!obj || typeof obj !== 'object') return false;
-  if (Array.isArray(obj)) {
-    for (const item of obj) {
-      if (item?.type === 'previs-frame' && item?.metadata?.shotElementId === elementId) {
-        item.filePath = newFilePath;
-        return true;
-      }
-      if (updatePrevisAssetFilePath(item, elementId, newFilePath)) return true;
-    }
-    return false;
-  }
-  for (const k of Object.keys(obj)) {
-    if (updatePrevisAssetFilePath(obj[k], elementId, newFilePath)) return true;
-  }
-  return false;
-}
-
-/**
- * Recursively walk an object to find and update the previs shot matching elementId.
- * Updates the asset's filePath or creates a new asset entry.
- */
-
-/**
- * Recursively walk an object to find and update an element by ID.
- * Updates the specified field on the element.
- */
-function updateElementField(obj: any, elementId: string, field: string, value: any): boolean {
-  if (!obj || typeof obj !== 'object') return false;
-  if (Array.isArray(obj)) {
-    for (const item of obj) {
-      // Check if this item is the element we're looking for
-      if (item?.id === elementId) {
-        item[field] = value;
-        item._editedAt = new Date().toISOString();
-        return true;
-      }
-      if (updateElementField(item, elementId, field, value)) return true;
-    }
-    return false;
-  }
-  // Check if this object is the element
-  if (obj.id === elementId) {
-    obj[field] = value;
-    obj._editedAt = new Date().toISOString();
-    return true;
-  }
-  // Recurse into object properties
-  for (const k of Object.keys(obj)) {
-    if (updateElementField(obj[k], elementId, field, value)) return true;
-  }
-  return false;
-}
-
-function updatePrevisInObj(obj: any, elementId: string, newFilePath: string): boolean {
-  if (!obj || typeof obj !== 'object') return false;
-  if (Array.isArray(obj)) {
-    for (const item of obj) {
-      if (item?.shotElementId === elementId) {
-        // Found the previs entry — update or create its asset reference
-        item._generatedFilePath = newFilePath;
-        item._generatedAt = new Date().toISOString();
-        return true;
-      }
-      if (updatePrevisInObj(item, elementId, newFilePath)) return true;
-    }
-    return false;
-  }
-  for (const k of Object.keys(obj)) {
-    if (updatePrevisInObj(obj[k], elementId, newFilePath)) return true;
-  }
-  return false;
-}
-
-/**
- * Add or update a dialogue-audio asset in the app state.
- * Finds the node file containing the assetCollection and adds the asset,
- * replacing any existing asset for the same dialogueElementId.
- */
-async function addDialogueAudioAsset(pipelineId: string, asset: any): Promise<void> {
-  const dir = join(APP_STATE_DIR, pipelineId);
-  let files: string[];
-  try { files = await readdir(dir); } catch { return; }
-
-  for (const file of files) {
-    if (!file.endsWith('.json') || file === '_manifest.json') continue;
-    const filePath = join(dir, file);
-    try {
-      const raw = await readFile(filePath, 'utf-8');
-      const data = JSON.parse(raw);
-      if (insertDialogueAudioInObj(data, asset)) {
-        await writeFile(filePath, JSON.stringify(data, null, 2));
-        debugLog.info('generate-dialogue-audio', `Added dialogue-audio asset to ${file} for ${asset.metadata?.dialogueElementId}`);
-        return;
-      }
-    } catch { /* skip */ }
-  }
-
-  // If no assetCollection found in any node, log a warning
-  debugLog.info('generate-dialogue-audio', `No assetCollection found in any node for pipeline ${pipelineId}`);
-}
-
-/**
- * Recursively walk an object to find an `assetCollection` with an `assets` array.
- * Remove any existing dialogue-audio for the same dialogueElementId, then append the new asset.
- */
-function insertDialogueAudioInObj(obj: any, asset: any): boolean {
-  if (!obj || typeof obj !== 'object') return false;
-  if (Array.isArray(obj)) {
-    for (const item of obj) {
-      if (insertDialogueAudioInObj(item, asset)) return true;
-    }
-    return false;
-  }
-  // Check if this object has an assets array (assetCollection or similar)
-  if (obj.assetCollection && Array.isArray(obj.assetCollection.assets)) {
-    const assets: any[] = obj.assetCollection.assets;
-    const dialogueElementId = asset.metadata?.dialogueElementId;
-    // Remove any existing dialogue-audio for this same element
-    if (dialogueElementId) {
-      for (let i = assets.length - 1; i >= 0; i--) {
-        if (assets[i]?.type === 'dialogue-audio' &&
-            assets[i]?.metadata?.dialogueElementId === dialogueElementId) {
-          assets.splice(i, 1);
-        }
-      }
-    }
-    assets.push(asset);
-    return true;
-  }
-  for (const k of Object.keys(obj)) {
-    if (insertDialogueAudioInObj(obj[k], asset)) return true;
-  }
-  return false;
 }

@@ -8,7 +8,15 @@ import { GitStatus } from './GitStatus';
 import { SaveLoadPanel } from './SaveLoadPanel';
 import { CommandBar } from './CommandBar';
 
-export type ViewMode = 'overview' | 'data' | 'screenplay' | 'editor' | 'script' | 'voices' | 'settings';
+export type ViewMode = string;
+
+export interface ViewDefinition {
+  id: string;
+  label: string;
+  icon: string;
+  type?: 'builtin' | 'react' | 'vanilla';
+  order?: number;
+}
 
 interface SidebarProps {
   currentView: ViewMode;
@@ -18,18 +26,10 @@ interface SidebarProps {
   pipelineId: string;
   schema: any | null;
   appState: any | null;
+  availableViews: ViewDefinition[];
 }
 
-const VIEW_TABS: Array<{ id: ViewMode; label: string; icon: string }> = [
-  { id: 'overview', label: 'Overview', icon: '📋' },
-  { id: 'data', label: 'Data', icon: '📊' },
-  { id: 'screenplay', label: 'Screenplay', icon: '📜' },
-  { id: 'editor', label: 'Editor', icon: '🎬' },
-  { id: 'script', label: 'Script', icon: '✏️' },
-  { id: 'voices', label: 'Voices', icon: '🎙' },
-];
-
-export function Sidebar({ currentView, onViewChange, activeSection, onSectionChange, pipelineId, schema, appState }: SidebarProps) {
+export function Sidebar({ currentView, onViewChange, activeSection, onSectionChange, pipelineId, schema, appState, availableViews }: SidebarProps) {
   const pipeline = usePipeline();
   const { pipelineName, projectFolder, project: projectData } = pipeline;
 
@@ -125,24 +125,23 @@ export function Sidebar({ currentView, onViewChange, activeSection, onSectionCha
 
       {/* Navigation */}
       <nav className="app-nav" aria-label="App sections">
-        {/* View tabs */}
-        {VIEW_TABS.map(tab => (
+        {/* View tabs (sorted by order) */}
+        {[...availableViews].sort((a, b) => (a.order ?? 0) - (b.order ?? 0)).map(tab => (
           <button
             key={tab.id}
             onClick={() => onViewChange(tab.id)}
             className={`app-nav-item${currentView === tab.id && !activeSection ? ' active' : ''}`}
           >
-            <span className="app-nav-label">{tab.icon} {tab.label}</span>
+            <span className="app-nav-label">
+              {tab.icon && tab.icon.startsWith('<svg') ? (
+                <span className="app-nav-icon" dangerouslySetInnerHTML={{ __html: tab.icon }} />
+              ) : tab.icon ? (
+                <span className="app-nav-icon">{tab.icon}</span>
+              ) : null}
+              {' '}{tab.label}
+            </span>
           </button>
         ))}
-        {settingsSection && (
-          <button
-            onClick={() => onViewChange('settings')}
-            className={`app-nav-item${currentView === 'settings' ? ' active' : ''}`}
-          >
-            <span className="app-nav-label">⚙️ Settings</span>
-          </button>
-        )}
 
         {/* Node sections — collapsible panel */}
         {nodeSections.length > 0 && (

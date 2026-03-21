@@ -64,13 +64,34 @@ export interface Element {
 
 // ── Scene-Grouped Data ──────────────────────────────────────
 
+/** A single previs image generation for a shot. */
+export interface PrevisGeneration {
+  id: string;
+  filePath: string;
+  generatedAt: string;
+  aspectRatio?: string;
+  referenceImages?: string[];
+  referenceCharacterIds?: string[];
+  referenceLocationId?: string;
+  generationModel?: string;
+  generationPrompt?: string;
+}
+
 export interface SceneShot {
   id: string;
   shotType: string;
   description: string;
   characterIds: string[];
+  aspectRatio?: string;
+  /** Path to the currently selected previs image */
   previsPath?: string;
   generatedAt?: string;
+  /** All previs generations for this shot (newest last) */
+  generations?: PrevisGeneration[];
+  /** ID of the user-selected generation (defaults to latest) */
+  selectedGenerationId?: string;
+  /** User-assigned duration in seconds for timeline placement */
+  duration?: number;
 }
 
 export interface SceneDialogue {

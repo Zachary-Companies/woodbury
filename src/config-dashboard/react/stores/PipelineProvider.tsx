@@ -11,11 +11,11 @@ import React, {
   createContext, useContext, useReducer, useCallback, useEffect, useRef, useMemo,
   useState, type ReactNode,
 } from 'react';
-import type { ProjectData, Character, Location, Section, Element, ScriptMetadata, SceneData } from './pipeline-store';
+import type { ProjectData, Character, Location, Section, Element, ScriptMetadata, SceneData, SceneShot, SceneDialogue, PrevisGeneration } from '../../../dashboard/project-types.js';
 import { buildScenes } from '../parsers/fountainParser';
 
-// Re-export types — these come from pipeline-store which re-exports from project-types
-export type { ProjectData, Character, Location, Section, Element, ScriptMetadata, SceneData, SceneShot, SceneDialogue };
+// Re-export types from canonical location
+export type { ProjectData, Character, Location, Section, Element, ScriptMetadata, SceneData, SceneShot, SceneDialogue, PrevisGeneration };
 
 // ════════════════════════════════════════════════════════════════
 // Context 1: Pipeline Identity (rarely changes)
@@ -182,7 +182,6 @@ export function PipelineProvider({ pipelineId, children }: { pipelineId: string;
     const isInitial = !initialLoadDone.current;
     if (isInitial) dispatch({ type: 'LOADING' });
     try {
-      // Try new /api/project/:id endpoint first (single source of truth)
       const projectRes = await fetch(`/api/project/${encodeURIComponent(pipelineId)}`);
 
       let project: ProjectData | null = null;
@@ -194,22 +193,6 @@ export function PipelineProvider({ pipelineId, children }: { pipelineId: string;
         project = data.project;
         pipelineName = data.pipelineName || pipelineId;
         projectFolder = data.projectFolder || null;
-      } else {
-        // Fallback to legacy endpoints
-        const [schemaRes, stateRes] = await Promise.all([
-          fetch(`/api/app/${encodeURIComponent(pipelineId)}/schema`),
-          fetch(`/api/app/${encodeURIComponent(pipelineId)}/state`),
-        ]);
-        const schema = await schemaRes.json();
-        const appState = await stateRes.json();
-        project = extractProjectData(appState, pipelineId);
-        pipelineName = schema?.name || appState?.pipelineName || pipelineId;
-
-        try {
-          const compRes = await fetch(`/api/compositions/${encodeURIComponent(pipelineId)}`);
-          const comp = await compRes.json();
-          projectFolder = comp?.composition?.metadata?.projectFolder || null;
-        } catch {}
       }
 
       // Auto-compute scenes if not present
@@ -236,7 +219,6 @@ export function PipelineProvider({ pipelineId, children }: { pipelineId: string;
     if (!state.project) return;
     dispatch({ type: 'SAVING' });
     try {
-      // Use new PATCH /api/project/:id endpoint (single path)
       const res = await fetch(`/api/project/${encodeURIComponent(pipelineId)}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
@@ -244,12 +226,7 @@ export function PipelineProvider({ pipelineId, children }: { pipelineId: string;
       });
 
       if (!res.ok) {
-        // Fallback to legacy PUT endpoint
-        await fetch(`/api/app/${encodeURIComponent(pipelineId)}/project`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ project: state.project }),
-        });
+        throw new Error(`Save failed: ${res.status} ${res.statusText}`);
       }
 
       dispatch({ type: 'SAVED' });
@@ -267,11 +244,7 @@ export function PipelineProvider({ pipelineId, children }: { pipelineId: string;
 
   // ── Clear project ──────────────────────────────────────────
   const clearProjectAction = useCallback(async () => {
-    // Try new endpoint first, fall back to legacy
-    const res = await fetch(`/api/project/${encodeURIComponent(pipelineId)}`, { method: 'DELETE' });
-    if (!res.ok) {
-      await fetch(`/api/app/${encodeURIComponent(pipelineId)}/state`, { method: 'DELETE' });
-    }
+    await fetch(`/api/project/${encodeURIComponent(pipelineId)}`, { method: 'DELETE' });
     dispatch({ type: 'CLEAR' });
   }, [pipelineId]);
 
@@ -496,46 +469,6 @@ function createEmptyProject(pipelineId: string): ProjectData {
   };
 }
 
-function extractProjectData(appState: any, pipelineId: string): ProjectData | null {
-  if (!appState?.nodeData) return null;
-
-  const nd = appState.nodeData;
-  let metadata: any = {};
-  let characters: any[] = [];
-  let locations: any[] = [];
-  let sections: any[] = [];
-  let elements: any[] = [];
-  let previs: any = { shots: [] };
-  let assets: any[] = [];
-  let fountain = '';
-
-  // Assembly node first (single source of truth)
-  const assembly = nd['node-15'];
-  if (assembly) {
-    const sp = assembly.outputs?.scriptPackage || assembly.scriptPackage;
-    const script = sp?.script || sp;
-    if (script) {
-      metadata = script.metadata || {};
-      characters = script.characters || [];
-      locations = script.locations || [];
-      sections = script.sections || [];
-      elements = script.elements || [];
-    }
-    if (sp?.previsualizations) previs = sp.previsualizations;
-    if (sp?.assets) assets = sp.assets;
-    fountain = assembly.outputs?._fountainSource || assembly._fountainSource || '';
-  }
-
-  // Fill gaps from individual nodes
-  if (!characters.length) characters = nd['node-5']?.outputs?.characters || nd['node-5']?.characters || [];
-  if (!locations.length) locations = nd['node-6']?.outputs?.locations || nd['node-6']?.locations || [];
-  if (!sections.length) sections = nd['node-7']?.outputs?.sections || nd['node-7']?.sections || [];
-  if (!elements.length) elements = nd['node-10']?.outputs?.elements || nd['node-10']?.elements || [];
-  if (!Object.keys(metadata).length) metadata = nd['node-4']?.outputs?.metadata || nd['node-4']?.metadata || {};
-
-  return { version: '1.0', pipelineId, metadata, characters, locations, sections, elements, previsualizations: previs, assets, _fountainSource: fountain };
-}
-
 function computeScenes(project: ProjectData): SceneData[] {
   const scenes = buildScenes({
     sections: project.sections as any,
@@ -544,7 +477,7 @@ function computeScenes(project: ProjectData): SceneData[] {
     locations: project.locations,
   });
 
-  // Link previs paths from previsualizations
+  // Link previs paths and generations from previsualizations
   if (project.previsualizations?.shots) {
     const previsMap: Record<string, any> = {};
     for (const p of project.previsualizations.shots) {
@@ -554,8 +487,21 @@ function computeScenes(project: ProjectData): SceneData[] {
       for (const shot of scene.shots) {
         const prev = previsMap[shot.id];
         if (prev) {
-          shot.previsPath = prev.filePath || prev._generatedFilePath;
-          shot.generatedAt = prev._generatedAt;
+          // Merge generations from previsualizations if scene data doesn't have them
+          if (prev.generations?.length && (!shot.generations || shot.generations.length < prev.generations.length)) {
+            shot.generations = prev.generations;
+          }
+          // Resolve selected generation or use latest
+          if (shot.selectedGenerationId && shot.generations) {
+            const selected = shot.generations.find((g: any) => g.id === shot.selectedGenerationId);
+            if (selected) {
+              shot.previsPath = selected.filePath;
+              shot.generatedAt = selected.generatedAt;
+            }
+          } else {
+            shot.previsPath = shot.previsPath || prev.filePath || prev._generatedFilePath;
+            shot.generatedAt = shot.generatedAt || prev._generatedAt;
+          }
         }
       }
     }

@@ -191,7 +191,7 @@ export function parseFountainText(text: string): ParsedScreenplay {
 // a scene-grouped data model where each scene contains its own dialogue,
 // actions, shots, and character list.
 
-import type { SceneData, SceneDialogue, SceneShot, Character, Location } from '../stores/pipeline-store';
+import type { SceneData, SceneDialogue, SceneShot, Character, Location } from '../../../dashboard/project-types.js';
 
 export interface BuildScenesInput {
   sections: ParsedSection[];

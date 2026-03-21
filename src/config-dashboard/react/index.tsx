@@ -6,14 +6,42 @@
  * Also provides renderCompositionAppPage() to replace compositions-app.js.
  */
 import React from 'react';
+import ReactDOM from 'react-dom';
 import { createRoot, type Root } from 'react-dom/client';
 import { PipelineApp } from './components/PipelineApp';
-import { ScreenplayView } from './components/ScreenplayView';
-import { DataView } from './components/DataView';
 import { ImportModal } from './components/ImportModal';
 import { ImportScriptModal } from './components/ImportScriptModal';
-import { loadPipeline, setState, getState } from './stores/pipeline-store';
+import { PipelineProvider, usePipeline, usePipelineIdentity, useProjectData, useAIOperations } from './stores/PipelineProvider';
+import { ImageZoom } from './components/ImageZoom';
+import * as jsxRuntime from 'react/jsx-runtime';
 import { fetchAppSchema, fetchAppState, fetchAppBindings, loadPipelineCustomViews } from './api/appApi';
+
+// ── React View Registry ──
+// Pipeline-local React views register themselves here via registerReactView()
+const reactViewRegistry = new Map<string, { name: string; label?: string; icon?: string; order?: number; component: any }>();
+
+function registerReactView(def: { name: string; label?: string; icon?: string; order?: number; component: any }) {
+  reactViewRegistry.set(def.name, def);
+}
+
+// Expose registry globally so the view bridge in PipelineApp can access it
+(window as any).__woodburyReactViewRegistry = reactViewRegistry;
+
+// ── View SDK ──
+// Expose React, hooks, and components so pipeline-local React views can use them
+// without bundling their own copies.
+(window as any).__WoodburyViewSDK = {
+  React,
+  ReactDOM,
+  jsxRuntime,
+  PipelineProvider,
+  usePipeline,
+  usePipelineIdentity,
+  useProjectData,
+  useAIOperations,
+  ImageZoom,
+  registerReactView,
+};
 
 let root: Root | null = null;
 let mountEl: HTMLElement | null = null;
@@ -35,30 +63,6 @@ function mountPipelineApp(container: HTMLElement, pipelineId: string, schema?: a
 }
 
 /**
- * Mount just the React screenplay view into a container element.
- */
-function mountScreenplay(container: HTMLElement, pipelineId: string) {
-  unmount();
-  mountEl = container;
-  container.innerHTML = '';
-  root = createRoot(container);
-  root.render(<ScreenplayView />);
-  loadPipeline(pipelineId);
-}
-
-/**
- * Mount the data view.
- */
-function mountDataView(container: HTMLElement, pipelineId: string) {
-  unmount();
-  mountEl = container;
-  container.innerHTML = '';
-  root = createRoot(container);
-  root.render(<DataView />);
-  loadPipeline(pipelineId);
-}
-
-/**
  * Show the import modal (appended to document.body).
  */
 function showImportModal(pipelineId: string) {
@@ -72,11 +76,11 @@ function showImportModal(pipelineId: string) {
     overlay.remove();
   };
 
-  if (getState().pipelineId !== pipelineId) {
-    loadPipeline(pipelineId);
-  }
-
-  importRoot.render(<ImportModal onClose={handleClose} />);
+  importRoot.render(
+    <PipelineProvider pipelineId={pipelineId}>
+      <ImportModal onClose={handleClose} />
+    </PipelineProvider>
+  );
 }
 
 /**
@@ -203,14 +207,9 @@ async function renderCompositionAppPage() {
 // Expose to vanilla JS
 (window as any).WoodburyReact = {
   mountPipelineApp,
-  mountScreenplay,
-  mountDataView,
   showImportModal,
   showImportScriptModal,
   unmount,
-  loadPipeline,
-  getState,
-  setState,
 };
 
 // Replace the global renderCompositionAppPage

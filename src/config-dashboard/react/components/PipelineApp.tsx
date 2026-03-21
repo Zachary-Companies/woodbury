@@ -5,11 +5,7 @@
  */
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { PipelineProvider, usePipeline } from '../stores/PipelineProvider';
-import { Sidebar, type ViewMode } from './Sidebar';
-import { ScreenplayView } from './ScreenplayView';
-import { DataView } from './DataView';
-import { VoicesView } from './VoicesView';
-import { OverviewView } from './OverviewView';
+import { Sidebar, type ViewMode, type ViewDefinition } from './Sidebar';
 import { NodeSection } from './NodeSection';
 import { SettingsView } from './SettingsView';
 import { ImportModal } from './ImportModal';
@@ -39,10 +35,12 @@ function PipelineAppInner({ pipelineId, initialSchema, initialAppState }: {
   const pipeline = usePipeline();
   const { loading, projectFolder, project: projectData } = pipeline;
   const [showImport, setShowImport] = useState(false);
-  const [currentView, setCurrentView] = useState<ViewMode>('screenplay');
+  const [currentView, setCurrentView] = useState<ViewMode>('');
   const [activeSection, setActiveSection] = useState<string | null>(null);
   const [schema, setSchema] = useState<any>(initialSchema || null);
   const [appState, setAppState] = useState<any>(initialAppState || null);
+  const [discoveredViews, setDiscoveredViews] = useState<ViewDefinition[]>([]);
+  const viewsLoaded = useRef(false);
 
   // Fetch schema/state if not passed as props
   useEffect(() => {
@@ -60,6 +58,64 @@ function PipelineAppInner({ pipelineId, initialSchema, initialAppState }: {
       } catch {}
     })();
   }, [pipelineId, schema, appState]);
+
+  // Discover views from the server and merge with reactViewRegistry
+  useEffect(() => {
+    if (viewsLoaded.current) return;
+    viewsLoaded.current = true;
+
+    (async () => {
+      const views: ViewDefinition[] = [];
+      try {
+        const res = await fetch(`/api/app/${encodeURIComponent(pipelineId)}/views`);
+        if (res.ok) {
+          const data = await res.json();
+          for (const v of (data.views || [])) {
+            views.push({
+              id: v.name,
+              label: v.label || v.name,
+              icon: v.icon || '',
+              type: v.type === 'react' ? 'react' : 'vanilla',
+              order: v.order ?? 50,
+            });
+          }
+        }
+      } catch {}
+
+      // Also include any views already registered in the React view registry
+      const registry = (window as any).__woodburyReactViewRegistry as Map<string, any> | undefined;
+      if (registry) {
+        for (const [name, def] of registry) {
+          if (!views.find(v => v.id === name)) {
+            views.push({
+              id: name,
+              label: def.label || name,
+              icon: def.icon || '',
+              type: 'react',
+              order: def.order ?? 50,
+            });
+          }
+        }
+      }
+
+      setDiscoveredViews(views);
+    })();
+  }, [pipelineId]);
+
+  // Build the full availableViews list
+  const settingsSection = schema?.sections?.find((s: any) => s.type === 'settings') || null;
+  const availableViews: ViewDefinition[] = [
+    ...discoveredViews,
+    ...(settingsSection ? [{ id: 'settings', label: 'Settings', icon: '⚙️', type: 'builtin' as const, order: 999 }] : []),
+  ];
+
+  // Set default view to the first available view (by order) once views are loaded
+  useEffect(() => {
+    if (currentView === '' && availableViews.length > 0) {
+      const sorted = [...availableViews].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+      setCurrentView(sorted[0].id);
+    }
+  }, [availableViews, currentView]);
 
   const handleViewChange = useCallback((view: ViewMode) => {
     setCurrentView(view);
@@ -116,6 +172,7 @@ function PipelineAppInner({ pipelineId, initialSchema, initialAppState }: {
         pipelineId={pipelineId}
         schema={schema}
         appState={appState}
+        availableViews={availableViews}
       />
 
       {/* Content */}
@@ -130,17 +187,11 @@ function PipelineAppInner({ pipelineId, initialSchema, initialAppState }: {
               {/* Node section view (when a specific node is selected in sidebar) */}
               {activeSection && activeSectionDef ? (
                 <NodeSection section={activeSectionDef} appState={appState} pipelineId={pipelineId} />
-              ) : (
-                <>
-                  {currentView === 'overview' && <OverviewView schema={schema} appState={appState} />}
-                  {currentView === 'screenplay' && <ScreenplayView />}
-                  {currentView === 'data' && <DataView />}
-                  {currentView === 'voices' && <VoicesView />}
-                  {currentView === 'settings' && <SettingsView schema={schema} appState={appState} pipelineId={pipelineId} />}
-                  {currentView === 'editor' && <VanillaViewBridge viewName="editor" pipelineId={pipelineId} appState={appState} />}
-                  {currentView === 'script' && <VanillaViewBridge viewName="script-editor" pipelineId={pipelineId} appState={appState} />}
-                </>
-              )}
+              ) : currentView === 'settings' ? (
+                <SettingsView schema={schema} appState={appState} pipelineId={pipelineId} />
+              ) : currentView !== '' ? (
+                <DynamicViewBridge viewName={currentView} pipelineId={pipelineId} appState={appState} discoveredViews={discoveredViews} />
+              ) : null}
             </>
           )}
         </div>
@@ -150,6 +201,117 @@ function PipelineAppInner({ pipelineId, initialSchema, initialAppState }: {
       {showImport && <ImportScriptModal pipelineId={pipelineId} onClose={() => setShowImport(false)} />}
     </div>
   );
+}
+
+/**
+ * ReactViewBridge — renders a React component from the __woodburyReactViewRegistry.
+ * If the component isn't registered yet, tries loading its bundle from the server.
+ */
+function ReactViewBridge({ viewName, pipelineId }: {
+  viewName: string;
+  pipelineId: string;
+}) {
+  const [Component, setComponent] = useState<React.ComponentType | null>(null);
+  const [loadingBundle, setLoadingBundle] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const registry = (window as any).__woodburyReactViewRegistry as Map<string, any> | undefined;
+    if (registry && registry.has(viewName)) {
+      setComponent(() => registry.get(viewName)!.component);
+      return;
+    }
+
+    // Not in registry yet — try loading the bundle from the server
+    setLoadingBundle(true);
+    setError(null);
+
+    const enc = encodeURIComponent;
+    const scriptId = `react-view-bundle-${viewName}`;
+    if (document.getElementById(scriptId)) {
+      // Script already in DOM, check registry again after a tick
+      setTimeout(() => {
+        const reg = (window as any).__woodburyReactViewRegistry as Map<string, any> | undefined;
+        if (reg && reg.has(viewName)) {
+          setComponent(() => reg.get(viewName)!.component);
+        } else {
+          setError(`React view "${viewName}" did not register after bundle loaded.`);
+        }
+        setLoadingBundle(false);
+      }, 100);
+      return;
+    }
+
+    const script = document.createElement('script');
+    script.id = scriptId;
+    script.src = `/api/app/${enc(pipelineId)}/view-file/${enc(viewName)}/view.bundle.js`;
+    script.onload = () => {
+      // Give the bundle a tick to call registerReactView()
+      setTimeout(() => {
+        const reg = (window as any).__woodburyReactViewRegistry as Map<string, any> | undefined;
+        if (reg && reg.has(viewName)) {
+          setComponent(() => reg.get(viewName)!.component);
+        } else {
+          setError(`React view "${viewName}" did not register after bundle loaded.`);
+        }
+        setLoadingBundle(false);
+      }, 100);
+    };
+    script.onerror = () => {
+      setError(`Failed to load bundle for React view "${viewName}".`);
+      setLoadingBundle(false);
+    };
+    document.body.appendChild(script);
+
+    return () => {
+      // Don't remove script — it may have registered the view
+    };
+  }, [viewName, pipelineId]);
+
+  if (loadingBundle) {
+    return (
+      <div style={{ padding: 20, color: '#94a3b8', fontSize: 13 }}>
+        Loading view "{viewName}"...
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div style={{ padding: 20, color: '#f87171', fontSize: 13 }}>
+        {error}
+      </div>
+    );
+  }
+
+  if (Component) {
+    return <Component />;
+  }
+
+  return null;
+}
+
+/**
+ * DynamicViewBridge — routes to the right bridge based on view type.
+ * Checks if a view is a React view (in registry) or a vanilla view.
+ */
+function DynamicViewBridge({ viewName, pipelineId, appState, discoveredViews }: {
+  viewName: string;
+  pipelineId: string;
+  appState?: any;
+  discoveredViews?: ViewDefinition[];
+}) {
+  // Check if this is a React view — either already in registry, or discovered as type 'react'
+  const registry = (window as any).__woodburyReactViewRegistry as Map<string, any> | undefined;
+  const isReact = (registry && registry.has(viewName))
+    || discoveredViews?.find(v => v.id === viewName)?.type === 'react';
+
+  if (isReact) {
+    return <ReactViewBridge viewName={viewName} pipelineId={pipelineId} />;
+  }
+
+  // Fall back to vanilla view bridge
+  return <VanillaViewBridge viewName={viewName} pipelineId={pipelineId} appState={appState} />;
 }
 
 /**
