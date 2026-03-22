@@ -72,6 +72,9 @@ export function Sidebar({ currentView, onViewChange, activeSection, onSectionCha
   }, []);
 
   const handleOpenEditor = useCallback(() => {
+    if (typeof (window as any).updateHash === 'function') {
+      (window as any).updateHash('compositions', pipelineId);
+    }
     if (typeof (window as any).selectComposition === 'function') {
       (window as any).selectComposition(pipelineId, null);
     }

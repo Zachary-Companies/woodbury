@@ -109,13 +109,13 @@ function PipelineAppInner({ pipelineId, initialSchema, initialAppState }: {
     ...(settingsSection ? [{ id: 'settings', label: 'Settings', icon: '⚙️', type: 'builtin' as const, order: 999 }] : []),
   ];
 
-  // Set default view to the first available view (by order) once views are loaded
+  // Set default view to the first available view (by order) once custom views are loaded
   useEffect(() => {
-    if (currentView === '' && availableViews.length > 0) {
+    if (discoveredViews.length > 0 && (currentView === '' || currentView === 'settings')) {
       const sorted = [...availableViews].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
       setCurrentView(sorted[0].id);
     }
-  }, [availableViews, currentView]);
+  }, [discoveredViews, availableViews, currentView]);
 
   const handleViewChange = useCallback((view: ViewMode) => {
     setCurrentView(view);
