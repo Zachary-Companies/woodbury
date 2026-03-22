@@ -194,22 +194,70 @@ function OutputBlock({ outputKey, value, section, pipelineId }: {
 function CharacterGrid({ characters, pipelineId }: { characters: any[]; pipelineId: string }) {
   const { enrichCharacter, generateCharacterImages } = useAIOperations();
   const [generating, setGenerating] = useState(false);
+  const [progress, setProgress] = useState<{ current: number; total: number; currentName: string } | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const enrichedCount = characters.filter(c => c.description && c.description.length > 20).length;
+  const withImages = characters.filter(c => c.imagePath).length;
+
+  const handleGenerate = useCallback(async () => {
+    setGenerating(true);
+    setError(null);
+    const missing = characters.filter(c => !c.imagePath);
+    const total = missing.length;
+    if (total === 0) { setGenerating(false); return; }
+    setProgress({ current: 0, total, currentName: missing[0]?.name || '' });
+    try {
+      const result = await generateCharacterImages((completed: number, charName: string) => {
+        setProgress({ current: completed, total, currentName: charName });
+      });
+      if (result?.failed > 0) {
+        setError(`${result.failed} of ${total} failed`);
+      }
+    } catch (err: any) {
+      setError(err.message || 'Generation failed');
+    }
+    setProgress(null);
+    setGenerating(false);
+  }, [characters, generateCharacterImages]);
 
   return (
     <div>
-      <div style={{ display: 'flex', gap: 8, marginBottom: 12, alignItems: 'center' }}>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 12, alignItems: 'center', flexWrap: 'wrap' }}>
         <button
-          onClick={async () => { setGenerating(true); try { await generateCharacterImages(); } catch {} setGenerating(false); }}
+          onClick={handleGenerate}
           disabled={generating}
-          style={{ padding: '6px 12px', borderRadius: 6, fontSize: 11, fontWeight: 500, background: 'rgba(16,185,129,0.1)', border: '1px solid rgba(16,185,129,0.2)', color: '#6ee7b7', cursor: 'pointer' }}
+          style={{ padding: '6px 12px', borderRadius: 6, fontSize: 11, fontWeight: 500, background: 'rgba(16,185,129,0.1)', border: '1px solid rgba(16,185,129,0.2)', color: '#6ee7b7', cursor: 'pointer', opacity: generating ? 0.6 : 1 }}
         >
           {generating ? '⏳ Generating...' : '🖼 Generate Headshots'}
         </button>
         <span style={{ fontSize: 10, color: '#475569' }}>
-          {enrichedCount}/{characters.length} enriched
+          {enrichedCount}/{characters.length} enriched · {withImages}/{characters.length} with images
         </span>
+        {error && (
+          <span style={{ fontSize: 10, color: '#f87171', marginLeft: 4 }}>{error}</span>
+        )}
       </div>
+      {progress && (
+        <div style={{ marginBottom: 14, padding: '10px 14px', borderRadius: 8, background: 'rgba(16,185,129,0.06)', border: '1px solid rgba(16,185,129,0.12)' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+            <span style={{ fontSize: 11, color: '#6ee7b7', fontWeight: 500 }}>
+              Generating: {progress.currentName}
+            </span>
+            <span style={{ fontSize: 10, color: '#64748b' }}>
+              {progress.current}/{progress.total}
+            </span>
+          </div>
+          <div style={{ height: 4, borderRadius: 2, background: 'rgba(255,255,255,0.06)', overflow: 'hidden' }}>
+            <div style={{
+              height: '100%',
+              borderRadius: 2,
+              background: '#10b981',
+              width: `${(progress.current / progress.total) * 100}%`,
+              transition: 'width 0.3s ease',
+            }} />
+          </div>
+        </div>
+      )}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: 12 }}>
         {characters.map(char => (
           <CharacterCard key={char.id || char.name} character={char} pipelineId={pipelineId} />

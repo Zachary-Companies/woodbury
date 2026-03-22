@@ -273,7 +273,10 @@ export async function loadPipelineRoutes(
 
   try {
     // Dynamic import the pipeline's route module
-    const routeModule = await import(`file://${routesPath}`);
+    // Use Function constructor to prevent TypeScript from compiling import() to require()
+    // Pipeline routes are ESM (export default) so they must be loaded with import(), not require()
+    const importDynamic = new Function('specifier', 'return import(specifier)') as (s: string) => Promise<any>;
+    const routeModule = await importDynamic(`file://${routesPath}`);
     const setup: PipelineRouteSetup = routeModule.default || routeModule.setupRoutes;
 
     if (typeof setup !== 'function') {

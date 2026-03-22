@@ -1,5 +1,5 @@
 /**
- * Sidebar — left sidebar for the pipeline app.
+ * Sidebar — collapsible left sidebar for the pipeline app.
  * Uses the existing .app-sidebar CSS classes from styles.css for styling.
  */
 import React, { useState, useCallback } from 'react';
@@ -33,13 +33,13 @@ export function Sidebar({ currentView, onViewChange, activeSection, onSectionCha
   const pipeline = usePipeline();
   const { pipelineName, projectFolder, project: projectData } = pipeline;
 
-  // Derive sections from schema (must be before useState that references nodeSections)
   const overviewSection = schema?.sections?.find((s: any) => s.type === 'overview') || null;
   const settingsSection = schema?.sections?.find((s: any) => s.type === 'settings') || null;
   const nodeSections = schema?.sections?.filter((s: any) => s.type !== 'overview' && s.type !== 'settings') || [];
 
   const [nodesCollapsed, setNodesCollapsed] = useState(nodeSections.length > 6);
   const [showSaveLoad, setShowSaveLoad] = useState(false);
+  const [collapsed, setCollapsed] = useState(false);
   const staleSet = new Set<string>(appState?.staleNodes || []);
   const staleCount = staleSet.size;
 
@@ -47,15 +47,12 @@ export function Sidebar({ currentView, onViewChange, activeSection, onSectionCha
     if (projectData && projectData.elements?.length > 0) {
       if (!confirm('This will clear all current project data. Continue?')) return;
     }
-    // Delete all state on server (this deletes project.json + node files)
     await fetch(`/api/app/${encodeURIComponent(pipelineId)}/state`, { method: 'DELETE' });
-    // Clear projectFolder so it doesn't point to old data on next load
     await fetch(`/api/compositions/${encodeURIComponent(pipelineId)}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ metadata: { projectFolder: null } }),
     });
-    // Navigate to form view (same behavior as old resetAndShowForm)
     if (typeof (window as any).updateHash === 'function') {
       (window as any).updateHash('compositions', pipelineId, 'form');
     }
@@ -101,7 +98,21 @@ export function Sidebar({ currentView, onViewChange, activeSection, onSectionCha
     : null;
 
   return (
-    <div className="app-sidebar">
+    <div className={`app-sidebar${collapsed ? ' collapsed' : ''}`}>
+      {/* Collapse toggle */}
+      <button
+        className="app-sidebar-collapse-btn"
+        onClick={() => setCollapsed(!collapsed)}
+        title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+      >
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          {collapsed
+            ? <><polyline points="9 18 15 12 9 6" /></>
+            : <><polyline points="15 18 9 12 15 6" /></>
+          }
+        </svg>
+      </button>
+
       {/* Header */}
       <div className="app-sidebar-header">
         {logoSrc && (
@@ -109,42 +120,43 @@ export function Sidebar({ currentView, onViewChange, activeSection, onSectionCha
             <img src={logoSrc} alt="" className="app-sidebar-logo-img" />
           </div>
         )}
-        <h2 className="app-sidebar-title">{title}</h2>
-        {schema?.description && (
-          <p className="app-sidebar-desc">{schema.description}</p>
-        )}
-        {projectFolder && (
-          <p className="app-sidebar-desc" style={{ color: '#7c3aed', marginTop: 4, cursor: 'pointer' }} title={projectFolder} onClick={() => {
-            // Copy full path to clipboard
-            navigator.clipboard.writeText(projectFolder);
-          }}>
-            📁 {projectFolder}
-          </p>
+        {!collapsed && (
+          <>
+            <h2 className="app-sidebar-title">{title}</h2>
+            {schema?.description && (
+              <p className="app-sidebar-desc">{schema.description}</p>
+            )}
+            {projectFolder && (
+              <p className="app-sidebar-desc" style={{ color: '#7c3aed', marginTop: 4, cursor: 'pointer' }} title={projectFolder} onClick={() => {
+                navigator.clipboard.writeText(projectFolder);
+              }}>
+                📁 {projectFolder}
+              </p>
+            )}
+          </>
         )}
       </div>
 
       {/* Navigation */}
       <nav className="app-nav" aria-label="App sections">
-        {/* View tabs (sorted by order) */}
         {[...availableViews].sort((a, b) => (a.order ?? 0) - (b.order ?? 0)).map(tab => (
           <button
             key={tab.id}
             onClick={() => onViewChange(tab.id)}
             className={`app-nav-item${currentView === tab.id && !activeSection ? ' active' : ''}`}
+            title={collapsed ? tab.label : undefined}
           >
-            <span className="app-nav-label">
-              {tab.icon && tab.icon.startsWith('<svg') ? (
-                <span className="app-nav-icon" dangerouslySetInnerHTML={{ __html: tab.icon }} />
-              ) : tab.icon ? (
-                <span className="app-nav-icon">{tab.icon}</span>
-              ) : null}
-              {' '}{tab.label}
-            </span>
+            {tab.icon && tab.icon.startsWith('<svg') ? (
+              <span className="app-nav-icon" dangerouslySetInnerHTML={{ __html: tab.icon }} />
+            ) : tab.icon ? (
+              <span className="app-nav-icon">{tab.icon}</span>
+            ) : null}
+            {!collapsed && <span className="app-nav-label">{tab.label}</span>}
           </button>
         ))}
 
-        {/* Node sections — collapsible panel */}
-        {nodeSections.length > 0 && (
+        {/* Node sections — collapsible panel (hidden when sidebar collapsed) */}
+        {!collapsed && nodeSections.length > 0 && (
           <div className={`app-nav-panel${nodesCollapsed ? ' collapsed' : ''}`} data-panel="nodes">
             <button className="app-nav-panel-header" onClick={() => setNodesCollapsed(!nodesCollapsed)}>
               <span className="app-nav-panel-icon">{nodesCollapsed ? '▶' : '▼'}</span>
@@ -185,34 +197,41 @@ export function Sidebar({ currentView, onViewChange, activeSection, onSectionCha
         )}
       </nav>
 
-      {/* Actions */}
-      <div className="app-sidebar-actions">
-        <button onClick={handleRunPipeline} className="app-action-btn">▶ Run Pipeline</button>
-        <button onClick={handleNewProject} className="app-action-btn app-action-new-project">✨ New Project</button>
-        <button onClick={handleImportScript} className="app-action-btn app-action-import">📄 Import Script</button>
-        {staleCount > 0 && (
-          <button onClick={handleRefreshStale} className="app-action-btn app-action-refresh">
-            🔄 Refresh {staleCount} stale
-          </button>
-        )}
-        <button onClick={handleOpenEditor} className="app-action-btn app-action-secondary">Open Editor</button>
-        <button onClick={handleOpenForm} className="app-action-btn app-action-secondary">Open Form</button>
+      {/* Actions — hidden when collapsed */}
+      {!collapsed && (
+        <div className="app-sidebar-actions">
+          {/* Primary actions */}
+          <button onClick={handleRunPipeline} className="app-action-btn">▶ Run Pipeline</button>
+          <button onClick={handleNewProject} className="app-action-btn app-action-new-project">✨ New Project</button>
+          <button onClick={handleImportScript} className="app-action-btn app-action-import">📄 Import Script</button>
+          {staleCount > 0 && (
+            <button onClick={handleRefreshStale} className="app-action-btn app-action-refresh">
+              🔄 Refresh {staleCount} stale
+            </button>
+          )}
 
-        {/* Save / Load */}
-        <div className="app-save-section">
-          <div className="app-save-row">
-            <button onClick={() => setShowSaveLoad(true)} className="app-action-btn app-action-save">💾 Save / Load</button>
+          {/* Secondary actions */}
+          <div className="app-action-group-secondary">
+            <button onClick={handleOpenEditor} className="app-action-btn app-action-secondary">Open Editor</button>
+            <button onClick={handleOpenForm} className="app-action-btn app-action-secondary">Open Form</button>
+          </div>
+
+          {/* Save / Load */}
+          <div className="app-save-section">
+            <div className="app-save-row">
+              <button onClick={() => setShowSaveLoad(true)} className="app-action-btn app-action-save">💾 Save / Load</button>
+            </div>
+          </div>
+
+          {/* Git */}
+          <div style={{ marginTop: 4 }}>
+            <GitStatus pipelineId={pipelineId} />
           </div>
         </div>
+      )}
 
-        {/* Git */}
-        <div style={{ marginTop: 4 }}>
-          <GitStatus pipelineId={pipelineId} />
-        </div>
-      </div>
-
-      {/* Command bar */}
-      <CommandBar pipelineId={pipelineId} />
+      {/* Command bar — hidden when collapsed */}
+      {!collapsed && <CommandBar pipelineId={pipelineId} />}
 
       {/* Save/Load modal */}
       {showSaveLoad && (

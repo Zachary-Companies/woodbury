@@ -75,8 +75,8 @@ interface AIOperationsContextValue {
   enrichLocation: (id: string) => Promise<void>;
   enrichAllCharacters: () => Promise<void>;
   enrichAllLocations: () => Promise<void>;
-  generateCharacterImages: () => Promise<any>;
-  generateLocationImages: () => Promise<any>;
+  generateCharacterImages: (onProgress?: (completed: number, currentName: string) => void) => Promise<any>;
+  generateLocationImages: (onProgress?: (completed: number, currentName: string) => void) => Promise<any>;
 }
 
 const AIOperationsContext = createContext<AIOperationsContextValue | null>(null);
@@ -327,16 +327,54 @@ export function PipelineProvider({ pipelineId, children }: { pipelineId: string;
   }, [state.project, enrichLocation]);
 
   // ── Image Generation ───────────────────────────────────────
-  const generateCharacterImages = useCallback(async () => {
-    const poll = setInterval(() => { reload(); }, 5000);
+  const generateCharacterImages = useCallback(async (onProgress?: (completed: number, currentName: string) => void) => {
+    // Poll more frequently (2s) so cards update as each image lands, and report progress
+    let completed = 0;
+    const poll = setInterval(async () => {
+      try {
+        await reload();
+      } catch {}
+    }, 2000);
     try {
       const res = await fetch(`/api/app/${encodeURIComponent(pipelineId)}/generate-assets`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ type: 'characters' }),
+        body: JSON.stringify({ type: 'characters', stream: true }),
       });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: 'Generation failed' }));
+        throw new Error(err.error || 'Generation failed');
+      }
+      // If streaming response (ndjson), read progress events
+      if (res.headers.get('content-type')?.includes('x-ndjson')) {
+        const reader = res.body!.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let finalResult: any = null;
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+          for (const line of lines) {
+            if (!line.trim()) continue;
+            try {
+              const evt = JSON.parse(line);
+              if (evt.type === 'progress') {
+                completed = evt.completed;
+                onProgress?.(evt.completed, evt.name || '');
+                reload().catch(() => {});
+              } else if (evt.type === 'done') {
+                finalResult = evt;
+              }
+            } catch {}
+          }
+        }
+        return finalResult || { success: true, generated: completed, failed: 0 };
+      }
+      // Fallback: non-streaming response
       const result = await res.json();
-      if (!res.ok) throw new Error(result.error || 'Generation failed');
       return result;
     } finally {
       clearInterval(poll);
@@ -344,16 +382,49 @@ export function PipelineProvider({ pipelineId, children }: { pipelineId: string;
     }
   }, [pipelineId, reload]);
 
-  const generateLocationImages = useCallback(async () => {
-    const poll = setInterval(() => { reload(); }, 5000);
+  const generateLocationImages = useCallback(async (onProgress?: (completed: number, currentName: string) => void) => {
+    let completed = 0;
+    const poll = setInterval(async () => {
+      try { await reload(); } catch {}
+    }, 2000);
     try {
       const res = await fetch(`/api/app/${encodeURIComponent(pipelineId)}/generate-assets`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ type: 'locations' }),
+        body: JSON.stringify({ type: 'locations', stream: true }),
       });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: 'Generation failed' }));
+        throw new Error(err.error || 'Generation failed');
+      }
+      if (res.headers.get('content-type')?.includes('x-ndjson')) {
+        const reader = res.body!.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let finalResult: any = null;
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+          for (const line of lines) {
+            if (!line.trim()) continue;
+            try {
+              const evt = JSON.parse(line);
+              if (evt.type === 'progress') {
+                completed = evt.completed;
+                onProgress?.(evt.completed, evt.name || '');
+                reload().catch(() => {});
+              } else if (evt.type === 'done') {
+                finalResult = evt;
+              }
+            } catch {}
+          }
+        }
+        return finalResult || { success: true, generated: completed, failed: 0 };
+      }
       const result = await res.json();
-      if (!res.ok) throw new Error(result.error || 'Generation failed');
       return result;
     } finally {
       clearInterval(poll);
@@ -434,8 +505,8 @@ interface PipelineContextValue extends PipelineContextState {
   enrichLocation: (id: string) => Promise<void>;
   enrichAllCharacters: () => Promise<void>;
   enrichAllLocations: () => Promise<void>;
-  generateCharacterImages: () => Promise<any>;
-  generateLocationImages: () => Promise<any>;
+  generateCharacterImages: (onProgress?: (completed: number, currentName: string) => void) => Promise<any>;
+  generateLocationImages: (onProgress?: (completed: number, currentName: string) => void) => Promise<any>;
 }
 
 /**
