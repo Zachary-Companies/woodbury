@@ -110,12 +110,14 @@ function PipelineAppInner({ pipelineId, initialSchema, initialAppState }: {
   ];
 
   // Set default view to the first available view (by order) once custom views are loaded
+  const defaultViewSet = useRef(false);
   useEffect(() => {
-    if (discoveredViews.length > 0 && (currentView === '' || currentView === 'settings')) {
+    if (!defaultViewSet.current && discoveredViews.length > 0) {
+      defaultViewSet.current = true;
       const sorted = [...availableViews].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
       setCurrentView(sorted[0].id);
     }
-  }, [discoveredViews, availableViews, currentView]);
+  }, [discoveredViews, availableViews]);
 
   const handleViewChange = useCallback((view: ViewMode) => {
     setCurrentView(view);
