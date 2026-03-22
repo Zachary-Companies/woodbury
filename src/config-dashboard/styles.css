@@ -7336,6 +7336,25 @@ textarea.wf-se-input {
   transition: border-color 0.15s, color 0.15s;
 }
 .chat-temp-btn:hover { border-color: #7c3aed; color: #e2e8f0; }
+
+.chat-workspace-toggle {
+  background: none;
+  border: 1px solid #334155;
+  border-radius: 4px;
+  color: #94a3b8;
+  cursor: pointer;
+  padding: 3px 5px;
+  display: flex;
+  align-items: center;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+.chat-workspace-toggle:hover { border-color: #7c3aed; color: #e2e8f0; }
+.chat-workspace-toggle.active {
+  background: rgba(124, 58, 237, 0.15);
+  border-color: rgba(124, 58, 237, 0.4);
+  color: #c4b5fd;
+}
+
 .chat-temp-popover {
   position: absolute;
   top: calc(100% + 6px);

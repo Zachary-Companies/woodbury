@@ -389,7 +389,7 @@
     var split = document.createElement('div');
     split.className = 'chat-split';
     split.innerHTML =
-      '<div class="chat-panel">' +
+      '<div class="chat-panel" style="flex:1;max-width:none;width:auto;">' +
         '<div class="chat-panel-header">' +
           '<span>Woodbury Assistant</span>' +
           '<div class="chat-header-actions">' +
@@ -405,6 +405,12 @@
                 '<span id="chat-temp-value">0.7</span>' +
               '</button>' +
             '</div>' +
+            '<button class="chat-workspace-toggle" id="chat-workspace-toggle" title="Toggle Agent Workspace">' +
+              '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+                '<rect x="3" y="3" width="18" height="18" rx="2"/>' +
+                '<path d="M15 3v18"/>' +
+              '</svg>' +
+            '</button>' +
           '</div>' +
         '</div>' +
         '<div class="chat-messages" id="chat-messages">' +
@@ -419,8 +425,8 @@
           '<button class="chat-send-btn" id="chat-send-btn">Send</button>' +
         '</div>' +
       '</div>' +
-      '<div class="resize-handle" id="chat-resizer"><div class="resize-bar-inner"></div></div>' +
-      '<div class="chat-workspace-panel">' +
+      '<div class="resize-handle" id="chat-resizer" style="display:none;"><div class="resize-bar-inner"></div></div>' +
+      '<div class="chat-workspace-panel" style="display:none;">' +
         '<div class="chat-workspace-header">Agent Workspace</div>' +
         '<div class="chat-workspace-body">' +
           '<div class="chat-status-bar">' +
@@ -486,6 +492,34 @@
         direction: 'left'
       });
     }
+
+    // Wire up workspace toggle
+    (function () {
+      var toggleBtn = document.getElementById('chat-workspace-toggle');
+      var workspace = split.querySelector('.chat-workspace-panel');
+      var resizer = document.getElementById('chat-resizer');
+      var chatPanel = split.querySelector('.chat-panel');
+      if (!toggleBtn || !workspace || !chatPanel) return;
+
+      toggleBtn.addEventListener('click', function () {
+        var isVisible = workspace.style.display !== 'none';
+        if (isVisible) {
+          workspace.style.display = 'none';
+          if (resizer) resizer.style.display = 'none';
+          chatPanel.style.flex = '1';
+          chatPanel.style.maxWidth = 'none';
+          chatPanel.style.width = 'auto';
+          toggleBtn.classList.remove('active');
+        } else {
+          workspace.style.display = '';
+          if (resizer) resizer.style.display = '';
+          chatPanel.style.flex = '';
+          chatPanel.style.maxWidth = '';
+          chatPanel.style.width = '';
+          toggleBtn.classList.add('active');
+        }
+      });
+    })();
 
     // Wire up temperature control
     (function () {
