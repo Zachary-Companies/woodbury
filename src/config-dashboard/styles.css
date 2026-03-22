@@ -51,7 +51,7 @@ body.composition-form-mode .main {
 }
 
 .sidebar-header {
-  padding: 1.25rem;
+  padding: 2.75rem 1.25rem 1.25rem;
   border-bottom: 1px solid #334155;
   background:
     radial-gradient(circle at top left, rgba(124,58,237,0.18), transparent 44%),
@@ -8959,7 +8959,7 @@ textarea.wf-se-input {
 }
 
 .app-sidebar.collapsed .app-sidebar-header {
-  padding: 0.75rem 0.5rem;
+  padding: 2.75rem 0.5rem 0.5rem;
   text-align: center;
 }
 
@@ -9001,7 +9001,7 @@ textarea.wf-se-input {
 /* ── Collapse Toggle Button ─────────────────────────────────── */
 .app-sidebar-collapse-btn {
   position: absolute;
-  top: 12px;
+  top: 44px;
   right: 8px;
   z-index: 5;
   width: 24px;
@@ -9026,7 +9026,7 @@ textarea.wf-se-input {
 
 .app-sidebar.collapsed .app-sidebar-collapse-btn {
   position: static;
-  margin: 8px auto 4px;
+  margin: 4px auto;
   right: auto;
 }
 
@@ -9055,7 +9055,7 @@ textarea.wf-se-input {
 }
 
 .app-sidebar-header {
-  padding: 0.75rem 0.75rem 0.6rem;
+  padding: 2.75rem 0.75rem 0.6rem;
   border-bottom: 1px solid rgba(139, 92, 246, 0.08);
   background:
     radial-gradient(ellipse 120% 80% at 30% -20%, rgba(124, 58, 237, 0.08), transparent 60%);
