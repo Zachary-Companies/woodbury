@@ -62,6 +62,10 @@ import type {
   DesktopTypeStep,
   DesktopKeyboardStep,
   InjectStyleStep,
+  HttpRequestStep,
+  EvalStep,
+  ExtractStructuredStep,
+  ParallelStep,
   Precondition,
   Postcondition,
 } from './types.js';
@@ -223,6 +227,27 @@ export class WorkflowExecutor {
     };
   }
 
+  /** Bring the browser to the foreground so native keyboard events go to it */
+  private async activateBrowser(): Promise<void> {
+    const { exec } = await import('child_process');
+    if (process.platform === 'darwin') {
+      await new Promise<void>((resolve) => {
+        exec(`osascript -e 'tell application "Google Chrome" to activate'`, () => resolve());
+      });
+    } else if (process.platform === 'win32') {
+      // PowerShell: find Chrome window and bring it to front
+      await new Promise<void>((resolve) => {
+        exec(`powershell -Command "(New-Object -ComObject WScript.Shell).AppActivate('Google Chrome')"`, () => resolve());
+      });
+    } else {
+      // Linux: use wmctrl or xdotool
+      await new Promise<void>((resolve) => {
+        exec(`wmctrl -a 'Google Chrome' 2>/dev/null || xdotool search --name 'Google Chrome' windowactivate 2>/dev/null`, () => resolve());
+      });
+    }
+    await this.delay(300);
+  }
+
   private async nativeClick(
     viewportX: number,
     viewportY: number,
@@ -259,7 +284,27 @@ export class WorkflowExecutor {
 
   private async nativeType(text: string): Promise<void> {
     const robot = await this.getRobot();
-    robot.typeString(text);
+    execLog('INFO', `nativeType: typing ${text.length} chars: "${text.slice(0, 50)}..."`);
+    try {
+      robot.typeString(text);
+      execLog('INFO', `nativeType: typeString completed`);
+    } catch (err: any) {
+      execLog('ERROR', `nativeType: typeString failed: ${err.message}`);
+      // Fallback: type character by character using keyTap
+      execLog('INFO', `nativeType: falling back to character-by-character typing`);
+      for (const ch of text) {
+        if (ch === ' ') {
+          robot.keyTap('space');
+        } else if (ch === '\n') {
+          robot.keyTap('enter');
+        } else if (ch >= 'A' && ch <= 'Z') {
+          robot.keyTap(ch.toLowerCase(), 'shift');
+        } else {
+          robot.keyTap(ch);
+        }
+        await this.delay(20);
+      }
+    }
   }
 
   private cdpKeyToRobotjs(key: string): string {
@@ -677,6 +722,14 @@ export class WorkflowExecutor {
         return this.execTryCatch(step as TryCatchStep);
       case 'set_variable':
         return this.execSetVariable(step as SetVariableStep);
+      case 'http_request':
+        return this.execHttpRequest(step as HttpRequestStep);
+      case 'eval':
+        return this.execEval(step as EvalStep);
+      case 'extract_structured':
+        return this.execExtractStructured(step as ExtractStructuredStep);
+      case 'parallel':
+        return this.execParallel(step as ParallelStep);
       case 'desktop_launch_app':
         return this.execDesktopLaunchApp(step as DesktopLaunchAppStep);
       case 'desktop_click':
@@ -1015,45 +1068,74 @@ export class WorkflowExecutor {
       : step.target.selector;
 
     if (step.clearFirst) {
-      // Try set_value first (works with React/Vue controlled inputs)
+      if (step.forceNativeTyping) {
+        // Native clear: activate browser, click, select all, delete
+        await this.activateBrowser();
+        if (resolved.position && !step.skipClick) {
+          const cx = resolved.position.left + resolved.position.width / 2;
+          const cy = resolved.position.top + resolved.position.height / 2;
+          await this.nativeClick(cx, cy);
+          await this.delay(300);
+        }
+        const selectMod = process.platform === 'darwin' ? 'command' : 'control';
+        await this.nativeKeyPress('a', [selectMod]);
+        await this.delay(100);
+        await this.nativeKeyPress('Backspace');
+        await this.delay(200);
+      } else {
+        // Try set_value first (works with React/Vue controlled inputs)
+        try {
+          await this.bridge.send('set_value', {
+            selector: setValueSelector,
+            value: '',
+          });
+        } catch {
+          // Fallback: click and select all + delete (skip click if skipClick is set)
+          if (resolved.position && !step.skipClick) {
+            const cx = resolved.position.left + resolved.position.width / 2;
+            const cy = resolved.position.top + resolved.position.height / 2;
+            await this.nativeClick(cx, cy);
+          }
+          await this.nativeHotkey('a', { ctrl: true });
+          await this.nativeKeyPress('Backspace');
+        }
+      }
+    }
+
+    if (step.forceNativeTyping) {
+      // Native keyboard typing via robotjs.
+      // Must activate Chrome first so keystrokes go to the browser, not another app.
+      await this.activateBrowser();
+      if (resolved.position && !step.skipClick) {
+        const cx = resolved.position.left + resolved.position.width / 2;
+        const cy = resolved.position.top + resolved.position.height / 2;
+        await this.nativeClick(cx, cy);
+        await this.delay(300);
+      }
+      await this.nativeType(step.value);
+    } else {
+      // Try set_value first for reliability
       try {
         await this.bridge.send('set_value', {
           selector: setValueSelector,
-          value: '',
+          value: step.value,
         });
-      } catch {
-        // Fallback: click and select all + delete (skip click if skipClick is set)
+        // After set_value, click the element to sync OS-level focus with DOM focus.
+        // set_value does el.focus() but OS keyboard (Tab etc.) follows OS focus, not DOM focus.
         if (resolved.position && !step.skipClick) {
           const cx = resolved.position.left + resolved.position.width / 2;
           const cy = resolved.position.top + resolved.position.height / 2;
           await this.nativeClick(cx, cy);
         }
-        await this.nativeHotkey('a', { ctrl: true });
-        await this.nativeKeyPress('Backspace');
+      } catch {
+        // Fallback: type via keyboard (click to focus first unless skipClick is set)
+        if (resolved.position && !step.skipClick) {
+          const cx = resolved.position.left + resolved.position.width / 2;
+          const cy = resolved.position.top + resolved.position.height / 2;
+          await this.nativeClick(cx, cy);
+        }
+        await this.nativeType(step.value);
       }
-    }
-
-    // Try set_value first for reliability
-    try {
-      await this.bridge.send('set_value', {
-        selector: setValueSelector,
-        value: step.value,
-      });
-      // After set_value, click the element to sync OS-level focus with DOM focus.
-      // set_value does el.focus() but OS keyboard (Tab etc.) follows OS focus, not DOM focus.
-      if (resolved.position && !step.skipClick) {
-        const cx = resolved.position.left + resolved.position.width / 2;
-        const cy = resolved.position.top + resolved.position.height / 2;
-        await this.nativeClick(cx, cy);
-      }
-    } catch {
-      // Fallback: type via keyboard (click to focus first unless skipClick is set)
-      if (resolved.position && !step.skipClick) {
-        const cx = resolved.position.left + resolved.position.width / 2;
-        const cy = resolved.position.top + resolved.position.height / 2;
-        await this.nativeClick(cx, cy);
-      }
-      await this.nativeType(step.value);
     }
 
     if (step.delayAfterMs) {
@@ -1651,11 +1733,154 @@ export class WorkflowExecutor {
         break;
       }
 
+      case 'json_parse': {
+        const raw = this.variables[step.source.input];
+        try {
+          value = JSON.parse(String(raw));
+        } catch {
+          value = null;
+        }
+        break;
+      }
+
+      case 'expression': {
+        try {
+          const fn = new Function('variables', 'return (' + step.source.expression + ')');
+          value = fn(this.variables);
+        } catch (err) {
+          value = null;
+          execLog('WARN', `expression eval failed: ${(err as Error).message}`);
+        }
+        break;
+      }
+
       default:
         throw new Error(`Unknown variable source type: ${(step.source as { type: string }).type}`);
     }
 
     this.variables[step.variable] = value;
+  }
+
+  // ── Data & computation step executors ──────────────────────
+
+  private async execHttpRequest(step: HttpRequestStep): Promise<void> {
+    const url = String(step.url);
+    const method = step.method || 'GET';
+    const timeoutMs = step.timeoutMs ?? 30000;
+
+    execLog('INFO', `execHttpRequest: ${method} ${url}`);
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+      const fetchOpts: RequestInit = {
+        method,
+        headers: step.headers,
+        signal: controller.signal,
+      };
+
+      if (step.body !== undefined && method !== 'GET') {
+        if (typeof step.body === 'string') {
+          fetchOpts.body = step.body;
+        } else {
+          fetchOpts.body = JSON.stringify(step.body);
+          fetchOpts.headers = { 'Content-Type': 'application/json', ...fetchOpts.headers };
+        }
+      }
+
+      const response = await fetch(url, fetchOpts);
+
+      if (step.statusVariable) {
+        this.variables[step.statusVariable] = response.status;
+      }
+
+      if (step.expectedStatus !== undefined && response.status !== step.expectedStatus) {
+        throw new Error(`HTTP ${response.status} (expected ${step.expectedStatus})`);
+      }
+
+      if (step.outputVariable) {
+        const text = await response.text();
+        try {
+          this.variables[step.outputVariable] = JSON.parse(text);
+        } catch {
+          this.variables[step.outputVariable] = text;
+        }
+      }
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private async execEval(step: EvalStep): Promise<void> {
+    execLog('INFO', `execEval: ${step.expression.slice(0, 80)}`);
+
+    try {
+      const fn = new Function('variables', 'return (' + step.expression + ')');
+      const result = fn(this.variables);
+      // Await in case the expression returns a promise
+      this.variables[step.outputVariable] = result instanceof Promise ? await result : result;
+    } catch (err) {
+      throw new Error(`eval expression failed: ${(err as Error).message}`);
+    }
+  }
+
+  private async execExtractStructured(step: ExtractStructuredStep): Promise<void> {
+    const raw = this.variables[step.inputVariable];
+    execLog('INFO', `execExtractStructured: ${step.source} from ${step.inputVariable}`);
+
+    switch (step.source) {
+      case 'json_parse': {
+        try {
+          this.variables[step.outputVariable] = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        } catch {
+          throw new Error(`json_parse failed on variable "${step.inputVariable}"`);
+        }
+        break;
+      }
+
+      case 'regex_groups': {
+        if (!step.pattern) throw new Error('regex_groups requires a pattern');
+        const match = new RegExp(step.pattern).exec(String(raw));
+        // Return all named/numbered groups as an array (excluding full match)
+        this.variables[step.outputVariable] = match ? match.slice(1) : [];
+        break;
+      }
+
+      case 'split': {
+        const delimiter = step.pattern ?? ',';
+        this.variables[step.outputVariable] = String(raw).split(delimiter);
+        break;
+      }
+
+      default:
+        throw new Error(`Unknown extract_structured source: ${(step as ExtractStructuredStep).source}`);
+    }
+  }
+
+  private async execParallel(step: ParallelStep): Promise<void> {
+    execLog('INFO', `execParallel: ${step.branches.length} branches, failFast=${step.failFast ?? false}`);
+
+    const branchPromises = step.branches.map(branchSteps =>
+      this.executeSteps(branchSteps)
+    );
+
+    // Wait for all branches to complete
+    const allResults = await Promise.all(branchPromises);
+
+    // Check for failures across all branches
+    const failedSteps: string[] = [];
+    for (const branchResults of allResults) {
+      for (const sr of branchResults) {
+        if (sr.status === 'failed') {
+          failedSteps.push(sr.error || `step ${sr.stepId} failed`);
+        }
+      }
+    }
+
+    if (failedSteps.length > 0) {
+      throw new Error(`${failedSteps.length} parallel step(s) failed: ${failedSteps.join('; ')}`);
+    }
   }
 
   // ── Desktop step executors ─────────────────────────────────

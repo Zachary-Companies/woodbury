@@ -13,7 +13,7 @@ export interface CompositionInterfaceInput {
   required: boolean;
   default?: unknown;
   generationPrompt?: string;
-  inputControl?: 'text' | 'textarea' | 'select' | 'combobox';
+  inputControl?: 'text' | 'textarea' | 'select' | 'combobox' | 'folder-select';
   options?: string[];
   objectFields?: Array<{
     key: string;

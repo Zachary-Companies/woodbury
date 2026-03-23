@@ -805,21 +805,31 @@
           textEl._frozen = true;
         }
 
-        var pill = document.createElement('div');
-        pill.className = 'chat-tool-pill active';
-        pill.dataset.toolName = data.name;
-        // Header row with chevron + name
-        var header = document.createElement('div');
-        header.className = 'tool-header';
-        var chevron = document.createElement('span');
-        chevron.className = 'tool-chevron';
-        chevron.textContent = '\u25B6';
-        header.appendChild(chevron);
+        var toolLine = document.createElement('div');
+        toolLine.className = 'chat-tool-line active';
+        toolLine.dataset.toolName = data.name;
+        // Icon
+        var iconSpan = document.createElement('span');
+        iconSpan.className = 'tool-icon';
+        iconSpan.textContent = '\u23FA'; // ⏺
+        toolLine.appendChild(iconSpan);
+        // Name
         var nameSpan = document.createElement('span');
         nameSpan.className = 'tool-name';
         nameSpan.textContent = humanizeToolName(data.name);
-        header.appendChild(nameSpan);
-        pill.appendChild(header);
+        toolLine.appendChild(nameSpan);
+        // Param summary
+        var summary = toolParamSummary(data.name, data.params);
+        if (summary) {
+          var summarySpan = document.createElement('span');
+          summarySpan.className = 'tool-param-summary';
+          summarySpan.textContent = summary;
+          toolLine.appendChild(summarySpan);
+        }
+        // Duration placeholder (filled on tool_end)
+        var durationSpan = document.createElement('span');
+        durationSpan.className = 'tool-duration';
+        toolLine.appendChild(durationSpan);
         // Detail area (hidden until expanded)
         var detail = document.createElement('div');
         detail.className = 'chat-tool-detail';
@@ -832,15 +842,15 @@
           paramPre.textContent = typeof data.params === 'string' ? data.params : JSON.stringify(data.params, null, 2);
           detail.appendChild(paramPre);
         }
-        pill.appendChild(detail);
+        toolLine.appendChild(detail);
         // Toggle expand on click
-        pill.addEventListener('click', function () {
-          pill.classList.toggle('expanded');
+        toolLine.addEventListener('click', function () {
+          toolLine.classList.toggle('expanded');
           scrollToBottom();
         });
-        // Append pill after the current text segment (interleaved)
-        parentBubble.appendChild(pill);
-        toolPills.push(pill);
+        // Append after the current text segment (interleaved)
+        parentBubble.appendChild(toolLine);
+        toolPills.push(toolLine);
 
         // Create a new text segment for tokens that come after this tool
         var newTextEl = document.createElement('div');
@@ -848,23 +858,26 @@
         newTextEl._rawText = '';
         parentBubble.appendChild(newTextEl);
         // Update the outer reference so subsequent tokens go to the new segment
-        // We do this by mutating a shared object
         textEl._nextSegment = newTextEl;
 
         scrollToBottom();
         break;
 
       case 'tool_end':
-        // Mark the last matching pill as done and add result
+        // Mark the last matching tool line as done and add result
         for (var i = toolPills.length - 1; i >= 0; i--) {
           if (toolPills[i].dataset.toolName === data.name && toolPills[i].classList.contains('active')) {
             toolPills[i].classList.remove('active');
-            toolPills[i].classList.add(data.success ? 'done' : '');
-            var nameEl = toolPills[i].querySelector('.tool-name');
-            if (nameEl) {
-              var statusIcon = data.success ? ' \u2713' : ' \u2717';
-              var durationStr = data.duration ? ' (' + (data.duration / 1000).toFixed(1) + 's)' : '';
-              nameEl.textContent = humanizeToolName(data.name) + statusIcon + durationStr;
+            toolPills[i].classList.add(data.success ? 'done' : 'failed');
+            // Update icon
+            var iconEl = toolPills[i].querySelector('.tool-icon');
+            if (iconEl) {
+              iconEl.textContent = data.success ? '\u2713' : '\u2717'; // ✓ or ✗
+            }
+            // Update duration
+            var durEl = toolPills[i].querySelector('.tool-duration');
+            if (durEl && data.duration) {
+              durEl.textContent = (data.duration / 1000).toFixed(1) + 's';
             }
             // For composition tools, render a pipeline card instead of raw JSON
             var isCompTool = data.name === 'mcp__intelligence__generate_pipeline' ||
@@ -873,7 +886,6 @@
             if (isCompTool && data.success && data.result) {
               try {
                 var comp = JSON.parse(data.result);
-                // Handle v2 file-backed pipeline results (format: "v2", manifest: {...})
                 var isV2 = comp && comp.format === 'v2' && comp.manifest;
                 var displayComp = isV2 ? comp.manifest : comp;
                 var cardId = isV2 ? (comp.pipelineId || comp.manifest.id) : comp.id;
@@ -1136,7 +1148,7 @@
 
     var roleLabel = document.createElement('div');
     roleLabel.className = 'chat-msg-role';
-    roleLabel.textContent = role === 'user' ? 'You' : 'Woodbury';
+    roleLabel.textContent = role === 'user' ? 'you' : 'woodbury';
     msg.appendChild(roleLabel);
 
     var textDiv = document.createElement('div');
@@ -1164,7 +1176,7 @@
     var btn = document.getElementById('chat-send-btn');
     if (btn) {
       btn.disabled = isSending;
-      btn.textContent = isSending ? 'Working...' : 'Send';
+      btn.textContent = isSending ? '\u23F3' : '\u2191'; // ⏳ or ↑
     }
   }
 
@@ -1210,10 +1222,54 @@
     var messagesDiv = textEl && textEl.parentElement;
     if (!messagesDiv || !label) return;
     var eventEl = document.createElement('div');
-    eventEl.className = 'chat-tool-pill';
-    eventEl.innerHTML = '<div class="tool-header"><span class="tool-name">' + escapeHtml(label) + '</span></div>';
+    eventEl.className = 'chat-tool-line done';
+    eventEl.innerHTML = '<span class="tool-icon">\u2500</span><span class="tool-name">' + escapeHtml(label) + '</span>';
     messagesDiv.insertBefore(eventEl, textEl);
     scrollToBottom();
+  }
+
+  /**
+   * Extract the most relevant parameter from a tool call for inline display.
+   * Returns a short string like "package.json" or "button.primary" or null.
+   */
+  function toolParamSummary(toolName, params) {
+    if (!params) return null;
+    var name = String(toolName || '').toLowerCase();
+    // File operations — show path
+    if (params.file_path) {
+      var fp = String(params.file_path);
+      // Show just filename or last 2 segments
+      var parts = fp.split('/').filter(Boolean);
+      return parts.length > 2 ? parts.slice(-2).join('/') : parts.join('/');
+    }
+    if (params.path) {
+      var pp = String(params.path);
+      var pparts = pp.split('/').filter(Boolean);
+      return pparts.length > 2 ? pparts.slice(-2).join('/') : pparts.join('/');
+    }
+    // Search/grep — show pattern
+    if (params.pattern) return '"' + truncate(String(params.pattern), 40) + '"';
+    if (params.query) return '"' + truncate(String(params.query), 40) + '"';
+    // Web — show url
+    if (params.url) {
+      try {
+        var u = new URL(params.url);
+        return u.hostname + u.pathname.slice(0, 30);
+      } catch (e) {
+        return truncate(String(params.url), 40);
+      }
+    }
+    // CSS selector
+    if (params.selector) return truncate(String(params.selector), 40);
+    // Command
+    if (params.command) return truncate(String(params.command), 50);
+    // Glob
+    if (params.glob) return truncate(String(params.glob), 40);
+    return null;
+  }
+
+  function truncate(s, max) {
+    return s.length > max ? s.slice(0, max - 1) + '\u2026' : s;
   }
 
   // ── Suggested Prompts ─────────────────────────────────────

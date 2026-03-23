@@ -77,6 +77,12 @@ async function handleAction(action, params) {
     case 'click_element':
       return clickElement(params);
 
+    case 'hover_element':
+      return hoverElement(params);
+
+    case 'evaluate':
+      return evaluateExpression(params);
+
     case 'set_value':
       return setValue(params);
 
@@ -1139,7 +1145,18 @@ function clickElement({ selector, x, y }) {
   let el;
 
   if (selector) {
-    el = document.querySelector(selector);
+    // Prefer visible elements when multiple match
+    const allMatches = document.querySelectorAll(selector);
+    if (allMatches.length > 1) {
+      for (const candidate of allMatches) {
+        const style = window.getComputedStyle(candidate);
+        if (style.visibility !== 'hidden' && style.display !== 'none' && style.opacity !== '0') {
+          el = candidate;
+          break;
+        }
+      }
+    }
+    if (!el) el = document.querySelector(selector);
     if (!el) throw new Error(`Element not found: ${selector}`);
   } else if (x !== undefined && y !== undefined) {
     el = document.elementFromPoint(x, y);
@@ -1151,14 +1168,19 @@ function clickElement({ selector, x, y }) {
   // Scroll into view if needed
   el.scrollIntoView({ behavior: 'instant', block: 'center' });
 
-  // Simulate a full click sequence
-  el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
-  el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
-  el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+  // Focus the element first (synthetic events don't trigger automatic focus)
+  if (typeof el.focus === 'function') {
+    el.focus();
+  }
 
-  // Also call .click() for anchors and buttons that use native handling
+  // Click the element — use .click() for simplicity (triggers native handling)
+  // Only dispatch mouse events if .click() is not available
   if (typeof el.click === 'function') {
     el.click();
+  } else {
+    el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+    el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+    el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
   }
 
   return {
@@ -1169,14 +1191,77 @@ function clickElement({ selector, x, y }) {
 }
 
 /**
+ * Hover over an element — dispatches mouseenter/mouseover events to trigger submenus.
+ */
+function hoverElement({ selector, x, y }) {
+  let el;
+  if (selector) {
+    const allMatches = document.querySelectorAll(selector);
+    if (allMatches.length > 1) {
+      for (const candidate of allMatches) {
+        const style = window.getComputedStyle(candidate);
+        if (style.visibility !== 'hidden' && style.display !== 'none') {
+          el = candidate;
+          break;
+        }
+      }
+    }
+    if (!el) el = document.querySelector(selector);
+    if (!el) throw new Error(`Element not found: ${selector}`);
+  } else if (x !== undefined && y !== undefined) {
+    el = document.elementFromPoint(x, y);
+    if (!el) throw new Error(`No element at coordinates (${x}, ${y})`);
+  } else {
+    throw new Error('Either selector or x,y coordinates are required');
+  }
+
+  el.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true, cancelable: true }));
+  el.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, cancelable: true }));
+  el.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, cancelable: true }));
+
+  return {
+    hovered: true,
+    element: describeElement(el),
+    bounds: getBoundingInfo(el)
+  };
+}
+
+/**
+ * Evaluate a JavaScript expression and return the result.
+ */
+function evaluateExpression({ expression }) {
+  if (!expression) throw new Error('expression is required');
+  try {
+    const result = new Function('"use strict"; return (' + expression + ')')();
+    return { result: result !== undefined ? JSON.parse(JSON.stringify(result)) : null };
+  } catch (err) {
+    return { error: err.message };
+  }
+}
+
+/**
  * Set the value of an input element.
  */
 function setValue({ selector, value }) {
   if (!selector) throw new Error('selector is required');
   if (value === undefined) throw new Error('value is required');
 
-  const el = document.querySelector(selector);
-  if (!el) throw new Error(`Element not found: ${selector}`);
+  // Find element — prefer visible elements when multiple match
+  let el = document.querySelector(selector);
+  if (!el) {
+    throw new Error(`Element not found: ${selector}`);
+  }
+  // If multiple elements match, prefer the first visible one
+  const allMatches = document.querySelectorAll(selector);
+  if (allMatches.length > 1) {
+    for (const candidate of allMatches) {
+      const style = window.getComputedStyle(candidate);
+      if (style.visibility !== 'hidden' && style.display !== 'none' && style.opacity !== '0') {
+        el = candidate;
+        break;
+      }
+    }
+  }
 
   // Focus the element
   el.focus();

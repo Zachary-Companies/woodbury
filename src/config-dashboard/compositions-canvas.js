@@ -73,12 +73,11 @@ function renderGraphEditor() {
       compEscHtml(compositionNavigationStack.map(function(entry) { return entry.name || entry.id; }).join(' / ')) +
       '</span>';
   }
-  html += '<h2 id="comp-pipeline-title" title="Double-click to rename" style="margin:0;font-size:1rem;cursor:pointer;">' + compEscHtml(compData.name) + '</h2>' + helpIcon('pipelines-connecting');
-  if (compData.description) {
-    html += '<span style="color:#64748b;font-size:0.75rem;margin-left:0.5rem;">' + compEscHtml(compData.description) + '</span>';
-  }
   html += '</div>';
   html += '<div class="comp-toolbar-right">';
+
+  // ── Group 1: Build ──
+  html += '<div class="comp-tb-group">';
   html += '<button class="comp-tb-btn comp-tb-btn-generate" id="comp-generate-pipeline" title="Generate a multi-step pipeline from a description">&#x2728; Generate</button>';
   html += '<div class="comp-add-dropdown-wrap" id="comp-add-dropdown-wrap">';
   html += '<button class="comp-tb-btn comp-tb-btn-add" id="comp-add-dropdown-toggle" title="Add a node">+ Add Node &#x25be;</button>' + helpIcon('pipelines-nodes');
@@ -112,9 +111,19 @@ function renderGraphEditor() {
   html += '<button class="comp-add-dropdown-item comp-add-dropdown-junction" id="comp-add-junction">&#x26a1; Junction</button>';
   html += '</div>';
   html += '</div>';
+  html += '</div>';
+
+  // ── Group 2: Edit ──
+  html += '<div class="comp-tb-divider"></div>';
+  html += '<div class="comp-tb-group">';
   html += '<button class="comp-tb-btn" id="comp-undo-btn" title="Undo (Ctrl+Z)" disabled>&#x21a9;</button>';
   html += '<button class="comp-tb-btn" id="comp-redo-btn" title="Redo (Ctrl+Shift+Z)" disabled>&#x21aa;</button>';
   html += '<button class="comp-tb-btn comp-tb-btn-danger" id="comp-delete-selected" title="Remove selected" style="display:none;">&#x1f5d1; Remove</button>';
+  html += '</div>';
+
+  // ── Group 3: Layout & View ──
+  html += '<div class="comp-tb-divider"></div>';
+  html += '<div class="comp-tb-group">';
   html += '<div class="comp-tb-layout-wrap" style="position:relative;display:inline-block;">';
   html += '<button class="comp-tb-btn" id="comp-auto-layout" title="Tidy up layout">&#x2195; Layout</button>';
   html += '<button class="comp-tb-btn comp-tb-layout-arrow" id="comp-layout-arrow" title="Layout options" style="padding:0 4px;margin-left:-4px;border-left:1px solid rgba(255,255,255,0.1);">&#x25BE;</button>';
@@ -133,14 +142,28 @@ function renderGraphEditor() {
   html += '<button class="comp-tb-btn" id="comp-open-form-btn" title="Open this pipeline as a full-page form inside the app">Form View</button>';
   html += '<button class="comp-tb-btn" id="comp-open-app-btn" title="Open as an interactive app with editable outputs">&#x1f4f1; App</button>';
   html += '<button class="comp-tb-btn" id="comp-share-form-btn" title="Copy a link that opens this pipeline as a form">&#x1f517; Share Form</button>';
+  html += '</div>';
+
+  // ── Group 4: Run ──
+  html += '<div class="comp-tb-divider"></div>';
+  html += '<div class="comp-tb-group">';
   html += '<button class="comp-tb-btn comp-tb-btn-run" id="comp-run-btn" title="Run this pipeline">&#x25b6; Run</button>';
-  html += '<button class="comp-tb-btn comp-tb-btn-batch" id="comp-batch-btn" title="Run with different variable sets">&#x1f4e6; Batch</button>';
-  html += '<button class="comp-tb-btn comp-tb-btn-schedule" id="comp-schedule-btn" title="Schedule this pipeline">&#x23f0; Schedule</button>';
-  html += '<button class="comp-tb-btn comp-tb-btn-danger" id="comp-delete-pipeline-btn" title="Delete this pipeline">&#x1f5d1; Delete</button>';
   html += '<button class="comp-tb-btn comp-tb-btn-cancel" id="comp-cancel-btn" title="Stop running" style="display:none;">&#x25a0; Stop</button>';
+  html += '<button class="comp-tb-btn" id="comp-batch-btn" title="Run with different variable sets">Batch</button>';
+  html += '<button class="comp-tb-btn" id="comp-schedule-btn" title="Schedule this pipeline">Schedule</button>';
+  html += '</div>';
+
+  // ── Group 5: Canvas ──
+  html += '<div class="comp-tb-divider"></div>';
+  html += '<div class="comp-tb-group">';
   html += '<button class="comp-tb-btn" id="comp-zoom-fit" title="Fit to view">Fit</button>';
   html += '<span class="comp-zoom-label" id="comp-zoom-label">' + Math.round(canvasState.zoom * 100) + '%</span>';
   html += '<button class="comp-tb-btn" id="comp-more-btn" title="More actions">&#x22ef;</button>';
+  html += '</div>';
+
+  // Delete button (hidden, moved to less prominent position)
+  html += '<button class="comp-tb-btn comp-tb-btn-danger" id="comp-delete-pipeline-btn" title="Delete this pipeline" style="display:none;">&#x1f5d1; Delete</button>';
+
   html += '</div>';
   html += '</div>';
 
@@ -155,6 +178,13 @@ function renderGraphEditor() {
 
   // Canvas
   html += '<div class="comp-canvas-wrap" id="comp-canvas-wrap" tabindex="0" style="outline:none;">';
+  // Pipeline title & description overlay (fixed to top-left of canvas)
+  html += '<div class="comp-canvas-title-overlay" id="comp-canvas-title-overlay">';
+  html += '<h2 id="comp-pipeline-title" title="Double-click to rename" class="comp-canvas-title">' + compEscHtml(compData.name) + '</h2>';
+  if (compData.description) {
+    html += '<p class="comp-canvas-description">' + compEscHtml(compData.description) + '</p>';
+  }
+  html += '</div>';
   html += '<svg class="comp-edges-svg" id="comp-edges-svg"><g class="comp-edges-group" id="comp-edges-group"></g></svg>';
   html += '<div class="comp-nodes-layer" id="comp-nodes-layer"></div>';
   // Selection rectangle (hidden by default)

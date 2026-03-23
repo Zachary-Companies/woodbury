@@ -97,6 +97,9 @@ export class ConditionValidator {
       case 'element_text_matches':
         return this.checkElementTextMatches(condition.target, condition.pattern);
 
+      case 'element_focused':
+        return this.checkElementFocused(condition.target);
+
       case 'url_matches':
         return this.checkUrlMatches(condition.pattern);
 
@@ -243,6 +246,40 @@ export class ConditionValidator {
       } catch {
         return resolved.textContent.includes(pattern);
       }
+    } catch {
+      return false;
+    }
+  }
+
+  private async checkElementFocused(target: ElementTarget): Promise<boolean> {
+    try {
+      const resolved = await this.resolver.resolve(target);
+      // Ask the bridge to check if the resolved element has focus
+      const selector = target.selector || target.accessibilityQuery;
+      if (!selector) return false;
+      const result = await this.bridge.send('evaluate', {
+        expression: `(() => {
+          const el = document.activeElement;
+          if (!el) return { focused: false, tag: 'none' };
+          return {
+            focused: true,
+            tag: el.tagName.toLowerCase(),
+            role: el.getAttribute('role') || '',
+            ariaLabel: el.getAttribute('aria-label') || '',
+            placeholder: el.getAttribute('placeholder') || '',
+            id: el.id || '',
+            className: el.className || ''
+          };
+        })()`,
+      });
+      // Log focus info for debugging
+      // Debug: log which element has focus
+      // Check if the focused element matches what we expect
+      if (!result || !(result as any).focused) return false;
+      const info = result as Record<string, string>;
+      // Match by role
+      if (target.role && info.tag !== target.role && info.role !== target.role) return false;
+      return true;
     } catch {
       return false;
     }

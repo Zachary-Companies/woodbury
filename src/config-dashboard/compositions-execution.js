@@ -1025,6 +1025,7 @@ function getCompositionInputControl(input) {
     isBoolean: false,
     isSelect: false,
     isCombobox: false,
+    isFolderSelect: false,
     isObject: false,
     objectFields: [],
     options: [],
@@ -1059,6 +1060,11 @@ function getCompositionInputControl(input) {
   }
   if (explicitControl === 'textarea') {
     config.isTextarea = true;
+    return config;
+  }
+  if (explicitControl === 'folder-select') {
+    config.isFolderSelect = true;
+    config.placeholder = defaultValue !== undefined && defaultValue !== null ? String(defaultValue) : '/path/to/folder';
     return config;
   }
 
@@ -1131,7 +1137,7 @@ function renderCompositionRunFields(inputs) {
     var control = getCompositionInputControl(input);
     var savedVal = getCompositionRunValue(compData.id, input.key, getCompositionDefaultText(input));
     var sources = input.sources.length > 0 ? input.sources.join(', ') : '';
-    var fieldClassName = 'comp-run-field' + ((control.isTextarea || control.isSelect || control.isCombobox || control.isObject) ? ' comp-run-field-wide' : '');
+    var fieldClassName = 'comp-run-field' + ((control.isTextarea || control.isSelect || control.isCombobox || control.isObject || control.isFolderSelect) ? ' comp-run-field-wide' : '');
 
     html += '<div class="' + fieldClassName + '">';
     html += '<div class="comp-run-field-header">';
@@ -1207,6 +1213,11 @@ function renderCompositionRunFields(inputs) {
         html += '<option value="' + compEscAttr(control.options[ci]) + '">';
       }
       html += '</datalist>';
+    } else if (control.isFolderSelect) {
+      html += '<div class="comp-run-folder-select" style="display:flex;gap:6px;align-items:center;">';
+      html += '<input class="comp-props-input comp-run-input" type="text" name="' + compEscAttr(input.key) + '" id="comp-run-input-' + compEscAttr(input.key) + '" data-comp-run-key="' + compEscAttr(input.key) + '" value="' + compEscAttr(savedVal) + '" placeholder="' + compEscAttr(control.placeholder) + '" style="flex:1;">';
+      html += '<button type="button" class="comp-run-browse-btn" data-folder-target="' + compEscAttr(input.key) + '" style="white-space:nowrap;padding:6px 12px;border:1px solid var(--border-color,#444);border-radius:6px;background:var(--surface-hover,#2a2a2a);color:var(--text-primary,#e0e0e0);cursor:pointer;font-size:13px;">Browse\u2026</button>';
+      html += '</div>';
     } else if (control.isTextarea) {
       html += '<textarea class="comp-props-input comp-run-input comp-run-textarea" id="comp-run-input-' + compEscAttr(input.key) + '" data-comp-run-key="' + compEscAttr(input.key) + '" placeholder="' + compEscAttr(control.placeholder) + '">' + compEscHtml(savedVal) + '</textarea>';
     } else {
@@ -1344,6 +1355,28 @@ function wireCompositionRunInputActions(root, inputs) {
     btn.addEventListener('click', function() {
       var input = inputMap[btn.getAttribute('data-comp-run-generate')];
       generateCompositionInputValue(input, root, btn);
+    });
+  });
+
+  // Wire folder-select browse buttons
+  root.querySelectorAll('.comp-run-browse-btn[data-folder-target]').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      var targetKey = btn.getAttribute('data-folder-target');
+      var targetInput = root.querySelector('#comp-run-input-' + targetKey);
+      var startDir = targetInput ? targetInput.value : '';
+
+      if (typeof window.openFolderPicker === 'function') {
+        // Use the global folder picker (modal or Electron)
+        window.openFolderPicker(function(folder) {
+          if (folder && targetInput) {
+            targetInput.value = folder;
+            targetInput.dispatchEvent(new Event('input', { bubbles: true }));
+          }
+        }, startDir);
+      } else if (typeof openFolderPicker === 'function') {
+        // Use the app.js modal folder picker (targets by name attribute)
+        openFolderPicker(targetKey, startDir);
+      }
     });
   });
 }

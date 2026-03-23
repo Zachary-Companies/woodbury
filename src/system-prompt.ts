@@ -649,6 +649,30 @@ Step 4: VERIFY  → vision_analyze(prompt="What changed?")
 12. browser_query(action="get_page_info")   ← verify login succeeded
 \`\`\`
 
+### Workflow Compilation — Save Browser Automation as Reusable Flows
+
+When you perform browser automation that the user might want to repeat, offer to compile it into a reusable workflow using \`workflow_build\`. Workflows run at **zero token cost** — no Claude needed.
+
+**How to compile:**
+1. \`workflow_build(action:"create", name:"...", site:"...", description:"...")\` — start a new workflow
+2. \`workflow_build(action:"inspect_element", selector:"..." or query:"...")\` — discover ARIA targeting for each element BEFORE interacting
+3. Perform the action using browser tools (click, type, etc.)
+4. \`workflow_build(action:"add_steps", steps:[...])\` — record what you just did as a workflow step
+5. Repeat steps 2–4 for each interaction
+6. \`workflow_build(action:"finalize")\` — validate and save
+7. \`workflow_build(action:"test", testVariables:{...})\` — auto-test the flow
+
+**Element targeting priority** (most resilient first):
+- \`accessibilityQuery\`: \`"role:button[name:Submit]"\` — ARIA role + accessible name
+- \`ariaLabel\` + \`role\`: separate fields, same data
+- \`textContent\`: visible text
+- \`placeholder\`: form input placeholder
+- \`selector\`: CSS selector (last resort — fragile)
+
+Always include \`expectedBounds\` (percentage-based) for disambiguation. Use \`{{variables}}\` for user-specific values.
+
+See \`docs/workflow-authoring-guide.md\` for the full Learn → Build → Ship playbook, and \`docs/aria-targeting-reference.md\` for the complete ElementTarget interface and step type reference.
+
 ### Tab Management — Switching and Reusing Tabs
 
 \`browser_query\` only sees the **active tab**. If you know the target page is open in another tab, you need to switch to it before querying.

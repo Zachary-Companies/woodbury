@@ -288,6 +288,7 @@ export type AssertCondition =
   | { type: 'element_exists'; target: ElementTarget }
   | { type: 'element_visible'; target: ElementTarget }
   | { type: 'element_text_matches'; target: ElementTarget; pattern: string }
+  | { type: 'element_focused'; target: ElementTarget }
   | { type: 'url_matches'; pattern: string }
   | { type: 'url_contains'; substring: string }
   | { type: 'page_title_contains'; text: string }
@@ -395,6 +396,8 @@ export interface TypeStep extends StepBase {
   clearFirst?: boolean;
   /** Skip clicking the element before typing (assumes field is already focused) */
   skipClick?: boolean;
+  /** Force native keyboard typing instead of bridge set_value. Use for React/Vue controlled inputs. */
+  forceNativeTyping?: boolean;
   /** Delay after typing in ms */
   delayAfterMs?: number;
 }
@@ -587,7 +590,67 @@ export type VariableSource =
   | { type: 'element_attribute'; target: ElementTarget; attribute: string }
   | { type: 'url' }
   | { type: 'url_param'; param: string }
-  | { type: 'regex'; input: string; pattern: string; group?: number };
+  | { type: 'regex'; input: string; pattern: string; group?: number }
+  | { type: 'json_parse'; input: string }
+  | { type: 'expression'; expression: string };
+
+// ────────────────────────────────────────────────────────────────
+//  Data & Computation Steps
+// ────────────────────────────────────────────────────────────────
+
+/** Make an HTTP request and store the response in variables */
+export interface HttpRequestStep extends StepBase {
+  type: 'http_request';
+  /** HTTP method */
+  method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+  /** Request URL (supports {{variables}}) */
+  url: string;
+  /** Request headers (values support {{variables}}) */
+  headers?: Record<string, string>;
+  /** Request body — string or object (supports {{variables}} in string values) */
+  body?: string | Record<string, unknown>;
+  /** Variable name to store response body (auto-parsed as JSON if possible) */
+  outputVariable?: string;
+  /** Variable name to store HTTP status code */
+  statusVariable?: string;
+  /** Fail the step if status doesn't match (e.g., 200) */
+  expectedStatus?: number;
+  /** Request timeout in ms (default: 30000) */
+  timeoutMs?: number;
+}
+
+/** Evaluate a JavaScript expression and store the result */
+export interface EvalStep extends StepBase {
+  type: 'eval';
+  /** JavaScript expression to evaluate. Has access to a `variables` object
+   *  containing all current workflow variables.
+   *  Example: "variables.items.filter(i => i.price > 10)" */
+  expression: string;
+  /** Variable name to store the expression result */
+  outputVariable: string;
+}
+
+/** Extract structured data from a variable */
+export interface ExtractStructuredStep extends StepBase {
+  type: 'extract_structured';
+  /** Extraction strategy */
+  source: 'json_parse' | 'regex_groups' | 'split';
+  /** Name of the variable to extract from */
+  inputVariable: string;
+  /** Pattern for regex_groups (regex string) or split (delimiter string) */
+  pattern?: string;
+  /** Variable name to store the extracted result */
+  outputVariable: string;
+}
+
+/** Run multiple branches of steps concurrently */
+export interface ParallelStep extends StepBase {
+  type: 'parallel';
+  /** Each branch is an independent sequence of steps executed concurrently */
+  branches: WorkflowStep[][];
+  /** If true, abort all branches when the first one fails (default: false) */
+  failFast?: boolean;
+}
 
 // ────────────────────────────────────────────────────────────────
 //  Desktop Automation Steps (native app coordinate-based)
@@ -672,6 +735,10 @@ export type WorkflowStep =
   | LoopStep
   | TryCatchStep
   | SetVariableStep
+  | HttpRequestStep
+  | EvalStep
+  | ExtractStructuredStep
+  | ParallelStep
   | DesktopLaunchAppStep
   | DesktopClickStep
   | DesktopTypeStep
@@ -1115,12 +1182,13 @@ export interface VariableNodeConfig {
   generationPrompt?: string;
   /**
    * Form control mode for the pipeline form UI.
-   *   - 'text'     (default) — plain text input, or textarea via label heuristic
-   *   - 'textarea' — force multi-line text area
-   *   - 'select'   — fixed dropdown; user must pick from `options`
-   *   - 'combobox' — dropdown with suggestions from `options`, but also allows freeform typing
+   *   - 'text'          (default) — plain text input, or textarea via label heuristic
+   *   - 'textarea'      — force multi-line text area
+   *   - 'select'        — fixed dropdown; user must pick from `options`
+   *   - 'combobox'      — dropdown with suggestions from `options`, but also allows freeform typing
+   *   - 'folder-select' — text input with a browse button that opens the OS folder picker
    */
-  inputControl?: 'text' | 'textarea' | 'select' | 'combobox';
+  inputControl?: 'text' | 'textarea' | 'select' | 'combobox' | 'folder-select';
   /** Option values for 'select' and 'combobox' controls */
   options?: string[];
 }
