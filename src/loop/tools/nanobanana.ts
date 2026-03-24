@@ -245,6 +245,9 @@ export async function nanobanana(
   // Build generation config
   const generationConfig: Record<string, unknown> = {
     responseModalities: ['TEXT', 'IMAGE'],
+    imageConfig: {
+      aspectRatio: aspectRatio || '1:1',
+    },
   };
 
   const requestBody = {

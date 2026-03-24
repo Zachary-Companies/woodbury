@@ -79,6 +79,9 @@ export { workflowBuildDefinition, workflowBuildHandler } from './workflow-build.
 // AI Image Generation tools
 export { nanobananaTool } from './nanobanana.js';
 
+// AI Video Generation tools
+export { nanobananaVideoTool } from './nanobanana-video.js';
+
 // AI Text-to-Speech tools
 export { ttsSpeakTool, ttsVoicesTool, ttsModelsTool } from './elevenlabs.js';
 
@@ -118,6 +121,7 @@ import { browserQueryDefinition, browserQueryHandler } from './browser-query.js'
 import { workflowPlayDefinition, workflowPlayHandler } from './workflow-play.js';
 import { workflowBuildDefinition, workflowBuildHandler } from './workflow-build.js';
 import { nanobananaTool } from './nanobanana.js';
+import { nanobananaVideoTool } from './nanobanana-video.js';
 import { ttsSpeakTool, ttsVoicesTool, ttsModelsTool } from './elevenlabs.js';
 import { definition as skillOptimizeDefinition, handler as skillOptimizeHandler } from './skill-optimize.js';
 
@@ -174,6 +178,8 @@ export const allTools = [
   { definition: workflowBuildDefinition, handler: workflowBuildHandler },
   // AI Image Generation
   { definition: nanobananaTool, handler: nanobananaTool.execute },
+  // AI Video Generation
+  { definition: nanobananaVideoTool, handler: nanobananaVideoTool.execute },
   // AI Text-to-Speech
   { definition: ttsSpeakTool, handler: ttsSpeakTool.execute },
   { definition: ttsVoicesTool, handler: ttsVoicesTool.execute },

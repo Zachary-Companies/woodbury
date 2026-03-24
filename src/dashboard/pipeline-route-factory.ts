@@ -187,6 +187,31 @@ export function createPipelineRouteSdk(
       }
     },
 
+    // Video generation
+    generateVideo: async (params) => {
+      try {
+        const { nanobananaVideo: nbv } = await import('../loop/tools/nanobanana-video.js');
+        const result = await nbv({
+          action: (params.action || (params.image ? 'image-to-video' : 'text-to-video')) as 'text-to-video' | 'image-to-video',
+          prompt: params.prompt,
+          model: 'veo-3.1' as const,
+          image: params.image,
+          duration: params.duration || 6,
+          aspectRatio: (params.aspectRatio || '16:9') as any,
+          outputPath: params.outputPath,
+        }, dirname(params.outputPath));
+        const parsed = typeof result === 'string' ? JSON.parse(result) : result;
+        return {
+          success: parsed.success !== false,
+          filePath: parsed.filePath || params.outputPath,
+          duration: parsed.duration,
+          error: parsed.error,
+        };
+      } catch (err) {
+        return { success: false, error: String(err) };
+      }
+    },
+
     // Extension tools
     callTool: async (toolName, params, workDir) => {
       await ctx.extensionManager?.whenReady();

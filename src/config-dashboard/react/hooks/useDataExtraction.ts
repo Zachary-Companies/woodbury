@@ -52,8 +52,10 @@ export function useDataExtraction(
     // This must happen BEFORE element processing so clip durations can use actual audio lengths.
     const dialogAudioMap: Record<string, string> = {};
     const dialogDurationMap: Record<string, number> = {};
+    const rawAssets = (project as any).assets;
+    const assetArray = Array.isArray(rawAssets) ? rawAssets : (rawAssets?.assets || []);
     const allAssetSources = [
-      ...((project as any).assets || []),
+      ...assetArray,
       ...((project as any).dialogueAudio?.assets || []),
     ];
     for (const a of allAssetSources) {
@@ -316,10 +318,11 @@ export function useDataExtraction(
     }
 
     // ── Assets from project ─────────────────────────────────
-    if ((project as any).assets && Array.isArray((project as any).assets)) {
-      for (const a of (project as any).assets) {
-        if (a && (a.name || a.filePath)) assets.push(a);
-      }
+    const projectAssets = Array.isArray((project as any).assets)
+      ? (project as any).assets
+      : ((project as any).assets?.assets || []);
+    for (const a of projectAssets) {
+      if (a && (a.name || a.filePath)) assets.push(a);
     }
 
     // ── Dialogue audio assets from project.dialogueAudio ───

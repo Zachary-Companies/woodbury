@@ -79,6 +79,17 @@ export interface PipelineRouteSdk {
     referenceImages?: string[];
   }) => Promise<{ success: boolean; filePath?: string; error?: string }>;
 
+  // ── Video Generation (nanobanana-video / Veo 3.1) ──
+  /** Generate a video using the nanobanana-video tool (Veo 3.1). */
+  generateVideo: (params: {
+    action: 'text-to-video' | 'image-to-video';
+    prompt: string;
+    image?: string;
+    duration?: number;
+    aspectRatio?: '16:9' | '9:16';
+    outputPath: string;
+  }) => Promise<{ success: boolean; filePath?: string; duration?: number; error?: string }>;
+
   // ── Extension Tools ──
   /** Find and call an extension tool by name. Returns null if not found. */
   callTool: (toolName: string, params: Record<string, any>, workDir?: string) => Promise<any | null>;
