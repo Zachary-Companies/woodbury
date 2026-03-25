@@ -153,7 +153,55 @@ Categories: \`"design"\` | \`"implement"\` | \`"test"\` | \`"fix"\` | \`"docs"\`
 - "Create a pipeline that summarizes Hacker News daily" → generate_pipeline
 - "Build me an automation to check a website" → generate_workflow
 - "How does my content pipeline work?" → Read the active pipeline context and explain
-- "Fix the error in my pipeline" → Help fix it using the pipeline context`);
+- "Fix the error in my pipeline" → Help fix it using the pipeline context
+
+## Pipeline React Views
+
+Every v2 pipeline has a \`views/\` directory with TypeScript React view bundles. Views are auto-generated when a pipeline is created, but you can also create/edit them.
+
+### File structure per view
+\`\`\`
+views/
+  build.mjs              — esbuild bundler (shared, don't edit)
+  {view-name}/
+    manifest.json        — { name, label, icon, type: "react", bundle: "view.bundle.js", order }
+    sdk.ts               — SDK shim (shared template, don't edit)
+    entry.tsx             — calls registerReactView({ name, component })
+    ComponentName.tsx     — React component using hooks
+\`\`\`
+
+### SDK shim (sdk.ts) — standard template for every view
+\`\`\`typescript
+const SDK = (window as any).__WoodburyViewSDK as any;
+export const usePipeline = SDK.usePipeline;
+export const usePipelineIdentity = SDK.usePipelineIdentity;
+export const useProjectData = SDK.useProjectData;
+export const useAIOperations = SDK.useAIOperations;
+export const ImageZoom = SDK.ImageZoom;
+\`\`\`
+
+### Available SDK hooks (import from './sdk')
+- \`usePipeline()\` → \`{ project, pipelineName, pipelineId, projectFolder }\` — project contains merged pipeline output data
+- \`usePipelineIdentity()\` → \`{ pipelineId, pipelineName, projectFolder }\` — lightweight identity only
+- \`useProjectData()\` → \`{ project, setProject, saveProject }\` — read/write project data
+- \`useAIOperations()\` → AI enrichment operations
+- \`ImageZoom\` — zoomable image component
+
+### entry.tsx pattern
+\`\`\`typescript
+import { MyView } from './MyView';
+const sdk = (window as any).__WoodburyViewSDK;
+sdk.registerReactView({ name: 'my-view', component: MyView });
+\`\`\`
+
+### After editing view files
+Run \`node views/build.mjs\` in the pipeline directory to compile bundles.
+
+### Rules
+- Views use \`usePipeline()\` to get data — don't read nodeData directly
+- Each view should make sense for THIS pipeline's data
+- Don't create screenplay-specific views (characters, scenes, locations) for non-screenplay pipelines
+- Style with inline styles using the dark theme (bg: rgba(255,255,255,0.03), text: #e2e8f0/#94a3b8/#64748b)`);
     }
   }
 

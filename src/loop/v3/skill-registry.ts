@@ -384,9 +384,9 @@ export class SkillRegistry {
       suggestions.add('pipeline_validate_and_repair');
     } else if (skillName === 'pipeline_validate_and_repair') {
       suggestions.add('pipeline_verify');
-      suggestions.add('pipeline_generate');
+      // Do NOT suggest cycling back to pipeline_generate — one generation per request
     } else if (skillName === 'pipeline_verify') {
-      suggestions.add('pipeline_validate_and_repair');
+      // Do NOT suggest cycling back — verification is the final stage
     } else if (skillName === 'workflow_or_pipeline_build') {
       suggestions.add('pipeline_design');
     } else if (skillName === 'browser_automation') {

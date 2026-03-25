@@ -167,26 +167,28 @@ function getOpenAIClient(apiKey?: string, baseURL?: string): OpenAI {
   return clientCache.get(cacheKey) as OpenAI;
 }
 
-function getAnthropicClient(apiKey?: string): Anthropic {
+function getAnthropicClient(apiKey?: string, baseURL?: string): Anthropic {
   const key = apiKey || process.env.ANTHROPIC_API_KEY || '';
-  const cacheKey = `anthropic:${key}`;
+  const cacheKey = `anthropic:${key}:${baseURL || ''}`;
 
   if (!clientCache.has(cacheKey)) {
     clientCache.set(cacheKey, new Anthropic({
-      apiKey: key
+      apiKey: key,
+      baseURL: baseURL || undefined,
     }));
   }
 
   return clientCache.get(cacheKey) as Anthropic;
 }
 
-function getGroqClient(apiKey?: string): Groq {
+function getGroqClient(apiKey?: string, baseURL?: string): Groq {
   const key = apiKey || process.env.GROQ_API_KEY || '';
-  const cacheKey = `groq:${key}`;
+  const cacheKey = `groq:${key}:${baseURL || ''}`;
 
   if (!clientCache.has(cacheKey)) {
     clientCache.set(cacheKey, new Groq({
-      apiKey: key
+      apiKey: key,
+      baseURL: baseURL || undefined,
     }));
   }
 
@@ -260,7 +262,7 @@ async function streamAnthropic(
   messages: ChatMessage[], model: string,
   callbacks: StreamCallbacks, options?: Partial<RunPromptOptions>
 ): Promise<LLMResponse> {
-  const client = getAnthropicClient(options?.apiKey);
+  const client = getAnthropicClient(options?.apiKey, options?.baseURL);
   const systemMessage = messages.find(m => m.role === 'system');
   let conversationMessages = messages.filter(m => m.role !== 'system');
 
@@ -318,7 +320,7 @@ async function streamGroq(
   messages: ChatMessage[], model: string,
   callbacks: StreamCallbacks, options?: Partial<RunPromptOptions>
 ): Promise<LLMResponse> {
-  const client = getGroqClient(options?.apiKey);
+  const client = getGroqClient(options?.apiKey, options?.baseURL);
   const stream = await client.chat.completions.create({
     model,
     messages: messages.map(m => ({ role: m.role, content: m.content })),
@@ -627,7 +629,7 @@ async function runOpenAI(messages: ChatMessage[], model: string, options?: Parti
 }
 
 async function runAnthropic(messages: ChatMessage[], model: string, options?: Partial<RunPromptOptions>): Promise<LLMResponse> {
-  const client = getAnthropicClient(options?.apiKey);
+  const client = getAnthropicClient(options?.apiKey, options?.baseURL);
 
   // Extract system message and user/assistant messages
   const systemMessage = messages.find(m => m.role === 'system');
@@ -667,7 +669,7 @@ async function runAnthropic(messages: ChatMessage[], model: string, options?: Pa
 }
 
 async function runGroq(messages: ChatMessage[], model: string, options?: Partial<RunPromptOptions>): Promise<LLMResponse> {
-  const client = getGroqClient(options?.apiKey);
+  const client = getGroqClient(options?.apiKey, options?.baseURL);
 
   const response = await client.chat.completions.create({
     model,

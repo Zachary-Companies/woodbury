@@ -5020,6 +5020,25 @@ Remember: respond with ONLY the JSON object.`;
           debugLog.warn('generation', 'Failed to generate/run v2 pipeline tests', { error: String(testErr) });
         }
 
+        // ── Generate React views for the pipeline ──
+        let viewsResult: { viewsGenerated: string[]; buildSuccess: boolean } | null = null;
+        try {
+          const { generatePipelineViews } = await import('../view-scaffolding.js');
+          viewsResult = await generatePipelineViews(
+            pipelineDir,
+            pipelineName,
+            description.trim(),
+            realNodes,
+          );
+          debugLog.info('generation', 'Pipeline views generated', {
+            pipelineId,
+            views: viewsResult.viewsGenerated,
+            buildSuccess: viewsResult.buildSuccess,
+          });
+        } catch (viewErr) {
+          debugLog.warn('generation', 'View generation failed (non-fatal)', { error: String(viewErr) });
+        }
+
         sendJson(res, 200, {
           success: true,
           format: 'v2',
@@ -5031,6 +5050,7 @@ Remember: respond with ONLY the JSON object.`;
           ...(decompositionPlan ? { decompositionPlan } : {}),
           ...(validation ? { validation } : {}),
           ...(pipelineTestResults ? { testResults: pipelineTestResults } : {}),
+          ...(viewsResult ? { views: viewsResult } : {}),
         });
       } else {
         sendJson(res, 200, {

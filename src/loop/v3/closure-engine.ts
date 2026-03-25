@@ -193,10 +193,24 @@ const COMPOSITION_TOOLS = new Set([
 ]);
 
 /**
+ * Track the composition ID saved during the current pipeline generation lifecycle.
+ * Reset via `resetAutoSaveGuard()` at the start of each new chat session.
+ * Prevents duplicate pipelines when the model calls generation tools multiple times.
+ */
+let savedCompositionId: string | null = null;
+
+/** Reset the auto-save guard — call at the start of a new chat session/goal */
+export function resetAutoSaveGuard(): void {
+  savedCompositionId = null;
+}
+
+/**
  * Auto-save a CompositionDocument returned by an MCP intelligence tool.
  * Handles two formats:
  *   - v1: Inline CompositionDocument JSON → writes to .composition.json
  *   - v2: File-backed pipeline → already written to disk by the tool, just invalidate cache
+ *
+ * Only saves one composition ID per lifecycle to prevent duplicate pipelines.
  */
 export function autoSaveComposition(toolName: string, output: string): void {
   try {
@@ -228,12 +242,20 @@ export function autoSaveComposition(toolName: string, output: string): void {
       debugLog.warn('closure-engine', 'MCP intelligence tool result is not a valid composition', { toolName });
       return;
     }
+
+    // Prevent duplicate pipelines: if we already saved a DIFFERENT composition ID
+    // in this lifecycle, skip this one. The model should only create one pipeline per request.
+    const fileId = parsed.id.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/^-+|-+$/g, '');
+    if (savedCompositionId && savedCompositionId !== fileId) {
+      debugLog.warn('closure-engine', `Skipping duplicate composition save — already saved ${savedCompositionId}, refusing new ID ${fileId}`, { toolName });
+      return;
+    }
+    savedCompositionId = fileId;
+
     const dir = join(homedir(), '.woodbury', 'workflows');
     if (!existsSync(dir)) {
       mkdirSync(dir, { recursive: true });
     }
-    // Sanitize ID for filename
-    const fileId = parsed.id.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/^-+|-+$/g, '');
     const filePath = join(dir, `${fileId}.composition.json`);
     writeFileSync(filePath, JSON.stringify(parsed, null, 2), 'utf-8');
     invalidateCompositionCache();
@@ -616,6 +638,7 @@ export class ClosureEngine {
     this.stateManager.startNewTurn();
     this.totalToolCalls = 0;
     this.currentUserMessage = userMessage;
+    resetAutoSaveGuard(); // Allow fresh pipeline generation for each new request
 
     // Extract the raw user message for goal extraction — strip any system preamble
     // injected by compressed prompt building (conversation_summary, recent_turns, <important> tags)
@@ -1233,9 +1256,9 @@ export class ClosureEngine {
               if (issues.length > 0) {
                 debugLog.warn('closure-engine', `Composition has ${issues.length} issue(s)`, { issues });
                 // Append validation feedback to the tool output so the model sees it
-                output += '\n\n⚠️ VALIDATION ISSUES FOUND — You MUST fix these before presenting to the user:\n' +
+                output += '\n\n⚠️ VALIDATION ISSUES FOUND:\n' +
                   issues.map((issue, i) => `${i + 1}. ${issue}`).join('\n') +
-                  '\n\nCall generate_pipeline again with corrected intent/constraints, or explain the issues to the user.';
+                  '\n\nDo NOT call generate_pipeline again — that would create a duplicate pipeline. Instead, explain the issues to the user and offer to fix the existing pipeline files directly.';
               }
             }
           } catch {

@@ -77,6 +77,7 @@ interface AppSchema {
   name: string;
   description: string;
   logo?: string;
+  appConfig?: Record<string, any>;
   sections: AppSection[];
   edges: Array<{ sourceNodeId: string; sourcePort: string; targetNodeId: string; targetPort: string }>;
   executionOrder: string[];
@@ -108,23 +109,10 @@ async function resolveProjectFolder(pipelineId: string): Promise<string> {
 
 // ── Node-to-project key mapping ──────────────────────────────
 
-/** Map pipeline node IDs to project.json top-level keys */
-const NODE_KEY_MAP: Record<string, string | string[]> = {
-  'node-4':  'metadata',
-  'node-5':  'characters',
-  'node-6':  'locations',
-  'node-7':  'sections',
-  'node-8':  'processedSections',
-  'node-9':  'sceneContent',
-  'node-10': 'elements',
-  'node-11': 'productionMetadata',
-  'node-12': 'assets',
-  'node-13': 'previsualizations',
-  'node-14': 'ruleEnforcement',
-  'node-15': '_assembly', // special: reads/writes entire project
-  'node-16': '_output',   // special: reads/writes entire project
-  'node-17': 'dialogueAudio',
-};
+/** Read node-key map from pipeline appConfig, or return empty map */
+function getNodeKeyMap(pipeline: any): Record<string, string | string[]> {
+  return pipeline?.appConfig?.nodeKeyMap || {};
+}
 
 function projectFilePath(projectFolder: string): string {
   return join(projectFolder, 'project.json');
@@ -148,60 +136,59 @@ async function saveProjectFile(projectFolder: string, data: Record<string, any>)
 
 /**
  * Convert a project.json into the nodeData format expected by the UI.
- * Creates virtual "node" entries so the existing stitcher/renderers work.
+ * Uses the pipeline's appConfig.nodeKeyMap to map project keys → node IDs.
+ * If no nodeKeyMap is provided, returns empty nodeData.
  */
-function projectToNodeData(project: Record<string, any>): Record<string, AppNodeData> {
+function projectToNodeData(project: Record<string, any>, nodeKeyMap: Record<string, string | string[]>): Record<string, AppNodeData> {
   const now = project.updatedAt || new Date().toISOString();
   const nodeData: Record<string, AppNodeData> = {};
 
-  // Map project keys back to node IDs
-  if (project.metadata) {
-    nodeData['node-4'] = { outputs: { metadata: project.metadata }, updatedAt: now, manuallyEdited: false };
-  }
-  if (project.characters) {
-    nodeData['node-5'] = { outputs: { characters: project.characters }, updatedAt: now, manuallyEdited: false };
-  }
-  if (project.locations) {
-    nodeData['node-6'] = { outputs: { locations: project.locations }, updatedAt: now, manuallyEdited: false };
-  }
-  if (project.sections) {
-    nodeData['node-7'] = { outputs: { sections: project.sections }, updatedAt: now, manuallyEdited: false };
-  }
-  if (project.elements) {
-    nodeData['node-10'] = { outputs: { elements: project.elements }, updatedAt: now, manuallyEdited: false };
-  }
-  if (project.assets) {
-    nodeData['node-12'] = { outputs: { assetCollection: project.assets }, updatedAt: now, manuallyEdited: false };
-  }
-  if (project.previsualizations) {
-    nodeData['node-13'] = { outputs: { previsualizations: project.previsualizations }, updatedAt: now, manuallyEdited: false };
+  // Build reverse map: projectKey → nodeId
+  const reverseMap: Record<string, string> = {};
+  for (const [nodeId, key] of Object.entries(nodeKeyMap)) {
+    if (typeof key === 'string') reverseMap[key] = nodeId;
   }
 
-  // Scene-grouped data (new model with shots containing previsPath)
-  if (project.scenes) {
-    nodeData['node-14'] = { outputs: { scenes: project.scenes }, updatedAt: now, manuallyEdited: false };
+  // Map project keys to node outputs using the pipeline's nodeKeyMap
+  for (const [projKey, nodeId] of Object.entries(reverseMap)) {
+    if (projKey.startsWith('_')) continue; // skip special keys like _assembly, _output
+    if (project[projKey] !== undefined) {
+      nodeData[nodeId] = { outputs: { [projKey]: project[projKey] }, updatedAt: now, manuallyEdited: false };
+    }
   }
 
-  // Also create an assembly node with the full scriptPackage
-  nodeData['node-15'] = {
-    outputs: {
-      scriptPackage: {
-        script: {
-          metadata: project.metadata || {},
-          characters: project.characters || [],
-          locations: project.locations || [],
-          sections: project.sections || [],
-          elements: project.elements || [],
+  // Scene-grouped data (if present in project but not in nodeKeyMap, skip)
+  if (project.scenes && !reverseMap['scenes']) {
+    // Find a node that maps to ruleEnforcement or similar
+    const rulesNodeId = reverseMap['ruleEnforcement'];
+    if (rulesNodeId) {
+      nodeData[rulesNodeId] = { outputs: { scenes: project.scenes }, updatedAt: now, manuallyEdited: false };
+    }
+  }
+
+  // Assembly node — build a scriptPackage if the pipeline declares _assembly
+  const assemblyNodeId = reverseMap['_assembly'];
+  if (assemblyNodeId) {
+    nodeData[assemblyNodeId] = {
+      outputs: {
+        scriptPackage: {
+          script: {
+            metadata: project.metadata || {},
+            characters: project.characters || [],
+            locations: project.locations || [],
+            sections: project.sections || [],
+            elements: project.elements || [],
+          },
+          previsualizations: project.previsualizations || { shots: [] },
+          assets: project.assets || [],
+          scenes: project.scenes || [],
         },
-        previsualizations: project.previsualizations || { shots: [] },
-        assets: project.assets || [],
-        scenes: project.scenes || [],
+        _fountainSource: project._fountainSource || '',
       },
-      _fountainSource: project._fountainSource || '',
-    },
-    updatedAt: now,
-    manuallyEdited: false,
-  };
+      updatedAt: now,
+      manuallyEdited: false,
+    };
+  }
 
   return nodeData;
 }
@@ -448,6 +435,7 @@ function deriveAppSchema(pipeline: any): AppSchema {
     name: pipeline.name || 'Untitled Pipeline',
     description: pipeline.description || '',
     logo: pipeline.metadata?.logo || undefined,
+    appConfig: pipeline.appConfig || undefined,
     sections,
     edges: edges.map((e: any) => ({
       sourceNodeId: e.sourceNodeId,
@@ -507,7 +495,9 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
     }
 
     if (project) {
-      const nodeData = projectToNodeData(project as any);
+      const pipeline = await findPipeline(ctx.workDir, pipelineId);
+      const keyMap = getNodeKeyMap(pipeline);
+      const nodeData = projectToNodeData(project as any, keyMap);
       const info = ctx.projectState.getInfo(pipelineId);
       sendJson(res, 200, {
         pipelineId,
@@ -614,8 +604,10 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
         if (sp.assets) partial.assets = sp.assets;
         if (outputs._fountainSource) partial._fountainSource = outputs._fountainSource;
       } else {
-        // Map using NODE_KEY_MAP for individual nodes
-        const keyMapping = NODE_KEY_MAP[nodeId];
+        // Map using pipeline's nodeKeyMap for individual nodes
+        const pipeline = await findPipeline(ctx.workDir, pipelineId);
+        const nodeKeyMap = getNodeKeyMap(pipeline);
+        const keyMapping = nodeKeyMap[nodeId];
         if (keyMapping && typeof keyMapping === 'string' && keyMapping !== '_assembly' && keyMapping !== '_output') {
           const val = outputs[keyMapping];
           if (val !== undefined) partial[keyMapping] = val;
@@ -942,11 +934,13 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
       sendJson(res, 404, { error: 'No data for this node' });
       return true;
     }
-    // Map nodeId to project data using NODE_KEY_MAP
-    const keyMapping = NODE_KEY_MAP[nodeId];
+    // Map nodeId to project data using pipeline's nodeKeyMap
+    const pipeline = await findPipeline(ctx.workDir, pipelineId);
+    const nodeKeyMap = getNodeKeyMap(pipeline);
+    const keyMapping = nodeKeyMap[nodeId];
     let outputs: Record<string, unknown> = {};
     if (keyMapping === '_assembly' || keyMapping === '_output') {
-      outputs = projectToNodeData(project as any)[nodeId]?.outputs || {};
+      outputs = projectToNodeData(project as any, nodeKeyMap)[nodeId]?.outputs || {};
     } else if (keyMapping && typeof keyMapping === 'string') {
       outputs = { [keyMapping]: (project as any)[keyMapping] };
     }
@@ -1184,6 +1178,88 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
       res.end(content);
     } catch {
       sendJson(res, 404, { error: 'View file not found' });
+    }
+    return true;
+  }
+
+  // ── LLM Proxy Management ──────────────────────────────────
+  if (subPath === '/llm-proxy/status') {
+    const proxy = ctx.llmProxy;
+    const status: any = {
+      running: !!proxy,
+      port: proxy?.port || 8642,
+      enabled: process.env.LLM_PROXY_ENABLED !== 'false',
+      baseURL: process.env.LLM_BASE_URL || null,
+    };
+    // Try to get stats from running proxy
+    if (proxy) {
+      try {
+        const resp = await fetch(`http://localhost:${proxy.port}/stats`);
+        if (resp.ok) status.stats = await resp.json();
+      } catch {}
+      try {
+        const resp = await fetch(`http://localhost:${proxy.port}/health`);
+        if (resp.ok) status.health = await resp.json();
+      } catch {}
+    }
+    // Detect available API keys
+    status.availableBackends = {
+      anthropic: !!process.env.ANTHROPIC_API_KEY,
+      openai: !!process.env.OPENAI_API_KEY,
+      groq: !!process.env.GROQ_API_KEY,
+    };
+    sendJson(res, 200, status);
+    return true;
+  }
+
+  if (req.method === 'POST' && subPath === '/llm-proxy/toggle') {
+    const body = await readBody(req);
+    const enable = body.enabled !== false;
+    process.env.LLM_PROXY_ENABLED = enable ? 'true' : 'false';
+
+    if (enable && !ctx.llmProxy) {
+      // Import and start proxy
+      const { startLlmProxy } = await import('../server.js');
+      if (typeof (startLlmProxy as any) === 'function') {
+        (startLlmProxy as any)(ctx);
+      }
+    } else if (!enable && ctx.llmProxy) {
+      try {
+        ctx.llmProxy.process.kill('SIGTERM');
+        ctx.llmProxy = null;
+        delete process.env.LLM_BASE_URL;
+      } catch {}
+    }
+
+    sendJson(res, 200, { success: true, running: !!ctx.llmProxy, enabled: enable });
+    return true;
+  }
+
+  if (req.method === 'POST' && subPath === '/llm-proxy/model') {
+    const body = await readBody(req);
+    const model = body.model;
+    if (!model || typeof model !== 'string') {
+      sendJson(res, 400, { error: 'model required' });
+      return true;
+    }
+    // Persist model selection to chat config (same file as Model menu)
+    const configDir = join(homedir(), '.woodbury', 'config');
+    try {
+      await mkdir(configDir, { recursive: true });
+      const configPath = join(configDir, 'chat-config.json');
+      let config: any = {};
+      try { config = JSON.parse(await readFile(configPath, 'utf-8')); } catch {}
+      // Determine provider from model name
+      let provider = 'anthropic';
+      if (model.startsWith('gpt-') || model.startsWith('o1-') || model.startsWith('o3-')) provider = 'openai';
+      else if (model.startsWith('llama') || model.startsWith('mixtral')) provider = 'groq';
+      config.provider = provider;
+      config.model = model;
+      config.pipelineModel = model; // extra field for pipeline-specific selection
+      await writeFile(configPath, JSON.stringify(config, null, 2));
+      sendJson(res, 200, { success: true, model, provider });
+    } catch (err: any) {
+      sendJson(res, 500, { error: err.message });
     }
     return true;
   }

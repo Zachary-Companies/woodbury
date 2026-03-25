@@ -1,6 +1,6 @@
 /**
  * NodeSection — display for a pipeline node's output data.
- * Detects characters/locations/elements and uses specialized card renderers.
+ * Uses pipeline appConfig.nodeRenderers for specialized renderers.
  * Falls back to generic key-value/card grid for unknown data shapes.
  */
 import React, { useState, useCallback } from 'react';
@@ -8,41 +8,33 @@ import { usePipeline, useAIOperations } from '../stores/PipelineProvider';
 import { CharacterCard } from './CharacterCard';
 import { LocationCard } from './LocationCard';
 
+interface NodeRendererConfig {
+  id: string;
+  matchFields: string[];
+  excludeFields?: string[];
+  renderer: string;
+}
+
 interface NodeSectionProps {
   section: any;
   appState: any;
   pipelineId: string;
+  appConfig?: any;
 }
 
-/** Detect if an array looks like characters */
-function isCharacterArray(arr: any[]): boolean {
-  if (!arr.length || typeof arr[0] !== 'object') return false;
-  const sample = arr[0];
-  return 'name' in sample && ('role' in sample || 'traits' in sample || 'dialogueCount' in sample || 'description' in sample);
+/** Match an array value against pipeline-declared renderer configs */
+function matchRenderer(value: any, renderers: NodeRendererConfig[]): string | null {
+  if (!Array.isArray(value) || value.length === 0 || typeof value[0] !== 'object') return null;
+  const sample = value[0];
+  for (const r of renderers) {
+    const hasAll = r.matchFields.every(f => f in sample);
+    const hasNone = !(r.excludeFields || []).some(f => f in sample);
+    if (hasAll && hasNone) return r.renderer;
+  }
+  return null;
 }
 
-/** Detect if an array looks like locations */
-function isLocationArray(arr: any[]): boolean {
-  if (!arr.length || typeof arr[0] !== 'object') return false;
-  const sample = arr[0];
-  return 'name' in sample && ('type' in sample || 'mood' in sample || 'timeOfDay' in sample) && !('role' in sample) && !('lines' in sample);
-}
-
-/** Detect if an array looks like screenplay elements */
-function isElementArray(arr: any[]): boolean {
-  if (!arr.length || typeof arr[0] !== 'object') return false;
-  const sample = arr[0];
-  return 'type' in sample && ('content' in sample || 'lines' in sample) && ('characterName' in sample || sample.type === 'action' || sample.type === 'dialogue');
-}
-
-/** Detect if an array looks like sections (acts/scenes) */
-function isSectionArray(arr: any[]): boolean {
-  if (!arr.length || typeof arr[0] !== 'object') return false;
-  const sample = arr[0];
-  return 'type' in sample && ('title' in sample) && (sample.type === 'act' || sample.type === 'scene');
-}
-
-export function NodeSection({ section, appState, pipelineId }: NodeSectionProps) {
+export function NodeSection({ section, appState, pipelineId, appConfig }: NodeSectionProps) {
   const nodeData = appState?.nodeData?.[section.nodeId];
   const outputs = nodeData?.outputs;
   const isStale = (appState?.staleNodes || []).includes(section.nodeId);
@@ -93,6 +85,7 @@ export function NodeSection({ section, appState, pipelineId }: NodeSectionProps)
             value={value}
             section={section}
             pipelineId={pipelineId}
+            appConfig={appConfig}
           />
         ))}
       </div>
@@ -101,11 +94,12 @@ export function NodeSection({ section, appState, pipelineId }: NodeSectionProps)
 }
 
 /** A single output key's rendered data */
-function OutputBlock({ outputKey, value, section, pipelineId }: {
+function OutputBlock({ outputKey, value, section, pipelineId, appConfig }: {
   outputKey: string;
   value: any;
   section: any;
   pipelineId: string;
+  appConfig?: any;
 }) {
   const [editing, setEditing] = useState(false);
   const [editText, setEditText] = useState('');
@@ -134,11 +128,8 @@ function OutputBlock({ outputKey, value, section, pipelineId }: {
     navigator.clipboard.writeText(JSON.stringify(value, null, 2));
   }, [value]);
 
-  // Detect specialized array types
-  const isChars = Array.isArray(value) && isCharacterArray(value);
-  const isLocs = Array.isArray(value) && isLocationArray(value);
-  const isElems = Array.isArray(value) && isElementArray(value);
-  const isSects = Array.isArray(value) && isSectionArray(value);
+  // Match against pipeline-declared renderers
+  const rendererType = matchRenderer(value, appConfig?.nodeRenderers || []);
   const itemCount = Array.isArray(value) ? ` (${value.length})` : '';
 
   return (
@@ -174,13 +165,13 @@ function OutputBlock({ outputKey, value, section, pipelineId }: {
               </button>
             </div>
           </div>
-        ) : isChars ? (
+        ) : rendererType === 'builtin:character-grid' ? (
           <CharacterGrid characters={value} pipelineId={pipelineId} />
-        ) : isLocs ? (
+        ) : rendererType === 'builtin:location-grid' ? (
           <LocationGrid locations={value} />
-        ) : isElems ? (
+        ) : rendererType === 'builtin:element-list' ? (
           <ElementList elements={value} />
-        ) : isSects ? (
+        ) : rendererType === 'builtin:section-tree' ? (
           <SectionTree sections={value} />
         ) : (
           <ValueRenderer value={value} />

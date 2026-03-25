@@ -40,6 +40,7 @@ import { handleSkillOptimizerRoutes } from './skill-optimizer.js';
 import { handlePipelineAppRoutes } from './pipeline-app.js';
 import { handleProjectRoutes } from './project.js';
 import { handleBindingsRoutes } from './bindings.js';
+import { handleLlmProxyRoutes } from './llm-proxy.js';
 
 // ── Handler chain (order matters for overlapping prefixes) ──
 
@@ -110,6 +111,9 @@ const handlers: RouteHandler[] = [
 
   // Skill policy review
   handleSkillPolicyRoutes,
+
+  // LLM Proxy management
+  handleLlmProxyRoutes,
 ];
 
 /**

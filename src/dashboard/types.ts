@@ -239,6 +239,9 @@ export interface DashboardContext {
   inferenceServer: InferenceServer | null;
   inferenceModelPath: string | null;
 
+  // ── LLM Proxy ──
+  llmProxy: { process: import('child_process').ChildProcess; port: number; logs: string[] } | null;
+
   // ── Chat ──
   chatAgent: any;
   chatAgents: Map<string, any>;

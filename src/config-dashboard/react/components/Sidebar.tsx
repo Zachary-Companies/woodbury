@@ -205,8 +205,18 @@ export function Sidebar({ currentView, onViewChange, activeSection, onSectionCha
         <div className="app-sidebar-actions">
           {/* Primary actions */}
           <button onClick={handleRunPipeline} className="app-action-btn">▶ Run Pipeline</button>
-          <button onClick={handleNewProject} className="app-action-btn app-action-new-project">✨ New Project</button>
-          <button onClick={handleImportScript} className="app-action-btn app-action-import">📄 Import Script</button>
+          {(schema?.appConfig?.sidebarActions || [])
+            .filter((a: any) => a.placement !== 'secondary')
+            .map((action: any) => (
+              <button
+                key={action.id}
+                onClick={() => window.dispatchEvent(new Event(action.event))}
+                className="app-action-btn"
+              >
+                {action.icon ? `${action.icon} ` : ''}{action.label}
+              </button>
+            ))
+          }
           {staleCount > 0 && (
             <button onClick={handleRefreshStale} className="app-action-btn app-action-refresh">
               🔄 Refresh {staleCount} stale

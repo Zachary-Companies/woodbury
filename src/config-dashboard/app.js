@@ -530,6 +530,11 @@ function switchTab(tab, opts) {
     if (typeof initMcp === 'function') {
       initMcp();
     }
+  } else if (tab === 'llm-settings') {
+    selectedExtension = null;
+    if (typeof initLlmSettings === 'function') {
+      initLlmSettings();
+    }
   }
 }
 

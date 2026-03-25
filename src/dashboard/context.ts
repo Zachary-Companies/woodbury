@@ -51,6 +51,9 @@ export function createDashboardContext(opts: {
 
     // Inference
     inferenceServer: null,
+
+    // LLM Proxy
+    llmProxy: null,
     inferenceModelPath: null,
 
     // Chat

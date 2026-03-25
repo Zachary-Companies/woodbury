@@ -247,6 +247,99 @@ function stopInferenceServer(ctx: DashboardContext): void {
 }
 
 // ────────────────────────────────────────────────────────────────
+//  LLM Proxy Lifecycle
+// ────────────────────────────────────────────────────────────────
+
+const LLM_PROXY_PORT = 8642;
+
+export function startLlmProxy(ctx: DashboardContext): void {
+  if (ctx.llmProxy) return;
+
+  // Check if proxy is enabled via env
+  const proxyEnabled = process.env.LLM_PROXY_ENABLED !== 'false';
+  if (!proxyEnabled) {
+    debugLog.info('llm-proxy', 'LLM proxy disabled (LLM_PROXY_ENABLED=false)');
+    return;
+  }
+
+  // Find the proxy binary — check pipeline tools directories
+  const { spawn } = require('node:child_process') as typeof import('node:child_process');
+  const { existsSync } = require('node:fs') as typeof import('node:fs');
+
+  const searchPaths = [
+    join(__dirname, '..', '..', 'tools', 'llm-proxy', 'woodbury-llm-proxy'),
+    join(__dirname, '..', 'tools', 'llm-proxy', 'woodbury-llm-proxy'),
+    join(homedir(), '.woodbury', 'bin', 'woodbury-llm-proxy'),
+  ];
+
+  let binaryPath: string | null = null;
+  for (const p of searchPaths) {
+    if (existsSync(p)) {
+      binaryPath = p;
+      break;
+    }
+  }
+
+  if (!binaryPath) {
+    debugLog.info('llm-proxy', 'LLM proxy binary not found, skipping. Searched: ' + searchPaths.join(', '));
+    return;
+  }
+
+  const logs: string[] = [];
+  const port = parseInt(process.env.LLM_PROXY_PORT || '') || LLM_PROXY_PORT;
+
+  try {
+    const proc = spawn(binaryPath, ['--port', String(port)], {
+      env: { ...process.env },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+
+    proc.stdout?.on('data', (data: Buffer) => {
+      const line = data.toString().trim();
+      if (line) {
+        logs.push(line);
+        if (logs.length > 200) logs.shift();
+        debugLog.info('llm-proxy', line);
+      }
+    });
+
+    proc.stderr?.on('data', (data: Buffer) => {
+      const line = data.toString().trim();
+      if (line) {
+        logs.push('[stderr] ' + line);
+        if (logs.length > 200) logs.shift();
+        debugLog.info('llm-proxy', line);
+      }
+    });
+
+    proc.on('close', (code: number | null) => {
+      debugLog.info('llm-proxy', `LLM proxy exited with code ${code}`);
+      if (ctx.llmProxy?.process === proc) {
+        ctx.llmProxy = null;
+      }
+    });
+
+    proc.on('error', (err: Error) => {
+      debugLog.error('llm-proxy', `LLM proxy error: ${err.message}`);
+      if (ctx.llmProxy?.process === proc) {
+        ctx.llmProxy = null;
+      }
+    });
+
+    ctx.llmProxy = { process: proc, port, logs };
+    debugLog.info('llm-proxy', `LLM proxy started on port ${port} (binary: ${binaryPath})`);
+
+    // Auto-set LLM_BASE_URL if not already set
+    if (!process.env.LLM_BASE_URL) {
+      process.env.LLM_BASE_URL = `http://localhost:${port}`;
+      debugLog.info('llm-proxy', `Set LLM_BASE_URL=http://localhost:${port}`);
+    }
+  } catch (err: any) {
+    debugLog.error('llm-proxy', `Failed to start LLM proxy: ${err.message}`);
+  }
+}
+
+// ────────────────────────────────────────────────────────────────
 //  Main Entry Point
 // ────────────────────────────────────────────────────────────────
 
@@ -326,6 +419,9 @@ export async function startDashboard(
   // Inference server (background, non-blocking)
   startInferenceServer(ctx);
 
+  // LLM Proxy (background, non-blocking)
+  startLlmProxy(ctx);
+
   // Bridge server (background, non-blocking)
   ensureBridgeServer().catch(() => {});
 
@@ -386,6 +482,18 @@ export async function startDashboard(
       stopScheduler();
       clearInterval(memoryTimer);
       stopInferenceServer(ctx);
+
+      // Stop LLM proxy
+      if (ctx.llmProxy) {
+        try {
+          ctx.llmProxy.process.kill('SIGTERM');
+          await new Promise<void>((resolve) => {
+            const timeout = setTimeout(() => { try { ctx.llmProxy?.process.kill('SIGKILL'); } catch {} resolve(); }, 3000);
+            ctx.llmProxy?.process.once('close', () => { clearTimeout(timeout); resolve(); });
+          });
+        } catch {}
+        ctx.llmProxy = null;
+      }
 
       if (ctx.chatAgent) {
         await ctx.chatAgent.stop().catch(() => {});

@@ -1,0 +1,41 @@
+port: 8642
+default_backend: anthropic
+
+backends:
+  anthropic:
+    api_key_env: ANTHROPIC_API_KEY
+    base_url: https://api.anthropic.com
+  openai:
+    api_key_env: OPENAI_API_KEY
+    base_url: https://api.openai.com
+
+routes:
+  - match: "claude-*"
+    backend: anthropic
+  - match: "gpt-*"
+    backend: openai
+  - match: "o1-*"
+    backend: openai
+  - match: "o3-*"
+    backend: openai
+  - match: "*"
+    backend: anthropic
+
+logging:
+  enabled: true
+  # Relative to ~/.woodbury/data/
+  db_path: ~/.woodbury/data/llm-proxy.db
+
+cost_rates:
+  claude-sonnet-4-20250514:
+    input_per_1m: 3.0
+    output_per_1m: 15.0
+  claude-opus-4-20250514:
+    input_per_1m: 15.0
+    output_per_1m: 75.0
+  gpt-4o:
+    input_per_1m: 2.5
+    output_per_1m: 10.0
+  gpt-4o-mini:
+    input_per_1m: 0.15
+    output_per_1m: 0.6

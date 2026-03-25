@@ -21,8 +21,8 @@ interface PipelineAppProps {
 
 export function PipelineApp({ pipelineId, schema: initialSchema, appState: initialAppState }: PipelineAppProps) {
   return (
-    <PipelineProvider pipelineId={pipelineId}>
-      <PipelineAppInner pipelineId={pipelineId} initialSchema={initialSchema} initialAppState={initialAppState} />
+    <PipelineProvider key={pipelineId} pipelineId={pipelineId}>
+      <PipelineAppInner key={pipelineId} pipelineId={pipelineId} initialSchema={initialSchema} initialAppState={initialAppState} />
     </PipelineProvider>
   );
 }
@@ -59,7 +59,13 @@ function PipelineAppInner({ pipelineId, initialSchema, initialAppState }: {
     })();
   }, [pipelineId, schema, appState]);
 
-  // Discover views from the server and merge with reactViewRegistry
+  // Clear stale view registrations from other pipelines on mount
+  useEffect(() => {
+    const registry = (window as any).__woodburyReactViewRegistry as Map<string, any> | undefined;
+    if (registry) registry.clear();
+  }, [pipelineId]);
+
+  // Discover views from the server, then merge any freshly-registered React views
   useEffect(() => {
     if (viewsLoaded.current) return;
     viewsLoaded.current = true;
@@ -82,7 +88,8 @@ function PipelineAppInner({ pipelineId, initialSchema, initialAppState }: {
         }
       } catch {}
 
-      // Also include any views already registered in the React view registry
+      // Merge any React views that were freshly registered by THIS pipeline's bundles
+      // (the registry was cleared above, so only current-pipeline registrations exist)
       const registry = (window as any).__woodburyReactViewRegistry as Map<string, any> | undefined;
       if (registry) {
         for (const [name, def] of registry) {
@@ -140,13 +147,13 @@ function PipelineAppInner({ pipelineId, initialSchema, initialAppState }: {
     return () => window.removeEventListener('woodbury:show-import', handler);
   }, []);
 
-  // Auto-show import modal when there's no project folder
+  // Auto-show import modal when there's no project folder (only if pipeline declares it)
   useEffect(() => {
     if (loading) return;
-    if (!projectFolder) {
+    if (!projectFolder && schema?.appConfig?.importModal?.autoShow) {
       setShowImport(true);
     }
-  }, [loading, projectFolder]);
+  }, [loading, projectFolder, schema]);
 
   // Listen for view switch requests from child components
   useEffect(() => {
@@ -188,7 +195,7 @@ function PipelineAppInner({ pipelineId, initialSchema, initialAppState }: {
             <>
               {/* Node section view (when a specific node is selected in sidebar) */}
               {activeSection && activeSectionDef ? (
-                <NodeSection section={activeSectionDef} appState={appState} pipelineId={pipelineId} />
+                <NodeSection section={activeSectionDef} appState={appState} pipelineId={pipelineId} appConfig={schema?.appConfig} />
               ) : currentView === 'settings' ? (
                 <SettingsView schema={schema} appState={appState} pipelineId={pipelineId} />
               ) : currentView !== '' ? (
@@ -199,8 +206,10 @@ function PipelineAppInner({ pipelineId, initialSchema, initialAppState }: {
         </div>
       </div>
 
-      {/* Import modal */}
-      {showImport && <ImportScriptModal pipelineId={pipelineId} onClose={() => setShowImport(false)} />}
+      {/* Import modal — only shown if pipeline declares an import modal type */}
+      {showImport && schema?.appConfig?.importModal?.type === 'fountain' && (
+        <ImportScriptModal pipelineId={pipelineId} onClose={() => setShowImport(false)} />
+      )}
     </div>
   );
 }

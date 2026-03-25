@@ -9,6 +9,7 @@ import { promises as fs } from 'fs';
 import { join, basename, extname } from 'path';
 import { existsSync } from 'fs';
 import type { PipelineDocument, PipelineNode, PipelineEdge, PortDeclaration, ScriptFileNodeConfig } from '../workflow/types.js';
+import { debugLog } from '../debug-log.js';
 
 // ── Port annotation parsing ──────────────────────────────────
 
@@ -316,6 +317,16 @@ export async function scaffoldPipeline(
   // Write initial empty rules.json
   const emptyRules = { version: '1.0', pipelineId: id, rules: [] };
   await fs.writeFile(join(bindingsDir, 'rules.json'), JSON.stringify(emptyRules, null, 2), 'utf-8');
+
+  // Scaffold views/ directory with build script + generic overview
+  try {
+    const { scaffoldViewsDirectory, scaffoldGenericOverview } = await import('./view-scaffolding.js');
+    await scaffoldViewsDirectory(pipelineDir);
+    await scaffoldGenericOverview(pipelineDir, name);
+  } catch (err) {
+    // Non-fatal — pipeline works without views
+    debugLog.warn('pipeline-sync', 'Failed to scaffold views directory', { error: String(err) });
+  }
 
   // Clean stale .ts files from previous generation (overwrite scenario)
   // Check both src/ and root for backward compat
