@@ -1,3 +1,5 @@
+'use client'
+
 const pipelines = [
   {
     name: 'Comprehensive Screenplay Generator',
