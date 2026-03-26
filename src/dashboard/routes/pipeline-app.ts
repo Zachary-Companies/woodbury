@@ -478,6 +478,23 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
     return true;
   }
 
+  // ── GET /api/app/:id/pipeline-inputs ─────────────────────
+  // Serves pipeline-inputs.json (friendly field definitions for settings form)
+  if (req.method === 'GET' && subPath === '/pipeline-inputs') {
+    try {
+      const discovered = await discoverCompositions(ctx.workDir);
+      const entry = discovered.find((d: any) => d?.composition?.id === pipelineId);
+      if (entry?.pipelineDir) {
+        const inputsPath = join(entry.pipelineDir, 'pipeline-inputs.json');
+        const raw = await readFile(inputsPath, 'utf-8');
+        sendJson(res, 200, JSON.parse(raw));
+        return true;
+      }
+    } catch { /* file doesn't exist or parse error — return 404 */ }
+    sendJson(res, 404, { error: 'No pipeline-inputs.json found' });
+    return true;
+  }
+
   // ── GET /api/app/:id/state ───────────────────────────────
   // Reads from ProjectStateManager, returns in nodeData format for backward compat
   if (req.method === 'GET' && subPath === '/state') {

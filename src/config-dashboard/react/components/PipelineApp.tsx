@@ -186,7 +186,7 @@ function PipelineAppInner({ pipelineId, initialSchema, initialAppState }: {
 
       {/* Content */}
       <div className="app-content" style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-        <div style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
+        <div style={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
           {loading ? (
             <div className="app-loading">
               <span className="spinner"></span> Loading...

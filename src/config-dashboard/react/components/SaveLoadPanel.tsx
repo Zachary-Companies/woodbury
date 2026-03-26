@@ -108,60 +108,63 @@ export function SaveLoadPanel({ pipelineId, onClose }: SaveLoadPanelProps) {
     }
   }, [handleSave]);
 
+  const s = {
+    overlay: { position: 'fixed' as const, inset: 0, zIndex: 50, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(4px)' },
+    panel: { width: 520, maxHeight: '70vh', background: '#0f172a', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 16, boxShadow: '0 25px 60px rgba(0,0,0,0.5)', overflow: 'hidden' as const, display: 'flex', flexDirection: 'column' as const, fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif', colorScheme: 'dark' as any },
+    tabRow: { display: 'flex', borderBottom: '1px solid rgba(255,255,255,0.06)' },
+    tab: (active: boolean) => ({ flex: 1, padding: '12px 16px', fontSize: 13, fontWeight: 500, background: 'none', border: 'none', borderBottom: active ? '2px solid #818cf8' : '2px solid transparent', color: active ? '#a5b4fc' : '#64748b', cursor: 'pointer', transition: 'color 0.15s' }),
+    closeBtn: { padding: '8px 14px', background: 'none', border: 'none', color: '#475569', fontSize: 18, cursor: 'pointer', lineHeight: 1 },
+    content: { flex: 1, overflowY: 'auto' as const, padding: 20 },
+    input: { width: '100%', padding: '10px 14px', borderRadius: 8, fontSize: 13, background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)', color: '#e2e8f0', outline: 'none', marginBottom: 10, boxSizing: 'border-box' as const },
+    btnPrimary: { padding: '10px 20px', borderRadius: 8, fontSize: 12, fontWeight: 600, background: 'rgba(99,102,241,0.2)', border: '1px solid rgba(99,102,241,0.3)', color: '#a5b4fc', cursor: 'pointer', transition: 'background 0.15s' },
+    btnSecondary: { padding: '10px 20px', borderRadius: 8, fontSize: 12, fontWeight: 500, background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)', color: '#94a3b8', cursor: 'pointer', transition: 'background 0.15s' },
+    btnLoad: { padding: '6px 12px', borderRadius: 6, fontSize: 11, fontWeight: 500, background: 'rgba(99,102,241,0.15)', border: '1px solid rgba(99,102,241,0.25)', color: '#a5b4fc', cursor: 'pointer' },
+    btnDelete: { padding: '6px 12px', borderRadius: 6, fontSize: 11, fontWeight: 500, background: 'none', border: '1px solid rgba(239,68,68,0.15)', color: 'rgba(248,113,113,0.6)', cursor: 'pointer' },
+    saveItem: { borderRadius: 10, border: '1px solid rgba(255,255,255,0.06)', background: 'rgba(255,255,255,0.02)', padding: 14, marginBottom: 8 },
+    statusBar: (ok: boolean) => ({ padding: '10px 20px', fontSize: 12, borderTop: '1px solid rgba(255,255,255,0.06)', color: ok ? '#34d399' : '#f87171' }),
+    empty: { fontSize: 12, color: '#475569', padding: '32px 0', textAlign: 'center' as const },
+  };
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onClose}>
-      <div className="w-[500px] max-h-[70vh] bg-[#111827] border border-white/10 rounded-xl shadow-2xl overflow-hidden flex flex-col" onClick={e => e.stopPropagation()}>
+    <div style={s.overlay} onClick={onClose}>
+      <div style={s.panel} onClick={e => e.stopPropagation()}>
         {/* Tabs */}
-        <div className="flex border-b border-white/5">
-          <button
-            onClick={() => setMode('save')}
-            className={`flex-1 px-4 py-2.5 text-xs font-medium transition-colors ${
-              mode === 'save' ? 'text-indigo-300 border-b-2 border-indigo-500' : 'text-slate-500 hover:text-slate-300'
-            }`}
-          >
-            💾 Save
-          </button>
-          <button
-            onClick={() => setMode('load')}
-            className={`flex-1 px-4 py-2.5 text-xs font-medium transition-colors ${
-              mode === 'load' ? 'text-indigo-300 border-b-2 border-indigo-500' : 'text-slate-500 hover:text-slate-300'
-            }`}
-          >
-            📂 Load
-          </button>
-          <button onClick={onClose} className="px-3 text-slate-600 hover:text-slate-400 text-lg">&times;</button>
+        <div style={s.tabRow}>
+          <button style={s.tab(mode === 'save')} onClick={() => setMode('save')}>💾 Save</button>
+          <button style={s.tab(mode === 'load')} onClick={() => setMode('load')}>📂 Load</button>
+          <button style={s.closeBtn} onClick={onClose}>&times;</button>
         </div>
 
         {/* Content */}
-        <div className="flex-1 overflow-y-auto p-4">
+        <div style={s.content}>
           {mode === 'save' && (
-            <div className="space-y-3">
+            <div>
               <input
                 type="text"
                 placeholder="Save name (e.g. 'Final draft')"
                 value={saveName}
                 onChange={e => setSaveName(e.target.value)}
-                className="w-full px-3 py-2 rounded-md text-xs bg-white/[0.03] border border-white/5 text-slate-300 placeholder-slate-600 outline-none focus:border-indigo-500/30"
+                style={s.input}
               />
               <input
                 type="text"
                 placeholder="Description (optional)"
                 value={saveDesc}
                 onChange={e => setSaveDesc(e.target.value)}
-                className="w-full px-3 py-2 rounded-md text-xs bg-white/[0.03] border border-white/5 text-slate-300 placeholder-slate-600 outline-none focus:border-indigo-500/30"
+                style={s.input}
               />
-              <div className="flex gap-2">
+              <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
                 <button
                   onClick={() => handleSave()}
                   disabled={busy}
-                  className="px-4 py-2 rounded-md text-xs font-medium bg-indigo-500/20 text-indigo-300 hover:bg-indigo-500/30 disabled:opacity-50"
+                  style={{ ...s.btnPrimary, opacity: busy ? 0.5 : 1 }}
                 >
                   {busy ? '⏳ Saving...' : '💾 Save Here'}
                 </button>
                 <button
                   onClick={handleSaveToFolder}
                   disabled={busy}
-                  className="px-4 py-2 rounded-md text-xs font-medium bg-white/[0.03] text-slate-400 hover:text-white hover:bg-white/[0.06] border border-white/5 disabled:opacity-50"
+                  style={{ ...s.btnSecondary, opacity: busy ? 0.5 : 1 }}
                 >
                   📁 Save to Folder...
                 </button>
@@ -170,38 +173,38 @@ export function SaveLoadPanel({ pipelineId, onClose }: SaveLoadPanelProps) {
           )}
 
           {mode === 'load' && (
-            <div className="space-y-2">
+            <div>
               {loadingSaves ? (
-                <div className="text-xs text-slate-500 py-4 text-center">Loading saves...</div>
+                <div style={s.empty}>Loading saves...</div>
               ) : saves.length === 0 ? (
-                <div className="text-xs text-slate-600 py-4 text-center">No saves yet. Click Save to create one.</div>
+                <div style={s.empty}>No saves yet. Click Save to create one.</div>
               ) : (
-                saves.map(s => (
-                  <div key={s.id} className="rounded-lg border border-white/5 bg-white/[0.02] p-3">
-                    <div className="flex items-center justify-between mb-1">
-                      <span className="text-xs font-medium text-slate-300">{s.name || s.id}</span>
-                      <span className="text-[10px] text-slate-600">
-                        {new Date(s.createdAt).toLocaleString()}
+                saves.map(item => (
+                  <div key={item.id} style={s.saveItem}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
+                      <span style={{ fontSize: 13, fontWeight: 500, color: '#e2e8f0' }}>{item.name || item.id}</span>
+                      <span style={{ fontSize: 10, color: '#475569' }}>
+                        {new Date(item.createdAt).toLocaleString()}
                       </span>
                     </div>
-                    {s.description && (
-                      <p className="text-[10px] text-slate-500 mb-1.5">{s.description}</p>
+                    {item.description && (
+                      <p style={{ fontSize: 11, color: '#64748b', margin: '0 0 6px' }}>{item.description}</p>
                     )}
-                    <div className="flex items-center justify-between">
-                      <span className="text-[10px] text-slate-600">
-                        {s.nodeCount} nodes &middot; {s.size > 1048576 ? `${(s.size / 1048576).toFixed(1)} MB` : `${Math.round(s.size / 1024)} KB`}
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                      <span style={{ fontSize: 10, color: '#475569' }}>
+                        {item.nodeCount} nodes &middot; {item.size > 1048576 ? `${(item.size / 1048576).toFixed(1)} MB` : `${Math.round(item.size / 1024)} KB`}
                       </span>
-                      <div className="flex gap-1">
+                      <div style={{ display: 'flex', gap: 6 }}>
                         <button
-                          onClick={() => handleLoad(s.id)}
+                          onClick={() => handleLoad(item.id)}
                           disabled={busy}
-                          className="px-2 py-0.5 rounded text-[10px] bg-indigo-500/20 text-indigo-300 hover:bg-indigo-500/30 disabled:opacity-50"
+                          style={{ ...s.btnLoad, opacity: busy ? 0.5 : 1 }}
                         >
                           Load
                         </button>
                         <button
-                          onClick={() => handleDelete(s.id)}
-                          className="px-2 py-0.5 rounded text-[10px] text-red-400/60 hover:text-red-400 hover:bg-red-500/10"
+                          onClick={() => handleDelete(item.id)}
+                          style={s.btnDelete}
                         >
                           Delete
                         </button>
@@ -216,9 +219,7 @@ export function SaveLoadPanel({ pipelineId, onClose }: SaveLoadPanelProps) {
 
         {/* Status */}
         {status && (
-          <div className={`px-4 py-2 text-xs border-t border-white/5 ${
-            status.type === 'ok' ? 'text-emerald-400' : 'text-red-400'
-          }`}>
+          <div style={s.statusBar(status.type === 'ok')}>
             {status.type === 'ok' ? '✓' : '✗'} {status.text}
           </div>
         )}

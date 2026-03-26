@@ -314,25 +314,65 @@ function ElementList({ elements }: { elements: any[] }) {
 
 /** Renders section tree (acts/scenes) */
 function SectionTree({ sections }: { sections: any[] }) {
-  function renderNode(node: any, depth: number): React.ReactElement {
+  const typeIcons: Record<string, string> = {
+    act: '📁', scene: '🎬', teaser: '🎪', montage: '🎞', sequence: '🔗',
+    'cold-open': '❄️', tag: '🏷', blackout: '⬛', 'end-credits': '🎬',
+  };
+  const typeColors: Record<string, string> = {
+    act: '#a5b4fc', scene: '#94a3b8', teaser: '#c4b5fd', montage: '#67e8f9',
+    sequence: '#fbbf24', 'cold-open': '#93c5fd', tag: '#d4d4d8', 'end-credits': '#64748b',
+  };
+
+  function renderNode(node: any, depth: number, index: number): React.ReactElement {
+    const title = node.title || node.name || node.heading || node.label || `${(node.type || 'section')} ${index + 1}`;
+    const icon = typeIcons[node.type] || (node.children?.length > 0 ? '📁' : '🎬');
+    const color = typeColors[node.type] || (depth === 0 ? '#a5b4fc' : '#94a3b8');
+    const childCount = node.children?.length || 0;
+    const hasDetails = node.location || node.timeOfDay || node.setting || node.description;
+
     return (
-      <div key={node.id || node.title} style={{ marginLeft: depth * 16, marginBottom: 2 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '3px 0' }}>
-          <span style={{ fontSize: 10 }}>{node.type === 'act' ? '📁' : '🎬'}</span>
-          <span style={{ fontSize: 12, color: depth === 0 ? '#a5b4fc' : '#94a3b8', fontWeight: depth === 0 ? 600 : 400 }}>
-            {node.title}
+      <div key={node.id || title + index} style={{ marginLeft: depth * 20, marginBottom: depth === 0 ? 8 : 2 }}>
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 8, padding: depth === 0 ? '6px 10px' : '3px 8px',
+          borderRadius: 6,
+          background: depth === 0 ? 'rgba(255,255,255,0.02)' : 'transparent',
+          border: depth === 0 ? '1px solid rgba(255,255,255,0.04)' : 'none',
+        }}>
+          <span style={{ fontSize: 12 }}>{icon}</span>
+          <span style={{ fontSize: depth === 0 ? 13 : 12, color, fontWeight: depth === 0 ? 600 : 400 }}>
+            {title}
           </span>
-          {node.timeOfDay && <span style={{ fontSize: 9, color: '#475569' }}>({node.timeOfDay})</span>}
-          {node.location && node.location !== node.title && (
-            <span style={{ fontSize: 9, color: '#475569' }}>@ {node.location}</span>
+          {node.type && (
+            <span style={{ fontSize: 9, padding: '1px 6px', borderRadius: 3, background: 'rgba(255,255,255,0.04)', color: '#64748b' }}>
+              {node.type}
+            </span>
+          )}
+          {childCount > 0 && (
+            <span style={{ fontSize: 9, color: '#475569' }}>({childCount})</span>
+          )}
+          {node.timeOfDay && <span style={{ fontSize: 9, color: '#475569' }}>{node.timeOfDay}</span>}
+          {node.location && node.location !== title && (
+            <span style={{ fontSize: 9, color: '#475569' }}>@ {typeof node.location === 'string' ? node.location : node.location?.name || ''}</span>
           )}
         </div>
-        {node.children?.map((child: any) => renderNode(child, depth + 1))}
+        {node.description && (
+          <div style={{ marginLeft: 28, fontSize: 10, color: '#475569', marginTop: 1, marginBottom: 2 }}>
+            {String(node.description).slice(0, 120)}
+          </div>
+        )}
+        {node.children?.map((child: any, i: number) => renderNode(child, depth + 1, i))}
       </div>
     );
   }
 
-  return <div>{sections.map(s => renderNode(s, 0))}</div>;
+  return (
+    <div>
+      <div style={{ fontSize: 11, color: '#64748b', marginBottom: 8 }}>
+        {sections.length} top-level sections · {sections.reduce((sum, s) => sum + (s.children?.length || 0), 0)} nested
+      </div>
+      {sections.map((s, i) => renderNode(s, 0, i))}
+    </div>
+  );
 }
 
 /** Renders any value type intelligently */

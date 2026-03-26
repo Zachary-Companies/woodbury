@@ -160,7 +160,7 @@ export const handleAppRoutes: RouteHandler = async (req, res, pathname, url, ctx
       '.pdf': 'application/pdf',
       // text / code
       '.json': 'application/json', '.csv': 'text/csv',
-      '.txt': 'text/plain', '.md': 'text/markdown',
+      '.txt': 'text/plain', '.md': 'text/markdown', '.fountain': 'text/plain',
       '.js': 'text/javascript', '.ts': 'text/typescript', '.py': 'text/x-python',
       '.html': 'text/html', '.css': 'text/css', '.sh': 'text/x-sh',
       '.yaml': 'text/yaml', '.yml': 'text/yaml', '.xml': 'text/xml',
