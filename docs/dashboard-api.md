@@ -1,6 +1,6 @@
 # Dashboard API Endpoint Reference
 
-Complete reference for all HTTP endpoints served by the Woodbury dashboard (`config-dashboard.ts`).
+Complete reference for all HTTP endpoints served by the Woodbury dashboard (30 route modules in `src/dashboard/routes/`).
 
 For the structured chat SSE contract, see [chat-api-and-sse-contract.md](chat-api-and-sse-contract.md).
 For composition artifact and validation rules, see [composition-schema-and-validation.md](composition-schema-and-validation.md).
@@ -997,3 +997,155 @@ These endpoints interact directly with the Chrome extension bridge for browser a
 _(Also aliased as `/api/simulate-keystroke`)_
 
 See [App & Bridge](#1-app--bridge) for full details.
+
+---
+
+## 24. LLM Proxy
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/llm-proxy/status` | Get proxy status, running state, and available backends |
+| POST | `/api/llm-proxy/toggle` | Enable or disable the LLM proxy service |
+| POST | `/api/llm-proxy/model` | Set active LLM model and detect provider |
+
+### Request/Response Details
+
+**GET `/api/llm-proxy/status`**
+```
+Response: { running, pid?, backends: [{ provider, available }], activeModel? }
+```
+
+**POST `/api/llm-proxy/toggle`**
+```
+Body: { enabled: boolean }
+Response: { running, pid? }
+```
+
+**POST `/api/llm-proxy/model`**
+```
+Body: { model: string }
+Response: { model, provider }
+```
+
+---
+
+## 25. Bindings
+
+Pipeline data connection management for entity-to-entity relationships.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/compositions/:id/bindings` | List all bindings for a pipeline |
+| POST | `/api/compositions/:id/bindings` | Create a new binding |
+| PUT | `/api/compositions/:id/bindings/:bindId` | Update a binding |
+| DELETE | `/api/compositions/:id/bindings/:bindId` | Delete a binding |
+| GET | `/api/compositions/:id/bindings/for-entity/:type/:id` | Get bindings for a specific entity |
+| POST | `/api/compositions/:id/bindings/apply-rules` | Trigger auto-binding rule evaluation |
+| GET | `/api/compositions/:id/bindings/rules` | List all binding rules |
+| POST | `/api/compositions/:id/bindings/rules` | Create a binding rule |
+| PUT | `/api/compositions/:id/bindings/rules/:ruleId` | Update a binding rule |
+| DELETE | `/api/compositions/:id/bindings/rules/:ruleId` | Delete a binding rule |
+| GET | `/api/compositions/:id/bindings/views` | List custom view configurations |
+| POST | `/api/compositions/:id/bindings/views` | Create a custom view config |
+| PUT | `/api/compositions/:id/bindings/views/:viewId` | Update a view configuration |
+| DELETE | `/api/compositions/:id/bindings/views/:viewId` | Delete a view configuration |
+
+---
+
+## 26. Memories
+
+AI memory store management for the agentic loop.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/memories` | List/search memories with pagination and filtering |
+| POST | `/api/memories` | Create a new memory |
+| DELETE | `/api/memories/:id` | Delete a specific memory |
+| GET | `/api/memories/stats` | Get memory store statistics |
+| POST | `/api/memories/consolidate` | Trigger memory decay and consolidation |
+
+---
+
+## 27. Pipeline App
+
+Pipeline application mode endpoints for the interactive app view.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/app/:id/schema` | Derive navigation structure from pipeline graph |
+| GET | `/api/app/:id/pipeline-inputs` | Load field definitions for pipeline settings |
+| GET | `/api/app/:id/state` | Load persisted app state |
+| DELETE | `/api/app/:id/state` | Clear all project state |
+| PUT | `/api/app/:id/project` | Write project data |
+| PUT | `/api/app/:id/state/:nodeId` | Save a single node's data and mark downstream stale |
+| POST | `/api/app/:id/refresh-from-run` | Reload project data from disk after a run |
+| POST | `/api/app/:id/mark-stale` | Mark nodes as stale |
+| GET | `/api/app/:id/saves` | List all saved snapshots |
+| POST | `/api/app/:id/saves` | Create a new snapshot |
+| POST | `/api/app/:id/saves/:saveId/load` | Restore state from a snapshot |
+| DELETE | `/api/app/:id/saves/:saveId` | Delete a snapshot |
+| POST | `/api/app/:id/saves/load-from-path` | Load state from an arbitrary path |
+| GET | `/api/app/:id/node/:nodeId` | Load a single node's output data |
+| GET | `/api/app/:id/bindings` | Get bindings for the app view |
+| PUT | `/api/app/:id/bindings` | Save bindings |
+| POST | `/api/app/:id/open-path` | Open a file/folder in system file manager |
+| GET | `/api/app/:id/rules` | Get binding rules |
+| PUT | `/api/app/:id/rules` | Save binding rules |
+| POST | `/api/app/:id/rules/run` | Execute binding rules |
+| GET | `/api/app/:id/views` | Discover pipeline-local custom views |
+| GET | `/api/app/:id/view-file/:viewName/:fileName` | Serve pipeline-local view files |
+| POST | `/api/app/:id/llm-proxy/toggle` | Toggle LLM proxy for this pipeline |
+| POST | `/api/app/:id/llm-proxy/model` | Set LLM model for this pipeline |
+
+---
+
+## 28. Project
+
+Project data management via `ProjectStateManager`.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/project/:id` | Get full project data |
+| PATCH | `/api/project/:id` | Partial update to domain slices |
+| DELETE | `/api/project/:id` | Clear project data |
+| POST | `/api/project/:id/reload` | Force reload from disk |
+| POST | `/api/project/:id/flush` | Flush in-memory state to disk |
+
+---
+
+## 29. Skill Optimizer
+
+Skill generation, optimization, and evaluation.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/skills/library` | List all published skills |
+| PATCH | `/api/skills/library/:id` | Update published skill metadata |
+| GET | `/api/skills/drafts` | List all draft sessions |
+| GET | `/api/skills/drafts/latest` | Get the most recent draft |
+| POST | `/api/skills/drafts/cleanup` | Delete old/unapproved drafts |
+| POST | `/api/skills/draft` | Generate initial skill draft from description |
+| GET | `/api/skills/drafts/:sessionId` | Get a specific draft session |
+| PATCH | `/api/skills/drafts/:sessionId` | Update draft session |
+| DELETE | `/api/skills/drafts/:sessionId` | Delete a draft session |
+| POST | `/api/skills/drafts/:sessionId/publish` | Publish an approved draft |
+| POST | `/api/skills/drafts/:sessionId/regenerate-rejected` | Regenerate rejected examples |
+| POST | `/api/skills/drafts/:sessionId/approve` | Approve a draft |
+| POST | `/api/skills/drafts/:sessionId/unapprove` | Unapprove a draft |
+| GET | `/api/skills/runs` | List optimization runs |
+| GET | `/api/skills/runs/:runId` | Get optimization report |
+| GET | `/api/skills/runs/:runId/artifacts` | List all artifacts for a run |
+| GET | `/api/skills/runs/:runId/versions/:version` | Load specific version artifact |
+| GET | `/api/skills/runs/:runId/diff` | Diff two skill versions |
+| POST | `/api/skills/runs/:runId/publish` | Publish optimized skill from a run |
+| POST | `/api/skills/optimize` | Start a skill optimization run |
+| POST | `/api/skills/evaluate` | Evaluate a skill against test cases |
+
+---
+
+## 30. Skill Policies
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/skill-policies` | Get all skill policies (filter by reviewStatus, skillName) |
+| PUT | `/api/skill-policies/:updateId` | Update a skill policy |

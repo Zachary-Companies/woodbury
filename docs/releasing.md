@@ -38,13 +38,13 @@ Example:
 
 ```json
 {
-  "version": "1.1.9",
-  "releaseDate": "2026-03-03",
+  "version": "1.4.1",
+  "releaseDate": "2026-03-26",
   "downloadUrls": {
-    "mac": "https://github.com/Zachary-Companies/woodbury/releases/latest/download/Woodbury-1.1.9-arm64.dmg",
-    "windows": "https://github.com/Zachary-Companies/woodbury/releases/latest/download/Woodbury-Setup-1.1.9.exe"
+    "mac": "https://github.com/Zachary-Companies/woodbury/releases/latest/download/Woodbury-1.4.1-arm64.dmg",
+    "windows": "https://github.com/Zachary-Companies/woodbury/releases/latest/download/Woodbury-Setup-1.4.1.exe"
   },
-  "releaseNotes": "Go menu shortcuts, dashboard UI improvements, Chrome focus fix for workflows.",
+  "releaseNotes": "LLM proxy, dynamic pipeline appConfig, view scaffolding, dark theme fixes, UI polish.",
   "releaseUrl": "https://github.com/Zachary-Companies/woodbury/releases/latest"
 }
 ```

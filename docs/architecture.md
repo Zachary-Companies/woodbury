@@ -23,13 +23,14 @@ The major subsystems are:
 | Subsystem | Entry Point | Description |
 |---|---|---|
 | Electron App | `electron/main.js` | Desktop shell: tray, menus, auto-updater, dashboard webview |
-| Dashboard Server | `src/dashboard/` (24 route modules) | HTTP server on port 9001 with modular route handlers for dashboard APIs |
+| Dashboard Server | `src/dashboard/` (30 route modules) | HTTP server on port 9001 with modular route handlers for dashboard APIs |
 | Dashboard UI | `src/config-dashboard/` | Browser-side HTML/CSS/JS served by the dashboard server |
 | Chrome Extension | (separate extension package) | Records browser interactions, communicates via WebSocket bridge |
 | Workflow Engine | `src/workflow/` | Records and replays browser/desktop action sequences |
 | Visual AI Inference | `src/inference/` | Node.js ONNX runtime for Siamese network element matching |
 | Extension System | `src/extension-loader.ts`, `src/extension-manager.ts` | JSON registry, hot install/uninstall, tool/command registration |
-| Agentic Loop | `src/loop/` | AI agent runtime with 34 built-in tools, plus dynamic extension and MCP tools, and a 13-skill v3 routing layer |
+| LLM Proxy | `tools/llm-proxy/` | Go-based reverse proxy for model routing, cost tracking, and multi-provider support |
+| Agentic Loop | `src/loop/` | AI agent runtime with 55 built-in tools, plus dynamic extension and MCP tools, and a 13-skill v3 routing layer |
 | Pipeline Builder | (within dashboard and loop) | DAG-based composition of workflow steps, scripts, and tools |
 | Social Media | `src/social/` | Scheduling, posting, content generation |
 | Training Pipeline | shells out to Python `woobury_models` | Siamese network training for visual element matching |
@@ -42,7 +43,7 @@ The major subsystems are:
 src/                         Main TypeScript source
 |
 |-- loop/                    Embedded agentic loop engine
-|   |-- tools/               34 built-in tools exposed by the default registry
+|   |-- tools/               55 built-in tools exposed by the default registry
 |   |                        (file_read, web_fetch, code_execute, etc.)
 |   |-- v2/                  Agent builder (API discovery, code gen, decomposition)
 |   |-- v3/                  Closure engine (state machine, safety, recovery)
@@ -80,7 +81,7 @@ src/                         Main TypeScript source
 |   |-- context.ts           createDashboardContext() factory
 |   |-- utils.ts             sendJson, readBody, maskValue, MIME_TYPES
 |   |-- middleware.ts         CORS, static file serving, API logging
-|   +-- routes/              24 route handler modules (see docs/dashboard-api.md)
+|   +-- routes/              30 route handler modules (see docs/dashboard-api.md)
 |
 |-- config-dashboard.ts      Backward-compatibility facade (re-exports from dashboard/)
 |-- cli.ts                   Commander-based CLI argument parsing
@@ -118,8 +119,7 @@ extensions/                  Bundled extensions (copied to dist/extensions/ at b
                             v
 +----------------------------------------------------------+
 |              Dashboard HTTP Server (:9001)                |
-|  src/config-dashboard.ts  (modular dashboard API surface) |
-|  Being refactored into src/dashboard/                    |
+|  src/dashboard/ (30 modular route handlers)               |
 |                                                          |
 |  Serves:                                                 |
 |  - Static UI from src/config-dashboard/                  |
@@ -135,7 +135,7 @@ extensions/                  Bundled extensions (copied to dist/extensions/ at b
      |                       |
      v                       v
 +---------+           +------------+
-| Bridge  |           | 34 Built-in |
+| Bridge  |           | 55 Built-in |
 | Server  |           | (loop/     |
 | (WS)    |           |  tools/)   |
 +---------+           +------------+
@@ -283,11 +283,10 @@ downstream inputs. Idempotency caching is stored in `~/.woodbury/cache/`.
 
 ### 5.1 Dashboard Server
 
-- **File**: `src/config-dashboard.ts` (14,640 lines -- actively being refactored into
-  `src/dashboard/` as smaller modules)
+- **Directory**: `src/dashboard/` (30 route handler modules)
 - **Port**: 9001
-- **Endpoints**: 155+ REST API routes covering workflows, extensions, pipelines, social
-  media, agent control, training, inference, configuration
+- **Endpoints**: 265+ REST API routes covering workflows, extensions, pipelines, social
+  media, agent control, training, inference, LLM proxy, skills, memories, and configuration
 - **Static Assets**: served from `src/config-dashboard/` (HTML, CSS, JS)
 
 ### 5.2 Dashboard UI
@@ -301,7 +300,7 @@ The browser-side UI is plain HTML/CSS/JS (no framework). Key files:
 
 ### 5.3 Agentic Loop
 
-Located in `src/loop/`. Provides an AI runtime with 34 built-in default tools, plus extension and MCP tools that can be added at runtime. The v3 closure engine also routes requests through a first-class skill layer before exposing a scoped tool subset.
+Located in `src/loop/`. Provides an AI runtime with 55 built-in default tools, plus extension and MCP tools that can be added at runtime. The v3 closure engine also routes requests through a first-class skill layer before exposing a scoped tool subset.
 
 - File operations (read, write, search, glob)
 - Code execution and analysis
@@ -513,7 +512,7 @@ WorkflowDocument
 
 | Concern | Tool | Notes |
 |---|---|---|
-| TypeScript compilation | `tsc` | Target ES2022, CommonJS output |
+| TypeScript compilation | `tsc` | Target ES2022, ESM output (Node16 module resolution) |
 | Import style | `.js` extensions | All TypeScript imports use `.js` suffix |
 | Postbuild | custom script | Copies `src/config-dashboard/` and `extensions/` to `dist/` |
 | Testing | Jest + ts-jest | Unit and integration tests |
@@ -534,11 +533,15 @@ extensions are available in the distribution.
 
 ---
 
-## 12. Active Refactoring Notes
+## 12. LLM Proxy
 
-- `src/config-dashboard.ts` (14,640 lines) is being refactored into smaller modules
-  under `src/dashboard/`. When working on dashboard API endpoints, check both locations.
-- `src/config-dashboard/compositions.js` (10,493 lines) is slated to be split into
-  smaller view modules.
-- `src/config-dashboard/workflows.js` (5,465 lines) is slated to be split into smaller
-  view modules.
+The LLM proxy (`tools/llm-proxy/`) is a Go-based reverse proxy that routes pipeline LLM calls through a local service for logging, cost tracking, and multi-provider support. It sits between the dashboard and LLM providers (Anthropic, OpenAI, Groq).
+
+- **Lifecycle**: auto-starts with the dashboard, sets `LLM_BASE_URL`, shuts down on exit
+- **Routes**: `src/dashboard/routes/llm-proxy.ts` exposes `/api/llm-proxy/status`, `/api/llm-proxy/toggle`, `/api/llm-proxy/model`
+- **Dashboard UI**: `src/config-dashboard/llm-settings.js` provides a Settings tab with proxy toggle, backend detection, model selector, and usage stats
+
+## 13. Notes
+
+- `src/config-dashboard/compositions.js` and `src/config-dashboard/workflows.js` are large
+  frontend files that may be split into smaller view modules in the future.

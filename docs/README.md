@@ -1,6 +1,6 @@
 # Woodbury Docs Map
 
-Last updated: 2026-03-12
+Last updated: 2026-03-26
 
 This directory contains the working documentation set for Woodbury.
 
@@ -15,7 +15,7 @@ The goal is not to document every file. The goal is to document the contracts, b
   Codebase conventions, dashboard route patterns, file organization, and naming rules.
 
 - [dashboard-api.md](dashboard-api.md)
-  Dashboard HTTP endpoints and request/response shapes.
+  Dashboard HTTP endpoints and request/response shapes (265+ endpoints across 30 route modules).
 
 ## Chat And Agent Loop
 
@@ -36,6 +36,21 @@ The goal is not to document every file. The goal is to document the contracts, b
 - [pipeline-generation-runbook.md](pipeline-generation-runbook.md)
   Operational runbook for diagnosing false-success pipeline claims, stale discoverability, malformed script nodes, and incomplete verification.
 
+- [pipeline-views.md](pipeline-views.md)
+  React view architecture for pipelines: file structure, SDK hooks, manifest format, build system, and view registration.
+
+- [pipeline-extensions.md](pipeline-extensions.md)
+  Pipeline extension system for adding custom node types and behaviors.
+
+- [pipeline-screenplay-generator.md](pipeline-screenplay-generator.md)
+  Screenplay-specific pipeline type: Fountain import, character/location extraction, and scene generation.
+
+- [react-frontend-integration.md](react-frontend-integration.md)
+  Data flow from pipeline outputs to domain JSON files and the React frontend.
+
+- [provider-data-management.md](provider-data-management.md)
+  Provider data patterns for pipeline domain data management.
+
 ## Extensions And MCP
 
 - [extensions.md](extensions.md)
@@ -53,6 +68,14 @@ The goal is not to document every file. The goal is to document the contracts, b
 - [mcp-integration-guide.md](mcp-integration-guide.md)
   MCP server integration and discovery behavior.
 
+## Workflows
+
+- [workflow-authoring-guide.md](workflow-authoring-guide.md)
+  End-to-end guide for learning, building, testing, and shipping workflows.
+
+- [aria-targeting-reference.md](aria-targeting-reference.md)
+  ARIA-based element targeting for resilient workflow selectors.
+
 ## Platform-Specific Or Operational Docs
 
 - [electron-entry-point.md](electron-entry-point.md)
@@ -67,16 +90,17 @@ The goal is not to document every file. The goal is to document the contracts, b
 - [releasing.md](releasing.md)
   Release and packaging workflow.
 
-## Retrospectives
+- [react-migration-plan.md](react-migration-plan.md)
+  Status and plan for migrating dashboard UI components to React.
+
+## Changelogs
 
 - [change-log-2026-03-05-to-2026-03-12.md](change-log-2026-03-05-to-2026-03-12.md)
-  Commit-grounded retrospective covering all changes landed from March 5 through March 12, 2026, with rationale and architectural analysis.
+  Retrospective covering March 5 through March 12, 2026.
 
-- [todays-log-2026-03-12.md](todays-log-2026-03-12.md)
-  Isolated log covering only the March 12, 2026 work, including same-day follow-up contract and runtime-tool updates.
+- Daily changelogs: [03-19](changelog-2026-03-19.md), [03-20](changelog-2026-03-20.md), [03-21](changelog-2026-03-21.md), [03-22](changelog-2026-03-22.md), [03-24](changelog-2026-03-24.md), [03-25](changelog-2026-03-25.md), [03-26](changelog-2026-03-26.md)
 
-- [todays-log-2026-03-13.md](todays-log-2026-03-13.md)
-  Isolated log covering the March 13, 2026 working-tree changes: file-backed memory artifacts, the new skill optimizer surface, script-generation transcripts, and Electron startup hardening.
+- Daily logs: [03-12](todays-log-2026-03-12.md), [03-13](todays-log-2026-03-13.md), [03-14](todays-log-2026-03-14.md), [03-15](todays-log-2026-03-15.md), [03-16](todays-log-2026-03-16.md), [03-17](todays-log-2026-03-17.md), [03-18/19](todays-log-2026-03-18-19.md)
 
 ## What Deserves Documentation In This Repo
 

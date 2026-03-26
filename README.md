@@ -25,12 +25,15 @@ This repository is the main Woodbury application. It includes:
 
 - An Electron desktop app
 - A Node.js/TypeScript CLI and REPL
-- A dashboard server and browser-based dashboard UI
+- A dashboard server (30 route modules, 265+ API endpoints) and browser-based dashboard UI
 - A workflow recorder and executor for browser and desktop automation
-- A visual pipeline/composition system
+- A visual pipeline/composition system with React views and dynamic `appConfig`
 - A Node.js ONNX inference server for UI element matching
+- An LLM proxy for multi-provider model routing and cost tracking
+- An agentic loop with 55 built-in tools
 - An extension system and MCP integration surface
-- Social scheduling and media workflow modules
+- Skill optimizer for generating and evaluating reusable AI skills
+- Social scheduling, storyboard, and media workflow modules
 
 The separate training repo for visual models lives at [woobury-models](https://github.com/Zachary-Companies/woobury-models). This repo runs ONNX inference at runtime; it does not contain the Python training pipeline itself.
 
@@ -50,10 +53,13 @@ For the current status of the dashboard chat harness and v3 skills-first loop, s
 ## Major Subsystems
 
 - **Electron app**: desktop shell, tray/menu integration, auto-update plumbing, dashboard launcher
-- **Dashboard**: local HTTP server plus browser UI for workflows, compositions, runs, extensions, training, chat, assets, schedules, and social features
+- **Dashboard**: local HTTP server (30 route modules) plus browser UI for workflows, compositions, runs, extensions, training, chat, assets, schedules, storyboards, and social features
 - **Workflow engine**: recording, replay, variable substitution, validation, and execution snapshots
 - **Visual AI**: ONNX Runtime plus Sharp-based preprocessing for element embedding and comparison
-- **Agentic loop**: built-in tools plus dynamically loaded extension and MCP tools
+- **LLM proxy**: Go-based reverse proxy for multi-provider model routing (Anthropic, OpenAI, Groq) with cost tracking
+- **Agentic loop**: 55 built-in tools plus dynamically loaded extension and MCP tools, with a 13-skill v3 routing layer
+- **Pipeline app mode**: interactive React-based views with dynamic `appConfig`, project state management, and save/restore
+- **Skill optimizer**: draft generation, optimization runs, evaluation, and publishing of reusable AI skills
 - **Extension system**: local extensions can register tools, commands, system prompt guidance, and web UI
 
 ## Repository Layout
@@ -61,11 +67,11 @@ For the current status of the dashboard chat harness and v3 skills-first loop, s
 | Path | Purpose |
 |------|---------|
 | `src/` | Main TypeScript application code |
-| `src/dashboard/` | Dashboard server and route handlers |
+| `src/dashboard/` | Dashboard server (30 route modules) |
 | `src/config-dashboard/` | Browser-side dashboard assets |
 | `src/workflow/` | Workflow recording, replay, validation, and visual verification |
 | `src/inference/` | Node.js ONNX inference server and image preprocessing |
-| `src/loop/` | Embedded agent runtime and built-in tools |
+| `src/loop/` | Embedded agent runtime with 55 built-in tools |
 | `electron/` | Electron main process and preload code |
 | `chrome-extension/` | Browser extension used for recording and browser bridge behavior |
 | `extensions/` | Bundled Woodbury extensions copied into builds |
