@@ -5,7 +5,7 @@
  */
 import type { DashboardContext, RouteHandler } from '../types.js';
 import { sendJson, readBody, atomicWriteFile } from '../utils.js';
-import { readFile, readdir, unlink, mkdir, access } from 'node:fs/promises';
+import { readFile, readdir, unlink, mkdir, access, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import {
@@ -934,6 +934,162 @@ export const handleCompositionsRoutes: RouteHandler = async (req, res, pathname,
           }
         }
 
+        invalidateCompositionCache();
+        sendJson(res, 201, {
+          id: pipeline.id,
+          name: pipeline.name,
+          pipelineDir: targetDir,
+          nodeCount: pipeline.nodes.length,
+          edgeCount: pipeline.edges.length,
+        });
+      } catch (err: any) {
+        sendJson(res, 500, { error: err.message });
+      }
+      return true;
+    }
+
+  // ── V2 pipeline one-click install (from GitHub Releases) ────
+    if (req.method === 'POST' && pathname === '/api/compositions/v2/install') {
+      const body = await readBody(req);
+      const { gitUrl, name: customName } = body;
+      if (!gitUrl) { sendJson(res, 400, { error: 'gitUrl is required' }); return true; }
+
+      // Security: only allow Zachary-Companies repos
+      if (!gitUrl.startsWith('https://github.com/Zachary-Companies/')) {
+        sendJson(res, 400, { error: 'Only pipelines from Zachary-Companies are supported' });
+        return true;
+      }
+
+      try {
+        const parentDir = join(homedir(), '.woodbury', 'workflows');
+        await mkdir(parentDir, { recursive: true });
+
+        const repoName = customName || gitUrl.replace(/\.git$/, '').replace(/\/$/, '').split('/').pop() || 'installed-pipeline';
+        const targetDir = join(parentDir, repoName);
+
+        const { existsSync } = await import('node:fs');
+        if (existsSync(targetDir)) {
+          sendJson(res, 409, { error: `Pipeline "${repoName}" is already installed.` });
+          return true;
+        }
+
+        // Derive GitHub API URL from git URL
+        const repoPath = gitUrl.replace(/\.git$/, '').replace(/\/$/, '').replace('https://github.com/', '');
+        let installed = false;
+
+        // Strategy 1: Download pre-built release from GitHub Releases
+        try {
+          debugLog.info('compositions', `Checking GitHub Releases for ${repoPath}`);
+          const releaseResp = await fetch(`https://api.github.com/repos/${repoPath}/releases/latest`, {
+            headers: { 'Accept': 'application/vnd.github.v3+json', 'User-Agent': 'Woodbury' },
+          });
+
+          if (releaseResp.ok) {
+            const release = await releaseResp.json() as any;
+            const zipAsset = (release.assets || []).find((a: any) => a.name.endsWith('.zip'));
+
+            if (zipAsset) {
+              debugLog.info('compositions', `Downloading release asset: ${zipAsset.name}`);
+              const assetResp = await fetch(zipAsset.browser_download_url);
+              if (!assetResp.ok) throw new Error(`Asset download failed: HTTP ${assetResp.status}`);
+
+              const tmpZip = join(parentDir, `_tmp_${repoName}.zip`);
+              const buffer = Buffer.from(await assetResp.arrayBuffer());
+              await writeFile(tmpZip, buffer);
+
+              const { execSync } = await import('node:child_process');
+              execSync(`unzip -o "${tmpZip}" -d "${parentDir}"`, { timeout: 30000, stdio: 'pipe' });
+
+              // The zip may extract to a subdirectory — find and rename it
+              const extractedDir = join(parentDir, repoName);
+              if (!existsSync(extractedDir)) {
+                // Look for the extracted directory (usually repo-name/)
+                const entries = await readdir(parentDir);
+                const candidate = entries.find(e => e.startsWith(repoName) && e !== `_tmp_${repoName}.zip`);
+                if (candidate && candidate !== repoName) {
+                  const { renameSync } = await import('node:fs');
+                  renameSync(join(parentDir, candidate), extractedDir);
+                }
+              }
+
+              try { await unlink(tmpZip); } catch { /* ignore */ }
+              installed = existsSync(extractedDir);
+              if (installed) debugLog.info('compositions', `Installed from release: ${extractedDir}`);
+            }
+          }
+        } catch (releaseErr) {
+          debugLog.info('compositions', `Release download failed: ${releaseErr instanceof Error ? releaseErr.message : releaseErr}`);
+        }
+
+        // Strategy 2: Fallback to git clone
+        if (!installed) {
+          try {
+            const { execSync } = await import('node:child_process');
+            execSync(`git clone "${gitUrl}" "${targetDir}"`, { stdio: 'pipe', maxBuffer: 50 * 1024 * 1024, timeout: 60000 });
+            installed = true;
+            debugLog.info('compositions', 'Installed via git clone');
+          } catch {
+            debugLog.info('compositions', 'git clone failed, trying zip archive');
+          }
+        }
+
+        // Strategy 3: Fallback to GitHub archive zip
+        if (!installed) {
+          try {
+            const zipUrl = gitUrl.replace(/\.git$/, '').replace(/\/$/, '') + '/archive/refs/heads/main.zip';
+            const zipResp = await fetch(zipUrl);
+            if (!zipResp.ok) throw new Error(`HTTP ${zipResp.status}`);
+
+            const tmpZip = join(parentDir, `_tmp_${repoName}.zip`);
+            const buffer = Buffer.from(await zipResp.arrayBuffer());
+            await writeFile(tmpZip, buffer);
+
+            const { execSync } = await import('node:child_process');
+            execSync(`unzip -o "${tmpZip}" -d "${parentDir}"`, { timeout: 15000, stdio: 'pipe' });
+
+            const extractedDir = join(parentDir, `${repoName}-main`);
+            const { existsSync: existsFn } = await import('node:fs');
+            if (existsFn(extractedDir)) {
+              const { renameSync, rmSync } = await import('node:fs');
+              if (existsFn(targetDir)) rmSync(targetDir, { recursive: true });
+              renameSync(extractedDir, targetDir);
+            }
+
+            try { await unlink(tmpZip); } catch { /* ignore */ }
+            installed = existsFn(targetDir);
+            if (installed) debugLog.info('compositions', 'Installed via archive zip');
+          } catch (zipErr) {
+            debugLog.info('compositions', `Archive zip failed: ${zipErr instanceof Error ? zipErr.message : zipErr}`);
+          }
+        }
+
+        if (!installed) {
+          sendJson(res, 500, { error: 'Installation failed — could not download pipeline from any source' });
+          return true;
+        }
+
+        // Validate pipeline.json exists
+        const pipelineJsonPath = join(targetDir, 'pipeline.json');
+        if (!existsSync(pipelineJsonPath)) {
+          const { rm } = await import('node:fs/promises');
+          await rm(targetDir, { recursive: true, force: true });
+          sendJson(res, 400, { error: 'Downloaded repository does not contain a pipeline.json — not a valid pipeline' });
+          return true;
+        }
+
+        // If installed from release, deps are pre-bundled. Otherwise try npm install.
+        const pkgJsonPath = join(targetDir, 'package.json');
+        const nodeModulesPath = join(targetDir, 'node_modules');
+        if (existsSync(pkgJsonPath) && !existsSync(nodeModulesPath)) {
+          try {
+            const { execSync } = await import('node:child_process');
+            execSync('npm install --production', { cwd: targetDir, stdio: 'pipe', timeout: 120000 });
+          } catch {
+            debugLog.warn('compositions', 'npm install failed — pipeline may have missing dependencies');
+          }
+        }
+
+        const pipeline = await loadPipeline(targetDir);
         invalidateCompositionCache();
         sendJson(res, 201, {
           id: pipeline.id,

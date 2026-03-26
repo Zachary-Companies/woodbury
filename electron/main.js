@@ -978,6 +978,67 @@ async function handleProtocolUrl(url) {
         req.end();
       }
     }
+
+    // woodbury://pipeline/install/{repoName}?git={gitUrl} — install a v2 pipeline
+    if (parsed.hostname === 'pipeline' || parsed.pathname.startsWith('/pipeline')) {
+      const pathParts = parsed.pathname.replace(/^\//, '').split('/');
+      let action, repoName;
+      if (parsed.hostname === 'pipeline') {
+        action = pathParts[0];
+        repoName = pathParts[1];
+      } else {
+        action = pathParts[1];
+        repoName = pathParts[2];
+      }
+      const gitUrl = parsed.searchParams.get('git');
+
+      if (action === 'install' && repoName && gitUrl && dashboardHandle) {
+        // Show and focus the window
+        if (mainWindow) {
+          mainWindow.show();
+          mainWindow.focus();
+        }
+
+        // Call the v2 install endpoint
+        const http = require('http');
+        const postData = JSON.stringify({ gitUrl, name: repoName });
+        const req = http.request({
+          hostname: '127.0.0.1',
+          port: dashboardHandle.port,
+          path: '/api/compositions/v2/install',
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(postData) },
+        }, (res) => {
+          let body = '';
+          res.on('data', (chunk) => { body += chunk; });
+          res.on('end', () => {
+            try {
+              const result = JSON.parse(body);
+              if ((result.id || result.name) && mainWindow) {
+                mainWindow.webContents.executeJavaScript(`
+                  if (typeof switchTab === 'function') switchTab('compositions');
+                  setTimeout(function() {
+                    if (typeof showNotification === 'function') {
+                      showNotification('Pipeline "${repoName}" installed successfully!', 'success');
+                    } else {
+                      alert('Pipeline installed successfully!');
+                    }
+                  }, 500);
+                `).catch(() => {});
+              } else if (mainWindow) {
+                const errorMsg = result.error || 'Unknown error';
+                mainWindow.webContents.executeJavaScript(`
+                  alert('Failed to install pipeline: ' + ${JSON.stringify(errorMsg)});
+                `).catch(() => {});
+              }
+            } catch {}
+          });
+        });
+        req.on('error', () => {});
+        req.write(postData);
+        req.end();
+      }
+    }
   } catch (err) {
     console.error('[electron] Protocol URL error:', err.message || err);
   }
