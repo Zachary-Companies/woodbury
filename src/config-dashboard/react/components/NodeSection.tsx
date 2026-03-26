@@ -304,7 +304,7 @@ function ElementList({ elements }: { elements: any[] }) {
         ))}
       </div>
       {elements.length > 50 && !showAll && (
-        <button onClick={() => setShowAll(true)} style={{ marginTop: 8, fontSize: 10, color: '#6366f1', background: 'none', border: 'none', cursor: 'pointer' }}>
+        <button onClick={() => setShowAll(true)} style={{ marginTop: 8, fontSize: 11, color: '#818cf8', background: 'rgba(99,102,241,0.1)', border: '1px solid rgba(99,102,241,0.2)', borderRadius: 6, padding: '4px 12px', cursor: 'pointer' }}>
           Show all {elements.length} elements...
         </button>
       )}
@@ -378,22 +378,22 @@ function SectionTree({ sections }: { sections: any[] }) {
 /** Renders any value type intelligently */
 function ValueRenderer({ value, depth = 0 }: { value: any; depth?: number }) {
   if (value === null || value === undefined) {
-    return <span className="text-xs text-slate-600 italic">No value</span>;
+    return <span style={{ fontSize: 12, color: '#475569', fontStyle: 'italic' }}>No value</span>;
   }
 
   if (typeof value === 'string') {
     if (isImageUrl(value)) {
       const src = resolveImageSrc(value);
-      return <img src={src} alt="" className="max-w-xs rounded-md" loading="lazy" />;
+      return <img src={src} alt="" style={{ maxWidth: 320, borderRadius: 6 }} loading="lazy" />;
     }
     if (value.length > 200) {
-      return <pre className="text-xs text-slate-400 whitespace-pre-wrap break-words max-h-64 overflow-y-auto">{value}</pre>;
+      return <pre style={{ fontSize: 12, color: '#94a3b8', whiteSpace: 'pre-wrap', wordBreak: 'break-word', maxHeight: 256, overflowY: 'auto' }}>{value}</pre>;
     }
-    return <span className="text-xs text-slate-300">{value}</span>;
+    return <span style={{ fontSize: 12, color: '#cbd5e1' }}>{value}</span>;
   }
 
   if (typeof value === 'number' || typeof value === 'boolean') {
-    return <span className="text-xs text-slate-300 font-mono">{String(value)}</span>;
+    return <span style={{ fontSize: 12, color: '#cbd5e1', fontFamily: 'monospace' }}>{String(value)}</span>;
   }
 
   if (Array.isArray(value)) {
@@ -404,7 +404,7 @@ function ValueRenderer({ value, depth = 0 }: { value: any; depth?: number }) {
     return <ObjectRenderer obj={value} depth={depth} />;
   }
 
-  return <span className="text-xs text-slate-400">{String(value)}</span>;
+  return <span style={{ fontSize: 12, color: '#94a3b8' }}>{String(value)}</span>;
 }
 
 /** Renders arrays as card grids */
@@ -412,15 +412,15 @@ function ArrayRenderer({ items, depth }: { items: any[]; depth: number }) {
   const [filter, setFilter] = useState('');
 
   if (items.length === 0) {
-    return <span className="text-xs text-slate-600 italic">Empty list</span>;
+    return <span style={{ fontSize: 12, color: '#475569', fontStyle: 'italic' }}>Empty list</span>;
   }
 
   // Simple value array
   if (typeof items[0] !== 'object' || items[0] === null) {
     return (
-      <div className="flex flex-wrap gap-1.5">
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
         {items.map((item, i) => (
-          <span key={i} className="px-2 py-0.5 rounded bg-white/5 text-xs text-slate-400">
+          <span key={i} style={{ padding: '2px 8px', borderRadius: 4, background: 'rgba(255,255,255,0.05)', fontSize: 12, color: '#94a3b8' }}>
             {String(item)}
           </span>
         ))}
@@ -446,41 +446,40 @@ function ArrayRenderer({ items, depth }: { items: any[]; depth: number }) {
   return (
     <div>
       {items.length > 8 && (
-        <div className="flex items-center gap-2 mb-3">
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
           <input
             type="text"
             placeholder={`Filter ${items.length} items...`}
             value={filter}
             onChange={e => setFilter(e.target.value)}
-            className="px-2 py-1 rounded text-xs bg-black/20 border border-white/5 text-slate-300 placeholder-slate-600 outline-none w-48"
+            style={{ padding: '6px 10px', borderRadius: 6, fontSize: 12, background: 'rgba(0,0,0,0.2)', border: '1px solid rgba(255,255,255,0.06)', color: '#cbd5e1', outline: 'none', width: 200 }}
           />
-          <span className="text-[10px] text-slate-600">{filtered.length} of {items.length}</span>
+          <span style={{ fontSize: 10, color: '#475569' }}>{filtered.length} of {items.length}</span>
         </div>
       )}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: 8 }}>
         {filtered.slice(0, 100).map((item, i) => {
           const itemTitle = titleKey ? item[titleKey] : `Item ${i + 1}`;
           const imgVal = imageKey ? item[imageKey] : null;
           const imgSrc = imgVal && typeof imgVal === 'string' && isImageUrl(imgVal) ? resolveImageSrc(imgVal) : null;
 
           return (
-            <div key={i} className="rounded-lg border border-white/5 bg-white/[0.02] overflow-hidden">
+            <div key={i} style={{ borderRadius: 8, border: '1px solid rgba(255,255,255,0.05)', background: 'rgba(255,255,255,0.02)', overflow: 'hidden' }}>
               {imgSrc && (
-                <div className="h-24 overflow-hidden bg-black/20">
-                  <img src={imgSrc} alt="" className="w-full h-full object-cover" loading="lazy" />
+                <div style={{ height: 96, overflow: 'hidden', background: 'rgba(0,0,0,0.2)' }}>
+                  <img src={imgSrc} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} loading="lazy" />
                 </div>
               )}
-              <div className="p-2.5">
-                <div className="text-xs font-medium text-slate-300 truncate">{String(itemTitle || `Item ${i + 1}`)}</div>
+              <div style={{ padding: 10 }}>
+                <div style={{ fontSize: 12, fontWeight: 500, color: '#cbd5e1', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{String(itemTitle || `Item ${i + 1}`)}</div>
                 {typeKey && item[typeKey] && (
-                  <span className="inline-block mt-0.5 px-1.5 py-0.5 rounded text-[9px] bg-indigo-500/10 text-indigo-400">
+                  <span style={{ display: 'inline-block', marginTop: 2, padding: '1px 6px', borderRadius: 3, fontSize: 9, background: 'rgba(99,102,241,0.1)', color: '#818cf8' }}>
                     {String(item[typeKey])}
                   </span>
                 )}
                 {descKey && item[descKey] && (
-                  <p className="text-[10px] text-slate-500 mt-1 line-clamp-2">{String(item[descKey]).slice(0, 140)}</p>
+                  <p style={{ fontSize: 10, color: '#64748b', marginTop: 4, overflow: 'hidden', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' as any }}>{String(item[descKey]).slice(0, 140)}</p>
                 )}
-                {/* Extra fields */}
                 <ExtraFields item={item} shownKeys={[titleKey, descKey, typeKey, imageKey]} allKeys={keys} />
               </div>
             </div>
@@ -488,7 +487,7 @@ function ArrayRenderer({ items, depth }: { items: any[]; depth: number }) {
         })}
       </div>
       {filtered.length > 100 && (
-        <p className="text-[10px] text-slate-600 mt-2">Showing 100 of {filtered.length} items</p>
+        <p style={{ fontSize: 10, color: '#475569', marginTop: 8 }}>Showing 100 of {filtered.length} items</p>
       )}
     </div>
   );
@@ -500,7 +499,7 @@ function ExtraFields({ item, shownKeys, allKeys }: { item: any; shownKeys: (stri
   if (extras.length === 0) return null;
 
   return (
-    <div className="mt-1.5 space-y-0.5">
+    <div style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 2 }}>
       {extras.map(k => {
         const v = item[k];
         if (v === null || v === undefined) return null;
@@ -508,9 +507,9 @@ function ExtraFields({ item, shownKeys, allKeys }: { item: any; shownKeys: (stri
           ? (Array.isArray(v) ? `${v.length} items` : `${Object.keys(v).length} fields`)
           : String(v).slice(0, 60);
         return (
-          <div key={k} className="flex gap-1.5 text-[9px]">
-            <span className="text-slate-600">{humanize(k)}</span>
-            <span className="text-slate-500 truncate">{display}</span>
+          <div key={k} style={{ display: 'flex', gap: 6, fontSize: 9 }}>
+            <span style={{ color: '#475569' }}>{humanize(k)}</span>
+            <span style={{ color: '#64748b', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{display}</span>
           </div>
         );
       })}
@@ -540,17 +539,17 @@ function ObjectRenderer({ obj, depth }: { obj: Record<string, any>; depth: numbe
 
   // Simple KV grid
   return (
-    <div className="space-y-1">
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
       {entries.map(([k, v]) => (
-        <div key={k} className="flex gap-3 py-0.5">
-          <span className="text-[10px] text-slate-500 w-28 flex-shrink-0 truncate">{humanize(k)}</span>
-          <div className="flex-1 min-w-0">
+        <div key={k} style={{ display: 'flex', gap: 12, padding: '3px 0' }}>
+          <span style={{ fontSize: 11, color: '#64748b', width: 120, flexShrink: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{humanize(k)}</span>
+          <div style={{ flex: 1, minWidth: 0 }}>
             {typeof v === 'object' && v !== null ? (
-              <span className="text-[10px] text-slate-600">
+              <span style={{ fontSize: 11, color: '#475569' }}>
                 {Array.isArray(v) ? `[${v.length} items]` : `{${Object.keys(v).length} fields}`}
               </span>
             ) : (
-              <span className="text-xs text-slate-300 break-words">{formatValue(v)}</span>
+              <span style={{ fontSize: 12, color: '#cbd5e1', wordBreak: 'break-word' }}>{formatValue(v)}</span>
             )}
           </div>
         </div>
@@ -577,28 +576,30 @@ function TabbedObject({ simple, complex, depth }: {
 
   return (
     <div>
-      <div className="flex gap-1 mb-3 flex-wrap">
+      <div style={{ display: 'flex', gap: 4, marginBottom: 12, flexWrap: 'wrap' }}>
         {tabs.map(tab => (
           <button
             key={tab.id}
             onClick={() => setActiveTab(tab.id)}
-            className={`px-2.5 py-1 rounded text-[10px] transition-colors ${
-              activeTab === tab.id
-                ? 'bg-indigo-500/15 text-indigo-300'
-                : 'text-slate-500 hover:text-slate-300 hover:bg-white/[0.03]'
-            }`}
+            style={{
+              padding: '6px 12px', borderRadius: 6, fontSize: 11, fontWeight: 500,
+              background: activeTab === tab.id ? 'rgba(99,102,241,0.15)' : 'rgba(255,255,255,0.03)',
+              border: activeTab === tab.id ? '1px solid rgba(99,102,241,0.25)' : '1px solid rgba(255,255,255,0.06)',
+              color: activeTab === tab.id ? '#a5b4fc' : '#64748b',
+              cursor: 'pointer', transition: 'all 0.15s',
+            }}
           >
-            {tab.label} <span className="text-slate-600 ml-0.5">{tab.count}</span>
+            {tab.label} <span style={{ color: '#475569', marginLeft: 3, fontSize: 10 }}>{tab.count}</span>
           </button>
         ))}
       </div>
 
       {activeTab === '_summary' && (
-        <div className="space-y-1">
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
           {simple.map(([k, v]) => (
-            <div key={k} className="flex gap-3 py-0.5">
-              <span className="text-[10px] text-slate-500 w-28 flex-shrink-0">{humanize(k)}</span>
-              <span className="text-xs text-slate-300 break-words">{formatValue(v)}</span>
+            <div key={k} style={{ display: 'flex', gap: 12, padding: '3px 0' }}>
+              <span style={{ fontSize: 11, color: '#64748b', width: 120, flexShrink: 0 }}>{humanize(k)}</span>
+              <span style={{ fontSize: 12, color: '#cbd5e1', wordBreak: 'break-word' }}>{formatValue(v)}</span>
             </div>
           ))}
         </div>
