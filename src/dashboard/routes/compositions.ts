@@ -1080,12 +1080,27 @@ export const handleCompositionsRoutes: RouteHandler = async (req, res, pathname,
         // If installed from release, deps are pre-bundled. Otherwise try npm install.
         const pkgJsonPath = join(targetDir, 'package.json');
         const nodeModulesPath = join(targetDir, 'node_modules');
+        let depsWarning = '';
         if (existsSync(pkgJsonPath) && !existsSync(nodeModulesPath)) {
+          // Check if npm is available
+          let hasNpm = false;
           try {
             const { execSync } = await import('node:child_process');
-            execSync('npm install --production', { cwd: targetDir, stdio: 'pipe', timeout: 120000 });
-          } catch {
-            debugLog.warn('compositions', 'npm install failed — pipeline may have missing dependencies');
+            execSync('npm --version', { stdio: 'pipe', timeout: 5000 });
+            hasNpm = true;
+          } catch { /* npm not available */ }
+
+          if (hasNpm) {
+            try {
+              const { execSync } = await import('node:child_process');
+              execSync('npm install --production', { cwd: targetDir, stdio: 'pipe', timeout: 120000 });
+            } catch {
+              depsWarning = 'npm install failed — some pipeline features may not work. Try running "npm install" manually in ' + targetDir;
+              debugLog.warn('compositions', depsWarning);
+            }
+          } else {
+            depsWarning = 'Pipeline has dependencies but npm is not installed. Install Node.js from https://nodejs.org to enable all features.';
+            debugLog.warn('compositions', depsWarning);
           }
         }
 
@@ -1097,6 +1112,7 @@ export const handleCompositionsRoutes: RouteHandler = async (req, res, pathname,
           pipelineDir: targetDir,
           nodeCount: pipeline.nodes.length,
           edgeCount: pipeline.edges.length,
+          ...(depsWarning ? { warning: depsWarning } : {}),
         });
       } catch (err: any) {
         sendJson(res, 500, { error: err.message });

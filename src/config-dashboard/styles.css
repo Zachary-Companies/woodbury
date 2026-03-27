@@ -8365,6 +8365,70 @@ textarea.wf-se-input {
   letter-spacing: 0.5px;
 }
 
+/* Install bar */
+.home-install-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 10px;
+  padding: 0.4rem 0.5rem 0.4rem 0.75rem;
+  transition: border-color 0.2s;
+}
+.home-install-bar:focus-within {
+  border-color: #7c3aed;
+}
+.home-install-icon {
+  color: #64748b;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+}
+.home-install-input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: #e2e8f0;
+  font-size: 0.85rem;
+  font-family: inherit;
+  padding: 0.45rem 0;
+}
+.home-install-input::placeholder {
+  color: #475569;
+}
+.home-install-btn {
+  flex-shrink: 0;
+  background: #7c3aed;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  padding: 0.45rem 1rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.home-install-btn:hover {
+  background: #6d28d9;
+}
+.home-install-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.home-install-status {
+  font-size: 0.75rem;
+  min-height: 1.25rem;
+  margin-bottom: 1.5rem;
+  padding-left: 0.25rem;
+}
+.home-install-progress { color: #94a3b8; }
+.home-install-success { color: #34d399; }
+.home-install-warning { color: #fbbf24; }
+.home-install-error { color: #f87171; }
+
 /* ── Memory Browser ────────────────────────── */
 .memory-sidebar-toolbar {
   display: flex;

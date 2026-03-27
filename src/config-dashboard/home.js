@@ -47,6 +47,19 @@
         '</div>' +
       '</div>' +
 
+      // Install pipeline from link
+      '<div class="home-install-bar">' +
+        '<div class="home-install-icon">' +
+          '<svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">' +
+            '<path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />' +
+          '</svg>' +
+        '</div>' +
+        '<input type="text" id="home-install-input" class="home-install-input" ' +
+          'placeholder="Paste a woodbury:// install link or GitHub URL" spellcheck="false" />' +
+        '<button id="home-install-btn" class="home-install-btn">Install</button>' +
+      '</div>' +
+      '<div id="home-install-status" class="home-install-status"></div>' +
+
       // Section: Pipeline Apps (populated dynamically)
       '<div id="home-pipeline-apps"></div>' +
 
@@ -144,6 +157,90 @@
     if (ctaBtn) {
       ctaBtn.addEventListener('click', function () {
         switchTab('chat');
+      });
+    }
+
+    // Wire up install bar
+    var installInput = document.getElementById('home-install-input');
+    var installBtn = document.getElementById('home-install-btn');
+    var installStatus = document.getElementById('home-install-status');
+
+    function handleInstall() {
+      var raw = (installInput.value || '').trim();
+      if (!raw) return;
+
+      var gitUrl = '';
+      var name = '';
+
+      // Parse woodbury:// protocol links
+      if (raw.indexOf('woodbury://') === 0) {
+        try {
+          var parsed = new URL(raw);
+          gitUrl = parsed.searchParams.get('git') || '';
+          var parts = parsed.pathname.replace(/^\//, '').split('/');
+          name = parts[parts.length - 1] || '';
+        } catch (e) { /* fall through */ }
+      }
+
+      // Parse GitHub URLs directly
+      if (!gitUrl && raw.indexOf('https://github.com/') === 0) {
+        gitUrl = raw.replace(/\.git$/, '').replace(/\/$/, '');
+        name = gitUrl.split('/').pop() || '';
+      }
+
+      if (!gitUrl) {
+        installStatus.textContent = 'Paste a woodbury:// link or a GitHub URL';
+        installStatus.className = 'home-install-status home-install-error';
+        return;
+      }
+
+      // Disable controls and show progress
+      installBtn.disabled = true;
+      installBtn.textContent = 'Installing\u2026';
+      installStatus.textContent = 'Downloading pipeline\u2026';
+      installStatus.className = 'home-install-status home-install-progress';
+
+      fetch('/api/compositions/v2/install', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ gitUrl: gitUrl, name: name }),
+      })
+        .then(function (r) { return r.json().then(function (d) { return { status: r.status, data: d }; }); })
+        .then(function (result) {
+          if (result.status >= 200 && result.status < 300 && result.data.id) {
+            var msg = '\u2714 Pipeline "' + (result.data.name || name) + '" installed!';
+            if (result.data.warning) {
+              msg += ' \u26a0 ' + result.data.warning;
+              installStatus.className = 'home-install-status home-install-warning';
+            } else {
+              installStatus.className = 'home-install-status home-install-success';
+            }
+            installStatus.textContent = msg;
+            installInput.value = '';
+            // Refresh stats and apps
+            fetchStats();
+            fetchPipelineApps();
+          } else {
+            installStatus.textContent = result.data.error || 'Installation failed';
+            installStatus.className = 'home-install-status home-install-error';
+          }
+          installBtn.disabled = false;
+          installBtn.textContent = 'Install';
+        })
+        .catch(function (err) {
+          installStatus.textContent = 'Network error: ' + (err.message || err);
+          installStatus.className = 'home-install-status home-install-error';
+          installBtn.disabled = false;
+          installBtn.textContent = 'Install';
+        });
+    }
+
+    if (installBtn) {
+      installBtn.addEventListener('click', handleInstall);
+    }
+    if (installInput) {
+      installInput.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') handleInstall();
       });
     }
 
