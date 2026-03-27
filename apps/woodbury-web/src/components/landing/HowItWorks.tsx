@@ -1,9 +1,9 @@
 const steps = [
   {
     number: '01',
-    title: 'Record',
+    title: 'Describe or Record',
     description:
-      'Click record and do your task in the browser. Woodbury watches every click, scroll, and keystroke — learning exactly what you do.',
+      'Tell the AI what you want to build, or record your actions in the browser. Woodbury can generate full pipelines from a description or learn by watching you work.',
     icon: (
       <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
         <circle cx="12" cy="12" r="10" strokeWidth={1.5} />
@@ -13,20 +13,22 @@ const steps = [
   },
   {
     number: '02',
-    title: 'Replay',
+    title: 'Build Your Pipeline',
     description:
-      'Run your recorded workflow anytime with one click. Woodbury handles it automatically — even if the page looks slightly different.',
+      'Connect workflows, AI scripts, and tools into a visual pipeline. Add nodes for image generation, video, voiceovers, social posting, and more.',
     icon: (
       <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-        <polygon points="5,3 19,12 5,21" fill="currentColor" strokeWidth={0} />
+        <rect x="2" y="2" width="7" height="7" rx="1.5" strokeWidth={1.5} />
+        <rect x="15" y="15" width="7" height="7" rx="1.5" strokeWidth={1.5} />
+        <path d="M9 5.5h6M5.5 9v6M18.5 9v6" strokeWidth={1.5} />
       </svg>
     ),
   },
   {
     number: '03',
-    title: 'Scale',
+    title: 'Run and Schedule',
     description:
-      'Chain workflows into pipelines, schedule them to run on repeat, and automate across multiple sites and apps.',
+      'Run your pipeline on demand or schedule it to repeat daily, weekly, or on any cadence. Review outputs, approve content, and publish automatically.',
     icon: (
       <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M13 10V3L4 14h7v7l9-11h-7z" />
@@ -44,7 +46,7 @@ export default function HowItWorks() {
         <div className="mb-16 text-center">
           <span className="pill">How it works</span>
           <h2 className="mt-6 text-4xl font-semibold tracking-tight text-white sm:text-5xl">
-            From recording to automation
+            From idea to automated pipeline
             <br className="hidden sm:block" /> in minutes
           </h2>
         </div>

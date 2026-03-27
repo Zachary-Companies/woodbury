@@ -12,8 +12,8 @@ export default function Footer() {
               <span className="text-lg font-semibold text-white">Woodbury</span>
             </div>
             <p className="mt-3 max-w-xs text-sm leading-relaxed text-slate-500">
-              AI-powered browser automation for everyone.
-              Record, replay, and scale your workflows.
+              AI-powered content creation studio.
+              Automate creative pipelines, generate content, and publish on schedule.
             </p>
           </div>
 
@@ -45,14 +45,14 @@ export default function Footer() {
             <div>
               <h4 className="mb-3 text-xs font-semibold uppercase tracking-wider text-slate-500">Resources</h4>
               <div className="flex flex-col gap-2">
-                <a href="#" className="text-sm text-slate-400 transition-colors hover:text-white">
+                <a href="https://github.com/Zachary-Companies/woodbury" target="_blank" rel="noopener noreferrer" className="text-sm text-slate-400 transition-colors hover:text-white">
                   GitHub
                 </a>
-                <a href="#" className="text-sm text-slate-400 transition-colors hover:text-white">
+                <a href="https://github.com/Zachary-Companies/woodbury/tree/main/docs" target="_blank" rel="noopener noreferrer" className="text-sm text-slate-400 transition-colors hover:text-white">
                   Documentation
                 </a>
-                <a href="#" className="text-sm text-slate-400 transition-colors hover:text-white">
-                  Chrome Extension
+                <a href="https://github.com/Zachary-Companies/woodbury/releases/latest" target="_blank" rel="noopener noreferrer" className="text-sm text-slate-400 transition-colors hover:text-white">
+                  Releases
                 </a>
               </div>
             </div>

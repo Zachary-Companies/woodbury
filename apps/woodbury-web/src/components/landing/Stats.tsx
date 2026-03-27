@@ -1,23 +1,23 @@
 const stats = [
   {
-    value: '100+',
-    label: 'Workflow Steps',
-    description: 'Record complex multi-step automations with no limits',
+    value: '55+',
+    label: 'Built-in Tools',
+    description: 'Image generation, video, voice, web scraping, file management, and more',
   },
   {
-    value: '5 min',
-    label: 'Average Setup',
-    description: 'From download to your first automation in minutes',
+    value: '15+',
+    label: 'Extensions',
+    description: 'Install from the marketplace with one click — or build your own',
   },
   {
     value: 'Zero',
     label: 'Code Required',
-    description: 'Point and click — no programming knowledge needed',
+    description: 'Describe what you want in plain language — the AI builds it for you',
   },
   {
-    value: 'Mac + Chrome',
+    value: 'Mac + Win',
     label: 'Platform Support',
-    description: 'Native desktop app with Chrome extension included',
+    description: 'Native desktop app for macOS and Windows with Chrome extension',
   },
 ]
 

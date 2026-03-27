@@ -1,43 +1,18 @@
 const features = [
   {
-    title: 'Browser Automation',
+    title: 'AI Chat Assistant',
     description:
-      'Record clicks, form fills, navigation, and more. Woodbury captures everything you do in Chrome and replays it perfectly.',
+      'Describe what you want in plain language. The built-in AI generates images, writes scripts, builds pipelines, and manages your content — 55 tools at your fingertips.',
     icon: (
       <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-        <rect x="3" y="3" width="18" height="18" rx="3" />
-        <circle cx="12" cy="12" r="3" />
-        <line x1="3" y1="9" x2="21" y2="9" />
-      </svg>
-    ),
-  },
-  {
-    title: 'Desktop Automation',
-    description:
-      'Go beyond the browser. Automate any desktop application — move your mouse, type text, and press keys across your entire Mac.',
-    icon: (
-      <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-        <rect x="2" y="3" width="20" height="14" rx="2" />
-        <line x1="8" y1="21" x2="16" y2="21" />
-        <line x1="12" y1="17" x2="12" y2="21" />
-      </svg>
-    ),
-  },
-  {
-    title: 'Visual AI',
-    description:
-      'Woodbury uses visual recognition to find elements even when pages change. It sees the page like you do — not just the code behind it.',
-    icon: (
-      <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-        <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
-        <circle cx="12" cy="12" r="3" />
+        <path d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
       </svg>
     ),
   },
   {
     title: 'Visual Pipelines',
     description:
-      'Connect multiple workflows together visually. Drag, drop, and wire up complex automations — like building with blocks.',
+      'Build multi-step automations visually. Connect AI generation, browser actions, scripts, and API calls into a pipeline that runs with one click.',
     icon: (
       <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
         <rect x="2" y="2" width="7" height="7" rx="1.5" />
@@ -48,25 +23,47 @@ const features = [
     ),
   },
   {
-    title: 'Scheduling',
+    title: 'Content Generation',
     description:
-      'Set your workflows to run on a schedule — every hour, every day, or whenever you need. Woodbury keeps working while you don\'t.',
+      'Generate images, videos, voiceovers, and social posts with AI. Create complete content packages — from screenplay to final render — in a single pipeline.',
     icon: (
       <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-        <circle cx="12" cy="12" r="10" />
-        <polyline points="12,6 12,12 16,14" />
+        <path d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
       </svg>
     ),
   },
   {
-    title: 'No Code Required',
+    title: 'Extensions & Marketplace',
     description:
-      'Everything is point-and-click. If you can use a web browser, you can build automations. No programming, no scripts, no terminal.',
+      'Install tools for image generation, video clipping, voice cloning, hashtags, and more. One-click install from the marketplace or paste a link.',
     icon: (
       <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
         <path d="M12 2L2 7l10 5 10-5-10-5z" />
         <path d="M2 17l10 5 10-5" />
         <path d="M2 12l10 5 10-5" />
+      </svg>
+    ),
+  },
+  {
+    title: 'Browser & Desktop Automation',
+    description:
+      'Record browser actions and replay them with visual AI that adapts to page changes. Automate desktop apps with mouse, keyboard, and screen recognition.',
+    icon: (
+      <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+        <rect x="3" y="3" width="18" height="18" rx="3" />
+        <circle cx="12" cy="12" r="3" />
+        <line x1="3" y1="9" x2="21" y2="9" />
+      </svg>
+    ),
+  },
+  {
+    title: 'Scheduling & Social Posting',
+    description:
+      'Schedule pipelines to run daily, weekly, or on demand. Queue social media posts, review before publishing, and track performance across platforms.',
+    icon: (
+      <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+        <circle cx="12" cy="12" r="10" />
+        <polyline points="12,6 12,12 16,14" />
       </svg>
     ),
   },
@@ -80,8 +77,8 @@ export default function Features() {
         <div className="mb-16 text-center">
           <span className="pill">Features</span>
           <h2 className="mt-6 text-4xl font-semibold tracking-tight text-white sm:text-5xl">
-            Everything you need
-            <br className="hidden sm:block" /> to automate
+            A complete creative
+            <br className="hidden sm:block" /> automation studio
           </h2>
         </div>
 
