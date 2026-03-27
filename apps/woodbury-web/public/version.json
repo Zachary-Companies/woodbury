@@ -1,10 +1,10 @@
 {
-  "version": "1.4.1",
+  "version": "1.4.2",
   "releaseDate": "2026-03-26",
   "downloadUrls": {
-    "mac": "https://github.com/Zachary-Companies/woodbury/releases/latest/download/Woodbury-1.4.1-arm64.dmg",
-    "windows": "https://github.com/Zachary-Companies/woodbury/releases/latest/download/Woodbury-Setup-1.4.1.exe"
+    "mac": "https://github.com/Zachary-Companies/woodbury/releases/latest/download/Woodbury-1.4.2-arm64.dmg",
+    "windows": "https://github.com/Zachary-Companies/woodbury/releases/latest/download/Woodbury-Setup-1.4.2.exe"
   },
-  "releaseNotes": "LLM proxy for request routing and cost tracking, dynamic pipeline appConfig system, automatic React view scaffolding, dark theme consistency fixes, and UI polish improvements.",
+  "releaseNotes": "One-click pipeline installation from the website or dashboard. Paste a link or click Install in Woodbury — no git or npm required.",
   "releaseUrl": "https://github.com/Zachary-Companies/woodbury/releases/latest"
 }
