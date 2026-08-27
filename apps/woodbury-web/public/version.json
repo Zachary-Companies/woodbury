@@ -2,11 +2,12 @@
   "version": "1.5.0",
   "releaseDate": "2026-08-27",
   "downloadUrls": {
-    "mac": "https://github.com/Zachary-Companies/woodbury/releases/latest/download/Woodbury-1.5.0-arm64.dmg",
-    "windows": "https://github.com/Zachary-Companies/woodbury/releases/latest/download/Woodbury-Setup-1.5.0.exe"
+    "mac": "https://github.com/Zachary-Companies/woodbury/releases/latest/download/Woodbury-1.5.0-arm64.dmg"
   },
   "releaseNotes": "Local models via Ollama, agent sessions with resume, graduated tool permissions and pre/post tool-use hooks, vision-based page checks, and a new schedules view.",
   "releaseUrl": "https://github.com/Zachary-Companies/woodbury/releases/latest",
   "macUnsigned": true,
-  "macInstallNote": "The macOS build is not yet notarized. On first launch, right-click Woodbury in Applications and choose Open, then confirm."
+  "macInstallNote": "The macOS build is not yet notarized. On first launch, right-click Woodbury in Applications and choose Open, then confirm.",
+  "windowsAvailable": false,
+  "windowsNote": "The Windows installer is not available for this release. macOS (Apple Silicon) only for now."
 }

@@ -54,6 +54,12 @@ export default function Hero() {
               {versionInfo.macInstallNote}
             </p>
           )}
+          {/* Don't send Windows visitors to a release that has no .exe. */}
+          {os === 'Windows' && versionInfo?.windowsAvailable === false && versionInfo.windowsNote && (
+            <p className="max-w-md text-center text-xs leading-relaxed text-amber-400/80">
+              {versionInfo.windowsNote}
+            </p>
+          )}
           <a
             href="#how-it-works"
             className="flex w-full max-w-md items-center justify-center rounded-xl border border-white/10 px-10 py-5 text-lg font-medium text-slate-300 transition-all hover:border-white/25 hover:text-white"

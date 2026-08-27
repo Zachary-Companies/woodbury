@@ -8,6 +8,9 @@ interface VersionInfo {
   /** The mac build is not notarized yet; the UI shows a first-launch note. */
   macUnsigned?: boolean
   macInstallNote?: string
+  /** False when a release ships without a Windows installer. */
+  windowsAvailable?: boolean
+  windowsNote?: string
 }
 
 export function useVersion(): VersionInfo | null {
@@ -22,6 +25,8 @@ export function useVersion(): VersionInfo | null {
           releaseDate: data.releaseDate,
           macUnsigned: data.macUnsigned,
           macInstallNote: data.macInstallNote,
+          windowsAvailable: data.windowsAvailable,
+          windowsNote: data.windowsNote,
         })
       )
       .catch(() => {})
