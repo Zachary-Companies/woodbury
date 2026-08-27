@@ -323,7 +323,7 @@ async function ensureChatAgent(ctx: DashboardContext, sessionId: string): Promis
   const existingAgent = ctx.chatAgents.get(normalizedSessionId);
   if (existingAgent) return existingAgent;
 
-  const { createClosureAgent } = await import('../../agent-factory.js');
+  const { createClosureAgent, createAgent } = await import('../../agent-factory.js');
   const { McpClientManager } = await import('../../mcp-client-manager.js');
   const { loadMcpConfig } = await import('../../mcp-config.js');
 
@@ -365,12 +365,25 @@ async function ensureChatAgent(ctx: DashboardContext, sessionId: string): Promis
     await ctx.chatMcpManager.connectAll(mcpConfigs);
   }
 
-  const agent = await createClosureAgent(config, ctx.extensionManager, ctx.chatMcpManager || undefined);
+  // Ollama through the Closure Engine is a poor fit:
+  //   - each engine phase (planner → critic → verifier → reflector) is another Ollama call
+  //   - local models are slow, so the user sees "Completed" and a frozen send button
+  //     for 20-60s while post-hoc verification finishes
+  //   - many Ollama models also don't reliably return the JSON the critic/verifier expects
+  // For Ollama chat, use the simpler Agent — one LLM turn, streams tokens straight through.
+  const isOllamaChat =
+    savedProvider === 'ollama' ||
+    (typeof savedModel === 'string' && savedModel.startsWith('ollama/'));
+
+  const agent = isOllamaChat
+    ? await createAgent(config, ctx.extensionManager, ctx.chatMcpManager || undefined)
+    : await createClosureAgent(config, ctx.extensionManager, ctx.chatMcpManager || undefined);
   ctx.chatAgents.set(normalizedSessionId, agent);
   ctx.chatAgent = agent;
   debugLog.info('dashboard', 'Chat agent created', {
     provider: savedProvider || 'auto',
     sessionId: normalizedSessionId,
+    mode: isOllamaChat ? 'simple' : 'closure',
   });
 
   return agent;

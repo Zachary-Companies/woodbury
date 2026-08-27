@@ -23,6 +23,17 @@ let wcagScanning = false;   // true during scan
 let wcagLastUrl = null;     // track URL for auto-refresh on navigation
 let wcagInspecting = false; // true when inspect mode overlay is active
 
+/* ── Recorder State ── */
+let currentPanelTab = 'wcag';  // 'wcag' | 'recorder'
+let recActive = false;
+let recSteps = [];
+let recStepCounter = 0;
+let recLastUrl = null;
+let recLastEventTime = 0;
+let recExpandedStep = null;
+let recWorkflowName = '';
+let recWorkflowSite = '';
+
 const STEP_ICONS = {
   navigate: '\u{1F310}',
   click: '\u{1F5B1}',
@@ -41,6 +52,7 @@ const STEP_ICONS = {
   inject_style: '\u{1F3A8}',
   keyboard_nav: '\u{1F9ED}',
   click_selector: '\u{1F3AF}',
+  clipboard: '\u{1F4CB}',
 };
 
 /* ── Lifecycle port — lets background.js track open/close state ── */
@@ -279,6 +291,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'wcag_inspect_clicked' && message.data) {
     renderInspectedElement(message.data);
   }
+
+  // Recording event from content.js (forwarded by background.js)
+  if (message.type === 'recording_event' && recActive) {
+    handleRecorderEvent(message);
+  }
 });
 
 /* ── Rendering ─────────────────────────────────────────── */
@@ -290,7 +307,11 @@ function escHtml(str) {
 }
 
 function renderEmptyState() {
-  renderWcagAuditView();
+  if (currentPanelTab === 'recorder') {
+    renderRecorderView();
+  } else {
+    renderWcagAuditView();
+  }
 }
 
 function renderDebugUI() {
@@ -1436,6 +1457,7 @@ async function renderWcagAuditView() {
   var app = document.getElementById('app');
 
   var html = '';
+  html += renderTabBarHtml('wcag');
   html += '<div class="wcag-header">';
   html += '<div class="wcag-header-title">\u2705 WCAG Audit</div>';
   html += '<div class="wcag-header-actions">';
@@ -1446,6 +1468,7 @@ async function renderWcagAuditView() {
   html += '<div id="wcag-content" class="wcag-content"><div class="wcag-loading">\u23f3 Scanning page\u2026</div></div>';
 
   app.innerHTML = html;
+  wireTabBarHandlers();
 
   document.getElementById('wcag-refresh').addEventListener('click', function() {
     scanWcagComponents();
@@ -1775,4 +1798,801 @@ function renderInspectedElement(data) {
 function truncStr(str, max) {
   if (!str) return '';
   return str.length > max ? str.substring(0, max) + '\u2026' : str;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+ * RECORDER TAB
+ * ═══════════════════════════════════════════════════════════════ */
+
+function renderTabBarHtml(activeTab) {
+  return '<div class="sp-tab-bar">' +
+    '<button class="sp-tab' + (activeTab === 'wcag' ? ' active' : '') + '" data-tab="wcag">\u2705 WCAG Audit</button>' +
+    '<button class="sp-tab' + (activeTab === 'recorder' ? ' active' : '') + '" data-tab="recorder">\u{1F3AC} Recorder</button>' +
+    '</div>';
+}
+
+function wireTabBarHandlers() {
+  document.querySelectorAll('.sp-tab').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      currentPanelTab = btn.dataset.tab;
+      renderEmptyState();
+    });
+  });
+}
+
+/* ── Recorder View ── */
+
+function renderRecorderView() {
+  var app = document.getElementById('app');
+  var html = '';
+
+  html += renderTabBarHtml('recorder');
+
+  // Header + controls
+  html += '<div class="rec-header">';
+  html += '<div class="rec-header-title">\u{1F3AC} Workflow Recorder</div>';
+  html += '<div class="rec-controls">';
+  html += '<input class="rec-name-input" id="rec-name" placeholder="Workflow name\u2026" value="' + escHtml(recWorkflowName) + '">';
+  if (recActive) {
+    html += '<button class="rec-toggle recording" id="rec-toggle">\u23F9 Stop</button>';
+  } else {
+    html += '<button class="rec-toggle idle" id="rec-toggle">\u23FA Record</button>';
+  }
+  html += '</div>';
+  html += '</div>';
+
+  // Step list
+  html += '<div class="rec-step-list" id="rec-step-list">';
+  if (recSteps.length === 0 && !recActive) {
+    html += '<div style="padding:2rem 1rem;text-align:center;color:#64748b;font-size:0.75rem;">';
+    html += 'Enter a name and press Record to start<br>capturing browser interactions as workflow steps.';
+    html += '</div>';
+  } else {
+    for (var i = 0; i < recSteps.length; i++) {
+      html += renderStepCardHtml(recSteps[i], i);
+    }
+  }
+  html += '</div>';
+
+  // Toolbar
+  html += '<div class="rec-toolbar">';
+  html += '<button class="rec-toolbar-btn" id="rec-add-file" title="Add file dialog step">\u{1F4C2} File Dialog</button>';
+  html += '<button class="rec-toolbar-btn" id="rec-add-wait" title="Add wait step">\u23F3 Wait</button>';
+  html += '<button class="rec-toolbar-btn" id="rec-add-clipboard" title="Add clipboard copy+paste step">\u{1F4CB} Clipboard</button>';
+  html += '<button class="rec-toolbar-btn rec-save-btn" id="rec-save" title="Save as .workflow.json">\u{1F4BE} Save</button>';
+  html += '</div>';
+
+  app.innerHTML = html;
+  wireTabBarHandlers();
+  wireRecorderHandlers();
+  scrollStepListToBottom();
+}
+
+function wireRecorderHandlers() {
+  var toggleBtn = document.getElementById('rec-toggle');
+  if (toggleBtn) toggleBtn.addEventListener('click', toggleRecording);
+
+  var nameInput = document.getElementById('rec-name');
+  if (nameInput) nameInput.addEventListener('input', function() { recWorkflowName = nameInput.value; });
+
+  var addFileBtn = document.getElementById('rec-add-file');
+  if (addFileBtn) addFileBtn.addEventListener('click', addFileDialogStep);
+
+  var addWaitBtn = document.getElementById('rec-add-wait');
+  if (addWaitBtn) addWaitBtn.addEventListener('click', addWaitStep);
+
+  var addClipBtn = document.getElementById('rec-add-clipboard');
+  if (addClipBtn) addClipBtn.addEventListener('click', addClipboardStep);
+
+  var saveBtn = document.getElementById('rec-save');
+  if (saveBtn) saveBtn.addEventListener('click', saveRecordedWorkflow);
+
+  // Wire step card expand/collapse
+  document.querySelectorAll('.rec-step-header').forEach(function(header) {
+    header.addEventListener('click', function(e) {
+      // Don't toggle expand when clicking the delete button
+      if (e.target.closest('.rec-step-delete')) return;
+      var idx = parseInt(header.dataset.index, 10);
+      recExpandedStep = (recExpandedStep === idx) ? null : idx;
+      renderRecorderView();
+    });
+  });
+
+  // Wire step delete buttons
+  document.querySelectorAll('.rec-step-delete').forEach(function(btn) {
+    btn.addEventListener('click', function(e) {
+      e.stopPropagation();
+      var idx = parseInt(btn.dataset.index, 10);
+      recSteps.splice(idx, 1);
+      // Adjust expanded step index
+      if (recExpandedStep === idx) {
+        recExpandedStep = null;
+      } else if (recExpandedStep !== null && recExpandedStep > idx) {
+        recExpandedStep--;
+      }
+      renderRecorderView();
+    });
+  });
+
+  // Wire click-to-copy on target values (legacy flat rows)
+  document.querySelectorAll('.rec-target-value').forEach(function(el) {
+    el.addEventListener('click', function() {
+      navigator.clipboard.writeText(el.textContent).then(function() {
+        var orig = el.textContent;
+        el.textContent = '\u2705 Copied';
+        setTimeout(function() { el.textContent = orig; }, 800);
+      });
+    });
+  });
+
+  // Wire click-to-copy on WCAG-style copyable values
+  document.querySelectorAll('.rec-step-body .wcag-ip-copyable').forEach(function(el) {
+    el.addEventListener('click', function(e) {
+      e.stopPropagation(); // Don't trigger strategy selection
+      var text = el.getAttribute('data-copy');
+      if (!text) return;
+      navigator.clipboard.writeText(text).then(function() {
+        var orig = el.textContent;
+        el.textContent = '\u2705 Copied!';
+        el.classList.add('wcag-ip-copied');
+        setTimeout(function() {
+          el.textContent = orig;
+          el.classList.remove('wcag-ip-copied');
+        }, 1200);
+      });
+    });
+  });
+
+  // Wire strategy selection — click a strategy row to set it as active for that step
+  document.querySelectorAll('.rec-strategy-row').forEach(function(row) {
+    row.addEventListener('click', function() {
+      var stepIdx = parseInt(row.dataset.stepIndex, 10);
+      var method = row.dataset.strategyMethod;
+      var value = row.dataset.strategyValue;
+      var step = recSteps[stepIdx];
+      if (!step) return;
+
+      // Toggle: clicking the same strategy deselects it
+      if (step._selectedStrategy === method) {
+        step._selectedStrategy = null;
+      } else {
+        step._selectedStrategy = method;
+        // Update the step's target based on the selected strategy
+        applyStrategyToTarget(step, method, value);
+      }
+      renderRecorderView();
+    });
+  });
+}
+
+function scrollStepListToBottom() {
+  var list = document.getElementById('rec-step-list');
+  if (list) list.scrollTop = list.scrollHeight;
+}
+
+/* ── Recording Toggle ── */
+
+async function toggleRecording() {
+  if (recActive) {
+    // Stop
+    recActive = false;
+    await chrome.runtime.sendMessage({ type: 'set_recording_mode_from_panel', enabled: false });
+    renderRecorderView();
+  } else {
+    // Start
+    recSteps = [];
+    recStepCounter = 0;
+    recExpandedStep = null;
+    recLastEventTime = 0;
+    recActive = true;
+
+    // Get current tab URL as starting point
+    try {
+      var tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (tabs[0]) {
+        recLastUrl = tabs[0].url;
+        recWorkflowSite = new URL(tabs[0].url).hostname;
+        if (!recWorkflowName) {
+          recWorkflowName = recWorkflowSite.replace(/^www\./, '');
+        }
+      }
+    } catch (e) {}
+
+    await chrome.runtime.sendMessage({
+      type: 'set_recording_mode_from_panel',
+      enabled: true,
+      mode: 'accessibility'
+    });
+
+    renderRecorderView();
+  }
+}
+
+/* ── Event → Step Mapping ── */
+
+var REC_GAP_THRESHOLD = 3000;
+var REC_MAX_WAIT = 10000;
+
+function handleRecorderEvent(msg) {
+  var now = msg.timestamp || Date.now();
+  var el = msg.element || {};
+  var page = msg.page || {};
+
+  // Detect URL change → insert navigate step
+  if (page.url && page.url !== recLastUrl) {
+    recLastUrl = page.url;
+    addRecStep({
+      id: 'step-' + (++recStepCounter),
+      label: 'Navigate to ' + truncStr(page.url, 60),
+      type: 'navigate',
+      url: page.url,
+      waitMs: 2000
+    });
+    addRecStep({
+      id: 'step-' + (++recStepCounter),
+      label: 'Wait for page load',
+      type: 'wait',
+      condition: { type: 'delay', ms: 2000 }
+    });
+  }
+
+  // Detect time gap → insert wait
+  if (recLastEventTime > 0) {
+    var gap = now - recLastEventTime;
+    if (gap > REC_GAP_THRESHOLD) {
+      var waitMs = Math.min(gap, REC_MAX_WAIT);
+      addRecStep({
+        id: 'step-' + (++recStepCounter),
+        label: 'Wait ' + (waitMs / 1000).toFixed(1) + 's',
+        type: 'wait',
+        condition: { type: 'delay', ms: waitMs }
+      });
+    }
+  }
+  recLastEventTime = now;
+
+  // Map event to step
+  switch (msg.event) {
+    case 'click':
+      addRecStep({
+        id: 'step-' + (++recStepCounter),
+        label: 'Click ' + recDescribeElement(el),
+        type: 'click',
+        target: recBuildTarget(el),
+        delayAfterMs: 800,
+        _elementMeta: el
+      });
+      break;
+
+    case 'file_dialog':
+      addRecStep({
+        id: 'step-' + (++recStepCounter),
+        label: 'Select file',
+        type: 'file_dialog',
+        filePath: '{{filePath}}',
+        delayBeforeMs: 2000,
+        delayAfterMs: 1000
+      });
+      break;
+
+    case 'input':
+    case 'change':
+      // Debounce: if last step is a type on the same element, update its value
+      var lastStep = recSteps[recSteps.length - 1];
+      if (lastStep && lastStep.type === 'type' && lastStep._selector === (el.selector || '')) {
+        lastStep.value = el.value || '';
+        lastStep.label = 'Type "' + truncStr(el.value || '', 30) + '"';
+        updateRecStepCard(recSteps.length - 1);
+        return;
+      }
+      addRecStep({
+        id: 'step-' + (++recStepCounter),
+        label: 'Type "' + truncStr(el.value || '', 30) + '"',
+        type: 'type',
+        target: recBuildTarget(el),
+        value: el.value || '',
+        clearFirst: true,
+        forceNativeTyping: true,
+        _selector: el.selector || '',
+        _elementMeta: el
+      });
+      break;
+
+    case 'keydown':
+      var key = msg.keyboard?.key || '';
+      var mods = msg.keyboard?.modifiers || [];
+      var combo = mods.length > 0 ? mods.join('+') + '+' + key : key;
+      addRecStep({
+        id: 'step-' + (++recStepCounter),
+        label: 'Press ' + combo,
+        type: 'keyboard',
+        key: key,
+        modifiers: mods
+      });
+      break;
+
+    case 'hover_pick':
+      addRecStep({
+        id: 'step-' + (++recStepCounter),
+        label: 'Click ' + recDescribeElement(el),
+        type: 'click',
+        target: recBuildTarget(el),
+        delayAfterMs: 800,
+        _elementMeta: el,
+        _hoverPicked: true
+      });
+      break;
+  }
+}
+
+/* ── Target Building ── */
+
+function recBuildTarget(el) {
+  var target = {};
+
+  // Accessibility query (screen-reader-friendly identifier)
+  var role = el.computedRole || el.role || '';
+  var name = el.accessibleName || el.ariaLabel || '';
+  if (role && name) {
+    target.accessibilityQuery = 'role:' + role + '[name:' + name + ']';
+  }
+
+  // ARIA
+  if (el.ariaLabel) target.ariaLabel = el.ariaLabel;
+  if (role) target.role = role;
+
+  // Selectors
+  if (el.selector) target.selector = el.selector;
+  if (el.fallbackSelectors && el.fallbackSelectors.length > 0) {
+    target.fallbackSelectors = el.fallbackSelectors;
+  }
+
+  // Text
+  if (el.textContent) target.textContent = el.textContent.slice(0, 50);
+  if (el.placeholder) target.placeholder = el.placeholder;
+  if (el.title) target.title = el.title;
+  if (el.alt) target.alt = el.alt;
+  if (el.name) target.name = el.name;
+  if (el.dataTestId) target.dataTestId = el.dataTestId;
+
+  // Bounds
+  var bounds = el.bounds || {};
+  if (bounds.pctX !== undefined) {
+    target.expectedBounds = {
+      left: bounds.left, top: bounds.top,
+      width: bounds.width, height: bounds.height,
+      pctX: bounds.pctX, pctY: bounds.pctY,
+      pctW: bounds.pctW, pctH: bounds.pctH,
+      viewportW: bounds.viewportW, viewportH: bounds.viewportH,
+      tolerance: 80
+    };
+  }
+
+  // Context
+  if (el.context) target.context = el.context;
+
+  // Shadow DOM path
+  if (el.shadowPath) target.shadowPath = el.shadowPath;
+
+  // SVG fingerprint
+  if (el.svgFingerprint) target.svgFingerprint = el.svgFingerprint;
+
+  // Description for find_interactive fallback
+  if (name && role) {
+    target.description = role + ' labelled "' + name + '"';
+  } else if (el.textContent) {
+    target.description = (el.tag || 'element') + ' with text "' + el.textContent.slice(0, 40) + '"';
+  }
+
+  return target;
+}
+
+/**
+ * Update a step's target to prioritize the selected strategy method.
+ * This adjusts which selector/identifier the executor will try first.
+ */
+function applyStrategyToTarget(step, method, value) {
+  if (!step.target) step.target = {};
+  var t = step.target;
+
+  switch (method) {
+    case 'id':
+      t.selector = value; // e.g. '#myId'
+      break;
+    case 'data-testid':
+      t.dataTestId = value;
+      t.selector = '[data-testid="' + value + '"]';
+      break;
+    case 'selector':
+      t.selector = value;
+      break;
+    case 'aria-label':
+      t.ariaLabel = value;
+      // Build accessibilityQuery if we have a role
+      if (t.role) {
+        t.accessibilityQuery = 'role:' + t.role + '[name:' + value + ']';
+      }
+      t.description = 'element with aria-label "' + value + '"';
+      break;
+    case 'text':
+      t.textContent = value;
+      t.description = 'element with text "' + value + '"';
+      break;
+    case 'placeholder':
+      t.placeholder = value;
+      t.selector = '[placeholder="' + value + '"]';
+      break;
+    case 'name':
+      t.name = value;
+      t.selector = '[name="' + value + '"]';
+      break;
+    case 'label':
+      // Accessible name — set as ariaLabel for resolver
+      t.ariaLabel = value;
+      if (t.role) {
+        t.accessibilityQuery = 'role:' + t.role + '[name:' + value + ']';
+      }
+      t.description = 'element labelled "' + value + '"';
+      break;
+    case 'title':
+      t.title = value;
+      break;
+  }
+}
+
+function recDescribeElement(el) {
+  if (el.accessibleName) return '"' + truncStr(el.accessibleName, 30) + '"';
+  if (el.ariaLabel) return '"' + truncStr(el.ariaLabel, 30) + '"';
+  if (el.textContent) return '"' + truncStr(el.textContent, 30) + '"';
+  if (el.placeholder) return 'input "' + truncStr(el.placeholder, 30) + '"';
+  if (el.selector) return truncStr(el.selector, 40);
+  return el.tag || 'element';
+}
+
+/* ── Step Card Rendering ── */
+
+function renderStepCardHtml(step, index) {
+  var icon = step._hoverPicked ? '\uD83C\uDFAF' : (STEP_ICONS[step.type] || '\u2022');
+  var expanded = recExpandedStep === index;
+  var html = '<div class="rec-step-card">';
+
+  // Header
+  html += '<div class="rec-step-header" data-index="' + index + '">';
+  html += '<span class="rec-step-num">' + (index + 1) + '</span>';
+  html += '<span class="rec-step-icon">' + icon + '</span>';
+  html += '<span class="rec-step-label" id="rec-step-label-' + index + '">' + escHtml(step.label) + '</span>';
+  html += '<button class="rec-step-delete" data-index="' + index + '" title="Delete step">\u2715</button>';
+  html += '<span class="rec-step-chevron' + (expanded ? ' open' : '') + '">\u25B6</span>';
+  html += '</div>';
+
+  // Body (expanded)
+  if (expanded) {
+    html += '<div class="rec-step-body">';
+    html += renderTargetDetailHtml(step, index);
+    html += '</div>';
+  }
+
+  html += '</div>';
+  return html;
+}
+
+function renderTargetDetailHtml(step, stepIndex) {
+  var html = '';
+  var t = step.target;
+  var el = step._elementMeta;
+
+  if (step.type === 'navigate') {
+    html += recTargetRow('URL', step.url, 'accent');
+    return html;
+  }
+  if (step.type === 'wait') {
+    if (step.condition?.ms) html += recTargetRow('Duration', step.condition.ms + 'ms');
+    if (step.condition?.type) html += recTargetRow('Condition', step.condition.type);
+    return html;
+  }
+  if (step.type === 'keyboard') {
+    html += recTargetRow('Key', step.key);
+    if (step.modifiers?.length) html += recTargetRow('Modifiers', step.modifiers.join(', '));
+    return html;
+  }
+  if (step.type === 'file_dialog') {
+    html += recTargetRow('File Path', step.filePath, 'accent');
+    html += recTargetRow('Delay Before', (step.delayBeforeMs || 0) + 'ms');
+    html += recTargetRow('Delay After', (step.delayAfterMs || 0) + 'ms');
+    return html;
+  }
+  if (step.type === 'clipboard') {
+    html += recTargetRow('Value', step.value || '', 'accent');
+    html += recTargetRow('Paste', step.paste ? 'Yes (Cmd+V)' : 'No (copy only)');
+    html += recTargetRow('Delay After', (step.delayAfterMs || 0) + 'ms');
+    return html;
+  }
+  if (step.type === 'type') {
+    html += recTargetRow('Value', step.value || '', 'accent');
+  }
+
+  // ── WCAG-style inspector panel ──
+  if (el) {
+    // Tag / Role / Category badges
+    html += '<div class="wcag-ip-header" style="margin-bottom:0;padding:0;">';
+    html += '<div class="wcag-ip-badges">';
+    html += '<span class="wcag-ip-tag">&lt;' + escHtml(el.tag || 'element') + '&gt;</span>';
+    var role = el.computedRole || el.role || '';
+    if (role) {
+      html += '<span class="wcag-ip-role">role=' + escHtml(role) + '</span>';
+    }
+    html += '</div>';
+    html += '</div>';
+
+    // Accessible name
+    var accName = el.accessibleName || el.ariaLabel || '';
+    if (accName) {
+      html += '<div class="wcag-ip-row">';
+      html += '<span class="wcag-ip-label">Name</span>';
+      html += '<span class="wcag-ip-value">' + escHtml(truncStr(accName, 100)) + '</span>';
+      html += '</div>';
+    }
+
+    // Strategies — "Findable via" with selection
+    var strategies = el.strategies || [];
+    if (strategies.length > 0) {
+      html += '<div class="wcag-ip-section-label">Findable via</div>';
+      var selectedMethod = step._selectedStrategy || null;
+      for (var i = 0; i < strategies.length; i++) {
+        var s = strategies[i];
+        var isSelected = selectedMethod === s.method;
+        var cls = s.unique ? 'wcag-ip-unique' : 'wcag-ip-nonunique';
+        var icon = s.unique ? '\u2705' : '\u26a0\ufe0f';
+        var countStr = !s.unique && s.matchCount > 0 ? ' (' + s.matchCount + ')' : '';
+        var selectedCls = isSelected ? ' rec-strategy-selected' : '';
+        html += '<div class="wcag-ip-row rec-strategy-row' + selectedCls + '" data-step-index="' + stepIndex + '" data-strategy-method="' + escHtml(s.method) + '" data-strategy-value="' + escHtml(s.value) + '">';
+        html += '<span class="wcag-ip-label">' + icon + ' ' + escHtml(s.method) + countStr + '</span>';
+        html += '<span class="wcag-ip-value wcag-ip-copyable ' + cls + '" data-copy="' + escHtml(s.value) + '">' + escHtml(truncStr(s.value, 80)) + '</span>';
+        html += '</div>';
+      }
+    }
+
+    // Attributes
+    var attrs = {};
+    if (el.ariaLabel) attrs['aria-label'] = el.ariaLabel;
+    if (el.placeholder) attrs['placeholder'] = el.placeholder;
+    if (el.title) attrs['title'] = el.title;
+    if (el.alt) attrs['alt'] = el.alt;
+    if (el.name) attrs['name'] = el.name;
+    if (el.dataTestId) attrs['data-testid'] = el.dataTestId;
+    if (el.inputType) attrs['type'] = el.inputType;
+    var attrKeys = Object.keys(attrs);
+    if (attrKeys.length > 0) {
+      html += '<div class="wcag-ip-section-label">Attributes</div>';
+      for (var i = 0; i < attrKeys.length; i++) {
+        var k = attrKeys[i];
+        html += '<div class="wcag-ip-row">';
+        html += '<span class="wcag-ip-label">' + escHtml(k) + '</span>';
+        html += '<span class="wcag-ip-value wcag-ip-copyable" data-copy="' + escHtml(attrs[k]) + '">' + escHtml(truncStr(attrs[k], 80)) + '</span>';
+        html += '</div>';
+      }
+    }
+
+    // Context (heading, landmark)
+    if (t && t.context) {
+      if (t.context.nearestHeading || t.context.landmark) {
+        html += '<div class="wcag-ip-section-label">Context</div>';
+        if (t.context.nearestHeading) {
+          html += '<div class="wcag-ip-row">';
+          html += '<span class="wcag-ip-label">Heading</span>';
+          html += '<span class="wcag-ip-value" style="color:#94a3b8">' + escHtml(t.context.nearestHeading.text) + '</span>';
+          html += '</div>';
+        }
+        if (t.context.landmark) {
+          html += '<div class="wcag-ip-row">';
+          html += '<span class="wcag-ip-label">Landmark</span>';
+          html += '<span class="wcag-ip-value" style="color:#94a3b8">' + escHtml(t.context.landmark.label || t.context.landmark.ariaLabel || t.context.landmark.role) + '</span>';
+          html += '</div>';
+        }
+      }
+    }
+  } else if (t) {
+    // Fallback: no element metadata, show flat target rows
+    if (t.accessibilityQuery) html += recTargetRow('A11y Query', t.accessibilityQuery, 'accent');
+    if (t.role) html += recTargetRow('Role', t.role);
+    if (t.ariaLabel) html += recTargetRow('aria-label', t.ariaLabel);
+    if (t.selector) html += recTargetRow('Selector', t.selector);
+    if (t.textContent) html += recTargetRow('Text', t.textContent);
+    if (t.dataTestId) html += recTargetRow('data-testid', t.dataTestId, 'accent');
+    if (t.description) html += recTargetRow('Description', t.description, 'dim');
+  } else {
+    html += '<div style="color:#64748b;font-style:italic;">No target data</div>';
+  }
+
+  return html;
+}
+
+function recTargetRow(label, value, cls) {
+  return '<div class="rec-target-row">' +
+    '<span class="rec-target-label">' + escHtml(label) + '</span>' +
+    '<span class="rec-target-value' + (cls ? ' ' + cls : '') + '">' + escHtml(value || '') + '</span>' +
+    '</div>';
+}
+
+/* ── Incremental Step Updates ── */
+
+function addRecStep(step) {
+  recSteps.push(step);
+  var list = document.getElementById('rec-step-list');
+  if (list) {
+    // Remove the empty placeholder if it exists
+    if (recSteps.length === 1) {
+      var placeholder = list.querySelector('div[style]');
+      if (placeholder) placeholder.remove();
+    }
+    // Append the new card
+    var temp = document.createElement('div');
+    temp.innerHTML = renderStepCardHtml(step, recSteps.length - 1);
+    var card = temp.firstElementChild;
+    list.appendChild(card);
+    // Wire handlers on the new card
+    var header = card.querySelector('.rec-step-header');
+    if (header) {
+      header.addEventListener('click', function() {
+        var idx = parseInt(header.dataset.index, 10);
+        recExpandedStep = (recExpandedStep === idx) ? null : idx;
+        renderRecorderView();
+      });
+    }
+    card.querySelectorAll('.rec-target-value').forEach(function(el) {
+      el.addEventListener('click', function() {
+        navigator.clipboard.writeText(el.textContent).then(function() {
+          var orig = el.textContent;
+          el.textContent = '\u2705 Copied';
+          setTimeout(function() { el.textContent = orig; }, 800);
+        });
+      });
+    });
+    scrollStepListToBottom();
+  }
+}
+
+function updateRecStepCard(index) {
+  var labelEl = document.getElementById('rec-step-label-' + index);
+  if (labelEl && recSteps[index]) {
+    labelEl.textContent = recSteps[index].label;
+  }
+}
+
+/* ── Manual Step Insertion ── */
+
+function addFileDialogStep() {
+  var varName = prompt('File path variable name:', 'filePath');
+  if (!varName) return;
+  addRecStep({
+    id: 'step-' + (++recStepCounter),
+    label: 'Select file ({{' + varName + '}})',
+    type: 'file_dialog',
+    filePath: '{{' + varName + '}}',
+    delayBeforeMs: 2000,
+    delayAfterMs: 1000
+  });
+}
+
+function addWaitStep() {
+  var ms = prompt('Wait duration (ms):', '3000');
+  if (!ms) return;
+  var dur = parseInt(ms, 10);
+  if (isNaN(dur) || dur <= 0) return;
+  addRecStep({
+    id: 'step-' + (++recStepCounter),
+    label: 'Wait ' + (dur / 1000).toFixed(1) + 's',
+    type: 'wait',
+    condition: { type: 'delay', ms: dur }
+  });
+}
+
+function addClipboardStep() {
+  var text = prompt('Text to copy to clipboard (supports {{variable}}):', '{{caption}}');
+  if (text === null) return;
+  var paste = confirm('Also paste after copying? (Cmd+V / Ctrl+V)');
+  addRecStep({
+    id: 'step-' + (++recStepCounter),
+    label: (paste ? 'Paste' : 'Copy') + ' "' + truncStr(text, 25) + '"',
+    type: 'clipboard',
+    value: text,
+    paste: paste,
+    delayAfterMs: 500
+  });
+}
+
+/* ── Save Workflow ── */
+
+async function saveRecordedWorkflow() {
+  if (recSteps.length === 0) {
+    alert('No steps to save. Record some actions first.');
+    return;
+  }
+
+  var name = recWorkflowName || 'Untitled Workflow';
+  var site = recWorkflowSite || '';
+
+  // Clean steps: remove internal fields that shouldn't be persisted
+  var cleanSteps = recSteps.map(function(s) {
+    var clean = Object.assign({}, s);
+    delete clean._selector;
+    delete clean._elementMeta;
+    delete clean._hoverPicked;
+    delete clean._selectedStrategy;
+    return clean;
+  });
+
+  // Auto-detect variables from {{...}} patterns
+  var varSet = {};
+  var varPattern = /\{\{(\w+)\}\}/g;
+  var stepsJson = JSON.stringify(cleanSteps);
+  var match;
+  while ((match = varPattern.exec(stepsJson)) !== null) {
+    varSet[match[1]] = true;
+  }
+  var variables = Object.keys(varSet).map(function(v) {
+    return { name: v, description: '', type: 'string', required: true };
+  });
+
+  // Generate the workflow ID the same way the dashboard does
+  var workflowId = name.trim().toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+
+  var workflow = {
+    name: name,
+    description: 'Recorded from Woodbury side panel',
+    site: site,
+    variables: variables,
+    steps: cleanSteps
+  };
+
+  var saveBtn = document.getElementById('rec-save');
+  if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = '\u23f3 Saving\u2026'; }
+
+  try {
+    // First try POST (create new)
+    var resp = await chrome.runtime.sendMessage({
+      type: 'save_workflow_to_dashboard',
+      workflow: workflow
+    });
+
+    // If 409 conflict (already exists), update the existing workflow via PUT
+    if (resp && !resp.success && resp.data && resp.data.error && resp.data.error.includes('already exists')) {
+      // PUT expects a full workflow document wrapped in { workflow: { version, id, ... } }
+      var fullDoc = {
+        workflow: {
+          version: '1.0',
+          id: workflowId,
+          name: name,
+          description: workflow.description,
+          site: site || undefined,
+          variables: variables,
+          steps: cleanSteps,
+          metadata: {
+            updatedAt: new Date().toISOString(),
+            recordedBy: 'dashboard'
+          }
+        }
+      };
+      resp = await chrome.runtime.sendMessage({
+        type: 'update_workflow_to_dashboard',
+        workflowId: workflowId,
+        workflow: fullDoc
+      });
+    }
+
+    if (resp && resp.success) {
+      if (saveBtn) { saveBtn.textContent = '\u2705 Saved!'; }
+      setTimeout(function() {
+        if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = '\u{1F4BE} Save'; }
+      }, 2000);
+    } else {
+      alert('Save failed: ' + (resp?.data?.error || resp?.error || 'Unknown error'));
+      if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = '\u{1F4BE} Save'; }
+    }
+  } catch (e) {
+    alert('Save error: ' + e.message);
+    if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = '\u{1F4BE} Save'; }
+  }
 }

@@ -165,15 +165,37 @@ All images are base64-encoded data URLs. The `model` field is optional — defau
 
 | File | Purpose |
 |------|---------|
-| `src/workflow/types.ts` | `WorkflowDocument`, `WorkflowStep`, step types (navigate, click, type, keyboard, desktop), `RecordingEvent` |
+| `src/workflow/types.ts` | `WorkflowDocument`, `WorkflowStep`, step types (navigate, click, type, keyboard, desktop, llm_check), `RecordingEvent` |
 | `src/workflow/recorder.ts` | `WorkflowRecorder`: captures Chrome extension events → `.workflow.json`. Captures element crops when `captureElementCrops: true` |
-| `src/workflow/executor.ts` | `WorkflowExecutor`: runs steps sequentially via bridge server. Uses `VisualVerifier` for element matching |
+| `src/workflow/executor.ts` | `WorkflowExecutor`: runs steps sequentially via bridge server. Uses `VisualVerifier` for element matching. **NOT used by dashboard routes** — see "Workflow Executor Architecture" below |
 | `src/workflow/visual-verifier.ts` | `VisualVerifier`: HTTP client for inference server. `verifyElement()` (threshold 0.75), `searchNearby()` (threshold 0.65, 200px radius) |
 | `src/workflow/execution-snapshots.ts` | `ExecutionSnapshotCapture`: captures snapshots during replay. Successful runs keep data; failed runs delete snapshots |
-| `src/workflow/resolver.ts` | `ElementResolver`: CSS selector resolution with fallback strategies |
+| `src/workflow/resolver.ts` | `ElementResolver`: CSS selector resolution with 8-stage fallback chain (placeholder → CSS → fallbacks → aria → text → description → LLM vision → percentage) |
 | `src/workflow/validator.ts` | `ConditionValidator`: precondition/postcondition checking |
 | `src/workflow/variable-sub.ts` | `substituteObject()`: `{{variable}}` substitution in workflow steps |
 | `src/workflow/loader.ts` | `discoverWorkflows()`, `loadWorkflow()`: find and parse `.workflow.json` files |
+
+### Workflow Executor Architecture (CRITICAL)
+
+There are **three separate workflow executors**. The dashboard uses the social-scheduler extension's runner exclusively — NOT the main `WorkflowExecutor` class.
+
+| Executor | File | Used By | Step Types |
+|----------|------|---------|------------|
+| **Social-Scheduler Runner** (PRIMARY) | `~/.woodbury/extensions/social-scheduler/lib/workflow-runner.js` | Dashboard workflow runs, pipeline workflow nodes, storyboard debug | 32 types including `llm_check` |
+| **Main WorkflowExecutor** (UNUSED in dashboard) | `src/workflow/executor.ts` | Tests, loop tools (`workflow-play.ts`), extension scaffold | 28+ types including `llm_check`, `http_request`, `extract_structured`, `parallel` |
+| **PostingEngine** (social-only) | `src/social/posting-engine.ts` | Social media posting | 6 types (bridge, wait, checkpoint, navigate, file_dialog, keyboard) |
+
+**When adding a new step type, you MUST add it to the social-scheduler runner (`workflow-runner.js`)** — that's what the dashboard actually executes. Adding it only to `src/workflow/executor.ts` will NOT work for dashboard or pipeline runs.
+
+**Dashboard loading path:**
+```
+workflow-run.ts → require('~/.woodbury/extensions/social-scheduler/lib/workflow-runner.js') → executeWorkflow()
+composition-run.ts → getExecuteWorkflow() → same require() with module-level cache
+```
+
+**Caching:** The social-scheduler runner is loaded via Node's `require()` and cached for the process lifetime. Editing `workflow-runner.js` on disk requires restarting the Electron app. The `?refresh=1` API parameter only invalidates the workflow/composition JSON file cache, NOT the runner module cache.
+
+**Step types only in the main executor (unavailable in dashboard):** `http_request`, `extract_structured`, `parallel`. These step types exist in `src/workflow/executor.ts` but cannot be used in dashboard workflow or pipeline runs because the dashboard always loads the social-scheduler runner.
 
 ### Extension System
 
@@ -289,3 +311,55 @@ npm test               # Run Jest tests
 - The inference server is pure Node.js — no Python required for end-user element matching
 - Workflow snapshots go to `~/.woodbury/data/training-crops/snapshots/<site_id>/`
 - Trained models live at `~/.woodbury/data/models/<run-id>/encoder.onnx`
+
+## Workflow Building via MCP
+
+The `woodbury-mcp` server (sister repo `~/Documents/GitHub/woodbury-mcp/`) exposes 8 MCP tools for building workflows programmatically. These let Claude create zero-token-cost browser automations that can be scheduled or composed into pipelines.
+
+**Tools** (prefixed `mcp__woodbury-browser__` in Claude Code):
+
+| Tool | Purpose |
+|------|---------|
+| `workflow_schema` | Returns the complete workflow JSON schema — call first to learn the format |
+| `workflow_create` | Create a new workflow (name, site, variables, optional steps) |
+| `workflow_list` | List all workflows |
+| `workflow_get` | Get full WorkflowDocument by ID |
+| `workflow_update` | Update steps/variables/metadata with validation |
+| `workflow_delete` | Delete a workflow |
+| `workflow_test` | Start an async test run in the real browser |
+| `workflow_test_status` | Poll for test run results |
+
+**Building loop**: `workflow_schema` → inspect page with `browser_query` → `workflow_create` → `workflow_update` (add steps) → `workflow_test` → `workflow_test_status` → fix & re-test until passing.
+
+**Requirements**: Woodbury dashboard must be running (Electron app or `woodbury --dashboard`), Chrome extension connected.
+
+## Pipeline Building via MCP
+
+The `woodbury-mcp` server also exposes 12 MCP tools for building **pipelines** — directed graphs that connect workflows, tool nodes, script nodes, and control flow. Pipelines let Claude combine browser automation with AI tools (image gen, LLM calls, file I/O) into reusable multi-step automations.
+
+**Tools** (prefixed `mcp__woodbury-browser__` in Claude Code):
+
+| Tool | Purpose |
+|------|---------|
+| `pipeline_schema` | Returns the pipeline JSON schema — node types, edges, ports, examples |
+| `pipeline_tools` | Lists available tools for `__tool__` nodes (nanobanana, elevenlabs, etc.) |
+| `pipeline_create` | Create a new empty pipeline |
+| `pipeline_list` | List all pipelines (discover reusable sub-pipelines) |
+| `pipeline_get` | Get full CompositionDocument by ID |
+| `pipeline_update` | Update nodes/edges with validation |
+| `pipeline_delete` | Delete a pipeline |
+| `pipeline_run` | Start async pipeline execution |
+| `pipeline_run_status` | Poll execution progress and results |
+| `pipeline_generate` | AI-generate a pipeline from natural language description |
+| `pipeline_document` | Generate documentation for discoverability and reuse |
+| `pipeline_interface` | Get formal inputs/outputs for sub-pipeline composition |
+
+**Building loop**: `pipeline_schema` → `pipeline_tools` → `pipeline_generate` or `pipeline_create` + `pipeline_update` → `pipeline_run` → `pipeline_run_status` → fix & re-run → `pipeline_document` → `pipeline_interface`.
+
+**Key concepts**:
+- **Tool nodes** (`__tool__`): call extension tools like nanobanana (image gen), web_fetch, shell_execute
+- **Script nodes** (`__script__`): run JS with `context.llm.generate()` and `context.tools.*`
+- **Workflow nodes**: reference recorded browser automations by ID
+- **Sub-pipelines** (`comp:<id>`): reference another pipeline as a node — enables composition
+- **Variable nodes**: expose pipeline inputs; **Output node**: collect pipeline results
+- After building, always call `pipeline_document` to make the pipeline discoverable and reusable

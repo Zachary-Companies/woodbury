@@ -459,6 +459,18 @@ async function buildScriptContext(ctx: DashboardContext) {
       scriptTools.nanobanana = async (p: any) => JSON.parse(await nb(p as any, ctx.workDir));
     } catch { /* nanobanana not available */ }
   }
+  if (!scriptTools.video_generate) {
+    try {
+      const { nanobananaVideo: nbv } = await import('../../loop/tools/nanobanana-video.js');
+      scriptTools.video_generate = async (p: any) => JSON.parse(await nbv(p as any, ctx.workDir));
+    } catch { /* nanobanana video not available */ }
+  }
+  if (!scriptTools.file_exists) {
+    try {
+      const { fileExistsHandler } = await import('../../loop/tools/file-exists.js');
+      scriptTools.file_exists = async (p: any) => JSON.parse(await fileExistsHandler(p, { workingDirectory: ctx.workDir }) as string);
+    } catch { /* file_exists not available */ }
+  }
 
   return { scriptRunPrompt, scriptModel, scriptTools };
 }
@@ -1020,6 +1032,20 @@ async function executeAssetNode(
       metadata: JSON.stringify(asset.metadata || {}),
       __done__: true,
     };
+  } else if (assetMode === 'get') {
+    // Get mode — look up a specific asset by ID passed as input
+    const assetId = String(edgeInputs['assetId'] || mergedInputs['assetId'] || node.asset.assetId || '');
+    if (!assetId) throw new Error('No assetId provided. Connect an Asset ID input or configure one in the properties panel.');
+    const result = await assetTools.asset_get({ id: assetId });
+    if (!result?.success) throw new Error(result?.error || `Failed to get asset "${assetId}"`);
+    const asset = result.asset;
+    return {
+      filePath: asset.file_path_absolute || asset.file_path || asset.filePath || '',
+      fileName: asset.file_name || asset.fileName || asset.name || '',
+      assetId: asset.id || assetId,
+      metadata: JSON.stringify(asset.metadata || {}),
+      __done__: true,
+    };
   } else if (assetMode === 'save') {
     const filePath = String(edgeInputs['filePath'] || mergedInputs['filePath'] || '');
     const name = String(edgeInputs['name'] || mergedInputs['name'] || node.asset.defaultName || `asset-${Date.now()}`);
@@ -1391,6 +1417,66 @@ const SPECIAL_NODE_IDS = new Set([
   '__tool__', '__file_write__', '__file_read__', '__junction__',
   '__variable__', '__get_variable__',
 ]);
+
+/**
+ * Decide which way a branch node goes.
+ *
+ * Precedence rules, in order:
+ *  1. A literal "true"/"false" expression wins outright.
+ *  2. A configured expression is evaluated when it can actually consume the
+ *     edge value — it references {{value}} or {{condition}} — or when no edge
+ *     supplied one.
+ *  3. Otherwise an edge-supplied `condition` wins. An expression that mentions
+ *     neither placeholder has none of its own variables in scope, so evaluating
+ *     it would substitute null, yield false, and silently route every run down
+ *     the false branch while discarding a perfectly good edge value.
+ *
+ * Returns the resolved truthiness plus an `error` when an expression that was
+ * supposed to run could not be evaluated — the caller surfaces that rather than
+ * letting a broken expression masquerade as a legitimate `false`.
+ */
+export function evaluateBranchCondition(
+  conditionExpr: string,
+  edgeConditionValue: unknown,
+  mergedInputs: Record<string, unknown>,
+): { value: boolean; error?: string } {
+  const expr = conditionExpr || '';
+  const isLiteralExpr = expr === 'true' || expr === 'false';
+  // Must match the substitution regex below exactly — \w+ with no inner
+  // whitespace — or we'd claim an expression consumes the edge value and then
+  // fail to actually substitute it.
+  const exprUsesEdgeValue = /\{\{(value|condition)\}\}/.test(expr);
+  const shouldEvaluateExpr =
+    !!expr && !isLiteralExpr && (edgeConditionValue === undefined || exprUsesEdgeValue);
+
+  if (shouldEvaluateExpr) {
+    const exprVars: Record<string, unknown> = { ...mergedInputs };
+    if (edgeConditionValue !== undefined) {
+      exprVars['value'] = edgeConditionValue;
+      exprVars['condition'] = edgeConditionValue;
+    }
+    const conditionStr = expr.replace(/\{\{(\w+)\}\}/g, (_: string, varName: string) => {
+      const val = exprVars[varName];
+      if (val === undefined || val === null) return 'null';
+      if (typeof val === 'string') return JSON.stringify(val);
+      return String(val);
+    });
+    try {
+      return { value: !!new Function(`return (${conditionStr});`)() };
+    } catch (exprErr: any) {
+      return {
+        value: false,
+        error: `Branch condition "${expr}" failed to evaluate: ${exprErr?.message || String(exprErr)}`,
+      };
+    }
+  }
+
+  if (edgeConditionValue !== undefined) {
+    return { value: !!edgeConditionValue };
+  }
+
+  return { value: isLiteralExpr ? expr === 'true' : false };
+}
 
 function isSpecialNode(workflowId: string): boolean {
   return SPECIAL_NODE_IDS.has(workflowId) || workflowId.startsWith('comp:');
@@ -1792,8 +1878,9 @@ async function executeNestedForEach(
   for (const ibid of innerBodyIds) forEachBodyNodes.add(ibid);
 
   const innerBodyObjs = comp.nodes.filter((n: any) => innerBodyIds.has(n.id));
+  // Exclude edges FROM the parent ForEach node — same reason as the outer loop
   const innerBodyEdges = comp.edges.filter((e: any) =>
-    (innerBodyIds.has(e.sourceNodeId) || e.sourceNodeId === bodyNodeId) &&
+    innerBodyIds.has(e.sourceNodeId) &&
     innerBodyIds.has(e.targetNodeId)
   );
   let innerOrder: string[];
@@ -1939,6 +2026,94 @@ function getExecuteWorkflow(): Function {
 // ────────────────────────────────────────────────────────────────
 
 export const handleCompositionRunRoutes: RouteHandler = async (req, res, pathname, url, ctx) => {
+  // POST /api/compositions/:id/run-node — execute a single node for debugging
+  const runNodeMatch = pathname.match(/^\/api\/compositions\/([^/]+)\/run-node$/);
+  if (req.method === 'POST' && runNodeMatch) {
+    const compId = decodeURIComponent(runNodeMatch[1]);
+    try {
+      const body = await readBody(req);
+      const { nodeId } = body;
+      if (!nodeId) {
+        sendJson(res, 400, { error: 'nodeId is required' });
+        return true;
+      }
+
+      const compDiscovered = await discoverCompositions(ctx.workDir);
+      const compFound = compDiscovered.find((d: any) => d.composition.id === compId);
+      if (!compFound) {
+        sendJson(res, 404, { error: `Composition "${compId}" not found` });
+        return true;
+      }
+      const comp = compFound.composition;
+      const node = comp.nodes.find((n: any) => n.id === nodeId);
+      if (!node) {
+        sendJson(res, 404, { error: `Node "${nodeId}" not found in composition "${compId}"` });
+        return true;
+      }
+
+      const startTime = Date.now();
+
+      // Gather inputs from upstream nodes using the last run's outputs
+      // (so the node gets realistic data from previous executions)
+      const lastOutputs: Record<string, Record<string, unknown>> = {};
+      if (ctx.activeCompRun && ctx.activeCompRun.nodeStates) {
+        for (const [nId, ns] of Object.entries(ctx.activeCompRun.nodeStates) as any) {
+          if (ns.outputVariables) lastOutputs[nId] = ns.outputVariables;
+        }
+      }
+      const edgeInputs = gatherInputVariables(nodeId, comp.edges, lastOutputs);
+      const mergedInputs: Record<string, unknown> = { ...body.variables, ...edgeInputs };
+
+      let outputs: Record<string, unknown> = {};
+
+      // Script node
+      if (node.workflowId === '__script__' && node.script) {
+        const result = await runScriptNodeWithAutoFix({
+          ctx,
+          node,
+          nodeId,
+          mergedInputs,
+          composition: comp,
+          compositionPath: compFound.path,
+          nodes: comp.nodes,
+          edges: comp.edges,
+          nodeOutputs: lastOutputs,
+          wfMap: {},
+          locationLabel: `${comp.name} / ${node.label || nodeId} (debug)`,
+          updateCurrentStep: () => {},
+          recomputeInputs: () => mergedInputs,
+        });
+        outputs = result.outputs || {};
+      }
+      // Tool node
+      else if (node.workflowId === '__tool__' && node.toolNode) {
+        outputs = await executeToolNode(ctx, node, edgeInputs);
+      }
+      // Asset node
+      else if (node.workflowId === '__asset__' && node.asset) {
+        outputs = await executeAssetNode(ctx, node, edgeInputs, mergedInputs);
+      }
+      // Text node
+      else if (node.workflowId === '__text__') {
+        outputs = { text: node.textNode?.value ?? '' };
+      }
+      // Composition/sub-pipeline — just show what inputs it would receive
+      else if (node.workflowId.startsWith('comp:')) {
+        outputs = { _inputsReceived: mergedInputs, _note: 'Sub-pipeline dry run — showing inputs only' };
+      }
+      // Workflow node — show inputs
+      else {
+        outputs = { _inputsReceived: mergedInputs, _note: `Node type "${node.workflowId}" — showing inputs` };
+      }
+
+      const durationMs = Date.now() - startTime;
+      sendJson(res, 200, { success: true, nodeId, outputs, durationMs, inputs: mergedInputs });
+    } catch (err: any) {
+      sendJson(res, 500, { error: err?.message || String(err) });
+    }
+    return true;
+  }
+
   // POST /api/compositions/:id/run — execute a composition
   const runCompMatch = pathname.match(/^\/api\/compositions\/([^/]+)\/run$/);
   if (req.method === 'POST' && runCompMatch) {
@@ -2497,20 +2672,13 @@ export const handleCompositionRunRoutes: RouteHandler = async (req, res, pathnam
               const mergedInputs: Record<string, unknown> = { ...initialVariables, ...edgeInputs };
               ns.inputVariables = { ...mergedInputs };
 
-              let conditionValue: unknown = edgeInputs['condition'];
-              if (conditionValue === undefined) {
-                let conditionStr = node.branchNode.condition || 'false';
-                conditionStr = conditionStr.replace(/\{\{(\w+)\}\}/g, (_: string, varName: string) => {
-                  const val = mergedInputs[varName];
-                  if (val === undefined || val === null) return 'null';
-                  if (typeof val === 'string') return JSON.stringify(val);
-                  return String(val);
-                });
-                try { conditionValue = new Function(`return (${conditionStr});`)(); }
-                catch { conditionValue = false; }
-              }
-
-              const isTruthy = !!conditionValue;
+              const branch = evaluateBranchCondition(
+                node.branchNode.condition || '',
+                edgeInputs['condition'],
+                mergedInputs,
+              );
+              if (branch.error) ns.error = branch.error;
+              const isTruthy = branch.value;
               const inactivePort = isTruthy ? 'on_false' : 'on_true';
 
               const toSkip = getNodesExclusivelyDownstreamOfPort(nodeId, inactivePort, comp.edges);
@@ -2668,8 +2836,14 @@ export const handleCompositionRunRoutes: RouteHandler = async (req, res, pathnam
               for (const bodyId of loopBodyNodeIds) forEachBodyNodes.add(bodyId);
 
               const loopBodyNodeObjs = comp.nodes.filter((n: any) => loopBodyNodeIds.has(n.id));
+              // Exclude edges FROM the ForEach node itself — those provide iteration
+              // variables (current_item, index, count) that are pre-set before each
+              // iteration, not data dependencies between body nodes.  Including them
+              // inflates in-degrees in topoSort (the ForEach node isn't in the body
+              // node list, so those in-degrees never get decremented), causing a
+              // spurious "cycle detected" error and falling back to arbitrary order.
               const loopBodyEdges = comp.edges.filter((e: any) =>
-                (loopBodyNodeIds.has(e.sourceNodeId) || e.sourceNodeId === nodeId) &&
+                loopBodyNodeIds.has(e.sourceNodeId) &&
                 loopBodyNodeIds.has(e.targetNodeId)
               );
               let loopBodyOrder: string[];
@@ -3292,6 +3466,204 @@ export const handleCompositionRunRoutes: RouteHandler = async (req, res, pathnam
                     subNs.status = 'completed';
                     subNs.stepsCompleted = subNs.stepsTotal || 1;
                     subNs.currentStep = 'Done';
+                    subNs.outputVariables = subNodeOutputs[subNodeId];
+                    ns.stepsCompleted = Math.min(subOrder.length, (ns.stepsCompleted || 0) + 1);
+                    continue;
+                  }
+
+                  // Asset node inside sub-pipeline
+                  if (subNode.workflowId === '__asset__' && subNode.asset) {
+                    const subEdgeInputs = gatherInputVariables(subNodeId, subComp.edges, subNodeOutputs);
+                    const subMerged: Record<string, unknown> = { ...subInputs, ...subEdgeInputs };
+                    subNs.inputVariables = { ...subMerged };
+                    try {
+                      const assetOutputs = await executeAssetNode(ctx, subNode, subEdgeInputs, subMerged);
+                      subNodeOutputs[subNodeId] = assetOutputs;
+                      subNs.status = 'completed';
+                      subNs.stepsCompleted = subNs.stepsTotal || 1;
+                      subNs.currentStep = 'Done';
+                      subNs.outputVariables = assetOutputs;
+                      ns.stepsCompleted = Math.min(subOrder.length, (ns.stepsCompleted || 0) + 1);
+                      continue;
+                    } catch (subAssetErr: any) {
+                      subNs.status = 'failed';
+                      subNs.error = subAssetErr?.message || String(subAssetErr);
+                      subNs.currentStep = 'Failed';
+                      throw new Error(`Asset node "${subNs.workflowName}" failed: ${subNs.error}`);
+                    }
+                  }
+
+                  // Variable node inside sub-pipeline
+                  if (subNode.workflowId === '__variable__') {
+                    const subEdgeInputs = gatherInputVariables(subNodeId, subComp.edges, subNodeOutputs);
+                    const varName = subNode.variableNode?.inputName || subNode.label || '';
+                    const varValue = subEdgeInputs[varName] ?? subInputs[varName] ?? (subNode.variableNode as any)?.defaultValue ?? '';
+                    subNodeOutputs[subNodeId] = { value: varValue, __done__: true };
+                    subNs.status = 'completed';
+                    subNs.stepsCompleted = subNs.stepsTotal || 1;
+                    subNs.currentStep = 'Value ready';
+                    subNs.outputVariables = subNodeOutputs[subNodeId];
+                    ns.stepsCompleted = Math.min(subOrder.length, (ns.stepsCompleted || 0) + 1);
+                    continue;
+                  }
+
+                  // Tool node inside sub-pipeline (nanobanana, web_fetch, etc.)
+                  if (subNode.workflowId === '__tool__' && subNode.toolNode) {
+                    const subEdgeInputs = gatherInputVariables(subNodeId, subComp.edges, subNodeOutputs);
+                    const subMerged: Record<string, unknown> = { ...subInputs, ...subEdgeInputs };
+                    subNs.inputVariables = { ...subMerged };
+                    subNs.currentStep = `Running tool: ${subNode.toolNode.selectedTool}...`;
+                    try {
+                      const toolOutputs = await executeToolNode(ctx, subNode, subEdgeInputs);
+                      subNodeOutputs[subNodeId] = { ...toolOutputs };
+                      subNs.status = 'completed';
+                      subNs.stepsCompleted = subNs.stepsTotal || 1;
+                      subNs.currentStep = 'Done';
+                      subNs.outputVariables = subNodeOutputs[subNodeId];
+                      ns.stepsCompleted = Math.min(subOrder.length, (ns.stepsCompleted || 0) + 1);
+                      continue;
+                    } catch (subToolErr: any) {
+                      subNs.status = 'failed';
+                      subNs.error = subToolErr?.message || String(subToolErr);
+                      subNs.currentStep = 'Failed';
+                      throw new Error(`Tool node "${subNs.workflowName}" failed: ${subNs.error}`);
+                    }
+                  }
+
+                  // Text node inside sub-pipeline
+                  if (subNode.workflowId === '__text__') {
+                    const textValue = subNode.textNode?.value ?? '';
+                    subNodeOutputs[subNodeId] = { text: textValue };
+                    subNs.status = 'completed';
+                    subNs.stepsCompleted = subNs.stepsTotal || 1;
+                    subNs.currentStep = 'Done';
+                    subNs.outputVariables = subNodeOutputs[subNodeId];
+                    ns.stepsCompleted = Math.min(subOrder.length, (ns.stepsCompleted || 0) + 1);
+                    continue;
+                  }
+
+                  // ForEach loop inside sub-pipeline
+                  if (subNode.workflowId === '__for_each__' && subNode.forEachNode) {
+                    const feEdgeInputs = gatherInputVariables(subNodeId, subComp.edges, subNodeOutputs);
+                    const feMerged: Record<string, unknown> = { ...subInputs, ...feEdgeInputs };
+                    subNs.inputVariables = { ...feMerged };
+
+                    let feItems = feEdgeInputs['items'];
+                    if (typeof feItems === 'string') {
+                      try { feItems = JSON.parse(feItems); } catch {}
+                    }
+                    const feItemsArray = Array.isArray(feItems) ? feItems : [];
+                    const feMaxIter = subNode.forEachNode.maxIterations || 100;
+                    const feLimited = feItemsArray.slice(0, feMaxIter);
+
+                    // Find body nodes downstream of this for-each's output ports
+                    const feBodyFromItem = getNodesExclusivelyDownstreamOfPort(subNodeId, 'current_item', subComp.edges);
+                    const feBodyFromIndex = getNodesExclusivelyDownstreamOfPort(subNodeId, 'index', subComp.edges);
+                    const feBodyFromCount = getNodesExclusivelyDownstreamOfPort(subNodeId, 'count', subComp.edges);
+                    const feBodyNodeIds = new Set<string>();
+                    for (const lbId of feBodyFromItem) feBodyNodeIds.add(lbId);
+                    for (const lbId of feBodyFromIndex) feBodyNodeIds.add(lbId);
+                    for (const lbId of feBodyFromCount) feBodyNodeIds.add(lbId);
+
+                    const feBodyNodeObjs = subComp.nodes.filter((n: any) => feBodyNodeIds.has(n.id));
+                    // Exclude edges FROM the ForEach node — same reason as the outer loop
+                    const feBodyEdges = subComp.edges.filter((e: any) =>
+                      feBodyNodeIds.has(e.sourceNodeId) &&
+                      feBodyNodeIds.has(e.targetNodeId)
+                    );
+                    let feBodyOrder: string[];
+                    try { feBodyOrder = topoSort(feBodyNodeObjs, feBodyEdges); }
+                    catch { feBodyOrder = [...feBodyNodeIds]; }
+
+                    // Terminal nodes for collecting results
+                    const feHasSuccessor = new Set<string>();
+                    for (const e of subComp.edges) {
+                      if (feBodyNodeIds.has(e.sourceNodeId) && feBodyNodeIds.has(e.targetNodeId)) feHasSuccessor.add(e.sourceNodeId);
+                    }
+                    const feTerminalNodes = [...feBodyNodeIds].filter(tbId => !feHasSuccessor.has(tbId));
+
+                    const feCollected: unknown[] = [];
+                    subNs.stepsTotal = feLimited.length;
+
+                    for (let fi = 0; fi < feLimited.length; fi++) {
+                      if (abort.signal.aborted) break;
+                      subNs.currentStep = `Iteration ${fi + 1}/${feLimited.length}`;
+                      subNs.stepsCompleted = fi;
+
+                      subNodeOutputs[subNodeId] = {
+                        current_item: feLimited[fi],
+                        index: fi,
+                        count: feLimited.length,
+                      };
+
+                      for (const feBodyNodeId of feBodyOrder) {
+                        if (abort.signal.aborted) break;
+                        const feBodyNode = subComp.nodes.find((n: any) => n.id === feBodyNodeId);
+                        if (!feBodyNode) continue;
+                        const feBodyNs = subNodeStates[feBodyNodeId] || (subNodeStates[feBodyNodeId] = {
+                          status: 'pending', workflowId: feBodyNode.workflowId,
+                          workflowName: feBodyNode.label || feBodyNodeId,
+                          stepsTotal: 1, stepsCompleted: 0, currentStep: '',
+                        });
+
+                        const feBodyEdgeInputs = gatherInputVariables(feBodyNodeId, subComp.edges, subNodeOutputs);
+                        const feBodyMerged: Record<string, unknown> = { ...subInputs, ...feBodyEdgeInputs };
+                        feBodyNs.status = 'running';
+                        feBodyNs.inputVariables = { ...feBodyMerged };
+
+                        try {
+                          await executeForEachBodyNode(
+                            ctx, feBodyNode, feBodyNs, feBodyEdgeInputs, feBodyMerged,
+                            subInputs, subNodeOutputs, subComp, subWfMap, abort, run,
+                            feBodyNodeIds, id, fi, subFound.path,
+                          );
+                        } catch (feErr: any) {
+                          feBodyNs.status = 'failed';
+                          feBodyNs.error = feErr?.message || String(feErr);
+                          throw new Error(`ForEach body "${feBodyNs.workflowName}" failed at iteration ${fi}: ${feBodyNs.error}`);
+                        }
+                      }
+
+                      // Collect results from terminal nodes
+                      for (const termId of feTerminalNodes) {
+                        const termOut = subNodeOutputs[termId];
+                        if (termOut) feCollected.push(termOut);
+                      }
+                    }
+
+                    subNs.stepsCompleted = feLimited.length;
+                    subNs.status = 'completed';
+                    subNs.currentStep = `Done (${feLimited.length} items)`;
+                    subNodeOutputs[subNodeId] = {
+                      results: JSON.stringify(feCollected),
+                      count: feCollected.length,
+                      __done__: true,
+                    };
+                    subNs.outputVariables = subNodeOutputs[subNodeId];
+                    ns.stepsCompleted = Math.min(subOrder.length, (ns.stepsCompleted || 0) + 1);
+                    continue;
+                  }
+
+                  // Gate node inside sub-pipeline
+                  if (subNode.workflowId === '__gate__' && subNode.gateNode) {
+                    const subEdgeInputs = gatherInputVariables(subNodeId, subComp.edges, subNodeOutputs);
+                    const subMerged: Record<string, unknown> = { ...subInputs, ...subEdgeInputs };
+                    const isOpen = subMerged['open'] === true || subMerged['open'] === 'true';
+                    const gateDefault = subNode.gateNode.defaultOpen !== false;
+                    const gateOpen = subMerged['open'] !== undefined ? isOpen : gateDefault;
+                    if (gateOpen) {
+                      subNodeOutputs[subNodeId] = { out: subMerged['data'] ?? '', data: subMerged['data'] ?? '', open: true };
+                    } else {
+                      subNodeOutputs[subNodeId] = { out: '', data: '', open: false };
+                      // Skip downstream nodes
+                      const downstream = getDownstreamNodes(subNodeId, subComp.edges);
+                      for (const downId of downstream) {
+                        if (subNodeStates[downId]) subNodeStates[downId].status = 'skipped';
+                      }
+                    }
+                    subNs.status = 'completed';
+                    subNs.stepsCompleted = subNs.stepsTotal || 1;
+                    subNs.currentStep = gateOpen ? 'Gate: OPEN' : 'Gate: CLOSED';
                     subNs.outputVariables = subNodeOutputs[subNodeId];
                     ns.stepsCompleted = Math.min(subOrder.length, (ns.stepsCompleted || 0) + 1);
                     continue;

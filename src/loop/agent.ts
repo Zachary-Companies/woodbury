@@ -4,11 +4,22 @@ import { runPrompt, runPromptStream, ChatMessage, resolveProviderForModel, Strea
 import { ToolParser } from './tool-parser.js';
 import { generateSystemPrompt } from './system-prompt.js';
 import { ProgressLogger } from './logger.js';
+import { discoverProjectContext } from './project-context.js';
+import { SessionStore, SessionManager } from './session.js';
+import { PermissionPolicy, PermissionMode } from './permissions.js';
+import { HookRunner } from './hooks.js';
+import {
+  shouldCompact,
+  compactMessages,
+  CompactionConfig,
+  DEFAULT_COMPACTION_CONFIG,
+  ChatMessageCompat,
+} from './compaction.js';
+import { BudgetTracker, type BudgetLimits } from './budget-guard.js';
 
-// Context compaction settings
-const MAX_CONTEXT_TOKENS = 200000;
-const COMPACTION_THRESHOLD = 160000; // Trigger compaction at 80% of max
-const KEEP_RECENT_MESSAGES = 10; // Keep last N messages when compacting
+// Context compaction settings (used as defaults, can be overridden via config)
+const COMPACTION_THRESHOLD = 100000;
+const KEEP_RECENT_MESSAGES = 6;
 
 export interface AgentResult {
   success: boolean;
@@ -19,16 +30,24 @@ export interface AgentResult {
     executionTime: number;
     iterations: number;
     totalTokens?: number;
+    sessionId?: string;
   };
 }
 
-// AgentConfig with defaults applied — callbacks remain optional
-type ResolvedAgentConfig = Required<Omit<AgentConfig, 'onToken' | 'onToolStart' | 'onToolEnd'>> & Pick<AgentConfig, 'onToken' | 'onToolStart' | 'onToolEnd'>;
+// Woodbury keeps streaming/tool-event callbacks optional (they're never defaulted
+// because a noop would mask "no caller set this" from code that checks presence).
+type ResolvedAgentConfig =
+  Required<Omit<AgentConfig, 'onToken' | 'onToolStart' | 'onToolEnd' | 'streaming'>> &
+  Pick<AgentConfig, 'onToken' | 'onToolStart' | 'onToolEnd' | 'streaming'>;
 
 export class Agent {
   private config: ResolvedAgentConfig;
   private toolRegistry?: ToolRegistry;
   private progressLogger: ProgressLogger;
+  private sessionManager?: SessionManager;
+  private permissionPolicy?: PermissionPolicy;
+  private hookRunner?: HookRunner;
+  private sessionId: string;
 
   constructor(config: AgentConfig, toolRegistry?: ToolRegistry) {
     // Set default values for required properties
@@ -52,14 +71,51 @@ export class Agent {
       baseURL: config.baseURL || '',
       logger: config.logger || console,
       timeoutMs: config.timeoutMs || config.timeout || 300000,
+      // New config fields with defaults
+      sessionDir: config.sessionDir || '',
+      resumeSessionId: config.resumeSessionId || '',
+      sessionAutoSaveMs: config.sessionAutoSaveMs ?? 5000,
+      permissionMode: config.permissionMode || '',
+      toolPermissions: config.toolPermissions || {},
+      denyTools: config.denyTools || [],
+      denyToolPrefixes: config.denyToolPrefixes || [],
+      preToolUseHooks: config.preToolUseHooks || [],
+      postToolUseHooks: config.postToolUseHooks || [],
+      hookTimeoutMs: config.hookTimeoutMs || 10000,
+      budgetLimits: config.budgetLimits || {},
+      onBudgetWarning: config.onBudgetWarning || (() => {}),
+      onBudgetExceeded: config.onBudgetExceeded || (() => {}),
+      // --- Woodbury: streaming + tool-event callbacks (stay optional) ---
       onToken: config.onToken,
       onToolStart: config.onToolStart,
       onToolEnd: config.onToolEnd,
-      streaming: config.streaming ?? !!config.onToken
+      streaming: config.streaming ?? !!config.onToken,
     };
 
     this.toolRegistry = toolRegistry;
     this.progressLogger = new ProgressLogger();
+    this.sessionId = `session-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+
+    // Initialize permission policy if configured
+    if (this.config.permissionMode) {
+      const mode = this.config.permissionMode as PermissionMode;
+      this.permissionPolicy = new PermissionPolicy({
+        mode,
+        toolRequirements: this.config.toolPermissions as Record<string, PermissionMode>,
+        denyList: this.config.denyTools,
+        denyPrefixes: this.config.denyToolPrefixes,
+        logger: this.config.logger,
+      });
+    }
+
+    // Initialize hook runner if hooks are configured
+    if (this.config.preToolUseHooks.length > 0 || this.config.postToolUseHooks.length > 0) {
+      this.hookRunner = new HookRunner({
+        preToolUse: this.config.preToolUseHooks,
+        postToolUse: this.config.postToolUseHooks,
+        timeoutMs: this.config.hookTimeoutMs,
+      }, this.config.logger);
+    }
   }
 
   /**
@@ -128,8 +184,24 @@ export class Agent {
       };
     }
 
-    // Check if tool is dangerous and whether we allow dangerous tools
-    if (tool.definition.dangerous && !this.config.allowDangerousTools) {
+    // Check graduated permissions (if configured)
+    if (this.permissionPolicy) {
+      const outcome = await this.permissionPolicy.authorize(toolCall.name);
+      if (!outcome.allowed) {
+        this.sessionManager?.addToolCall({
+          id: toolCall.id,
+          name: toolCall.name,
+          status: 'error',
+          executionTimeMs: 0,
+        });
+        return {
+          name: toolCall.name,
+          result: 'reason' in outcome ? outcome.reason : 'Permission denied',
+          status: 'error'
+        };
+      }
+    } else if (tool.definition.dangerous && !this.config.allowDangerousTools) {
+      // Fallback to legacy binary check if no permission policy
       return {
         name: toolCall.name,
         result: `Tool '${toolCall.name}' is marked as dangerous and dangerous tools are not enabled`,
@@ -137,7 +209,9 @@ export class Agent {
       };
     }
 
-    // Check for JSON parse errors from the tool parser
+    // Check for JSON parse errors from the tool parser. Must run before the
+    // handler sees the params — otherwise `_parseError`/`_raw` reach the tool
+    // as its arguments and surface as an opaque ERR_INVALID_ARG_TYPE.
     if (toolCall.parameters?._parseError) {
       return {
         name: toolCall.name,
@@ -156,6 +230,28 @@ export class Agent {
       };
     }
 
+    // Run pre-tool-use hooks
+    if (this.hookRunner) {
+      const hookResult = await this.hookRunner.runPreToolUse(
+        toolCall.name,
+        toolCall.parameters,
+        this.sessionId
+      );
+      if (!hookResult.allowed) {
+        this.sessionManager?.addToolCall({
+          id: toolCall.id,
+          name: toolCall.name,
+          status: 'error',
+          executionTimeMs: 0,
+        });
+        return {
+          name: toolCall.name,
+          result: hookResult.reason || `Pre-tool hook denied '${toolCall.name}'`,
+          status: 'error'
+        };
+      }
+    }
+
     const context: ToolContext = {
       workingDirectory: this.config.workingDirectory,
       logger: this.config.logger,
@@ -166,7 +262,8 @@ export class Agent {
       signal
     };
 
-    const toolStart = Date.now();
+    const toolStartTime = Date.now();
+    // Woodbury extension: notify outer renderer that a tool is starting
     this.config.onToolStart?.(toolCall.name, toolCall.parameters);
 
     try {
@@ -190,9 +287,31 @@ export class Agent {
         resultString = String(toolResult);
       }
 
-      const toolDuration = Date.now() - toolStart;
+      const executionTimeMs = Date.now() - toolStartTime;
+
+      // Record in session
+      this.sessionManager?.addToolCall({
+        id: toolCall.id,
+        name: toolCall.name,
+        status: 'success',
+        executionTimeMs,
+      });
+
+      // Run post-tool-use hooks
+      if (this.hookRunner) {
+        await this.hookRunner.runPostToolUse(
+          toolCall.name,
+          toolCall.parameters,
+          resultString,
+          false,
+          this.sessionId
+        );
+      }
+
+      // Woodbury extension: notify outer renderer of success
+      this.config.onToolEnd?.(toolCall.name, true, resultString, executionTimeMs);
+
       this.config.logger?.debug?.(`✓ ${toolCall.name}`);
-      this.config.onToolEnd?.(toolCall.name, true, resultString, toolDuration);
       return {
         name: toolCall.name,
         result: resultString,
@@ -200,9 +319,31 @@ export class Agent {
       };
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
-      const toolDuration = Date.now() - toolStart;
+      const executionTimeMs = Date.now() - toolStartTime;
+
+      // Record in session
+      this.sessionManager?.addToolCall({
+        id: toolCall.id,
+        name: toolCall.name,
+        status: 'error',
+        executionTimeMs,
+      });
+
+      // Run post-tool-use hooks (with error)
+      if (this.hookRunner) {
+        await this.hookRunner.runPostToolUse(
+          toolCall.name,
+          toolCall.parameters,
+          errorMessage,
+          true,
+          this.sessionId
+        );
+      }
+
+      // Woodbury extension: notify outer renderer of failure
+      this.config.onToolEnd?.(toolCall.name, false, errorMessage, executionTimeMs);
+
       this.config.logger?.warn?.(`✗ ${toolCall.name}: ${errorMessage}`);
-      this.config.onToolEnd?.(toolCall.name, false, errorMessage, toolDuration);
       return {
         name: toolCall.name,
         result: errorMessage,
@@ -212,90 +353,74 @@ export class Agent {
   }
 
   /**
-   * Compact the context by summarizing older messages
+   * Compact the context using structured summarization.
+   * Uses the standalone compaction module for deterministic, zero-LLM-cost compaction.
    */
-  private async compactContext(messages: ChatMessage[]): Promise<ChatMessage[]> {
-    // Keep system prompt (first message) and recent messages
-    if (messages.length <= KEEP_RECENT_MESSAGES + 1) {
-      return messages; // Nothing to compact
-    }
-
-    const systemPrompt = messages[0];
-    const recentMessages = messages.slice(-KEEP_RECENT_MESSAGES);
-    const messagesToSummarize = messages.slice(1, -KEEP_RECENT_MESSAGES);
-
-    if (messagesToSummarize.length === 0) {
-      return messages;
-    }
-
+  private compactContext(messages: ChatMessage[]): ChatMessage[] {
     this.progressLogger.update({ phase: 'compacting' });
 
-    // Pre-truncate tool results in older messages to reduce summarization cost
-    const truncatedMessages = messagesToSummarize.map(m => {
-      let content = m.content;
-      // Truncate large tool_result blocks (keep first 500 chars of each)
-      content = content.replace(
-        /<tool_result[^>]*>([\s\S]{500,}?)<\/tool_result>/g,
-        (match, inner) => match.replace(inner, inner.substring(0, 500) + '\n...(truncated)')
-      );
-      // Cap each message at 3000 chars for the summary
-      if (content.length > 3000) {
-        content = content.substring(0, 3000) + '...(truncated)';
-      }
-      return `[${m.role}]: ${content}`;
-    });
-
-    // Build summary prompt
-    const summaryPrompt: ChatMessage[] = [
+    const result = compactMessages(
+      messages as ChatMessageCompat[],
       {
-        role: 'system',
-        content: 'You are a context summarizer. Produce a concise structured summary preserving: 1) files read/modified with paths, 2) commands run and their outcomes, 3) decisions made, 4) current task state and progress. Use bullet points. Maximum 2000 chars.'
+        preserveRecentMessages: KEEP_RECENT_MESSAGES,
+        maxEstimatedTokens: COMPACTION_THRESHOLD,
+        useLlmSummary: false,
       },
-      {
-        role: 'user',
-        content: `Summarize this conversation:\n\n${truncatedMessages.join('\n\n')}`
-      }
-    ];
+      this.config.logger
+    );
 
-    try {
-      const summaryResponse = await runPrompt(summaryPrompt, this.config.model, {
-        provider: this.config.provider,
-        apiKey: this.config.apiKey,
-        baseURL: this.config.baseURL,
-        maxTokens: 32768,
-        temperature: 0.3
-      });
-
-      // Build compacted message array
-      const compactedMessages: ChatMessage[] = [
-        systemPrompt,
-        {
-          role: 'user',
-          content: `<context_summary>The following is a summary of our conversation so far:\n\n${summaryResponse.content}\n\n[End of summary - continuing from recent context]</context_summary>`
-        },
-        ...recentMessages
-      ];
-
-      const oldTokens = Math.round(messages.reduce((sum, m) => sum + m.content.length, 0) / 4);
-      const newTokens = Math.round(compactedMessages.reduce((sum, m) => sum + m.content.length, 0) / 4);
-      this.config.logger?.info?.(`Context compacted: ${oldTokens.toLocaleString()} → ${newTokens.toLocaleString()} tokens`);
-
-      return compactedMessages;
-    } catch (error) {
-      this.config.logger?.warn?.(`Context compaction failed: ${error}`);
-      return messages; // Return original if compaction fails
-    }
+    return result.messages as ChatMessage[];
   }
 
   async run(prompt: string, signal?: AbortSignal): Promise<AgentResult> {
     const startTime = Date.now();
     let iterations = 0;
+    const budgetTracker = new BudgetTracker();
     const allToolCalls: ParsedToolCall[] = [];
     let totalTokens = 0;
 
+    // Initialize session persistence if configured
+    if (this.config.sessionDir) {
+      const store = new SessionStore(this.config.sessionDir, this.config.logger);
+
+      if (this.config.resumeSessionId) {
+        // Try to resume existing session
+        const resumed = await SessionManager.resume(
+          this.config.resumeSessionId,
+          store,
+          this.config.sessionAutoSaveMs
+        );
+        if (resumed) {
+          this.sessionManager = resumed;
+          this.sessionId = this.config.resumeSessionId;
+          this.config.logger?.info?.(`Resumed session: ${this.sessionId}`);
+        } else {
+          this.config.logger?.warn?.(`Session '${this.config.resumeSessionId}' not found, starting new`);
+          this.sessionManager = new SessionManager(
+            this.sessionId, store, { name: this.config.name }, this.config.sessionAutoSaveMs
+          );
+        }
+      } else {
+        this.sessionManager = new SessionManager(
+          this.sessionId, store, { name: this.config.name }, this.config.sessionAutoSaveMs
+        );
+      }
+    }
+
+    // Discover project context files (AGENT.md, CLAUDE.md, etc.)
+    let systemPrompt = this.buildSystemPrompt();
+    try {
+      const projectCtx = await discoverProjectContext(this.config.workingDirectory);
+      if (projectCtx.content) {
+        systemPrompt = `## Project Context\n\n${projectCtx.content}\n\n${systemPrompt}`;
+      }
+    } catch {
+      // Project context discovery is best-effort
+    }
+
     // Build the messages array
     const messages: ChatMessage[] = [
-      { role: 'system', content: this.buildSystemPrompt() },
+      { role: 'system', content: systemPrompt },
       { role: 'user', content: prompt }
     ];
 
@@ -323,45 +448,81 @@ export class Agent {
         // Check if we need to compact context
         if (contextTokensEstimate > COMPACTION_THRESHOLD) {
           this.config.logger?.info?.(`Context size ${contextTokensEstimate.toLocaleString()} tokens exceeds threshold, compacting...`);
-          const compactedMessages = await this.compactContext(messages);
+          const compactedMessages = this.compactContext(messages);
           messages.length = 0;
           messages.push(...compactedMessages);
         }
 
-        // Call LLM (streaming or non-streaming)
-        const llmOptions = {
-          provider: this.config.provider,
-          apiKey: this.config.apiKey,
-          baseURL: this.config.baseURL,
-          maxTokens: this.config.maxTokens,
-          temperature: this.config.temperature
-        };
-
+        // Call LLM (Woodbury: stream if configured so onToken can fire)
         let response;
         if (this.config.streaming && this.config.onToken) {
-          // Stop the progress spinner so streamed tokens can write to stdout cleanly
-          this.progressLogger.stop();
-          let firstToken = true;
-          response = await runPromptStream(messages, this.config.model, {
-            onToken: (token: string) => {
-              if (firstToken) {
-                firstToken = false;
-              }
-              this.config.onToken?.(token);
+          let streamedContent = '';
+          response = await runPromptStream(
+            messages,
+            this.config.model,
+            {
+              onToken: (token: string) => {
+                streamedContent += token;
+                this.config.onToken?.(token);
+              },
+            } satisfies StreamCallbacks,
+            {
+              provider: this.config.provider,
+              apiKey: this.config.apiKey,
+              baseURL: this.config.baseURL,
+              maxTokens: this.config.maxTokens,
+              temperature: this.config.temperature,
             }
-          }, llmOptions);
-          // Restart progress display for next iteration (if tool calls follow)
-          this.progressLogger.start({
-            iteration: iterations,
-            maxIterations: this.config.maxIterations,
-            phase: 'thinking'
-          });
+          );
+          if (!response.content) response.content = streamedContent;
         } else {
-          response = await runPrompt(messages, this.config.model, llmOptions);
+          response = await runPrompt(messages, this.config.model, {
+            provider: this.config.provider,
+            apiKey: this.config.apiKey,
+            baseURL: this.config.baseURL,
+            maxTokens: this.config.maxTokens,
+            temperature: this.config.temperature,
+          });
         }
 
         if (response.usage) {
           totalTokens += response.usage.totalTokens;
+          budgetTracker.addUsage(
+            this.config.model,
+            response.usage.promptTokens || 0,
+            response.usage.completionTokens || 0,
+          );
+        }
+
+        // Check budget limits
+        if (this.config.budgetLimits) {
+          const { status, firstWarning } = budgetTracker.check(this.config.budgetLimits);
+          const budgetState = budgetTracker.getState();
+          if (status === 'exceeded') {
+            this.config.logger?.warn?.(`Budget exceeded: $${budgetState.totalCostUsd.toFixed(4)} / ${budgetState.totalTokens} tokens`);
+            this.config.onBudgetExceeded?.(budgetState);
+            // Return partial result instead of throwing. Tear down the same way
+            // every other exit path does — otherwise the session auto-save
+            // interval keeps the process alive and the final state is never flushed.
+            this.progressLogger.stop();
+            await this.sessionManager?.close();
+            const lastContent = response.content || '';
+            return {
+              success: true,
+              content: lastContent + '\n\n[BUDGET_EXCEEDED: Agent stopped — budget limit reached]',
+              toolCalls: allToolCalls,
+              metadata: {
+                executionTime: Date.now() - startTime,
+                iterations,
+                totalTokens,
+                sessionId: this.sessionId,
+              },
+            };
+          }
+          if (firstWarning) {
+            this.config.logger?.warn?.(`Budget warning: $${budgetState.totalCostUsd.toFixed(4)} / ${budgetState.totalTokens} tokens (${Math.round((this.config.budgetLimits.warnAtPercent ?? 0.8) * 100)}% threshold)`);
+            this.config.onBudgetWarning?.(budgetState);
+          }
         }
 
         // Update progress display with token stats
@@ -375,6 +536,23 @@ export class Agent {
 
         // Add assistant response to messages
         messages.push({ role: 'assistant', content: assistantContent });
+
+        // Track in session
+        this.sessionManager?.addMessage({
+          role: 'assistant',
+          content: assistantContent,
+          usage: response.usage ? {
+            inputTokens: response.usage.promptTokens,
+            outputTokens: response.usage.completionTokens,
+          } : undefined,
+          timestamp: Date.now(),
+        });
+        if (response.usage) {
+          this.sessionManager?.addUsage({
+            inputTokens: response.usage.promptTokens,
+            outputTokens: response.usage.completionTokens,
+          });
+        }
 
         // Check for incomplete/truncated tool calls first
         if (this.hasIncompleteToolCall(assistantContent)) {
@@ -398,21 +576,19 @@ export class Agent {
             continue;
           }
 
-          // Build parsed calls with IDs
+          // Woodbury extension: run multiple tool calls in parallel
+          // (upstream runs them sequentially, which is correct but slow).
+          // Give each call a unique id first so allToolCalls order is preserved.
           const parsedCalls: ParsedToolCall[] = toolCalls.map(tc => ({
             id: `call_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
             name: tc.name,
-            parameters: tc.parameters
+            parameters: tc.parameters,
           }));
           allToolCalls.push(...parsedCalls);
 
-          // Execute tools — run in parallel when multiple calls exist
           let toolResults: string[];
-
           if (parsedCalls.length > 1) {
-            // Parallel execution for multiple tool calls
             parsedCalls.forEach(pc => this.progressLogger.logTool(pc.name));
-
             const results = await Promise.all(
               parsedCalls.map(pc => this.executeTool(pc, signal))
             );
@@ -420,7 +596,6 @@ export class Agent {
               ToolParser.formatToolResult(r.name, r.status, r.result)
             );
           } else {
-            // Single tool — sequential (no overhead)
             this.progressLogger.logTool(parsedCalls[0].name);
             const result = await this.executeTool(parsedCalls[0], signal);
             toolResults = [ToolParser.formatToolResult(result.name, result.status, result.result)];
@@ -447,6 +622,7 @@ export class Agent {
           const executionTime = Date.now() - startTime;
 
           this.progressLogger.stop();
+          await this.sessionManager?.close();
           return {
             success: true,
             content: finalAnswer || assistantContent,
@@ -454,7 +630,8 @@ export class Agent {
             metadata: {
               executionTime,
               iterations,
-              totalTokens
+              totalTokens,
+              sessionId: this.sessionId,
             }
           };
         }
@@ -490,6 +667,7 @@ export class Agent {
       }
 
       this.progressLogger.stop();
+      await this.sessionManager?.close();
       return {
         success: true,
         content: finalContent,
@@ -497,12 +675,14 @@ export class Agent {
         metadata: {
           executionTime,
           iterations: iterations + 1, // Include the wrap-up iteration
-          totalTokens
+          totalTokens,
+          sessionId: this.sessionId,
         }
       };
 
     } catch (error) {
       this.progressLogger.stop();
+      await this.sessionManager?.close();
       const executionTime = Date.now() - startTime;
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
 
@@ -516,7 +696,8 @@ export class Agent {
         metadata: {
           executionTime,
           iterations,
-          totalTokens
+          totalTokens,
+          sessionId: this.sessionId,
         }
       };
     }
@@ -545,6 +726,18 @@ export class Agent {
 
   getToolRegistry(): ToolRegistry | undefined {
     return this.toolRegistry;
+  }
+
+  getSessionId(): string {
+    return this.sessionId;
+  }
+
+  getPermissionPolicy(): PermissionPolicy | undefined {
+    return this.permissionPolicy;
+  }
+
+  getHookRunner(): HookRunner | undefined {
+    return this.hookRunner;
   }
 }
 

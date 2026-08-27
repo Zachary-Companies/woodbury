@@ -61,6 +61,7 @@ const STEP_ICONS = {
   inject_style: '&#x1f3a8;',
   keyboard_nav: '&#x1f9ed;',
   click_selector: '&#x1f3af;',
+  clipboard: '&#x1f4cb;',
 };
 
 // ── Variable auto-detection ─────────────────────────────────
@@ -750,6 +751,13 @@ function renderStepFields(step, idx) {
       html += '<input class="wf-var-input wf-ns-selector" type="text" placeholder="Trigger selector (optional)" value="' + escAttr((step.trigger && step.trigger.selector) || '') + '" style="flex:1;min-width:120px;">';
       html += '<input class="wf-var-input wf-ns-outvar" type="text" placeholder="Output variable" value="' + escAttr(step.outputVariable || 'selectedFile') + '" style="width:130px;">';
       break;
+    case 'clipboard':
+      html += '<input class="wf-var-input wf-ns-clip-value" type="text" placeholder="Text to copy (supports {{variable}})" value="' + escAttr(step.value || '') + '" style="flex:1;min-width:200px;">';
+      html += '<select class="wf-var-input wf-ns-clip-paste" style="width:90px;">';
+      html += '<option value="true"' + (step.paste !== false ? ' selected' : '') + '>Paste</option>';
+      html += '<option value="false"' + (step.paste === false ? ' selected' : '') + '>Copy only</option>';
+      html += '</select>';
+      break;
     case 'inject_style':
       html += '<select class="wf-var-input wf-ns-style-action" style="width:90px;">';
       html += '<option value="apply"' + ((step.action || 'apply') === 'apply' ? ' selected' : '') + '>Apply</option>';
@@ -866,6 +874,13 @@ function wireStepFieldHandlers(row, idx) {
       if (outVarInput) outVarInput.addEventListener('input', function() { newWorkflowSteps[idx].outputVariable = outVarInput.value; });
       break;
     }
+    case 'clipboard': {
+      var clipValInput = row.querySelector('.wf-ns-clip-value');
+      var clipPasteSelect = row.querySelector('.wf-ns-clip-paste');
+      if (clipValInput) clipValInput.addEventListener('input', function() { newWorkflowSteps[idx].value = clipValInput.value; });
+      if (clipPasteSelect) clipPasteSelect.addEventListener('change', function() { newWorkflowSteps[idx].paste = clipPasteSelect.value === 'true'; });
+      break;
+    }
     case 'inject_style': {
       var actionInput = row.querySelector('.wf-ns-style-action');
       var selInput = row.querySelector('.wf-ns-style-selector');
@@ -912,6 +927,7 @@ function buildDefaultStep(type) {
     case 'conditional': return { type: 'conditional', condition: { type: 'expression', expression: '' }, thenSteps: [], elseSteps: [], label: 'Conditional' };
     case 'loop': return { type: 'loop', overVariable: '', itemVariable: 'item', indexVariable: '', steps: [], label: 'Loop' };
     case 'try_catch': return { type: 'try_catch', trySteps: [], catchSteps: [], errorVariable: 'error', label: 'Try / Catch' };
+    case 'clipboard': return { type: 'clipboard', value: '', paste: true, delayAfterMs: 500, label: '' };
     case 'inject_style': return { type: 'inject_style', selector: '', styles: {}, action: 'apply', label: '' };
     case 'click_selector': return { type: 'click_selector', selector: '', shadowDomSelector: '', textContent: '', exactMatch: false, clickType: 'single', delayAfterMs: 1000, label: '' };
     default: return { type: type, label: '' };
@@ -1268,6 +1284,20 @@ function renderStepEditor(step, idx, totalSteps) {
       html += '</div>';
       break;
 
+    case 'clipboard':
+      html += '<div class="wf-se-row">';
+      html += '<span class="wf-se-label">Value</span>';
+      html += '<input class="wf-se-input wf-se-clip-value" type="text" value="' + escAttr(step.value || '') + '" placeholder="Text to copy (supports {{variable}})">';
+      html += '</div>';
+      html += '<div class="wf-se-row">';
+      html += '<span class="wf-se-label">Paste</span>';
+      html += '<select class="wf-se-input wf-se-clip-paste" style="max-width:140px;">';
+      html += '<option value="true"' + (step.paste !== false ? ' selected' : '') + '>Yes (Cmd+V / Ctrl+V)</option>';
+      html += '<option value="false"' + (step.paste === false ? ' selected' : '') + '>No (copy only)</option>';
+      html += '</select>';
+      html += '</div>';
+      break;
+
     case 'inject_style':
       html += '<div class="wf-se-row">';
       html += '<span class="wf-se-label">Action</span>';
@@ -1576,6 +1606,13 @@ function collectStepEditorValues(editor, step) {
     case 'try_catch': {
       var errVarInput = editor.querySelector('.wf-se-error-var');
       if (errVarInput) updated.errorVariable = errVarInput.value || undefined;
+      break;
+    }
+    case 'clipboard': {
+      var clipValInput = editor.querySelector('.wf-se-clip-value');
+      var clipPasteSelect = editor.querySelector('.wf-se-clip-paste');
+      if (clipValInput) updated.value = clipValInput.value;
+      if (clipPasteSelect) updated.paste = clipPasteSelect.value === 'true';
       break;
     }
     case 'inject_style': {
@@ -2245,6 +2282,7 @@ function buildStepLabel(step, idx) {
     case 'conditional': return 'Conditional';
     case 'loop': return 'Loop over ' + (step.overVariable || 'items');
     case 'try_catch': return 'Try / Catch';
+    case 'clipboard': return (step.paste ? 'Paste' : 'Copy') + ' "' + truncate(step.value || '', 25) + '"';
     case 'inject_style': return step.action === 'clear' ? 'Clear styles: ' + truncate(step.selector || 'all', 30) : 'Inject style: ' + truncate(step.selector || '', 30);
     case 'click_selector': return 'Click ' + (step.selector || 'element') + (step.shadowDomSelector ? ' [shadow: ' + truncate(step.shadowDomSelector, 20) + ']' : '') + (step.textContent ? ' "' + truncate(step.textContent, 20) + '"' : '');
     default: return 'Step ' + (idx + 1);
@@ -4518,7 +4556,7 @@ function showInsertPicker(anchorEl, wf, pathStr, filePath, source, getInsertPoin
   var pickerHtml = '<div class="wf-se-insert-picker" style="margin-top:0.5rem;padding:0.5rem;background:#1e293b;border:1px solid #334155;border-radius:6px;">';
   pickerHtml += '<div style="font-size:0.75rem;color:#94a3b8;margin-bottom:0.5rem;">Select step type to insert:</div>';
   pickerHtml += '<div style="display:flex;flex-wrap:wrap;gap:0.35rem;">';
-  var allTypes = ['navigate', 'click', 'click_selector', 'type', 'wait', 'keyboard', 'keyboard_nav', 'scroll', 'assert', 'set_variable', 'file_dialog', 'capture_download', 'move_file', 'conditional', 'loop', 'try_catch', 'inject_style'];
+  var allTypes = ['navigate', 'click', 'click_selector', 'type', 'wait', 'keyboard', 'keyboard_nav', 'scroll', 'assert', 'set_variable', 'clipboard', 'file_dialog', 'capture_download', 'move_file', 'conditional', 'loop', 'try_catch', 'inject_style'];
   for (var ti = 0; ti < allTypes.length; ti++) {
     var t = allTypes[ti];
     var tIcon = STEP_ICONS[t] || '&#x25cf;';

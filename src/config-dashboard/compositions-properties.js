@@ -690,6 +690,7 @@ function renderNodeProperties(nodeId) {
   // ── Script File Node Properties (v2) ──
   if (node.workflowId === '__script_file__') {
     renderScriptFileProperties(body, node, nodeId);
+    injectNodeErrorDisplay(body, nodeId);
     return;
   }
 
@@ -1149,7 +1150,7 @@ function renderImageViewerProperties(body, node, nodeId) {
   // Type indicator
   html += '<div class="comp-props-section">';
   html += '<div class="comp-props-label" style="color:#a855f7;">&#x1f5bc; Image Viewer</div>';
-  html += '<div class="comp-props-value" style="font-size:0.68rem;color:#64748b;">Displays an image from a file path. Supports {{variable}} syntax.</div>';
+  html += '<div class="comp-props-value" style="font-size:0.68rem;color:#64748b;">Displays images from a file path or array of paths. Shows up to 4 per page with carousel navigation. Supports {{variable}} syntax.</div>';
   html += '</div>';
 
   // File Path
@@ -1180,10 +1181,28 @@ function renderImageViewerProperties(body, node, nodeId) {
   html += '<button class="comp-tb-btn" id="comp-props-iv-reset-size" style="width:100%;margin-top:6px;font-size:0.7rem;">Reset to 300 &times; 300</button>';
   html += '</div>';
 
-  // Preview
+  // Preview — check for runtime array
+  var ivRuntimePaths = [];
+  if (lastNodeStates && lastNodeStates[nodeId]) {
+    var _ivRns = lastNodeStates[nodeId];
+    var _ivRp = (_ivRns.outputVariables && _ivRns.outputVariables.file_path) || (_ivRns.inputVariables && _ivRns.inputVariables.file_path);
+    if (Array.isArray(_ivRp)) ivRuntimePaths = _ivRp.filter(function(p) { return typeof p === 'string' && p; });
+    else if (_ivRp && typeof _ivRp === 'string') ivRuntimePaths = [_ivRp];
+  }
   html += '<div class="comp-props-section">';
   html += '<div class="comp-props-label">Preview</div>';
-  if (ivCfg.filePath) {
+  if (ivRuntimePaths.length > 1) {
+    html += '<div style="font-size:0.65rem;color:#94a3b8;margin-bottom:4px;">' + ivRuntimePaths.length + ' images (showing first 4)</div>';
+    html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;">';
+    var ivPreviewMax = Math.min(ivRuntimePaths.length, 4);
+    for (var ivpi = 0; ivpi < ivPreviewMax; ivpi++) {
+      html += '<img class="comp-image-viewer-preview" src="/api/file?path=' + encodeURIComponent(ivRuntimePaths[ivpi]) + '" alt="Preview ' + (ivpi+1) + '" style="width:100%;max-height:100px;" onerror="this.style.display=\'none\'">';
+    }
+    html += '</div>';
+    if (ivRuntimePaths.length > 4) {
+      html += '<div style="font-size:0.6rem;color:#64748b;margin-top:2px;font-style:italic;">+' + (ivRuntimePaths.length - 4) + ' more — use carousel on canvas to browse</div>';
+    }
+  } else if (ivCfg.filePath) {
     html += '<img class="comp-image-viewer-preview" src="/api/file?path=' + encodeURIComponent(ivCfg.filePath) + '" alt="Preview" onerror="this.style.display=\'none\';this.nextElementSibling.style.display=\'\'">';
     html += '<div class="comp-image-viewer-placeholder" style="display:none;text-align:center;padding:1rem;color:#475569;font-size:0.72rem;">Failed to load image</div>';
   } else {
@@ -3432,6 +3451,7 @@ function renderAssetProperties(body, node, nodeId) {
     html += '<div class="comp-props-label">Mode</div>';
     html += '<select class="comp-props-input" id="comp-props-asset-mode">';
     html += '<option value="pick"' + (mode === 'pick' ? ' selected' : '') + '>Pick — Select an asset</option>';
+    html += '<option value="get"' + (mode === 'get' ? ' selected' : '') + '>Get — Look up asset by ID</option>';
     html += '<option value="save"' + (mode === 'save' ? ' selected' : '') + '>Save — Store a file as asset</option>';
     html += '<option value="list"' + (mode === 'list' ? ' selected' : '') + '>List — List collection assets</option>';
     html += '<option value="remove"' + (mode === 'remove' ? ' selected' : '') + '>Remove — Delete an asset</option>';
@@ -5032,7 +5052,10 @@ function renderScriptFileProperties(body, node, nodeId) {
 
   // Code Preview (loaded from file)
   html += '<div class="comp-props-section">';
+  html += '<div style="display:flex;align-items:center;justify-content:space-between;">';
   html += '<div class="comp-props-label">Code Preview</div>';
+  html += '<button class="comp-tb-btn" id="comp-sf-refresh-code" style="font-size:0.6rem;padding:2px 8px;">&#x21bb; Refresh</button>';
+  html += '</div>';
   html += '<pre class="comp-script-code-preview" id="comp-sf-code-preview" style="max-height:300px;overflow:auto;">Loading...</pre>';
   html += '</div>';
 
@@ -5119,39 +5142,79 @@ function renderScriptFileProperties(body, node, nodeId) {
       });
   }
 
-  // Wire up Monaco editor
-  var openEditorBtn = body.querySelector('#comp-sf-open-editor');
-  if (openEditorBtn) {
-    openEditorBtn.addEventListener('click', function() {
+  // Refresh code preview button
+  var refreshCodeBtn = body.querySelector('#comp-sf-refresh-code');
+  if (refreshCodeBtn) {
+    refreshCodeBtn.addEventListener('click', function() {
       if (!sf.file || !compData || !compData.id) return;
-      // First fetch the code
+      var cp = body.querySelector('#comp-sf-code-preview');
+      if (cp) cp.textContent = 'Loading...';
       fetch('/api/compositions/' + encodeURIComponent(compData.id) + '/script-file/' + encodeURIComponent(nodeId))
         .then(function(r) { return r.json(); })
         .then(function(data) {
-          if (!data.code && data.code !== '') { toast('Could not load file', 'error'); return; }
-          if (window.WoodburyMonaco && window.WoodburyMonaco.openScriptEditor) {
-            window.WoodburyMonaco.openScriptEditor(data.code, sf.file, function(newCode) {
-              // Save back to file via API
-              fetch('/api/compositions/' + encodeURIComponent(compData.id) + '/script-file/' + encodeURIComponent(nodeId), {
-                method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ code: newCode }),
-              }).then(function(r) { return r.json(); }).then(function(res) {
-                if (res.updated) {
-                  toast('File saved', 'success');
-                  // Re-render to pick up changes
-                  renderScriptFileProperties(body, node, nodeId);
-                } else {
-                  toast('Save failed: ' + (res.error || 'unknown'), 'error');
-                }
-              }).catch(function(err) {
-                toast('Save failed: ' + err.message, 'error');
-              });
-            });
-          } else {
-            toast('Monaco editor not available', 'error');
-          }
+          if (cp && data.code) cp.textContent = data.code;
+          else if (cp && data.error) cp.textContent = '// Error: ' + data.error;
+        })
+        .catch(function() { if (cp) cp.textContent = '// Could not load file'; });
+    });
+  }
+
+  // Wire up Monaco editor
+  var openEditorBtn = body.querySelector('#comp-sf-open-editor');
+  if (openEditorBtn) {
+    openEditorBtn.addEventListener('click', async function() {
+      if (!sf.file || !compData || !compData.id) return;
+      if (!window.WoodburyMonaco || typeof window.WoodburyMonaco.openScriptEditor !== 'function') {
+        toast('Monaco editor not available', 'error');
+        return;
+      }
+      // Fetch the code from the file
+      var resp;
+      try {
+        resp = await fetch('/api/compositions/' + encodeURIComponent(compData.id) + '/script-file/' + encodeURIComponent(nodeId));
+        resp = await resp.json();
+      } catch (err) {
+        toast('Could not load file: ' + err.message, 'error');
+        return;
+      }
+      if (!resp.code && resp.code !== '') { toast('Could not load file', 'error'); return; }
+
+      // Open Monaco with the file code
+      var newCode = await window.WoodburyMonaco.openScriptEditor({
+        title: (node.label || sf.file || 'Script File') + ' — ' + sf.file,
+        description: sf.description || '',
+        code: resp.code,
+      });
+
+      if (typeof newCode !== 'string') return; // cancelled
+
+      // Save back to file via API
+      try {
+        var saveResp = await fetch('/api/compositions/' + encodeURIComponent(compData.id) + '/script-file/' + encodeURIComponent(nodeId), {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ code: newCode }),
         });
+        var saveResult = await saveResp.json();
+        if (saveResult.updated) {
+          toast('File saved', 'success');
+          // Auto-sync ports from the updated file annotations
+          try {
+            var syncResp = await fetch('/api/compositions/' + encodeURIComponent(compData.id) + '/sync', { method: 'POST' });
+            var syncData = await syncResp.json();
+            if (syncData.changed) {
+              toast('Ports synced from file', 'success');
+              loadComposition(compData.id);
+              return;
+            }
+          } catch (_syncErr) { /* sync is best-effort */ }
+          renderScriptFileProperties(body, node, nodeId);
+        } else {
+          toast('Save failed: ' + (saveResult.error || 'unknown'), 'error');
+        }
+      } catch (err) {
+        toast('Save failed: ' + err.message, 'error');
+      }
     });
   }
 

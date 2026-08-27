@@ -54,7 +54,7 @@ export const handleMemoryRoutes: RouteHandler = async (req, res, pathname, url, 
 
   // ── Create memory (manual) ───────────────────────────────
   if (req.method === 'POST' && pathname === '/api/memories') {
-    const body = JSON.parse(await readBody(req));
+    const body = await readBody(req);   // readBody already parses JSON
     if (!body.content || !body.category) {
       sendJson(res, 400, { error: 'content and category are required' });
       return true;

@@ -65,11 +65,13 @@ Actions:
 - "create": Start a new workflow (name, site, description, variables)
 - "inspect_element": Get ARIA label, role, selector, and bounds for an element — returns a ready-to-use ElementTarget
 - "add_steps": Append steps to the in-progress workflow
+- "test_step": Test a single step via debug mode — runs steps up to stepIndex and returns the result
+- "update_step": Replace a step at a given index (for fixing targeting after test_step fails)
 - "finalize": Validate and save the complete workflow
-- "test": Run the workflow to verify it works, returns step-by-step results
+- "test": Run the full workflow to verify it works end-to-end, returns step-by-step results
 
 Typical flow:
-1. create → 2. inspect_element + browser interaction + add_steps (repeat) → 3. finalize → 4. test
+1. create → 2. (inspect_element → add_steps → test_step → verify/fix) × N → 3. finalize → 4. test
 
 Targeting priority: accessibilityQuery > ariaLabel+role > textContent > CSS selector.
 Always include expectedBounds (percentage) for disambiguation.
@@ -80,7 +82,7 @@ Use {{variables}} for user-specific values.`,
     properties: {
       action: {
         type: 'string',
-        enum: ['create', 'inspect_element', 'add_steps', 'finalize', 'test'],
+        enum: ['create', 'inspect_element', 'add_steps', 'test_step', 'update_step', 'finalize', 'test'],
         description: 'The workflow build action to perform.',
       },
       // create params
@@ -116,10 +118,19 @@ Use {{variables}} for user-specific values.`,
         description: 'Workflow steps to append (for action: "add_steps"). Each step needs at minimum: id, label, type, and type-specific fields.',
         items: { type: 'object' },
       },
+      // test_step / update_step params
+      stepIndex: {
+        type: 'number',
+        description: 'Step index to test or update (for action: "test_step" or "update_step"). Defaults to the last added step.',
+      },
+      updatedStep: {
+        type: 'object',
+        description: 'Replacement step object (for action: "update_step"). Must include id, label, type, and type-specific fields.',
+      },
       // test params
       testVariables: {
         type: 'object',
-        description: 'Variable values to use for the test run (for action: "test").',
+        description: 'Variable values to use for the test run (for action: "test" or "test_step").',
       },
     },
     required: ['action'],
@@ -141,12 +152,16 @@ export const workflowBuildHandler: ToolHandler = async (
       return handleInspectElement(params);
     case 'add_steps':
       return handleAddSteps(params);
+    case 'test_step':
+      return handleTestStep(params);
+    case 'update_step':
+      return handleUpdateStep(params);
     case 'finalize':
       return handleFinalize();
     case 'test':
       return handleTest(params);
     default:
-      throw new Error(`Unknown action: ${action}. Use: create, inspect_element, add_steps, finalize, test`);
+      throw new Error(`Unknown action: ${action}. Use: create, inspect_element, add_steps, test_step, update_step, finalize, test`);
   }
 };
 
@@ -256,6 +271,126 @@ async function handleAddSteps(params: any): Promise<string> {
     totalSteps: pendingSteps.length,
     addedSteps: params.steps.length,
     message: `Added ${params.steps.length} step(s). Total: ${pendingSteps.length}. Continue with inspect_element + add_steps, or finalize when done.`,
+  }, null, 2);
+}
+
+async function handleTestStep(params: any): Promise<string> {
+  if (!activeWorkflowId) {
+    throw new Error('No active workflow. Call workflow_build with action:"create" first.');
+  }
+  if (pendingSteps.length === 0) {
+    throw new Error('No steps to test. Use add_steps first.');
+  }
+
+  const targetIndex = params.stepIndex ?? pendingSteps.length - 1;
+  if (targetIndex < 0 || targetIndex >= pendingSteps.length) {
+    throw new Error(`stepIndex ${targetIndex} out of range (0-${pendingSteps.length - 1})`);
+  }
+
+  try {
+    // Start debug mode
+    await dashFetch(`/api/workflows/${activeWorkflowId}/debug/start`, {
+      method: 'POST',
+      body: JSON.stringify({ variables: params.testVariables || {} }),
+    });
+
+    // Step through until we reach the target step
+    let lastResult: any = null;
+    for (let i = 0; i <= targetIndex; i++) {
+      await new Promise(r => setTimeout(r, 500)); // brief pause between steps
+      lastResult = await dashFetch(`/api/workflows/${activeWorkflowId}/debug/step`, {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
+
+      // If a step before our target failed, report it
+      if (i < targetIndex && lastResult?.stepResult?.status === 'failed') {
+        await exitDebugMode();
+        return JSON.stringify({
+          success: false,
+          failedAtIndex: i,
+          failedStep: pendingSteps[i]?.label || `step ${i}`,
+          error: lastResult.stepResult?.error || 'Step failed',
+          message: `Step ${i} ("${pendingSteps[i]?.label}") failed before reaching target step ${targetIndex}. Fix earlier steps first.`,
+        }, null, 2);
+      }
+    }
+
+    // Exit debug mode
+    await exitDebugMode();
+
+    // Extract the result for the target step
+    const stepResult = lastResult?.stepResult || lastResult;
+    const passed = stepResult?.status === 'success' || stepResult?.success === true;
+
+    return JSON.stringify({
+      success: true,
+      passed,
+      stepIndex: targetIndex,
+      stepLabel: pendingSteps[targetIndex]?.label || `step ${targetIndex}`,
+      stepResult: {
+        status: passed ? 'success' : 'failed',
+        error: stepResult?.error || undefined,
+        coordinateInfo: stepResult?.coordinateInfo || lastResult?.coordinateInfo || undefined,
+      },
+      message: passed
+        ? `Step ${targetIndex} ("${pendingSteps[targetIndex]?.label}") passed. Take a screenshot to verify the browser state, then continue.`
+        : `Step ${targetIndex} ("${pendingSteps[targetIndex]?.label}") failed: ${stepResult?.error || 'unknown error'}. Use update_step to fix targeting, then test_step again.`,
+    }, null, 2);
+  } catch (err: any) {
+    // Ensure debug mode is exited on error
+    await exitDebugMode();
+    return JSON.stringify({
+      success: false,
+      error: err.message || String(err),
+      message: 'test_step failed. Check that the dashboard is running and the Chrome extension is connected.',
+    }, null, 2);
+  }
+}
+
+async function exitDebugMode(): Promise<void> {
+  if (!activeWorkflowId) return;
+  try {
+    await dashFetch(`/api/workflows/${activeWorkflowId}/debug/exit`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+  } catch { /* best effort */ }
+}
+
+async function handleUpdateStep(params: any): Promise<string> {
+  if (!activeWorkflowId) {
+    throw new Error('No active workflow. Call workflow_build with action:"create" first.');
+  }
+  if (!params.updatedStep) {
+    throw new Error('updatedStep is required for update_step action.');
+  }
+
+  const targetIndex = params.stepIndex ?? pendingSteps.length - 1;
+  if (targetIndex < 0 || targetIndex >= pendingSteps.length) {
+    throw new Error(`stepIndex ${targetIndex} out of range (0-${pendingSteps.length - 1})`);
+  }
+
+  const oldLabel = pendingSteps[targetIndex]?.label || `step ${targetIndex}`;
+  pendingSteps[targetIndex] = params.updatedStep;
+
+  // Persist to API
+  const current = await dashFetch(`/api/workflows/${activeWorkflowId}`);
+  const doc = current.workflow;
+  doc.steps = pendingSteps;
+  doc.metadata.updatedAt = new Date().toISOString();
+
+  await dashFetch(`/api/workflows/${activeWorkflowId}`, {
+    method: 'PUT',
+    body: JSON.stringify({ workflow: doc }),
+  });
+
+  return JSON.stringify({
+    success: true,
+    stepIndex: targetIndex,
+    oldLabel,
+    newLabel: params.updatedStep.label || oldLabel,
+    message: `Step ${targetIndex} updated. Use test_step to verify the fix.`,
   }, null, 2);
 }
 

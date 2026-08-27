@@ -29,7 +29,7 @@ export interface CritiqueResult {
 export class Critic {
   constructor(
     private adapter: ProviderAdapter,
-    private provider: 'openai' | 'anthropic' | 'groq',
+    private provider: 'openai' | 'anthropic' | 'groq' | 'ollama',
     private model: string,
   ) {}
 

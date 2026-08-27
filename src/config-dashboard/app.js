@@ -530,6 +530,11 @@ function switchTab(tab, opts) {
     if (typeof initMcp === 'function') {
       initMcp();
     }
+  } else if (tab === 'schedules') {
+    selectedExtension = null;
+    if (typeof initSchedules === 'function') {
+      initSchedules();
+    }
   } else if (tab === 'llm-settings') {
     selectedExtension = null;
     if (typeof initLlmSettings === 'function') {
@@ -574,7 +579,7 @@ function parseHash() {
 
 function handleHash() {
   var state = parseHash();
-  var validTabs = ['home', 'chat', 'workflows', 'compositions', 'runs', 'training', 'marketplace', 'social', 'assets', 'memory', 'skills', 'storyboard', 'mcp'];
+  var validTabs = ['home', 'chat', 'workflows', 'compositions', 'runs', 'training', 'marketplace', 'social', 'assets', 'memory', 'skills', 'storyboard', 'mcp', 'schedules'];
   var tab = validTabs.indexOf(state.tab) !== -1 ? state.tab : 'home';
 
   // Only switch tab if it changed
@@ -761,7 +766,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Restore state from hash on initial load
   var state = parseHash();
-  var validTabs = ['home', 'chat', 'workflows', 'compositions', 'runs', 'training', 'marketplace', 'social', 'assets', 'memory', 'skills', 'storyboard', 'mcp'];
+  var validTabs = ['home', 'chat', 'workflows', 'compositions', 'runs', 'training', 'marketplace', 'social', 'assets', 'memory', 'skills', 'storyboard', 'mcp', 'schedules'];
   var initialTab = validTabs.indexOf(state.tab) !== -1 ? state.tab : 'home';
 
   // Set detailView early so workflow render picks it up

@@ -190,6 +190,9 @@ export interface ElementTarget {
     pctW: number;  // width as % of viewport width
     pctH: number;  // height as % of viewport height
   };
+  /** Enable LLM vision fallback for element resolution when all other strategies fail.
+   *  Uses the `description` field as the prompt. Off by default (opt-in). */
+  llmFallback?: boolean;
 }
 
 /** Contextual clues about where an element lives on the page */
@@ -245,7 +248,7 @@ export interface ElementBounds {
 /** Result from resolving an element target */
 export interface ResolvedElement {
   /** The selector that matched */
-  matchedBy: 'selector' | 'fallback' | 'ariaLabel' | 'textContent' | 'description' | 'placeholder' | 'percentage' | 'visual' | 'accessibilityQuery' | 'svgFingerprint' | 'labelAssociation' | 'contextual';
+  matchedBy: 'selector' | 'fallback' | 'ariaLabel' | 'textContent' | 'description' | 'placeholder' | 'percentage' | 'visual' | 'accessibilityQuery' | 'svgFingerprint' | 'labelAssociation' | 'contextual' | 'llmVision';
   /** The actual selector or description used */
   matchedValue: string;
   /** Element position from the bridge */
@@ -486,6 +489,14 @@ export interface KeyboardStep extends StepBase {
   modifiers?: ('ctrl' | 'shift' | 'alt' | 'cmd')[];
 }
 
+export interface ClipboardStep extends StepBase {
+  type: 'clipboard';
+  /** The text to copy to the clipboard. Supports {{variable}} substitution. */
+  value: string;
+  /** If true, paste the clipboard content after copying (Cmd+V / Ctrl+V). Defaults to false. */
+  paste?: boolean;
+}
+
 /** Descriptor for verifying which element has focus after keyboard navigation */
 export interface ExpectedFocusDescriptor {
   /** Inner text of the expected focused element */
@@ -715,6 +726,32 @@ export interface InjectStyleStep extends StepBase {
   action?: 'apply' | 'clear';
 }
 
+/** LLM-powered visual check: validate screen state, extract data, or locate an element */
+export interface LlmCheckStep extends StepBase {
+  type: 'llm_check';
+  /** What this check does */
+  mode: 'validate' | 'extract' | 'locate';
+  /** Natural language prompt describing what to check, extract, or find */
+  prompt: string;
+  /** Optional: crop screenshot to a viewport region (percentages 0-100) */
+  region?: {
+    pctX: number;   // left edge as % of viewport width
+    pctY: number;   // top edge as % of viewport height
+    pctW: number;   // width as % of viewport width
+    pctH: number;   // height as % of viewport height
+  };
+  /** Override the default model (default: cheapest vision model available) */
+  model?: string;
+  /** Variable name to store the LLM response data */
+  outputVariable?: string;
+  /** For 'validate' mode: whether a failed check should fail the step (default: true) */
+  failOnFalse?: boolean;
+  /** For 'locate' mode: variable name to store {x, y} coordinates */
+  coordinateVariable?: string;
+  /** Max tokens for LLM response (default: 256 for validate, 1024 for extract, 128 for locate) */
+  maxTokens?: number;
+}
+
 /** Union of all step types */
 export type WorkflowStep =
   | NavigateStep
@@ -729,6 +766,7 @@ export type WorkflowStep =
   | FileDialogStep
   | ScrollStep
   | KeyboardStep
+  | ClipboardStep
   | KeyboardNavStep
   | SubWorkflowStep
   | ConditionalStep
@@ -743,7 +781,8 @@ export type WorkflowStep =
   | DesktopClickStep
   | DesktopTypeStep
   | DesktopKeyboardStep
-  | InjectStyleStep;
+  | InjectStyleStep
+  | LlmCheckStep;
 
 // ────────────────────────────────────────────────────────────────
 //  Expectations (workflow-level outcome checks)

@@ -30,6 +30,9 @@ const _woodburyInjectedStyles = new Map();
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const { action, params } = message;
 
+  // Ignore messages not intended for the content script (e.g. sidepanel → background)
+  if (!action) return false;
+
   // All handlers are async, so we use this pattern
   handleAction(action, params || {})
     .then(result => sendResponse({ success: true, data: result }))
@@ -289,7 +292,7 @@ function describeElement(el) {
   const classes = el.className && typeof el.className === 'string'
     ? '.' + el.className.trim().split(/\s+/).join('.')
     : '';
-  const text = (el.textContent || '').trim().substring(0, 80);
+  const text = (el.textContent || '').trim().substring(0, 500);
   const type = el.getAttribute('type') || '';
   const name = el.getAttribute('name') || '';
   const role = el.getAttribute('role') || '';
@@ -445,45 +448,232 @@ function findNearestHeading(el) {
 }
 
 function buildUniqueSelector(el) {
+  // Try to build a semantic, human-readable selector.
+  // Avoids positional indexes (nth-of-type) — instead anchors to the nearest
+  // semantic ancestor (role, aria-label, id, data-testid) and describes the
+  // target using meaningful attributes.
+
+  // Helper: test if a selector uniquely matches this element
+  function isUnique(sel) {
+    try {
+      const matches = document.querySelectorAll(sel);
+      return matches.length === 1 && matches[0] === el;
+    } catch { return false; }
+  }
+
+  const tag = el.tagName.toLowerCase();
+
+  // ── Direct selectors on the element itself ──
+
+  // 1. id
   if (el.id) return `#${CSS.escape(el.id)}`;
 
-  // Try aria-label
-  const ariaLabel = el.getAttribute('aria-label');
-  if (ariaLabel) {
-    const tag = el.tagName.toLowerCase();
-    const sel = `${tag}[aria-label="${CSS.escape(ariaLabel)}"]`;
-    if (document.querySelectorAll(sel).length === 1) return sel;
-  }
-
-  // Try data-testid
-  const testId = el.getAttribute('data-testid');
+  // 2. data-testid
+  const testId = el.getAttribute('data-testid') || el.getAttribute('data-test-id');
   if (testId) {
     const sel = `[data-testid="${CSS.escape(testId)}"]`;
-    if (document.querySelectorAll(sel).length === 1) return sel;
+    if (isUnique(sel)) return sel;
   }
 
-  // Build path from parent
-  const parts = [];
-  let current = el;
-  while (current && current !== document.body && parts.length < 5) {
-    let part = current.tagName.toLowerCase();
-    if (current.id) {
-      parts.unshift(`#${CSS.escape(current.id)}`);
-      break;
+  // 3. aria-label
+  const ariaLabel = el.getAttribute('aria-label');
+  if (ariaLabel) {
+    const sel = `${tag}[aria-label="${CSS.escape(ariaLabel)}"]`;
+    if (isUnique(sel)) return sel;
+    // Without tag constraint
+    const sel2 = `[aria-label="${CSS.escape(ariaLabel)}"]`;
+    if (isUnique(sel2)) return sel2;
+  }
+
+  // 4. role + aria-label combo
+  const role = el.getAttribute('role') || getImplicitRole(el);
+  if (role && ariaLabel) {
+    const sel = `[role="${CSS.escape(role)}"][aria-label="${CSS.escape(ariaLabel)}"]`;
+    if (isUnique(sel)) return sel;
+  }
+
+  // 5. role + accessible name (computed, may come from label association)
+  if (role) {
+    const accName = computeAccessibleName(el);
+    if (accName && accName !== ariaLabel) {
+      const sel = `[role="${CSS.escape(role)}"][aria-label="${CSS.escape(accName)}"]`;
+      if (isUnique(sel)) return sel;
     }
-    const parent = current.parentElement;
-    if (parent) {
-      const siblings = Array.from(parent.children).filter(c => c.tagName === current.tagName);
-      if (siblings.length > 1) {
-        const index = siblings.indexOf(current) + 1;
-        part += `:nth-of-type(${index})`;
+    const roleSel = `${tag}[role="${CSS.escape(role)}"]`;
+    if (isUnique(roleSel)) return roleSel;
+  }
+
+  // 6. placeholder
+  const placeholder = el.getAttribute('placeholder');
+  if (placeholder) {
+    const sel = `${tag}[placeholder="${CSS.escape(placeholder)}"]`;
+    if (isUnique(sel)) return sel;
+  }
+
+  // 7. name attribute
+  const name = el.getAttribute('name');
+  if (name) {
+    const sel = `${tag}[name="${CSS.escape(name)}"]`;
+    if (isUnique(sel)) return sel;
+  }
+
+  // 8. title attribute
+  const title = el.getAttribute('title');
+  if (title) {
+    const sel = `${tag}[title="${CSS.escape(title)}"]`;
+    if (isUnique(sel)) return sel;
+  }
+
+  // ── Scoped selectors: anchor to a semantic ancestor ──
+  // Walk up looking for an ancestor with a meaningful identifier, then describe
+  // the target element relative to it using semantic attributes — no indexes.
+
+  function buildAnchorSelector(ancestor) {
+    if (ancestor.id) return `#${CSS.escape(ancestor.id)}`;
+    const aTag = ancestor.tagName.toLowerCase();
+    const aRole = ancestor.getAttribute('role');
+    const aLabel = ancestor.getAttribute('aria-label');
+    const aTestId = ancestor.getAttribute('data-testid') || ancestor.getAttribute('data-test-id');
+    // role + aria-label is the strongest combo
+    if (aRole && aLabel) {
+      const sel = `[role="${CSS.escape(aRole)}"][aria-label="${CSS.escape(aLabel)}"]`;
+      try { if (document.querySelectorAll(sel).length === 1) return sel; } catch {}
+    }
+    // aria-label alone
+    if (aLabel) {
+      const sel = `${aTag}[aria-label="${CSS.escape(aLabel)}"]`;
+      try { if (document.querySelectorAll(sel).length === 1) return sel; } catch {}
+    }
+    // role alone (for landmarks/dialogs)
+    if (aRole) {
+      const sel = `[role="${CSS.escape(aRole)}"]`;
+      try { if (document.querySelectorAll(sel).length <= 2) return sel; } catch {}
+    }
+    // data-testid
+    if (aTestId) {
+      const sel = `[data-testid="${CSS.escape(aTestId)}"]`;
+      try { if (document.querySelectorAll(sel).length === 1) return sel; } catch {}
+    }
+    return null;
+  }
+
+  // Build semantic descriptors for the target element (no indexes).
+  // Uses role, aria-label, accessible name, text content, and other
+  // meaningful attributes to describe the element within a scope.
+  function buildTargetDescriptor(targetEl) {
+    const tTag = targetEl.tagName.toLowerCase();
+    const tRole = targetEl.getAttribute('role') || getImplicitRole(targetEl);
+    const tLabel = targetEl.getAttribute('aria-label');
+    const tAccName = computeAccessibleName(targetEl);
+    const tText = getDirectText(targetEl).trim();
+    const tPlaceholder = targetEl.getAttribute('placeholder');
+    const tName = targetEl.getAttribute('name');
+    const tTitle = targetEl.getAttribute('title');
+
+    const candidates = [];
+
+    // role + aria-label (strongest)
+    if (tRole && tLabel) candidates.push(`[role="${CSS.escape(tRole)}"][aria-label="${CSS.escape(tLabel)}"]`);
+    // aria-label alone
+    if (tLabel) candidates.push(`${tTag}[aria-label="${CSS.escape(tLabel)}"]`);
+    // role alone (e.g. div[role="button"] scoped inside a dialog)
+    if (tRole) candidates.push(`[role="${CSS.escape(tRole)}"]`);
+    if (tRole) candidates.push(`${tTag}[role="${CSS.escape(tRole)}"]`);
+    // placeholder, name, title
+    if (tPlaceholder) candidates.push(`${tTag}[placeholder="${CSS.escape(tPlaceholder)}"]`);
+    if (tName) candidates.push(`${tTag}[name="${CSS.escape(tName)}"]`);
+    if (tTitle) candidates.push(`${tTag}[title="${CSS.escape(tTitle)}"]`);
+
+    // Semantic tag alone (button, input, a, etc. — often unique within a scoped ancestor)
+    const semanticTags = new Set(['button', 'input', 'textarea', 'select', 'a', 'img', 'svg', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'nav', 'form', 'summary']);
+    if (semanticTags.has(tTag)) candidates.push(tTag);
+
+    return candidates;
+  }
+
+  // Helper: check if selector scoped to ancestor uniquely finds our element
+  // using text content as a disambiguation filter (via findElementByText).
+  // Returns a working selector string or null.
+  function tryTextScopedSelector(anchorSel, targetEl) {
+    const tTag = targetEl.tagName.toLowerCase();
+    const tRole = targetEl.getAttribute('role') || getImplicitRole(targetEl);
+    const tAccName = computeAccessibleName(targetEl);
+    const tText = getDirectText(targetEl).trim();
+    const textToMatch = tAccName || tText;
+    if (!textToMatch || textToMatch.length > 80) return null;
+
+    // Try to find elements with this text scoped to the ancestor
+    try {
+      const anchorEls = document.querySelectorAll(anchorSel);
+      if (anchorEls.length === 0) return null;
+      const anchor = anchorEls[0];
+
+      // Count how many elements inside this anchor have the same text + role
+      let matchCount = 0;
+      let matchEl = null;
+      const searchTag = tRole ? `[role="${CSS.escape(tRole)}"]` : tTag;
+      const candidates = anchor.querySelectorAll(searchTag);
+      for (const c of candidates) {
+        const cName = computeAccessibleName(c) || getDirectText(c).trim();
+        if (cName === textToMatch) {
+          matchCount++;
+          matchEl = c;
+        }
       }
-    }
-    parts.unshift(part);
-    current = parent;
+      if (matchCount === 1 && matchEl === targetEl) {
+        // Build the scoped selector — the resolver will use text matching at runtime
+        if (tRole) return `${anchorSel} [role="${CSS.escape(tRole)}"]`;
+        return `${anchorSel} ${tTag}`;
+      }
+    } catch {}
+    return null;
   }
 
-  return parts.join(' > ');
+  // Walk up the tree looking for a semantic anchor
+  let ancestor = el.parentElement;
+  while (ancestor && ancestor !== document.body && ancestor !== document.documentElement) {
+    const anchorSel = buildAnchorSelector(ancestor);
+    if (anchorSel) {
+      // Try each target descriptor scoped within this anchor
+      const descriptors = buildTargetDescriptor(el);
+      for (const desc of descriptors) {
+        const scopedSel = `${anchorSel} ${desc}`;
+        if (isUnique(scopedSel)) return scopedSel;
+      }
+      // CSS selector wasn't unique — try text-based disambiguation.
+      // e.g. [role="dialog"] has 3 div[role="button"] but only one with text "Next"
+      const textScoped = tryTextScopedSelector(anchorSel, el);
+      if (textScoped) return textScoped;
+    }
+    ancestor = ancestor.parentElement;
+  }
+
+  // ── Last resort: tag with role anchored to nearest semantic ancestor ──
+  ancestor = el.parentElement;
+  while (ancestor && ancestor !== document.body && ancestor !== document.documentElement) {
+    const anchorSel = buildAnchorSelector(ancestor);
+    if (anchorSel) {
+      // Prefer role-based child selector over nth-of-type
+      if (role) {
+        const roleSel = `${anchorSel} ${tag}[role="${CSS.escape(role)}"]`;
+        try {
+          const matches = document.querySelectorAll(roleSel);
+          if (matches.length <= 3) return roleSel; // small set, resolver can use text to disambiguate
+        } catch {}
+      }
+      // Direct child tag (no index)
+      const directSel = `${anchorSel} > ${tag}`;
+      try {
+        const matches = document.querySelectorAll(directSel);
+        if (matches.length === 1 && matches[0] === el) return directSel;
+      } catch {}
+    }
+    ancestor = ancestor.parentElement;
+  }
+
+  // Absolute fallback — role description (better than a bare tag)
+  if (role) return `${tag}[role="${CSS.escape(role)}"]`;
+  return tag;
 }
 
 // ── Action implementations ───────────────────────────────────
@@ -1229,10 +1419,16 @@ function hoverElement({ selector, x, y }) {
 /**
  * Evaluate a JavaScript expression and return the result.
  */
-function evaluateExpression({ expression }) {
+async function evaluateExpression({ expression }) {
   if (!expression) throw new Error('expression is required');
   try {
-    const result = new Function('"use strict"; return (' + expression + ')')();
+    let result = new Function('"use strict"; return (' + expression + ')')();
+    // Await thenables. Without this, an expression like
+    // `navigator.clipboard.writeText(x)` serializes to {} and a rejection is
+    // never observed by the caller, which then can't tell success from failure.
+    if (result && typeof result.then === 'function') {
+      result = await result;
+    }
     return { result: result !== undefined ? JSON.parse(JSON.stringify(result)) : null };
   } catch (err) {
     return { error: err.message };
@@ -1935,13 +2131,17 @@ async function captureAccessibilityMeta(el, event) {
   // 5. Get standard metadata as fallback (CSS selectors, bounds, etc.)
   const standardMeta = captureElementMeta(resolvedEl);
 
-  // 6. Merge accessibility data into the standard metadata
+  // 6. Compute resolver strategies for the element (same as WCAG auditor)
+  const strategies = getResolverStrategies(resolvedEl);
+
+  // 7. Merge accessibility data into the standard metadata
   return {
     ...standardMeta,
     shadowPath: shadowPath || undefined,
     svgFingerprint: svgFingerprint || undefined,
     accessibleName: accessibleName || undefined,
     computedRole: computedRole || undefined,
+    strategies,
   };
 }
 
@@ -2598,6 +2798,53 @@ function getResolverStrategies(el) {
     }
   }
 
+  // 10. role — shows the ARIA role (useful for executor's role-based resolution)
+  var elRole = el.getAttribute('role') || getImplicitRole(el);
+  if (elRole) {
+    var roleSel = '[role="' + CSS.escape(elRole) + '"]';
+    var cnt = 0;
+    try { cnt = document.querySelectorAll(roleSel).length; } catch (e) {}
+    strategies.push({ method: 'role', value: elRole, unique: cnt === 1, matchCount: cnt });
+  }
+
+  // 11. Scoped ancestor — find the nearest semantic ancestor (dialog, nav, form, etc.)
+  //     and show the scoped selector, e.g. [role="dialog"] [role="button"]
+  var ancestor = el.parentElement;
+  while (ancestor && ancestor !== document.body && ancestor !== document.documentElement) {
+    var aRole = ancestor.getAttribute('role');
+    var aLabel = ancestor.getAttribute('aria-label');
+    var aId = ancestor.id;
+    var anchorSel = null;
+    if (aId) {
+      anchorSel = '#' + CSS.escape(aId);
+    } else if (aRole && aLabel) {
+      anchorSel = '[role="' + CSS.escape(aRole) + '"][aria-label="' + CSS.escape(aLabel) + '"]';
+    } else if (aRole && ['dialog', 'alertdialog', 'navigation', 'main', 'complementary', 'search', 'form', 'region', 'banner', 'contentinfo', 'menu', 'menubar', 'tablist'].indexOf(aRole) >= 0) {
+      anchorSel = '[role="' + CSS.escape(aRole) + '"]';
+    } else if (aLabel) {
+      var aTag = ancestor.tagName.toLowerCase();
+      var aLabelSel = aTag + '[aria-label="' + CSS.escape(aLabel) + '"]';
+      try { if (document.querySelectorAll(aLabelSel).length <= 2) anchorSel = aLabelSel; } catch (e) {}
+    }
+    if (anchorSel) {
+      // Build scoped selector for the target inside this ancestor
+      var targetPart = elRole ? '[role="' + CSS.escape(elRole) + '"]' : tag;
+      var scopedSel = anchorSel + ' ' + targetPart;
+      var scopedCnt = 0;
+      try { scopedCnt = document.querySelectorAll(scopedSel).length; } catch (e) {}
+      strategies.push({
+        method: 'scoped',
+        value: scopedSel,
+        unique: scopedCnt === 1,
+        matchCount: scopedCnt,
+        _anchorRole: aRole,
+        _anchorLabel: aLabel
+      });
+      break; // only show the nearest ancestor scope
+    }
+    ancestor = ancestor.parentElement;
+  }
+
   return strategies;
 }
 
@@ -3015,12 +3262,17 @@ function captureElementMeta(el) {
     } catch {}
   }
 
+  // Compute resolver strategies (same as WCAG auditor "Findable via")
+  const resolvedForStrategies = interactiveAncestor || el;
+  const strategies = getResolverStrategies(resolvedForStrategies);
+
   return {
     selector: selectors[0] || '',
     fallbackSelectors: selectors.slice(1),
     ariaLabel: el.getAttribute('aria-label') || undefined,
     textContent: getDirectText(el).substring(0, 200) || undefined,
     description: undefined, // Can be filled in later by the recorder
+    strategies,
     bounds: {
       left: Math.round(rect.left),
       top: Math.round(rect.top),
@@ -3259,8 +3511,54 @@ function onRecordInput(e) {
   sendRecordingEvent('input', e.target, { _originalEvent: e });
 }
 
+// Track mouse position during recording for hover-pick (backtick key)
+let _recLastMouseX = 0;
+let _recLastMouseY = 0;
+function onRecordMouseMove(e) {
+  _recLastMouseX = e.clientX;
+  _recLastMouseY = e.clientY;
+}
+
 function onRecordKeydown(e) {
   if (!recordingActive) return;
+
+  // Backtick/tilde (`) — capture the hovered element as a step
+  if (e.key === '`') {
+    e.preventDefault();
+    e.stopPropagation();
+    const rawEl = document.elementFromPoint(_recLastMouseX, _recLastMouseY);
+    if (!rawEl) return;
+
+    // Use findNearestWcagElement to walk up to the nearest WCAG-relevant ancestor
+    // (buttons, links, inputs, aria-labelled elements, landmarks, etc.)
+    let resolved = findNearestWcagElement(rawEl);
+
+    // If no WCAG element found, try to find an element with text content
+    // by walking up to find something with meaningful accessible name or text
+    if (!resolved) {
+      let current = rawEl;
+      while (current && current !== document.body) {
+        const accName = computeAccessibleName(current);
+        if (accName && accName.trim().length > 0) {
+          resolved = current;
+          break;
+        }
+        const text = getDirectText(current).trim();
+        if (text.length > 0 && text.length <= 80) {
+          resolved = current;
+          break;
+        }
+        current = current.parentElement;
+      }
+    }
+
+    // Last resort: use the raw element
+    if (!resolved) resolved = rawEl;
+
+    sendRecordingEvent('hover_pick', resolved, { _originalEvent: e });
+    return;
+  }
+
   // Only capture special keys (Enter, Escape, Tab, etc.) not regular typing
   const specialKeys = ['Enter', 'Escape', 'Tab', 'Backspace', 'Delete', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown', ' '];
   if (!specialKeys.includes(e.key) && !e.ctrlKey && !e.metaKey && !e.altKey) return;
@@ -3305,6 +3603,7 @@ function startRecording() {
   document.addEventListener('click', onRecordClick, true);
   document.addEventListener('input', onRecordInput, true);
   document.addEventListener('keydown', onRecordKeydown, true);
+  document.addEventListener('mousemove', onRecordMouseMove, true);
 
   // Show recording indicator
   showRecordingIndicator();
@@ -3318,6 +3617,7 @@ function stopRecording() {
   document.removeEventListener('click', onRecordClick, true);
   document.removeEventListener('input', onRecordInput, true);
   document.removeEventListener('keydown', onRecordKeydown, true);
+  document.removeEventListener('mousemove', onRecordMouseMove, true);
 
   // Remove recording indicator
   hideRecordingIndicator();
@@ -3608,10 +3908,57 @@ function getElementAtPoint({ x, y }) {
   const id = el.id || '';
   const classes = Array.from(el.classList).slice(0, 5).join(' ');
   const role = el.getAttribute('role') || '';
+  const ariaLabel = el.getAttribute('aria-label') || '';
   const text = (el.textContent || '').trim().slice(0, 40);
   const fingerprint = `${tag}#${id}.${classes}[role=${role}]"${text}"`;
 
-  return { found: true, tag, id, classes, role, text, fingerprint };
+  // Walk up the DOM to find the nearest meaningful ARIA context.
+  // elementFromPoint often returns a child (e.g. <path> inside <svg aria-label="Post">
+  // inside <a role="link">). We need to surface the parent's identity so the executor
+  // can verify it's about to click the right thing.
+  let closestAriaLabel = ariaLabel;
+  let closestRole = role;
+  let closestInteractive = null;
+  let ancestor = el;
+  for (let i = 0; i < 10 && ancestor; i++) {
+    const aLabel = ancestor.getAttribute && ancestor.getAttribute('aria-label');
+    const aRole = ancestor.getAttribute && ancestor.getAttribute('role');
+    const aTag = ancestor.tagName && ancestor.tagName.toLowerCase();
+
+    if (!closestAriaLabel && aLabel) closestAriaLabel = aLabel;
+    if (!closestRole && aRole) closestRole = aRole;
+
+    // Find the nearest interactive ancestor (link, button, or role=link/button)
+    if (!closestInteractive) {
+      const isInteractive = aTag === 'a' || aTag === 'button' ||
+        aRole === 'link' || aRole === 'button' || aRole === 'menuitem';
+      if (isInteractive) {
+        closestInteractive = {
+          tag: aTag,
+          role: aRole || '',
+          ariaLabel: aLabel || '',
+          text: (ancestor.textContent || '').trim().slice(0, 60),
+        };
+      }
+    }
+
+    if (closestAriaLabel && closestRole && closestInteractive) break;
+    ancestor = ancestor.parentElement;
+  }
+
+  return {
+    found: true,
+    tag,
+    id,
+    classes,
+    role,
+    ariaLabel,
+    text,
+    fingerprint,
+    closestAriaLabel: closestAriaLabel || '',
+    closestRole: closestRole || '',
+    closestInteractive,
+  };
 }
 
 function toggleDebugOverlay(params) {

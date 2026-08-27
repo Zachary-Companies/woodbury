@@ -1,12 +1,9 @@
 {
-  "objective": "Confirm whether the Woodbury platform UI is React-based",
+  "objective": "Identify the identity of the AI model.",
   "successCriteria": [
-    "Provide a clear yes/no answer about whether the UI uses React",
-    "Reference relevant context from previous conversations if applicable"
+    "Provide an accurate response regarding the model's identity"
   ],
-  "constraints": [
-    "Answer based on known information from previous interactions"
-  ],
-  "createdAt": "2026-03-24T21:52:47.472Z",
-  "updatedAt": "2026-03-24T21:52:47.472Z"
+  "constraints": [],
+  "createdAt": "2026-04-17T20:36:42.958Z",
+  "updatedAt": "2026-04-17T20:36:42.958Z"
 }

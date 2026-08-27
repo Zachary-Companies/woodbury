@@ -639,14 +639,25 @@ function renderNodes() {
       // Image viewer node — input port, image preview, output port
       var ivCfg = node.imageViewer || { filePath: '', width: 300, height: 300 };
       var ivFilePath = ivCfg.filePath || '';
+      var ivFilePaths = []; // array of paths for carousel
       // Use runtime value from last run if available (e.g. from an edge connection)
       if (lastNodeStates && lastNodeStates[node.id]) {
         var _rns = lastNodeStates[node.id];
         var _runtimePath = (_rns.outputVariables && _rns.outputVariables.file_path) || (_rns.inputVariables && _rns.inputVariables.file_path);
-        if (_runtimePath && typeof _runtimePath === 'string') ivFilePath = _runtimePath;
+        if (Array.isArray(_runtimePath)) {
+          ivFilePaths = _runtimePath.filter(function(p) { return typeof p === 'string' && p; });
+          ivFilePath = ivFilePaths[0] || '';
+        } else if (_runtimePath && typeof _runtimePath === 'string') {
+          ivFilePath = _runtimePath;
+          ivFilePaths = [_runtimePath];
+        }
       }
+      if (!ivFilePaths.length && ivFilePath) ivFilePaths = [ivFilePath];
       var ivWidth = ivCfg.width || 300;
       var ivHeight = ivCfg.height || 300;
+      var ivIsCarousel = ivFilePaths.length > 1;
+      var ivPerPage = 4;
+      var ivTotalPages = ivIsCarousel ? Math.ceil(ivFilePaths.length / ivPerPage) : 1;
 
       html += '<div class="comp-image-viewer-body">';
 
@@ -656,15 +667,44 @@ function renderNodes() {
       var ivInConnected = isPortConnected(node.id, 'file_path', 'input');
       html += '<div class="comp-port comp-port-in' + (ivInConnected ? ' comp-port-connected' : '') + '" data-port-id="' + compEscAttr(ivInPortId) + '" data-node-id="' + compEscAttr(node.id) + '" data-port-name="file_path" data-port-dir="in">';
       html += '<div class="comp-port-dot comp-port-dot-in"></div>';
-      html += '<span class="comp-port-label" title="Image file path">Path</span>';
+      html += '<span class="comp-port-label" title="Image file path(s)">Path</span>';
       html += '</div>';
       html += '</div>';
 
       // Image preview (center)
-      html += '<div class="comp-image-viewer-wrap" style="height:' + ivHeight + 'px;">';
-      if (ivFilePath) {
-        html += '<img class="comp-image-viewer-img" src="/api/file?path=' + encodeURIComponent(ivFilePath) + '" alt="Preview" onerror="this.style.display=\'none\';this.nextElementSibling.style.display=\'\'">';
-        html += '<div class="comp-image-viewer-placeholder" style="display:none;">Failed to load image</div>';
+      html += '<div class="comp-image-viewer-wrap" style="height:' + ivHeight + 'px;" data-node-id="' + compEscAttr(node.id) + '">';
+      if (ivIsCarousel) {
+        // Carousel with up to 4 images per page
+        html += '<div class="comp-iv-carousel" data-page="0" data-total-pages="' + ivTotalPages + '" data-per-page="' + ivPerPage + '" data-paths=\'' + JSON.stringify(ivFilePaths).replace(/'/g, '&#39;') + '\'>';
+        // Render first page of images
+        var ivPageImages = ivFilePaths.slice(0, ivPerPage);
+        var ivGridCols = ivPageImages.length >= 2 ? 2 : 1;
+        html += '<div class="comp-iv-carousel-grid" style="grid-template-columns:repeat(' + ivGridCols + ',1fr);">';
+        for (var ivi = 0; ivi < ivPageImages.length; ivi++) {
+          html += '<div class="comp-iv-carousel-cell">';
+          if (detectMediaTypeFromExt(ivPageImages[ivi], 'auto') === 'video') {
+            html += '<video class="comp-iv-carousel-img" src="/api/file?path=' + encodeURIComponent(ivPageImages[ivi]) + '" autoplay loop muted playsinline onerror="this.style.display=\'none\'"></video>';
+          } else {
+            html += '<img class="comp-iv-carousel-img" src="/api/file?path=' + encodeURIComponent(ivPageImages[ivi]) + '" alt="Image ' + (ivi + 1) + '" onerror="this.style.display=\'none\'">';
+          }
+          html += '</div>';
+        }
+        html += '</div>';
+        // Nav controls
+        html += '<div class="comp-iv-carousel-nav">';
+        html += '<button class="comp-iv-carousel-btn comp-iv-carousel-prev" data-node-id="' + compEscAttr(node.id) + '" disabled>&#9664;</button>';
+        html += '<span class="comp-iv-carousel-page">1 / ' + ivTotalPages + ' (' + ivFilePaths.length + ' images)</span>';
+        html += '<button class="comp-iv-carousel-btn comp-iv-carousel-next" data-node-id="' + compEscAttr(node.id) + '"' + (ivTotalPages <= 1 ? ' disabled' : '') + '>&#9654;</button>';
+        html += '</div>';
+        html += '</div>';
+      } else if (ivFilePath) {
+        var ivMediaType = detectMediaTypeFromExt(ivFilePath, 'auto');
+        if (ivMediaType === 'video') {
+          html += '<video class="comp-image-viewer-img" src="/api/file?path=' + encodeURIComponent(ivFilePath) + '" autoplay loop muted playsinline onerror="this.style.display=\'none\';this.nextElementSibling.style.display=\'\'"></video>';
+        } else {
+          html += '<img class="comp-image-viewer-img" src="/api/file?path=' + encodeURIComponent(ivFilePath) + '" alt="Preview" onerror="this.style.display=\'none\';this.nextElementSibling.style.display=\'\'">';
+        }
+        html += '<div class="comp-image-viewer-placeholder" style="display:none;">Failed to load</div>';
       } else {
         html += '<div class="comp-image-viewer-placeholder">No image<br><span style="font-size:0.6rem;">Set file path in properties</span></div>';
       }
@@ -676,7 +716,7 @@ function renderNodes() {
       var ivOutPortId = node.id + ':out:file_path';
       var ivOutConnected = isPortConnected(node.id, 'file_path', 'output');
       html += '<div class="comp-port comp-port-out' + (ivOutConnected ? ' comp-port-connected' : '') + '" data-port-id="' + compEscAttr(ivOutPortId) + '" data-node-id="' + compEscAttr(node.id) + '" data-port-name="file_path" data-port-dir="out">';
-      html += '<span class="comp-port-label" title="Image file path">Path</span>';
+      html += '<span class="comp-port-label" title="Image file path(s)">Path</span>';
       html += '<div class="comp-port-dot comp-port-dot-out"></div>';
       html += '</div>';
       html += '</div>';
@@ -686,7 +726,9 @@ function renderNodes() {
       // Footer
       html += '<div class="comp-node-footer">';
       html += '<span class="comp-node-image-viewer-badge">Image</span>';
-      if (ivFilePath) {
+      if (ivIsCarousel) {
+        html += '<span style="color:#64748b;font-size:0.6rem;margin-left:4px;">' + ivFilePaths.length + ' images</span>';
+      } else if (ivFilePath) {
         var ivFileName = ivFilePath.split('/').pop() || ivFilePath;
         html += '<span style="color:#64748b;font-size:0.6rem;margin-left:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:150px;display:inline-block;vertical-align:middle;">' + compEscHtml(ivFileName) + '</span>';
       }
@@ -992,6 +1034,13 @@ function renderNodes() {
         html += '<div class="comp-port-dot comp-port-dot-in"></div>';
         html += '<span class="comp-port-label" title="Asset name (optional)">Name</span>';
         html += '</div>';
+      } else if (assetMode === 'get') {
+        var asGetInPort = node.id + ':in:assetId';
+        var asGetInConn = isPortConnected(node.id, 'assetId', 'input');
+        html += '<div class="comp-port comp-port-in' + (asGetInConn ? ' comp-port-connected' : '') + '" data-port-id="' + compEscAttr(asGetInPort) + '" data-node-id="' + compEscAttr(node.id) + '" data-port-name="assetId" data-port-dir="in">';
+        html += '<div class="comp-port-dot comp-port-dot-in"></div>';
+        html += '<span class="comp-port-label" title="Asset ID to look up">Asset ID</span>';
+        html += '</div>';
       } else if (assetMode === 'remove') {
         var asRemInPort = node.id + ':in:assetId';
         var asRemInConn = isPortConnected(node.id, 'assetId', 'input');
@@ -1012,7 +1061,7 @@ function renderNodes() {
 
       // Outputs
       html += '<div class="comp-node-ports comp-node-outputs">';
-      if (assetMode === 'pick') {
+      if (assetMode === 'pick' || assetMode === 'get') {
         var pickOuts = [
           { name: 'filePath', label: 'File Path', title: 'Full path to the asset file' },
           { name: 'fileName', label: 'File Name', title: 'Asset file name' },
@@ -1632,6 +1681,54 @@ function renderNodes() {
 
       document.addEventListener('mousemove', onMouseMove);
       document.addEventListener('mouseup', onMouseUp);
+    });
+  });
+
+  // ── Image viewer carousel navigation ──
+  document.querySelectorAll('.comp-iv-carousel-btn').forEach(function(btn) {
+    btn.addEventListener('mousedown', function(e) { e.stopPropagation(); });
+    btn.addEventListener('click', function(e) {
+      e.stopPropagation();
+      e.preventDefault();
+      var carousel = btn.closest('.comp-iv-carousel');
+      if (!carousel) return;
+      var page = parseInt(carousel.getAttribute('data-page')) || 0;
+      var totalPages = parseInt(carousel.getAttribute('data-total-pages')) || 1;
+      var perPage = parseInt(carousel.getAttribute('data-per-page')) || 4;
+      var paths;
+      try { paths = JSON.parse(carousel.getAttribute('data-paths')); } catch(ex) { return; }
+      if (!Array.isArray(paths)) return;
+
+      if (btn.classList.contains('comp-iv-carousel-prev')) {
+        page = Math.max(0, page - 1);
+      } else {
+        page = Math.min(totalPages - 1, page + 1);
+      }
+      carousel.setAttribute('data-page', page);
+
+      // Update grid
+      var grid = carousel.querySelector('.comp-iv-carousel-grid');
+      if (grid) {
+        var startIdx = page * perPage;
+        var pageImages = paths.slice(startIdx, startIdx + perPage);
+        var gridCols = pageImages.length >= 2 ? 2 : 1;
+        grid.style.gridTemplateColumns = 'repeat(' + gridCols + ', 1fr)';
+        var cellHtml = '';
+        for (var ci = 0; ci < pageImages.length; ci++) {
+          cellHtml += '<div class="comp-iv-carousel-cell">';
+          cellHtml += ivMediaHtml(pageImages[ci], 'comp-iv-carousel-img', 'Image ' + (startIdx + ci + 1));
+          cellHtml += '</div>';
+        }
+        grid.innerHTML = cellHtml;
+      }
+
+      // Update nav
+      var prevBtn = carousel.querySelector('.comp-iv-carousel-prev');
+      var nextBtn = carousel.querySelector('.comp-iv-carousel-next');
+      var pageLabel = carousel.querySelector('.comp-iv-carousel-page');
+      if (prevBtn) prevBtn.disabled = (page === 0);
+      if (nextBtn) nextBtn.disabled = (page >= totalPages - 1);
+      if (pageLabel) pageLabel.textContent = (page + 1) + ' / ' + totalPages + ' (' + paths.length + ' items)';
     });
   });
 
@@ -3197,6 +3294,15 @@ function addMediaNode() {
   renderNodes(); renderEdges(); wireUpCanvas();
   updateNodeSelection(); updateDeleteButton(); updatePropertiesPanel();
   immediateSave(); fetchCompositions();
+}
+
+// Build an <img> or <video> tag for the image viewer based on file extension
+function ivMediaHtml(filePath, cssClass, altText) {
+  var mt = detectMediaTypeFromExt(filePath, 'auto');
+  if (mt === 'video') {
+    return '<video class="' + cssClass + '" src="/api/file?path=' + encodeURIComponent(filePath) + '" autoplay loop muted playsinline onerror="this.style.display=\'none\'"></video>';
+  }
+  return '<img class="' + cssClass + '" src="/api/file?path=' + encodeURIComponent(filePath) + '" alt="' + (altText || 'Preview') + '" onerror="this.style.display=\'none\'">';
 }
 
 function detectMediaTypeFromExt(filePath, configType) {

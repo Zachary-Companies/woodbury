@@ -265,7 +265,147 @@
           fontLigatures: true,
         });
 
+        // ── Edit with AI ──────────────────────────────────────
+        var aiEditWidget = null;
+        var aiEditZone = null;
+
+        function removeAiEditWidget() {
+          if (aiEditWidget) {
+            editor.removeContentWidget(aiEditWidget);
+            aiEditWidget = null;
+          }
+          if (aiEditZone) {
+            editor.changeViewZones(function(accessor) { accessor.removeZone(aiEditZone); });
+            aiEditZone = null;
+          }
+        }
+
+        function showAiEditWidget() {
+          removeAiEditWidget();
+
+          var selection = editor.getSelection();
+          var hasSelection = selection && !selection.isEmpty();
+          var targetLine = hasSelection ? selection.startLineNumber : editor.getPosition().lineNumber;
+
+          // Create the widget DOM
+          var widgetEl = document.createElement('div');
+          widgetEl.className = 'woodbury-monaco-ai-edit-widget';
+          widgetEl.innerHTML = [
+            '<div class="woodbury-monaco-ai-edit-row">',
+            '  <span class="woodbury-monaco-ai-edit-icon">&#x2728;</span>',
+            '  <input class="woodbury-monaco-ai-edit-input" type="text" placeholder="' + (hasSelection ? 'Describe the fix for the selected code...' : 'Describe what to change...') + '" autofocus>',
+            '  <button class="woodbury-monaco-ai-edit-submit" type="button">Fix</button>',
+            '  <button class="woodbury-monaco-ai-edit-cancel" type="button">&times;</button>',
+            '</div>',
+          ].join('');
+
+          var inputEl = widgetEl.querySelector('.woodbury-monaco-ai-edit-input');
+          var submitBtn = widgetEl.querySelector('.woodbury-monaco-ai-edit-submit');
+          var cancelBtn = widgetEl.querySelector('.woodbury-monaco-ai-edit-cancel');
+
+          // Insert a view zone to push code down and make room
+          var zoneId = null;
+          editor.changeViewZones(function(accessor) {
+            zoneId = accessor.addZone({
+              afterLineNumber: targetLine - 1,
+              heightInPx: 44,
+              domNode: document.createElement('div'),
+            });
+          });
+          aiEditZone = zoneId;
+
+          // Content widget positioned at the target line
+          aiEditWidget = {
+            getId: function() { return 'woodbury.ai.edit'; },
+            getDomNode: function() { return widgetEl; },
+            getPosition: function() {
+              return {
+                position: { lineNumber: targetLine, column: 1 },
+                preference: [monaco.editor.ContentWidgetPositionPreference.ABOVE],
+              };
+            },
+          };
+          editor.addContentWidget(aiEditWidget);
+
+          // Focus the input after a tick
+          requestAnimationFrame(function() { inputEl.focus(); });
+
+          // Prevent editor from stealing keystrokes
+          inputEl.addEventListener('keydown', function(e) { e.stopPropagation(); });
+
+          async function doAiEdit() {
+            var instruction = inputEl.value.trim();
+            if (!instruction) return;
+
+            var fullCode = editor.getValue();
+            var selectedCode = hasSelection ? editor.getModel().getValueInRange(selection) : '';
+
+            inputEl.disabled = true;
+            submitBtn.disabled = true;
+            submitBtn.textContent = '...';
+            statusEl.textContent = 'AI is editing code...';
+            statusEl.style.color = '#93c5fd';
+
+            try {
+              var editPrompt = selectedCode
+                ? 'The user selected this code:\n```\n' + selectedCode + '\n```\n\nUser instruction: ' + instruction + '\n\nReturn the FULL updated file code (not just the selection). Preserve everything else.'
+                : 'User instruction: ' + instruction;
+
+              var res = await fetch('/api/compositions/generate-script', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  mode: 'edit',
+                  description: editPrompt,
+                  currentCode: fullCode,
+                }),
+              });
+              var data = await res.json();
+              if (!res.ok) throw new Error(data.error || 'AI edit failed');
+
+              if (data.code) {
+                // Replace the entire editor content with the AI result
+                var fullRange = editor.getModel().getFullModelRange();
+                editor.executeEdits('ai-edit', [{
+                  range: fullRange,
+                  text: data.code,
+                }]);
+                statusEl.textContent = 'AI edit applied. Review and save when ready.';
+                statusEl.style.color = '#86efac';
+              } else {
+                throw new Error('No code returned');
+              }
+            } catch (err) {
+              statusEl.textContent = 'AI edit failed: ' + err.message;
+              statusEl.style.color = '#fca5a5';
+            } finally {
+              removeAiEditWidget();
+              editor.focus();
+            }
+          }
+
+          submitBtn.addEventListener('click', doAiEdit);
+          inputEl.addEventListener('keydown', function(e) {
+            if (e.key === 'Enter') { e.preventDefault(); doAiEdit(); }
+            if (e.key === 'Escape') { e.preventDefault(); removeAiEditWidget(); editor.focus(); }
+          });
+          cancelBtn.addEventListener('click', function() { removeAiEditWidget(); editor.focus(); });
+        }
+
+        // Register as a Monaco editor action (context menu + Cmd+K)
+        editor.addAction({
+          id: 'woodbury.ai.edit',
+          label: 'Edit with AI',
+          keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyK],
+          contextMenuGroupId: '1_modification',
+          contextMenuOrder: 0,
+          run: function() { showAiEditWidget(); },
+        });
+
+        // ── End Edit with AI ──────────────────────────────────
+
         function finish(result) {
+          removeAiEditWidget();
           editor.dispose();
           overlay.remove();
           resolve(result);
@@ -275,6 +415,13 @@
 
         function onKeydown(event) {
           if (event.key === 'Escape' && currentOverlay === overlay) {
+            // If AI widget is open, close it first instead of closing the editor
+            if (aiEditWidget) {
+              removeAiEditWidget();
+              editor.focus();
+              event.preventDefault();
+              return;
+            }
             event.preventDefault();
             closeOverlay(undefined);
           }

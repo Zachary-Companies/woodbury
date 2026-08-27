@@ -36,7 +36,13 @@ export const nanobananaVideoSchema = z.object({
   ),
 });
 
-export type NanoBananaVideoParams = z.infer<typeof nanobananaVideoSchema>;
+/**
+ * Callers pass the schema's INPUT shape — nanobananaVideo() applies its own
+ * defaults for duration/aspectRatio/model when destructuring. z.infer would give
+ * the post-parse OUTPUT shape, which marks those defaulted fields as required
+ * and misdescribes every real call site.
+ */
+export type NanoBananaVideoParams = z.input<typeof nanobananaVideoSchema>;
 
 /**
  * Get the Gemini API key from environment or extension config

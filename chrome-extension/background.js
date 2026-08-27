@@ -24,6 +24,7 @@ let debugModeData = null;         // debug session state for side panel + marker
 let sidePanelOpen = false;        // track sidepanel open state via port connection
 let pendingPick = null;           // stores element_picked data when sidepanel was closed during pick
 let pendingStepResult = null;     // stores debug step result from close→execute→reopen flow
+let lockedTabId = null;           // when set, all bridge commands target this tab instead of the active tab
 
 // Restore debug state from persistent storage (survives MV3 service worker restarts)
 chrome.storage.local.get('debugModeData', (result) => {
@@ -450,8 +451,40 @@ async function handleMessage(message) {
   }
 
   try {
-    // Get the active tab
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    // ── Tab locking: lock_tab / unlock_tab ──
+    if (action === 'lock_tab') {
+      const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (activeTab?.id) {
+        lockedTabId = activeTab.id;
+        console.log('[Woodbury] Tab locked to', lockedTabId, activeTab.url);
+        sendResponse({ id, success: true, data: { tabId: lockedTabId, url: activeTab.url } });
+      } else {
+        sendResponse({ id, error: 'No active tab to lock' });
+      }
+      return;
+    }
+    if (action === 'unlock_tab') {
+      console.log('[Woodbury] Tab unlocked (was', lockedTabId, ')');
+      lockedTabId = null;
+      sendResponse({ id, success: true });
+      return;
+    }
+
+    // Get the target tab — use locked tab if set, otherwise active tab
+    let tab;
+    if (lockedTabId) {
+      try {
+        tab = await chrome.tabs.get(lockedTabId);
+      } catch (err) {
+        // Locked tab was closed — fall back to active tab and clear lock
+        console.log('[Woodbury] Locked tab', lockedTabId, 'no longer exists, falling back to active tab');
+        lockedTabId = null;
+      }
+    }
+    if (!tab) {
+      const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      tab = activeTab;
+    }
     if (!tab || !tab.id) {
       sendResponse({ id, error: 'No active tab found' });
       return;
@@ -1028,8 +1061,77 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponseCallback) => 
     } else {
       console.log('[Woodbury REC] DROPPED recording event (ws closed, recording not active)');
     }
+    // NOTE: Do NOT re-broadcast to sidepanel here — chrome.runtime.sendMessage()
+    // from content.js already reaches both background AND sidepanel (extension pages).
+    // Re-broadcasting caused every recorded step to appear twice.
     // Don't need to wait for response
     return false;
+  }
+
+  // Side panel requests to start/stop recording mode
+  if (message.type === 'set_recording_mode_from_panel') {
+    recordingModeActive = !!message.enabled;
+    if (message.mode) recordingModeType = message.mode;
+    (async () => {
+      try {
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (tab?.id) {
+          try { await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content.js'] }); } catch {}
+          await chrome.tabs.sendMessage(tab.id, {
+            action: 'set_recording_mode',
+            params: { enabled: message.enabled, mode: message.mode || 'accessibility' }
+          });
+
+          // Capture initial snapshot when recording starts
+          if (message.enabled) {
+            scheduleSnapshot(tab.id);
+          }
+        }
+        sendResponse({ success: true });
+      } catch (e) {
+        sendResponse({ success: false, error: e.message });
+      }
+    })();
+    return true; // async response
+  }
+
+  // Side panel requests to save a workflow to the dashboard API
+  if (message.type === 'save_workflow_to_dashboard') {
+    (async () => {
+      try {
+        const dashUrl = message.dashboardUrl || 'http://127.0.0.1:9001';
+        const resp = await fetch(`${dashUrl}/api/workflows`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(message.workflow),
+        });
+        const data = await resp.json();
+        sendResponse({ success: resp.ok, data });
+      } catch (e) {
+        sendResponse({ success: false, error: e.message });
+      }
+    })();
+    return true; // async response
+  }
+
+  // Side panel requests to update an existing workflow via PUT
+  if (message.type === 'update_workflow_to_dashboard') {
+    (async () => {
+      try {
+        const dashUrl = message.dashboardUrl || 'http://127.0.0.1:9001';
+        const id = message.workflowId;
+        const resp = await fetch(`${dashUrl}/api/workflows/${encodeURIComponent(id)}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(message.workflow),
+        });
+        const data = await resp.json();
+        sendResponse({ success: resp.ok, data });
+      } catch (e) {
+        sendResponse({ success: false, error: e.message });
+      }
+    })();
+    return true; // async response
   }
 });
 

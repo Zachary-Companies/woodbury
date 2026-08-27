@@ -49,6 +49,7 @@ import type {
   FileDialogStep,
   ScrollStep,
   KeyboardStep,
+  ClipboardStep,
   KeyboardNavStep,
   KeyboardNavAction,
   ExpectedFocusDescriptor,
@@ -62,12 +63,14 @@ import type {
   DesktopTypeStep,
   DesktopKeyboardStep,
   InjectStyleStep,
+  LlmCheckStep,
   HttpRequestStep,
   EvalStep,
   ExtractStructuredStep,
   ParallelStep,
   Precondition,
   Postcondition,
+  ResolvedElement,
 } from './types.js';
 import { substituteObject } from './variable-sub.js';
 import { ElementResolver, AccessibilityResolver } from './resolver.js';
@@ -710,6 +713,8 @@ export class WorkflowExecutor {
         return this.execScroll(step as ScrollStep);
       case 'keyboard':
         return this.execKeyboard(step as KeyboardStep);
+      case 'clipboard':
+        return this.execClipboard(step as ClipboardStep);
       case 'keyboard_nav':
         return this.execKeyboardNav(step as KeyboardNavStep);
       case 'sub_workflow':
@@ -740,6 +745,8 @@ export class WorkflowExecutor {
         return this.execDesktopKeyboard(step as DesktopKeyboardStep);
       case 'inject_style':
         return this.execInjectStyle(step as InjectStyleStep);
+      case 'llm_check':
+        return this.execLlmCheck(step as LlmCheckStep);
       default:
         throw new Error(`Unknown step type: ${(step as WorkflowStep).type}`);
     }
@@ -822,7 +829,86 @@ export class WorkflowExecutor {
       } : null,
     });
 
-    const resolved = await this.resolver.resolve(step.target);
+    // Semantic-first resolution: never use percentage for web steps.
+    // Fallback chain: semantic → hover discovery → LLM vision.
+    // resolve() THROWS when it exhausts the chain, so the throw has to be caught
+    // here — otherwise the fallbacks below are unreachable in exactly the case
+    // they exist for (element present but no longer matching its recorded target).
+    let resolved: ResolvedElement | null = null;
+    let resolveError: unknown = null;
+    try {
+      resolved = await this.resolver.resolve(step.target, { allowPercentage: false });
+    } catch (err) {
+      resolveError = err;
+      execLog('INFO', `execClick: semantic resolution threw, will try fallbacks: ${step.id}`, {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+
+    // Semantic resolution failed outright, produced no position, or fell back to
+    // percentage — try hover discovery, then LLM vision.
+    if (!resolved || !resolved.position || resolved.matchedBy === 'percentage') {
+      execLog('INFO', `execClick: semantic resolution insufficient, trying hover discovery: ${step.id}`);
+      const hoverResult = await this.resolver.resolveWithHoverDiscovery(
+        step.target,
+        async (x, y) => { await this.nativeClick(x, y, 'move'); },
+        async (ms) => { await this.sleepMs(ms); },
+      );
+      if (hoverResult) {
+        resolved = hoverResult;
+      } else {
+        execLog('INFO', `execClick: hover discovery failed, trying LLM vision: ${step.id}`);
+        const llmResult = await this.resolver.resolveWithLlmVision(
+          step.target,
+          async () => {
+            try {
+              const vpResult = await this.bridge.send('capture_viewport') as any;
+              const vpData = vpResult?.data || vpResult;
+              const imageDataUrl = vpData?.image;
+              if (!imageDataUrl) return null;
+              return imageDataUrl.replace(/^data:image\/[a-zA-Z+]+;base64,/, '');
+            } catch { return null; }
+          },
+          async (base64, description) => {
+            try {
+              const Anthropic = (await import('@anthropic-ai/sdk')).default;
+              const apiKey = process.env.ANTHROPIC_API_KEY;
+              if (!apiKey) return null;
+              const client = new Anthropic({ apiKey });
+              const resp = await client.messages.create({
+                model: 'claude-haiku-4-5-20251001',
+                max_tokens: 128,
+                temperature: 0,
+                messages: [{
+                  role: 'user',
+                  content: [
+                    { type: 'image', source: { type: 'base64', media_type: 'image/png', data: base64 } },
+                    { type: 'text', text: `Find the UI element: ${description}. Return ONLY JSON: { "x": number, "y": number, "confidence": number }` },
+                  ],
+                }],
+              });
+              const text = resp.content.filter((b: any) => b.type === 'text').map((b: any) => b.text).join('');
+              let cleaned = text.trim();
+              const fence = cleaned.match(/```(?:json)?\s*\n?([\s\S]*?)\n?\s*```/);
+              if (fence) cleaned = fence[1].trim();
+              return JSON.parse(cleaned);
+            } catch { return null; }
+          },
+        );
+        if (llmResult) {
+          resolved = llmResult;
+        }
+      }
+
+      // Every fallback failed. If semantic resolution threw, re-raise that error
+      // (it names what was tried); otherwise report the unusable result.
+      if (!resolved || !resolved.position) {
+        if (resolveError) throw resolveError;
+        throw new Error(
+          `Element not found and all fallbacks failed for step "${step.id}" (${step.label || 'unlabeled'})`
+        );
+      }
+    }
 
     execLog('INFO', `execClick resolved: ${step.id}`, {
       matchedBy: resolved.matchedBy,
@@ -1350,6 +1436,46 @@ export class WorkflowExecutor {
 
   private async execKeyboard(step: KeyboardStep): Promise<void> {
     await this.nativeKeyPress(step.key, step.modifiers);
+  }
+
+  private async execClipboard(step: ClipboardStep): Promise<void> {
+    const text = step.value || '';
+    const literal = JSON.stringify(text);
+
+    // navigator.clipboard.writeText() returns a PROMISE. Evaluating the bare call
+    // resolves the bridge request successfully even when the write is rejected
+    // (no document focus, permission denied), so a try/catch around bridge.send
+    // never sees the failure and the fallback below never runs — leaving a stale
+    // clipboard to be pasted. Resolve the promise inside the page and report the
+    // outcome as a value we can actually inspect.
+    let wrote = false;
+    try {
+      const res = await this.bridge.send('eval', {
+        expression: `navigator.clipboard.writeText(${literal}).then(() => true, () => false)`,
+      }) as any;
+      const value = res?.data?.result ?? res?.result ?? res?.data ?? res;
+      wrote = value === true || value === 'true';
+    } catch {
+      wrote = false;
+    }
+
+    if (!wrote) {
+      // Fallback: textarea + execCommand (synchronous, returns a boolean)
+      execLog('INFO', 'execClipboard: clipboard API write failed, using execCommand fallback');
+      const res = await this.bridge.send('eval', {
+        expression: `(() => { const t = document.createElement('textarea'); t.value = ${literal}; t.style.position = 'fixed'; t.style.left = '-9999px'; document.body.appendChild(t); t.select(); const ok = document.execCommand('copy'); t.remove(); return ok; })()`,
+      }) as any;
+      const value = res?.data?.result ?? res?.result ?? res?.data ?? res;
+      if (value !== true && value !== 'true') {
+        throw new Error('clipboard: failed to write to the clipboard (clipboard API rejected and execCommand fallback returned false)');
+      }
+    }
+
+    if (step.paste) {
+      await this.sleepMs(200);
+      const mod = process.platform === 'darwin' ? 'cmd' : 'ctrl';
+      await this.nativeKeyPress('v', [mod]);
+    }
   }
 
   // ── Keyboard Nav helpers ───────────────────────────────────
@@ -1996,6 +2122,116 @@ export class WorkflowExecutor {
         throw new Error('inject_style step requires a non-empty styles object when action is "apply"');
       }
       await this.bridge.send('inject_style', { selector: step.selector, styles: step.styles });
+    }
+  }
+
+  private async execLlmCheck(step: LlmCheckStep): Promise<void> {
+    execLog('INFO', `execLlmCheck: mode=${step.mode}, prompt=${step.prompt.slice(0, 80)}`);
+
+    // 1. Capture screenshot
+    const viewportResult = await this.bridge.send('capture_viewport') as Record<string, unknown>;
+    const data = viewportResult?.data as Record<string, unknown> | undefined;
+    const imageDataUrl = (data?.image || viewportResult?.image) as string | undefined;
+    if (!imageDataUrl) {
+      throw new Error('llm_check: Failed to capture viewport screenshot');
+    }
+
+    // Strip data URL prefix → raw base64
+    const base64 = imageDataUrl.replace(/^data:image\/[a-zA-Z+]+;base64,/, '');
+
+    // 2. Lazy-import vision service (avoids loading LLM deps when not used)
+    const { runVisionPrompt, parseJsonResponse } = await import('../loop/llm-service.js');
+
+    // 3. Build mode-specific prompt
+    let systemPrompt: string;
+    let defaultMaxTokens: number;
+
+    switch (step.mode) {
+      case 'validate':
+        systemPrompt = `Look at this screenshot of a web page. Answer the following question and respond with ONLY valid JSON in this exact format: { "pass": boolean, "reason": "brief explanation" }\n\nQuestion: ${step.prompt}`;
+        defaultMaxTokens = 256;
+        break;
+      case 'extract':
+        systemPrompt = `Look at this screenshot of a web page. Extract the requested information and respond with ONLY valid JSON.\n\nRequest: ${step.prompt}`;
+        defaultMaxTokens = 1024;
+        break;
+      case 'locate':
+        systemPrompt = `Look at this screenshot of a web page. Find the UI element described below and return its approximate center coordinates as ONLY valid JSON in this format: { "x": number, "y": number, "confidence": number } where x and y are pixel coordinates from the top-left of the viewport, and confidence is a number from 0 to 1.\n\nElement to find: ${step.prompt}`;
+        defaultMaxTokens = 128;
+        break;
+      default:
+        throw new Error(`llm_check: Unknown mode "${(step as any).mode}"`);
+    }
+
+    // 4. Call the vision LLM
+    const response = await runVisionPrompt({
+      prompt: systemPrompt,
+      imageBase64: base64,
+      model: step.model,
+      maxTokens: step.maxTokens ?? defaultMaxTokens,
+      temperature: 0,
+    });
+
+    execLog('INFO', `execLlmCheck: LLM responded`, {
+      mode: step.mode,
+      responseLength: response.content.length,
+      usage: response.usage,
+    });
+
+    // 5. Parse JSON response
+    let parsed: any;
+    try {
+      parsed = parseJsonResponse(response.content);
+    } catch (err) {
+      execLog('WARN', `execLlmCheck: Failed to parse JSON response`, { raw: response.content });
+      throw new Error(`llm_check: LLM response was not valid JSON: ${response.content.slice(0, 200)}`);
+    }
+
+    // 6. Handle result by mode
+    switch (step.mode) {
+      case 'validate': {
+        const pass = !!parsed.pass;
+        const reason = parsed.reason || '';
+        execLog('INFO', `execLlmCheck validate: pass=${pass}, reason=${reason}`);
+
+        if (step.outputVariable) {
+          this.variables[step.outputVariable] = parsed;
+        }
+
+        if (!pass && step.failOnFalse !== false) {
+          throw new Error(`llm_check validation failed: ${reason}`);
+        }
+        break;
+      }
+
+      case 'extract': {
+        if (step.outputVariable) {
+          this.variables[step.outputVariable] = parsed;
+        }
+        execLog('INFO', `execLlmCheck extract: stored in ${step.outputVariable}`, { dataType: typeof parsed });
+        break;
+      }
+
+      case 'locate': {
+        const x = Number(parsed.x);
+        const y = Number(parsed.y);
+        const confidence = Number(parsed.confidence ?? 0);
+
+        if (isNaN(x) || isNaN(y)) {
+          throw new Error(`llm_check locate: LLM returned invalid coordinates: ${JSON.stringify(parsed)}`);
+        }
+
+        if (confidence < 0.3) {
+          execLog('WARN', `execLlmCheck locate: Low confidence ${confidence}`, parsed);
+          throw new Error(`llm_check locate: Confidence too low (${confidence}) for element: ${step.prompt}`);
+        }
+
+        const coords = { x, y, confidence };
+        const varName = step.coordinateVariable || 'llmLocatedElement';
+        this.variables[varName] = coords;
+        execLog('INFO', `execLlmCheck locate: found at (${x}, ${y}) confidence=${confidence}, stored in ${varName}`);
+        break;
+      }
     }
   }
 

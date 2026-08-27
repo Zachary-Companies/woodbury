@@ -1,9 +1,9 @@
 {
   "tasks": [
     {
-      "id": "task_mn55hyp9_w5s4j3",
+      "id": "task_mo3dcq9r_ojnli1",
       "subject": "task",
-      "description": "Confirm whether the Woodbury platform UI is React-based",
+      "description": "Identify the identity of the AI model.",
       "status": "pending",
       "blockedBy": [],
       "blocks": [],
@@ -11,5 +11,5 @@
       "validators": []
     }
   ],
-  "updatedAt": "2026-03-24T21:52:50.925Z"
+  "updatedAt": "2026-04-17T20:36:53.631Z"
 }

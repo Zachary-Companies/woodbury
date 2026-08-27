@@ -181,5 +181,32 @@ export class AgentV1Compat {
   }
 }
 
+// Re-export session, permissions, hooks from V1 (shared infrastructure)
+export {
+  SessionStore,
+  SessionManager,
+} from '../session';
+export type {
+  StoredSession,
+  SessionMessage,
+  SessionUsage,
+  TokenUsage,
+  PermissionDecision,
+} from '../session';
+export {
+  PermissionPolicy,
+  PermissionMode,
+} from '../permissions';
+export type {
+  PermissionOutcome,
+  PermissionPrompter,
+} from '../permissions';
+export { HookRunner } from '../hooks';
+export type {
+  HookConfig,
+  HookPayload,
+  HookResult,
+} from '../hooks';
+
 // Agent Builder
 export * as AgentBuilder from './agent-builder';

@@ -55,7 +55,7 @@ export class StrategicPlanner {
     private stateManager: StateManager,
     private memoryStore: MemoryStore,
     private adapter: ProviderAdapter,
-    private provider: 'openai' | 'anthropic' | 'groq',
+    private provider: 'openai' | 'anthropic' | 'groq' | 'ollama',
     private model: string,
     private systemPrompt: string,
   ) {}

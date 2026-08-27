@@ -81,6 +81,7 @@ const STEP_ICONS = {
   inject_style: '&#x1f3a8;',
   keyboard_nav: '&#x1f9ed;',
   click_selector: '&#x1f3af;',
+  clipboard: '&#x1f4cb;',
 };
 
 // ── Variable auto-detection ─────────────────────────────────
@@ -932,6 +933,7 @@ function buildDefaultStep(type) {
     case 'conditional': return { type: 'conditional', condition: { type: 'expression', expression: '' }, thenSteps: [], elseSteps: [], label: 'Conditional' };
     case 'loop': return { type: 'loop', overVariable: '', itemVariable: 'item', indexVariable: '', steps: [], label: 'Loop' };
     case 'try_catch': return { type: 'try_catch', trySteps: [], catchSteps: [], errorVariable: 'error', label: 'Try / Catch' };
+    case 'clipboard': return { type: 'clipboard', value: '', paste: true, delayAfterMs: 500, label: '' };
     case 'inject_style': return { type: 'inject_style', selector: '', styles: {}, action: 'apply', label: '' };
     case 'click_selector': return { type: 'click_selector', selector: '', shadowDomSelector: '', textContent: '', exactMatch: false, clickType: 'single', delayAfterMs: 1000, label: '' };
     default: return { type: type, label: '' };
@@ -1121,6 +1123,7 @@ function buildStepLabel(step, idx) {
     case 'conditional': return 'Conditional';
     case 'loop': return 'Loop over ' + (step.overVariable || 'items');
     case 'try_catch': return 'Try / Catch';
+    case 'clipboard': return (step.paste ? 'Paste' : 'Copy') + ' "' + truncate(step.value || '', 25) + '"';
     case 'inject_style': return step.action === 'clear' ? 'Clear styles: ' + truncate(step.selector || 'all', 30) : 'Inject style: ' + truncate(step.selector || '', 30);
     case 'click_selector': return 'Click ' + (step.selector || 'element') + (step.shadowDomSelector ? ' [shadow: ' + truncate(step.shadowDomSelector, 20) + ']' : '') + (step.textContent ? ' "' + truncate(step.textContent, 20) + '"' : '');
     default: return 'Step ' + (idx + 1);

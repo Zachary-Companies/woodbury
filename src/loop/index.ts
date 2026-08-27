@@ -6,8 +6,75 @@ export { ToolParser, parseToolCall, validateToolCall } from './tool-parser.js';
 export { loadConfig } from './config.js';
 export { createLogger, ProgressLogger } from './logger.js';
 export { createRenderer } from './renderer.js';
+
+// --- Woodbury extensions ------------------------------------------------
+// Streaming LLM entry point + callback type used by the dashboard chat UI
+// and agent-factory. Upstream doesn't export these (streaming lives in
+// llm-service only locally).
 export { runPromptStream } from './llm-service.js';
 export type { StreamCallbacks } from './llm-service.js';
+// --- end Woodbury extensions --------------------------------------------
+
+// Session persistence
+export {
+  SessionStore,
+  SessionManager,
+} from './session.js';
+export type {
+  StoredSession,
+  SessionMessage,
+  SessionContentBlock,
+  SessionUsage,
+  TokenUsage,
+  PermissionDecision,
+} from './session.js';
+
+// Permission system
+export {
+  PermissionPolicy,
+  PermissionMode,
+} from './permissions.js';
+export type {
+  PermissionOutcome,
+  PermissionPrompter,
+} from './permissions.js';
+
+// Hook system
+export { HookRunner } from './hooks.js';
+export type {
+  HookConfig,
+  HookPayload,
+  HookResult,
+  HookEvent,
+} from './hooks.js';
+
+// Memory store
+export { MemoryStore } from './memory-store.js';
+export type {
+  StoredMemory,
+  MemoryScope,
+  MemorySearchOptions,
+  MemorySearchResult,
+  MemoryStoreConfig,
+} from './memory-store.js';
+
+// Compaction
+export {
+  compactMessages,
+  shouldCompact,
+  estimateTokens,
+  buildStructuredSummary,
+  formatSummary,
+  formatContinuationMessage,
+  extractExistingCompactionSummary,
+  DEFAULT_COMPACTION_CONFIG,
+} from './compaction.js';
+export type {
+  CompactionConfig,
+  CompactionResult,
+  CompactionSummary,
+  ChatMessageCompat,
+} from './compaction.js';
 
 // Type exports
 export * from './types.js';
@@ -16,6 +83,8 @@ export * from './types.js';
 export {
   fileReadDefinition,
   fileReadHandler,
+  fileEditDefinition,
+  fileEditHandler,
   fileWriteDefinition,
   fileWriteHandler,
   listDirectoryDefinition,
@@ -50,8 +119,23 @@ export {
   apiSearchHandler,
   databaseQueryDefinition,
   databaseQueryHandler,
+  memorySaveDefinition,
+  memorySaveHandler,
+  memoryRecallDefinition,
+  memoryRecallHandler,
+  memoryForgetDefinition,
+  memoryForgetHandler,
   allTools,
 } from './tools/index.js';
+
+// Project context discovery
+export { discoverProjectContext } from './project-context.js';
+export type { ProjectContextResult } from './project-context.js';
+
+// Software engineering prompt and preset
+export { SOFTWARE_ENGINEERING_PROMPT } from './prompts/software-engineering.js';
+export { createSoftwareAgent, createSoftwareToolRegistry } from './presets/software-engineering.js';
+export type { SoftwareAgentOptions } from './presets/software-engineering.js';
 
 // Knowledge base
 export { KnowledgeBase } from './knowledge-base.js';

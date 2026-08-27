@@ -28,7 +28,7 @@ try {
   // Fallback version
 }
 
-const VALID_PROVIDERS = ['openai', 'anthropic', 'groq', 'claude-code'] as const;
+const VALID_PROVIDERS = ['openai', 'anthropic', 'groq', 'claude-code', 'ollama'] as const;
 
 program
   .name('woodbury')
@@ -39,7 +39,7 @@ program
 program
   .option('-v, --verbose', 'Enable verbose logging')
   .option('-m, --model <model>', 'LLM model to use')
-  .option('-p, --provider <provider>', 'LLM provider (openai, anthropic, groq, claude-code)')
+  .option('-p, --provider <provider>', 'LLM provider (openai, anthropic, groq, claude-code, ollama)')
   .option('--working-directory <path>', 'Set working directory')
   .option('--context-dir <path>', 'Set context directory')
   .option('--max-iterations <number>', 'Maximum agent iterations', parseInt)

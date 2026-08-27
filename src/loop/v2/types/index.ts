@@ -16,8 +16,8 @@ export interface AgentV2Config {
   /** LLM model to use */
   model: string;
 
-  /** Provider: 'anthropic' | 'openai' | 'groq' */
-  provider?: 'anthropic' | 'openai' | 'groq';
+  /** Provider: 'anthropic' | 'openai' | 'groq' | 'ollama' */
+  provider?: 'anthropic' | 'openai' | 'groq' | 'ollama';
 
   /** System prompt for the agent */
   systemPrompt: string;
@@ -51,6 +51,38 @@ export interface AgentV2Config {
 
   /** Retry configuration for LLM calls (default: 3 retries with exponential backoff) */
   retryConfig?: RetryConfig;
+
+  /** Maximum tokens per LLM response (default: 8192) */
+  maxTokens?: number;
+
+  /** Temperature for LLM responses (default: 0.1) */
+  temperature?: number;
+
+  // Session persistence
+  /** Directory to store session files (enables crash recovery) */
+  sessionDir?: string;
+  /** Session ID to resume from */
+  resumeSessionId?: string;
+  /** Auto-save interval in ms (default: 5000) */
+  sessionAutoSaveMs?: number;
+
+  // Permission system
+  /** Permission mode: 'read_only' | 'workspace_write' | 'full_access' | 'prompt' */
+  permissionMode?: string;
+  /** Per-tool permission overrides */
+  toolPermissions?: Record<string, string>;
+  /** Tools to deny regardless of permission mode */
+  denyTools?: string[];
+  /** Tool name prefixes to deny */
+  denyToolPrefixes?: string[];
+
+  // Hook system
+  /** Shell commands to run before each tool execution */
+  preToolUseHooks?: string[];
+  /** Shell commands to run after each tool execution */
+  postToolUseHooks?: string[];
+  /** Timeout for hook commands in ms (default: 10000) */
+  hookTimeoutMs?: number;
 }
 
 /**

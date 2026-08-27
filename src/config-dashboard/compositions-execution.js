@@ -2884,37 +2884,124 @@ function pollCompRunStatus() {
           } else {
             removeNodeRetryBadge(nodeId);
           }
-          // Update image viewer nodes with runtime file path
+          // Update image viewer nodes with runtime file path (supports arrays)
           if (ns.workflowId === '__image_viewer__' && ns.status === 'completed') {
             var runtimePath = (ns.outputVariables && ns.outputVariables.file_path) || (ns.inputVariables && ns.inputVariables.file_path);
-            if (runtimePath && typeof runtimePath === 'string') {
+            var runtimePaths = [];
+            if (Array.isArray(runtimePath)) {
+              runtimePaths = runtimePath.filter(function(p) { return typeof p === 'string' && p; });
+            } else if (runtimePath && typeof runtimePath === 'string') {
+              runtimePaths = [runtimePath];
+            }
+            if (runtimePaths.length > 0) {
               var nodeEl = document.querySelector('.comp-node[data-node-id="' + nodeId + '"]');
               if (nodeEl) {
                 var imgWrap = nodeEl.querySelector('.comp-image-viewer-wrap');
                 if (imgWrap) {
-                  var existingImg = imgWrap.querySelector('.comp-image-viewer-img');
+                  var resizeHandle = imgWrap.querySelector('.comp-image-viewer-resize-handle');
                   var placeholder = imgWrap.querySelector('.comp-image-viewer-placeholder');
-                  if (existingImg) {
-                    var newSrc = '/api/file?path=' + encodeURIComponent(runtimePath);
-                    if (existingImg.getAttribute('src') !== newSrc) {
-                      existingImg.setAttribute('src', newSrc);
-                      existingImg.style.display = '';
-                      if (placeholder) placeholder.style.display = 'none';
+                  if (runtimePaths.length === 1) {
+                    // Single file — detect image vs video
+                    var existingCarousel = imgWrap.querySelector('.comp-iv-carousel');
+                    if (existingCarousel) existingCarousel.remove();
+                    var existingMedia = imgWrap.querySelector('.comp-image-viewer-img');
+                    var newSrc = '/api/file?path=' + encodeURIComponent(runtimePaths[0]);
+                    var isVideo = detectMediaTypeFromExt(runtimePaths[0], 'auto') === 'video';
+                    var needsReplace = !existingMedia
+                      || existingMedia.getAttribute('src') !== newSrc
+                      || (isVideo && existingMedia.tagName !== 'VIDEO')
+                      || (!isVideo && existingMedia.tagName !== 'IMG');
+                    if (needsReplace) {
+                      if (existingMedia) existingMedia.remove();
+                      var mediaEl;
+                      if (isVideo) {
+                        mediaEl = document.createElement('video');
+                        mediaEl.autoplay = true;
+                        mediaEl.loop = true;
+                        mediaEl.muted = true;
+                        mediaEl.playsInline = true;
+                      } else {
+                        mediaEl = document.createElement('img');
+                        mediaEl.alt = 'Preview';
+                      }
+                      mediaEl.className = 'comp-image-viewer-img';
+                      mediaEl.src = newSrc;
+                      mediaEl.onerror = function() { this.style.display = 'none'; if (placeholder) placeholder.style.display = ''; };
+                      if (placeholder) {
+                        imgWrap.insertBefore(mediaEl, placeholder);
+                        placeholder.style.display = 'none';
+                      } else if (resizeHandle) {
+                        imgWrap.insertBefore(mediaEl, resizeHandle);
+                      }
                     }
                   } else {
-                    // No img element yet — create one
-                    var img = document.createElement('img');
-                    img.className = 'comp-image-viewer-img';
-                    img.src = '/api/file?path=' + encodeURIComponent(runtimePath);
-                    img.alt = 'Preview';
-                    img.onerror = function() { this.style.display = 'none'; if (placeholder) placeholder.style.display = ''; };
-                    if (placeholder) {
-                      imgWrap.insertBefore(img, placeholder);
-                      placeholder.style.display = 'none';
-                    } else {
-                      var resizeHandle = imgWrap.querySelector('.comp-image-viewer-resize-handle');
-                      imgWrap.insertBefore(img, resizeHandle);
+                    // Multiple images — build carousel in-place
+                    var existingSingle = imgWrap.querySelector('.comp-image-viewer-img');
+                    if (existingSingle) existingSingle.remove();
+                    if (placeholder) placeholder.style.display = 'none';
+                    var existingCarousel2 = imgWrap.querySelector('.comp-iv-carousel');
+                    if (existingCarousel2) existingCarousel2.remove();
+
+                    var perPage = 4;
+                    var totalPages = Math.ceil(runtimePaths.length / perPage);
+                    var carouselEl = document.createElement('div');
+                    carouselEl.className = 'comp-iv-carousel';
+                    carouselEl.setAttribute('data-page', '0');
+                    carouselEl.setAttribute('data-total-pages', totalPages);
+                    carouselEl.setAttribute('data-per-page', perPage);
+                    carouselEl.setAttribute('data-paths', JSON.stringify(runtimePaths));
+
+                    var firstPage = runtimePaths.slice(0, perPage);
+                    var gridCols = firstPage.length >= 2 ? 2 : 1;
+                    var gridHtml = '<div class="comp-iv-carousel-grid" style="grid-template-columns:repeat(' + gridCols + ',1fr);">';
+                    for (var cii = 0; cii < firstPage.length; cii++) {
+                      gridHtml += '<div class="comp-iv-carousel-cell">' + ivMediaHtml(firstPage[cii], 'comp-iv-carousel-img', 'Image ' + (cii+1)) + '</div>';
                     }
+                    gridHtml += '</div>';
+                    gridHtml += '<div class="comp-iv-carousel-nav">';
+                    gridHtml += '<button class="comp-iv-carousel-btn comp-iv-carousel-prev" data-node-id="' + nodeId + '" disabled>&#9664;</button>';
+                    gridHtml += '<span class="comp-iv-carousel-page">1 / ' + totalPages + ' (' + runtimePaths.length + ' images)</span>';
+                    gridHtml += '<button class="comp-iv-carousel-btn comp-iv-carousel-next" data-node-id="' + nodeId + '"' + (totalPages <= 1 ? ' disabled' : '') + '>&#9654;</button>';
+                    gridHtml += '</div>';
+                    carouselEl.innerHTML = gridHtml;
+
+                    if (resizeHandle) imgWrap.insertBefore(carouselEl, resizeHandle);
+                    else imgWrap.appendChild(carouselEl);
+
+                    // Wire carousel nav buttons
+                    carouselEl.querySelectorAll('.comp-iv-carousel-btn').forEach(function(btn) {
+                      btn.addEventListener('mousedown', function(ev) { ev.stopPropagation(); });
+                      btn.addEventListener('click', function(ev) {
+                        ev.stopPropagation(); ev.preventDefault();
+                        var car = btn.closest('.comp-iv-carousel');
+                        if (!car) return;
+                        var pg = parseInt(car.getAttribute('data-page')) || 0;
+                        var tp = parseInt(car.getAttribute('data-total-pages')) || 1;
+                        var pp = parseInt(car.getAttribute('data-per-page')) || 4;
+                        var ps; try { ps = JSON.parse(car.getAttribute('data-paths')); } catch(x) { return; }
+                        if (btn.classList.contains('comp-iv-carousel-prev')) pg = Math.max(0, pg - 1);
+                        else pg = Math.min(tp - 1, pg + 1);
+                        car.setAttribute('data-page', pg);
+                        var grid = car.querySelector('.comp-iv-carousel-grid');
+                        if (grid) {
+                          var si = pg * pp;
+                          var pi = ps.slice(si, si + pp);
+                          var gc = pi.length >= 2 ? 2 : 1;
+                          grid.style.gridTemplateColumns = 'repeat(' + gc + ', 1fr)';
+                          var ch = '';
+                          for (var j = 0; j < pi.length; j++) {
+                            ch += '<div class="comp-iv-carousel-cell">' + ivMediaHtml(pi[j], 'comp-iv-carousel-img', 'Item ' + (si+j+1)) + '</div>';
+                          }
+                          grid.innerHTML = ch;
+                        }
+                        var pb = car.querySelector('.comp-iv-carousel-prev');
+                        var nb = car.querySelector('.comp-iv-carousel-next');
+                        var pl = car.querySelector('.comp-iv-carousel-page');
+                        if (pb) pb.disabled = (pg === 0);
+                        if (nb) nb.disabled = (pg >= tp - 1);
+                        if (pl) pl.textContent = (pg+1) + ' / ' + tp + ' (' + ps.length + ' images)';
+                      });
+                    });
                   }
                 }
               }
@@ -3878,6 +3965,75 @@ function injectNodeErrorDisplay(body, nodeId) {
 
   // Always inject logs (even when no error)
   injectNodeLogsDisplay(body, nodeId);
+
+  // Inject "Run This Node" button for debugging
+  injectRunNodeButton(body, nodeId);
+}
+
+function injectRunNodeButton(body, nodeId) {
+  if (!compData || !compData.id) return;
+  var node = compData.nodes ? compData.nodes.find(function(n) { return n.id === nodeId; }) : null;
+  if (!node) return;
+  // Skip output and variable nodes (they don't need manual runs)
+  if (node.workflowId === '__output__' || node.workflowId === '__variable__') return;
+
+  var runDiv = document.createElement('div');
+  runDiv.className = 'comp-props-section';
+  runDiv.style.cssText = 'margin-top:8px;border-top:1px solid rgba(255,255,255,0.06);padding-top:8px;';
+  runDiv.innerHTML =
+    '<button class="comp-tb-btn" id="comp-props-run-node" style="width:100%;font-size:0.72rem;">&#9654; Run This Node</button>' +
+    '<div id="comp-props-run-node-status" style="display:none;margin-top:6px;font-size:0.68rem;"></div>' +
+    '<div id="comp-props-run-node-output" style="display:none;margin-top:6px;max-height:250px;overflow:auto;background:#0a0e17;border:1px solid #1e293b;border-radius:6px;padding:6px 8px;font-family:monospace;font-size:0.65rem;color:#94a3b8;white-space:pre-wrap;word-break:break-all;"></div>';
+  body.appendChild(runDiv);
+
+  var runBtn = runDiv.querySelector('#comp-props-run-node');
+  if (runBtn) {
+    runBtn.addEventListener('click', async function() {
+      runBtn.disabled = true;
+      runBtn.textContent = 'Running...';
+      var statusEl = runDiv.querySelector('#comp-props-run-node-status');
+      var outputEl = runDiv.querySelector('#comp-props-run-node-output');
+      if (statusEl) { statusEl.style.display = ''; statusEl.innerHTML = '<span style="color:#60a5fa;">Starting...</span>'; }
+      if (outputEl) { outputEl.style.display = 'none'; outputEl.textContent = ''; }
+
+      try {
+        var res = await fetch('/api/compositions/' + encodeURIComponent(compData.id) + '/run-node', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ nodeId: nodeId }),
+        });
+        var data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Run failed');
+
+        if (statusEl) {
+          statusEl.innerHTML = '<span style="color:#10b981;">&#x2705; Completed' +
+            (data.durationMs ? ' (' + (data.durationMs / 1000).toFixed(1) + 's)' : '') + '</span>';
+        }
+        if (outputEl && data.outputs) {
+          outputEl.style.display = '';
+          outputEl.textContent = JSON.stringify(data.outputs, null, 2);
+        }
+        // Update last node states for error display
+        if (data.outputs && lastNodeStates) {
+          if (!lastNodeStates[nodeId]) lastNodeStates[nodeId] = {};
+          lastNodeStates[nodeId].outputVariables = data.outputs;
+          lastNodeStates[nodeId].status = 'completed';
+          lastNodeStates[nodeId].error = undefined;
+        }
+      } catch (err) {
+        if (statusEl) {
+          statusEl.innerHTML = '<span style="color:#f87171;">&#x274C; Failed: ' + compEscHtml(err.message) + '</span>';
+        }
+        if (lastNodeStates) {
+          if (!lastNodeStates[nodeId]) lastNodeStates[nodeId] = {};
+          lastNodeStates[nodeId].status = 'failed';
+          lastNodeStates[nodeId].error = err.message;
+        }
+      }
+      runBtn.disabled = false;
+      runBtn.innerHTML = '&#9654; Run This Node';
+    });
+  }
 }
 
 function injectNodeLogsDisplay(body, nodeId) {

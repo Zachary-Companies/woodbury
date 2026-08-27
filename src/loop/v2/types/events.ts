@@ -75,6 +75,7 @@ export interface IterationEvent extends BaseEvent {
   type: 'iteration';
   iteration: number;
   response: string;
+  reasoning?: string;
   toolCalls: NativeToolCall[];
   toolResults: ToolExecutionResult[];
   elapsedMs: number;

@@ -5,6 +5,7 @@ import { Logger, AgentConfig } from './types.js';
 // Import all tools
 import { fileReadDefinition, fileReadHandler } from './tools/file-read.js';
 import { fileWriteDefinition, fileWriteHandler } from './tools/file-write.js';
+import { fileEditDefinition, fileEditHandler } from './tools/file-edit.js';
 import { listDirectoryDefinition, listDirectoryHandler } from './tools/list-directory.js';
 import { codeExecuteDefinition, codeExecuteHandler } from './tools/code-execute.js';
 import { testRunnerDefinition, testRunnerHandler } from './tools/test-runner.js';
@@ -51,6 +52,7 @@ export class AgentFactory {
     // Register core tools
     registry.register(fileReadDefinition, fileReadHandler);
     registry.register(fileWriteDefinition, fileWriteHandler);
+    registry.register(fileEditDefinition, fileEditHandler);
     registry.register(listDirectoryDefinition, listDirectoryHandler);
     registry.register(codeExecuteDefinition, codeExecuteHandler);
     registry.register(testRunnerDefinition, testRunnerHandler);

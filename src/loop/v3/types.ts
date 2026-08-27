@@ -435,7 +435,7 @@ export interface SafetyPolicy {
 // ── Engine Config ──────────────────────────────────────────
 
 export interface ClosureEngineConfig {
-  provider: 'openai' | 'anthropic' | 'groq';
+  provider: 'openai' | 'anthropic' | 'groq' | 'ollama';
   model: string;
   apiKey?: string;
   sessionId?: string;

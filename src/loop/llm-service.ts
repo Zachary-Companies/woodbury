@@ -5,8 +5,13 @@ import { execFile, spawn } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import {
+  resolveOllamaBaseUrl,
+  isOllamaModel,
+  getOllamaModelName,
+} from './ollama-discovery.js';
 
-export type LLMProvider = 'openai' | 'anthropic' | 'groq' | 'claude-code';
+export type LLMProvider = 'openai' | 'anthropic' | 'groq' | 'claude-code' | 'ollama';
 
 // Load API keys from .env files. Checks ~/.woodbury/.env first, falls back to ~/.agentic-loop/.env.
 function loadEnvFile(envPath: string): void {
@@ -193,6 +198,36 @@ function getGroqClient(apiKey?: string, baseURL?: string): Groq {
   }
 
   return clientCache.get(cacheKey) as Groq;
+}
+
+// ── Ollama client ─────────────────────────────────────────
+// Ollama exposes an OpenAI-compatible chat endpoint at /v1, so we
+// reuse the OpenAI SDK against its baseURL. Base URL is resolved from
+// OLLAMA_BASE_URL or via mDNS discovery (see ollama-discovery.ts).
+async function getOllamaClient(baseURL?: string): Promise<OpenAI> {
+  const url = baseURL || await resolveOllamaBaseUrl();
+  if (!url) {
+    throw new Error(
+      'No Ollama server found. Set OLLAMA_BASE_URL or run an Ollama server reachable via mDNS on your network.'
+    );
+  }
+  const normalized = /\/v1\/?$/.test(url) ? url : `${url.replace(/\/$/, '')}/v1`;
+  const cacheKey = `ollama:${normalized}`;
+  if (!clientCache.has(cacheKey)) {
+    clientCache.set(cacheKey, new OpenAI({
+      apiKey: 'ollama',   // Ollama ignores the key but the SDK requires a non-empty string
+      baseURL: normalized,
+    }));
+  }
+  return clientCache.get(cacheKey) as OpenAI;
+}
+
+/**
+ * Resolve the model name as the Ollama server knows it (strips `ollama/` prefix
+ * when the caller used the prefix-style tag). Used by runOllama/streamOllama.
+ */
+function resolveOllamaModelName(model: string): string {
+  return isOllamaModel(model) ? getOllamaModelName(model) : model;
 }
 
 /**
@@ -693,10 +728,78 @@ async function runGroq(messages: ChatMessage[], model: string, options?: Partial
   };
 }
 
+// ── Ollama via OpenAI-compatible endpoint ─────────────────
+async function runOllama(
+  messages: ChatMessage[],
+  model: string,
+  options?: Partial<RunPromptOptions>
+): Promise<LLMResponse> {
+  const client = await getOllamaClient(options?.baseURL);
+  const resolvedModel = resolveOllamaModelName(model);
+
+  const response = await client.chat.completions.create({
+    model: resolvedModel,
+    messages: messages.map(m => ({ role: m.role, content: m.content })),
+    max_tokens: options?.maxTokens || 32768,
+    temperature: options?.temperature ?? 0.7,
+  });
+
+  const choice = response.choices[0];
+
+  return {
+    content: choice.message.content || '',
+    usage: response.usage ? {
+      promptTokens: response.usage.prompt_tokens,
+      completionTokens: response.usage.completion_tokens,
+      totalTokens: response.usage.total_tokens,
+    } : undefined,
+  };
+}
+
+async function streamOllama(
+  messages: ChatMessage[],
+  model: string,
+  callbacks: StreamCallbacks,
+  options?: Partial<RunPromptOptions>
+): Promise<LLMResponse> {
+  const client = await getOllamaClient(options?.baseURL);
+  const resolvedModel = resolveOllamaModelName(model);
+
+  const stream = await client.chat.completions.create({
+    model: resolvedModel,
+    messages: messages.map(m => ({ role: m.role, content: m.content })),
+    max_tokens: options?.maxTokens || 32768,
+    temperature: options?.temperature ?? 0.7,
+    stream: true,
+  });
+
+  let content = '';
+  let usage: LLMResponse['usage'] | undefined;
+  const detector = new RepetitionDetector();
+
+  for await (const chunk of stream) {
+    const delta = chunk.choices?.[0]?.delta?.content;
+    if (delta) {
+      content += delta;
+      callbacks.onToken?.(delta);
+      if (detector.feed(delta)) break;
+    }
+  }
+
+  content = detector.trimRepeated(content);
+
+  const response: LLMResponse = { content, usage };
+  callbacks.onDone?.(response);
+  return response;
+}
+
 /**
  * Determine the provider based on model name
  */
 export function resolveProviderForModel(model: string): LLMProvider {
+  // Explicit ollama/ prefix wins — routes to local/mDNS-discovered Ollama
+  if (isOllamaModel(model)) return 'ollama';
+
   const modelLower = model.toLowerCase();
 
   if (modelLower.includes('claude') || modelLower.includes('anthropic')) {
@@ -734,6 +837,8 @@ export async function runPrompt(
       return runGroq(messages, model, options);
     case 'claude-code':
       return runClaudeCode(messages, model, options);
+    case 'ollama':
+      return runOllama(messages, model, options);
     default:
       throw new Error(`Unknown LLM provider: ${provider}`);
   }
@@ -743,6 +848,140 @@ export async function runPrompt(
  * Run a prompt with streaming support.
  * Tokens are emitted via callbacks.onToken as they arrive.
  */
+// ── Vision prompt support ─────────────────────────────────
+
+export interface VisionPromptOptions {
+  /** The text prompt to send alongside the image */
+  prompt: string;
+  /** Base64-encoded image data (raw base64 or data URL — prefix stripped automatically) */
+  imageBase64: string;
+  /** Image MIME type (default: 'image/png') */
+  mediaType?: string;
+  /** Model override (default: cheapest vision-capable model for available provider) */
+  model?: string;
+  /** Provider override */
+  provider?: LLMProvider;
+  /** Max tokens for response (default: 512) */
+  maxTokens?: number;
+  /** Temperature (default: 0.0 for deterministic checks) */
+  temperature?: number;
+}
+
+/**
+ * Run a vision prompt — send an image + text to a vision-capable LLM.
+ * Auto-detects the cheapest available provider: Anthropic Haiku > OpenAI gpt-4o-mini.
+ * Returns the raw text response (caller is responsible for JSON parsing).
+ */
+export async function runVisionPrompt(opts: VisionPromptOptions): Promise<LLMResponse> {
+  // Strip data URL prefix if present
+  const base64 = opts.imageBase64.replace(/^data:image\/[a-zA-Z+]+;base64,/, '');
+  const mediaType = opts.mediaType || 'image/png';
+
+  // Auto-detect cheapest vision-capable provider
+  let provider = opts.provider;
+  let model = opts.model;
+
+  if (!provider && !model) {
+    if (process.env.ANTHROPIC_API_KEY) {
+      provider = 'anthropic';
+      model = 'claude-haiku-4-5-20251001';
+    } else if (process.env.OPENAI_API_KEY) {
+      provider = 'openai';
+      model = 'gpt-4o-mini';
+    } else {
+      throw new Error('No vision-capable LLM provider configured. Set ANTHROPIC_API_KEY or OPENAI_API_KEY.');
+    }
+  }
+
+  if (!provider && model) {
+    provider = resolveProviderForModel(model);
+  }
+
+  const maxTokens = opts.maxTokens ?? 512;
+  const temperature = opts.temperature ?? 0;
+
+  if (provider === 'anthropic') {
+    const client = getAnthropicClient();
+    const response = await client.messages.create({
+      model: model || 'claude-haiku-4-5-20251001',
+      max_tokens: maxTokens,
+      temperature,
+      messages: [{
+        role: 'user',
+        content: [
+          {
+            type: 'image',
+            source: {
+              type: 'base64',
+              media_type: mediaType as 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp',
+              data: base64,
+            },
+          },
+          { type: 'text', text: opts.prompt },
+        ],
+      }],
+    });
+
+    const textContent = response.content
+      .filter(block => block.type === 'text')
+      .map(block => (block as { type: 'text'; text: string }).text)
+      .join('');
+
+    return {
+      content: textContent,
+      usage: {
+        promptTokens: response.usage.input_tokens,
+        completionTokens: response.usage.output_tokens,
+        totalTokens: response.usage.input_tokens + response.usage.output_tokens,
+      },
+    };
+  }
+
+  if (provider === 'openai') {
+    const client = getOpenAIClient();
+    const response = await client.chat.completions.create({
+      model: model || 'gpt-4o-mini',
+      max_tokens: maxTokens,
+      temperature,
+      messages: [{
+        role: 'user',
+        content: [
+          {
+            type: 'image_url',
+            image_url: { url: `data:${mediaType};base64,${base64}` },
+          },
+          { type: 'text', text: opts.prompt },
+        ],
+      }] as any, // OpenAI SDK types need cast for multimodal content
+    });
+
+    const choice = response.choices[0];
+    return {
+      content: choice.message.content || '',
+      usage: response.usage ? {
+        promptTokens: response.usage.prompt_tokens,
+        completionTokens: response.usage.completion_tokens,
+        totalTokens: response.usage.total_tokens,
+      } : undefined,
+    };
+  }
+
+  throw new Error(`Provider "${provider}" does not support vision prompts. Use Anthropic or OpenAI.`);
+}
+
+/**
+ * Parse JSON from an LLM response, handling markdown code fences.
+ */
+export function parseJsonResponse(text: string): any {
+  let cleaned = text.trim();
+  // Strip markdown code fences
+  const fenceMatch = cleaned.match(/```(?:json)?\s*\n?([\s\S]*?)\n?\s*```/);
+  if (fenceMatch) {
+    cleaned = fenceMatch[1].trim();
+  }
+  return JSON.parse(cleaned);
+}
+
 export async function runPromptStream(
   messages: ChatMessage[],
   model: string,
@@ -760,6 +999,8 @@ export async function runPromptStream(
       return streamGroq(messages, model, callbacks, options);
     case 'claude-code':
       return streamClaudeCode(messages, model, callbacks, options);
+    case 'ollama':
+      return streamOllama(messages, model, callbacks, options);
     default:
       throw new Error(`Unknown LLM provider: ${provider}`);
   }

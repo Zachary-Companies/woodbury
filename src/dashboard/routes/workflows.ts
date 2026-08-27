@@ -76,6 +76,18 @@ function inferOutputVariables(wf: WorkflowDocument): string[] {
       if (s.type === 'set_variable' && s.variable) {
         outputs.add(s.variable);
       }
+      if (s.type === 'eval' && s.outputVariable) {
+        outputs.add(s.outputVariable);
+      }
+      if (s.type === 'llm_check' && s.outputVariable) {
+        outputs.add(s.outputVariable);
+      }
+      if (s.type === 'file_dialog' && s.outputVariable) {
+        outputs.add(s.outputVariable);
+      }
+      if (s.type === 'http_request' && s.outputVariable) {
+        outputs.add(s.outputVariable);
+      }
       // Recurse into nested step arrays
       for (const k of ['steps', 'trySteps', 'catchSteps', 'thenSteps', 'elseSteps']) {
         if (Array.isArray((s as any)[k])) scan((s as any)[k]);

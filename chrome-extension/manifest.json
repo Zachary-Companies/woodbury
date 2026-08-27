@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Woodbury Bridge",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Connects Chrome to the Woodbury desktop app for browser automation. Record, replay, and debug workflows.",
   "homepage_url": "https://github.com/Zachary-Companies/woodbury",
   "offline_enabled": false,

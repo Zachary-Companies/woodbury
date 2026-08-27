@@ -140,7 +140,7 @@ export function createPipelineLifecycleGraph(goal: Goal): TaskGraph {
 export async function decomposeGoal(
   goal: Goal,
   adapter: ProviderAdapter,
-  provider: 'openai' | 'anthropic' | 'groq',
+  provider: 'openai' | 'anthropic' | 'groq' | 'ollama',
   model: string,
   systemPrompt: string,
 ): Promise<TaskGraph> {

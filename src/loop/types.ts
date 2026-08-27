@@ -11,7 +11,7 @@ export interface AgentConfig {
   maxRetries?: number;
   enabledTools?: string[];
   // Additional properties found in usage
-  provider?: 'openai' | 'anthropic' | 'groq' | 'claude-code';
+  provider?: 'openai' | 'anthropic' | 'groq' | 'claude-code' | 'ollama';
   model?: string;
   apiKey?: string;
   baseURL?: string;
@@ -20,12 +20,54 @@ export interface AgentConfig {
   maxIterations?: number;
   toolTimeout?: number;
   allowDangerousTools?: boolean;
+
+  // --- Woodbury extensions -----------------------------------------------
   // Streaming support
   onToken?: (token: string) => void;
   streaming?: boolean;
   // Callbacks for tool execution events (allows outer renderer to display tool activity)
   onToolStart?: (toolName: string, params?: any) => void;
   onToolEnd?: (toolName: string, success: boolean, result?: string, duration?: number) => void;
+  // --- end Woodbury extensions -------------------------------------------
+
+  // Session persistence
+  /** Directory to store session files (enables crash recovery) */
+  sessionDir?: string;
+  /** Session ID to resume from (if sessionDir is set) */
+  resumeSessionId?: string;
+  /** Auto-save interval in ms (default: 5000, 0 to disable) */
+  sessionAutoSaveMs?: number;
+
+  // Permission system
+  /** Permission mode: 'read_only' | 'workspace_write' | 'full_access' | 'prompt' */
+  permissionMode?: string;
+  /** Per-tool permission overrides */
+  toolPermissions?: Record<string, string>;
+  /** Tools to deny regardless of permission mode */
+  denyTools?: string[];
+  /** Tool name prefixes to deny */
+  denyToolPrefixes?: string[];
+
+  // Hook system
+  /** Shell commands to run before each tool execution */
+  preToolUseHooks?: string[];
+  /** Shell commands to run after each tool execution */
+  postToolUseHooks?: string[];
+  /** Timeout for hook commands in ms (default: 10000) */
+  hookTimeoutMs?: number;
+
+  // Budget enforcement
+  /** Budget limits for this agent session */
+  budgetLimits?: {
+    maxTotalTokens?: number;
+    maxTotalCostUsd?: number;
+    /** Fraction (0-1) at which to emit a warning. Default: 0.8 */
+    warnAtPercent?: number;
+  };
+  /** Called when budget warning threshold is reached */
+  onBudgetWarning?: (state: { totalCostUsd: number; totalTokens: number }) => void;
+  /** Called when budget is exceeded. Agent will stop after current iteration. */
+  onBudgetExceeded?: (state: { totalCostUsd: number; totalTokens: number }) => void;
 }
 
 export interface AgentResponse {
@@ -163,7 +205,7 @@ export interface SubagentConfig {
   type: SubagentType;
   task: string;
   context: string;
-  provider?: 'openai' | 'anthropic' | 'groq' | 'claude-code';
+  provider?: 'openai' | 'anthropic' | 'groq' | 'claude-code' | 'ollama';
   model?: string;
   apiKey?: string;
   timeout?: number;

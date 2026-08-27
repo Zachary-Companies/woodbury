@@ -11,6 +11,7 @@ import { homedir } from 'node:os';
 import type { DashboardContext, RouteHandler } from '../types.js';
 import { sendJson, readBody } from '../utils.js';
 import type { Schedule } from '../../workflow/types.js';
+import { discoverCompositions } from '../../workflow/loader.js';
 import { debugLog } from '../../debug-log.js';
 
 // ── Constants ────────────────────────────────────────────────
@@ -20,7 +21,7 @@ let schedulesCache: Schedule[] | null = null;
 
 // ── Local helpers ────────────────────────────────────────────
 
-async function loadSchedules(): Promise<Schedule[]> {
+export async function loadSchedules(): Promise<Schedule[]> {
   if (schedulesCache !== null) return schedulesCache;
   try {
     await mkdir(RUNS_DIR, { recursive: true });
@@ -33,7 +34,7 @@ async function loadSchedules(): Promise<Schedule[]> {
   }
 }
 
-async function saveSchedules(schedules: Schedule[]): Promise<void> {
+export async function saveSchedules(schedules: Schedule[]): Promise<void> {
   schedulesCache = schedules;
   await mkdir(RUNS_DIR, { recursive: true });
   await writeFile(SCHEDULES_FILE, JSON.stringify(schedules, null, 2), 'utf-8');
@@ -60,8 +61,7 @@ export const handleSchedulesRoutes: RouteHandler = async (req, res, pathname, ur
   // POST /api/schedules — create a new schedule
   if (req.method === 'POST' && pathname === '/api/schedules') {
     try {
-      const body = await readBody(req);
-      const data = JSON.parse(body) as Partial<Schedule>;
+      const data = await readBody(req) as Partial<Schedule>;
 
       if (!data.compositionId || !data.cron) {
         sendJson(res, 400, { error: 'compositionId and cron are required' });
@@ -75,18 +75,15 @@ export const handleSchedulesRoutes: RouteHandler = async (req, res, pathname, ur
         return true;
       }
 
-      // Verify composition exists
-      const compDir = join(homedir(), '.woodbury', 'compositions');
-      const compFile = join(compDir, data.compositionId + '.json');
+      // Verify composition exists (search all discovery paths: workflows/, compositions/, extensions)
+      const discovered = await discoverCompositions(ctx.workDir);
+      const found = discovered.find(d => d.composition.id === data.compositionId);
       let compName = data.compositionName || 'Unknown';
-      try {
-        const compContent = await readFile(compFile, 'utf-8');
-        const comp = JSON.parse(compContent);
-        compName = comp.name || compName;
-      } catch {
+      if (!found) {
         sendJson(res, 404, { error: `Composition "${data.compositionId}" not found` });
         return true;
       }
+      compName = found.composition.name || compName;
 
       const schedule: Schedule = {
         id: generateScheduleId(),
@@ -133,8 +130,7 @@ export const handleSchedulesRoutes: RouteHandler = async (req, res, pathname, ur
         return true;
       }
       try {
-        const body = await readBody(req);
-        const updates = JSON.parse(body) as Partial<Schedule>;
+        const updates = await readBody(req) as Partial<Schedule>;
 
         // Apply allowed updates
         if (updates.cron !== undefined) {

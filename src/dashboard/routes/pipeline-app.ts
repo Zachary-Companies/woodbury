@@ -22,6 +22,7 @@ import { topoSort, gatherInputVariables, getDownstreamNodes } from '../graph-uti
 import { debugLog } from '../../debug-log.js';
 import { loadBindings, saveBindings, loadRules, saveRules, applyRules, getTargetIds, type RulesDocument } from '../pipeline-bindings.js';
 import { loadPipelineRoutes } from '../pipeline-route-factory.js';
+import { resolveOllamaBaseUrl } from '../../loop/ollama-discovery.js';
 
 // ────────────────────────────────────────────────────────────────
 //  Constants
@@ -1219,12 +1220,37 @@ export const handlePipelineAppRoutes: RouteHandler = async (req, res, pathname, 
         if (resp.ok) status.health = await resp.json();
       } catch {}
     }
-    // Detect available API keys
+    // Probe Ollama — env var or mDNS. Capped at 3.5s so status stays responsive.
+    let ollamaInfo: { baseURL: string; models: string[] } | null = null;
+    try {
+      const baseURL = await Promise.race([
+        resolveOllamaBaseUrl(),
+        new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 3500)),
+      ]);
+      if (baseURL) {
+        const tagsUrl = baseURL.replace(/\/v1\/?$/, '') + '/api/tags';
+        try {
+          const resp = await fetch(tagsUrl, { signal: AbortSignal.timeout(2000) });
+          if (resp.ok) {
+            const data = await resp.json() as { models?: Array<{ name: string }> };
+            const models = Array.isArray(data.models) ? data.models.map(m => m.name).filter(Boolean) : [];
+            ollamaInfo = { baseURL, models };
+          } else {
+            ollamaInfo = { baseURL, models: [] };
+          }
+        } catch {
+          ollamaInfo = { baseURL, models: [] };
+        }
+      }
+    } catch { /* ignore */ }
+
     status.availableBackends = {
       anthropic: !!process.env.ANTHROPIC_API_KEY,
       openai: !!process.env.OPENAI_API_KEY,
       groq: !!process.env.GROQ_API_KEY,
+      ollama: !!ollamaInfo,
     };
+    if (ollamaInfo) status.ollama = ollamaInfo;
     sendJson(res, 200, status);
     return true;
   }

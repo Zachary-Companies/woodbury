@@ -1,6 +1,8 @@
 // File system tools
 export { fileReadDefinition, fileReadHandler } from './file-read.js';
+export { fileEditDefinition, fileEditHandler } from './file-edit.js';
 export { fileWriteDefinition, fileWriteHandler } from './file-write.js';
+export { fileExistsDefinition, fileExistsHandler } from './file-exists.js';
 export { listDirectoryDefinition, listDirectoryHandler } from './list-directory.js';
 export { fileSearchDefinition, fileSearchHandler } from './file-search.js';
 export { grepDefinition, grepHandler } from './grep.js';
@@ -47,6 +49,10 @@ export { definition as goalContractDefinition, handler as goalContractHandler } 
 export { definition as reflectDefinition, handler as reflectHandler } from './reflect.js';
 export { definition as memorySaveDefinition, handler as memorySaveHandler } from './memory-save.js';
 export { definition as memoryRecallDefinition, handler as memoryRecallHandler } from './memory-recall.js';
+// memoryForget exported for completeness but NOT registered in allTools below —
+// it uses upstream's file-based MemoryStore, while Woodbury's memory_save/recall
+// use SQLite. Mixing them would let the agent delete memories it can't see.
+export { definition as memoryForgetDefinition, handler as memoryForgetHandler } from './memory-forget.js';
 export { definition as skillOptimizeDefinition, handler as skillOptimizeHandler } from './skill-optimize.js';
 export { definition as preflightCheckDefinition, handler as preflightCheckHandler } from './preflight-check.js';
 
@@ -87,7 +93,9 @@ export { ttsSpeakTool, ttsVoicesTool, ttsModelsTool } from './elevenlabs.js';
 
 // Import what we need for allTools array
 import { fileReadDefinition, fileReadHandler } from './file-read.js';
+import { fileEditDefinition, fileEditHandler } from './file-edit.js';
 import { fileWriteDefinition, fileWriteHandler } from './file-write.js';
+import { fileExistsDefinition, fileExistsHandler } from './file-exists.js';
 import { listDirectoryDefinition, listDirectoryHandler } from './list-directory.js';
 import { fileSearchDefinition, fileSearchHandler } from './file-search.js';
 import { grepDefinition, grepHandler } from './grep.js';
@@ -137,7 +145,9 @@ export interface ToolDefinition {
 // All tools array for convenience
 export const allTools = [
   { definition: fileReadDefinition, handler: fileReadHandler },
+  { definition: fileEditDefinition, handler: fileEditHandler },
   { definition: fileWriteDefinition, handler: fileWriteHandler },
+  { definition: fileExistsDefinition, handler: fileExistsHandler },
   { definition: listDirectoryDefinition, handler: listDirectoryHandler },
   { definition: fileSearchDefinition, handler: fileSearchHandler },
   { definition: grepDefinition, handler: grepHandler },

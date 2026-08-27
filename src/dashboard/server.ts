@@ -107,39 +107,115 @@ function cronMatchesDate(cron: string, date: Date): boolean {
   return true;
 }
 
-const SCHEDULES_DIR = join(homedir(), '.woodbury', 'data');
-const SCHEDULES_FILE = join(SCHEDULES_DIR, 'schedules.json');
-let _schedulesCache: any[] | null = null;
+// Single source of truth for schedules — shared with the API route handlers.
+// Both the scheduler tick and the CRUD endpoints use the same in-memory cache.
+import { loadSchedules, saveSchedules } from './routes/schedules.js';
 
-async function loadSchedules(): Promise<any[]> {
-  if (_schedulesCache !== null) return _schedulesCache;
-  try {
-    await mkdir(SCHEDULES_DIR, { recursive: true });
-    const content = await readFile(SCHEDULES_FILE, 'utf-8');
-    _schedulesCache = JSON.parse(content);
-    return _schedulesCache!;
-  } catch {
-    _schedulesCache = [];
-    return _schedulesCache;
-  }
+export const SCHEDULE_MAX_RETRIES = 3;
+export const SCHEDULE_RETRY_DELAY_MS = 5 * 60_000;
+
+/** The bits of a composition run the retry decision depends on. */
+export interface ScheduledRunState {
+  done?: boolean;
+  success?: boolean;
+  compositionId?: string;
+  /** Undefined for runs that were not started by the scheduler. */
+  _scheduledRetries?: number;
+  /** Epoch ms when the run was observed finished; 0 while still running. */
+  doneAt?: number;
 }
 
-async function saveSchedules(schedules: any[]): Promise<void> {
-  _schedulesCache = schedules;
-  await mkdir(SCHEDULES_DIR, { recursive: true });
-  await writeFile(SCHEDULES_FILE, JSON.stringify(schedules, null, 2), 'utf-8');
+/**
+ * Should the scheduler retry the last failed scheduled run?
+ *
+ * Only scheduler-started runs are eligible (`_scheduledRetries` is set when the
+ * scheduler fires one). The caller MUST consume the attempt on the failed run
+ * before dispatching — if the retry request comes back without a runId the same
+ * run object is still active, and an un-incremented counter would keep this
+ * returning true on every tick, hammering the endpoint forever.
+ */
+export function shouldRetryScheduledRun(
+  run: ScheduledRunState | null | undefined,
+  nowMs: number,
+  maxRetries: number = SCHEDULE_MAX_RETRIES,
+  retryDelayMs: number = SCHEDULE_RETRY_DELAY_MS,
+): boolean {
+  if (!run) return false;
+  if (!run.done || run.success) return false;
+  if (run._scheduledRetries === undefined) return false;
+  if (run._scheduledRetries >= maxRetries) return false;
+  return nowMs - (run.doneAt || 0) >= retryDelayMs;
 }
 
 async function schedulerTick(ctx: DashboardContext): Promise<void> {
   try {
+    // Use the in-memory cache as source of truth — saveSchedules() updates both
+    // cache and disk. Only re-read from disk on first load (cache is null).
     const schedules = await loadSchedules();
     const now = new Date();
 
-    for (const schedule of schedules) {
-      if (!schedule.enabled) continue;
-      if (!cronMatchesDate(schedule.cron, now)) continue;
+    // Track when a run finishes so we can compute retry delays
+    if (ctx.activeCompRun && ctx.activeCompRun.done && !(ctx.activeCompRun as any).doneAt) {
+      (ctx.activeCompRun as any).doneAt = now.getTime();
+    }
 
-      // Prevent double-fire
+    // Check if the last scheduled run failed — if so, retry it before
+    // processing any new cron matches. This handles both explicit failures
+    // and silent failures (e.g. API errors, crashes).
+    const activeRun = ctx.activeCompRun as any;
+    {
+      const MAX_RETRIES = SCHEDULE_MAX_RETRIES;
+
+      if (shouldRetryScheduledRun(activeRun, now.getTime())) {
+        const retrySchedule = schedules.find(s => s.compositionId === activeRun.compositionId && s.enabled);
+        if (retrySchedule) {
+          const retryNum = activeRun._scheduledRetries + 1;
+          debugLog.info('scheduler', `Retrying failed schedule "${retrySchedule.id}" (attempt ${retryNum}/${MAX_RETRIES})`);
+          // Consume the attempt on the FAILED run before firing. If the run
+          // request errors or comes back without a runId, activeCompRun is still
+          // this same object — leaving the counter at its old value would keep
+          // this branch satisfied and re-POST on every 30s tick forever.
+          activeRun._scheduledRetries = retryNum;
+          activeRun.doneAt = now.getTime();
+          try {
+            const addr = ctx.server.address();
+            const port = typeof addr === 'object' && addr ? addr.port : 0;
+            const runRes = await fetch(
+              `http://127.0.0.1:${port}/api/compositions/${encodeURIComponent(retrySchedule.compositionId)}/run`,
+              { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ variables: retrySchedule.variables || {} }) },
+            );
+            const runData = await runRes.json() as any;
+            if (runData.runId && ctx.activeCompRun) {
+              // Carry the retry count onto the new run so it can retry in turn
+              (ctx.activeCompRun as any)._scheduledRetries = retryNum;
+              (ctx.activeCompRun as any).doneAt = 0;
+              retrySchedule.lastRunId = runData.runId;
+            } else {
+              debugLog.info('scheduler', `Retry for "${retrySchedule.id}" did not start a run: ${JSON.stringify(runData)}`);
+              (retrySchedule as any).lastError = runData?.error || 'retry did not start a run';
+            }
+            retrySchedule.lastRunAt = now.toISOString();
+            await saveSchedules(schedules);
+          } catch (err) {
+            debugLog.info('scheduler', `Retry trigger failed: ${String(err)}`);
+            (retrySchedule as any).lastError = String(err);
+            await saveSchedules(schedules);
+          }
+          // Don't process more schedules this tick
+          return;
+        }
+      }
+    }
+
+    for (const schedule of schedules) {
+      if (!schedule.enabled) {
+        continue;
+      }
+
+      const cronMatch = cronMatchesDate(schedule.cron, now);
+      if (!cronMatch) continue;
+
+      // Prevent double-fire: skip if we already ran in this exact minute
       if (schedule.lastRunAt) {
         const lastRun = new Date(schedule.lastRunAt);
         if (
@@ -153,8 +229,8 @@ async function schedulerTick(ctx: DashboardContext): Promise<void> {
         }
       }
 
-      // Skip if busy
-      if (ctx.activeCompRun || ctx.activeBatchRun) {
+      // Skip if a composition or batch run is currently in progress
+      if ((ctx.activeCompRun && !ctx.activeCompRun.done) || (ctx.activeBatchRun && !ctx.activeBatchRun.done)) {
         debugLog.info('scheduler', `Skipping schedule "${schedule.id}" — another run is active`);
         continue;
       }
@@ -173,9 +249,21 @@ async function schedulerTick(ctx: DashboardContext): Promise<void> {
 
         schedule.lastRunAt = now.toISOString();
         if (runData.runId) schedule.lastRunId = runData.runId;
+        // Track retry count on the active run so failed scheduled runs can be retried
+        if (ctx.activeCompRun) {
+          (ctx.activeCompRun as any)._scheduledRetries = 0;
+          (ctx.activeCompRun as any).doneAt = 0;
+        }
         await saveSchedules(schedules);
+
+        // Only run one schedule per tick
+        break;
       } catch (err) {
         debugLog.info('scheduler', `Schedule trigger failed: ${String(err)}`);
+        // Record failure so it shows up in the schedule's status
+        schedule.lastRunAt = now.toISOString();
+        (schedule as any).lastError = String(err);
+        await saveSchedules(schedules);
       }
     }
   } catch (err) {
@@ -388,8 +476,8 @@ export async function startDashboard(
   let schedulerTimer: ReturnType<typeof setInterval> | null = null;
   function startScheduler(): void {
     if (schedulerTimer) return;
-    schedulerTimer = setInterval(() => { schedulerTick(ctx); }, 60_000);
-    debugLog.info('scheduler', 'Scheduler started (60s interval)');
+    schedulerTimer = setInterval(() => { schedulerTick(ctx); }, 30_000);
+    debugLog.info('scheduler', 'Scheduler started (30s interval)');
   }
   function stopScheduler(): void {
     if (schedulerTimer) {

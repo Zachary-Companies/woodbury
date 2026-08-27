@@ -8,7 +8,8 @@
  *   4. ARIA label
  *   5. Text content
  *   6. Natural language description
- *   7. Percentage-based viewport position (last resort)
+ *   7. LLM vision fallback (opt-in, uses screenshot + description)
+ *   8. Percentage-based viewport position (last resort)
  *
  * When multiple elements match a selector, uses percentage-based bounds
  * from recording to pick the closest match. If no element is found at all,
@@ -40,8 +41,13 @@ export class ElementResolver {
   /**
    * Resolve an element target using the fallback chain.
    * Returns the resolved element info, or throws if not found.
+   * @param allowPercentage - When false, skip the percentage-based last resort.
+   *   Percentages are unreliable across layouts/accounts, so semantic-first
+   *   callers (execClick) opt out explicitly. Defaults to true: flipping the
+   *   default would silently strip the fallback from every existing caller and
+   *   break recorded workflows that rely on it.
    */
-  async resolve(target: ElementTarget): Promise<ResolvedElement> {
+  async resolve(target: ElementTarget, { allowPercentage = true }: { allowPercentage?: boolean } = {}): Promise<ResolvedElement> {
     // 1. Placeholder — uniquely identifies form fields across DOM changes
     if (target.placeholder) {
       const result = await this.tryPlaceholder(target.placeholder);
@@ -92,8 +98,17 @@ export class ElementResolver {
       }
     }
 
-    // 7. Percentage-based fallback — use recorded viewport percentages
-    if (target.expectedBounds?.pctX != null && target.expectedBounds?.pctY != null) {
+    // 7. LLM vision fallback (opt-in via target.llmFallback)
+    if (target.llmFallback && target.description) {
+      const llmResult = await this.tryLlmVision(target.description);
+      if (llmResult) {
+        return this.buildResult('llmVision', target.description, llmResult, target);
+      }
+    }
+
+    // 8. Percentage-based fallback — use recorded viewport percentages
+    // Only for desktop steps; web steps must resolve semantically.
+    if (allowPercentage && target.expectedBounds?.pctX != null && target.expectedBounds?.pctY != null) {
       const pctPosition = await this.resolveByPercentage(target.expectedBounds);
       if (pctPosition) {
         return {
@@ -212,6 +227,60 @@ export class ElementResolver {
       const data = await this.bridge.send('find_interactive', { description, limit: 1 }) as unknown;
       return this.extractFirst(data);
     } catch {
+      return null;
+    }
+  }
+
+  /**
+   * LLM vision fallback: capture a screenshot and ask a vision model
+   * to find the element by its natural language description.
+   * Only called when target.llmFallback is true.
+   */
+  private async tryLlmVision(
+    description: string
+  ): Promise<BridgeElementResult | null> {
+    try {
+      resolverLog('INFO', `tryLlmVision: "${description}"`);
+
+      // Lazy-import to avoid loading LLM deps unless needed
+      const { runVisionPrompt, parseJsonResponse } = await import('../loop/llm-service.js');
+
+      // Capture viewport screenshot
+      const result = await this.bridge.send('capture_viewport') as Record<string, unknown>;
+      const data = result?.data as Record<string, unknown> | undefined;
+      const image = (data?.image || result?.image) as string | undefined;
+      if (!image) {
+        resolverLog('WARN', 'tryLlmVision: No screenshot captured');
+        return null;
+      }
+
+      const base64 = image.replace(/^data:image\/[a-zA-Z+]+;base64,/, '');
+
+      const response = await runVisionPrompt({
+        prompt: `Find the UI element described below in this screenshot. Return ONLY valid JSON: { "x": number, "y": number, "confidence": number } where x and y are the approximate center pixel coordinates from the top-left of the viewport, and confidence is 0 to 1.\n\nElement: ${description}`,
+        imageBase64: base64,
+        maxTokens: 128,
+        temperature: 0,
+      });
+
+      const parsed = parseJsonResponse(response.content);
+      const x = Number(parsed.x);
+      const y = Number(parsed.y);
+      const confidence = Number(parsed.confidence ?? 0);
+
+      if (isNaN(x) || isNaN(y) || confidence < 0.5) {
+        resolverLog('INFO', `tryLlmVision: Low confidence or invalid coords`, parsed);
+        return null;
+      }
+
+      resolverLog('INFO', `tryLlmVision: Found at (${x}, ${y}) confidence=${confidence}`);
+
+      // Return as a position result — approximate bounding box centered on the point
+      return {
+        position: { left: x - 10, top: y - 10, width: 20, height: 20 },
+      } as BridgeElementResult;
+    } catch (err) {
+      resolverLog('WARN', `tryLlmVision: Failed — ${(err as Error).message}`);
       return null;
     }
   }
@@ -416,6 +485,103 @@ export class ElementResolver {
       Math.abs(actual.height - expected.height) <= t
     );
   }
+
+  /**
+   * Hover Discovery: triggers a hover at the expected position to reveal
+   * hidden text labels (e.g., collapsed sidebar icons), then re-runs
+   * semantic resolution. The caller provides the hover function since
+   * the resolver does not own mouse control.
+   *
+   * @param hoverAtViewport - Callback to move the mouse to viewport coords
+   * @param sleepMs - Callback to wait for hover effects
+   */
+  async resolveWithHoverDiscovery(
+    target: ElementTarget,
+    hoverAtViewport: (x: number, y: number) => Promise<void>,
+    sleepMs: (ms: number) => Promise<void>,
+  ): Promise<ResolvedElement | null> {
+    const eb = target.expectedBounds;
+    // 0 is a valid percentage (edge-anchored elements) — check for null, not falsy.
+    if (eb?.pctX == null || eb?.pctY == null) return null;
+
+    const pctPosition = await this.resolveByPercentage(eb);
+    if (!pctPosition) return null;
+
+    // Probe positions: center + nearby offsets
+    const cx = pctPosition.left + pctPosition.width / 2;
+    const cy = pctPosition.top + pctPosition.height / 2;
+    const probes = [
+      { x: cx, y: cy },
+      { x: cx, y: cy - 40 },
+      { x: cx, y: cy + 40 },
+      { x: cx - 30, y: cy },
+      { x: cx + 30, y: cy },
+    ];
+
+    for (const probe of probes) {
+      try {
+        await hoverAtViewport(probe.x, probe.y);
+        await sleepMs(probe === probes[0] ? 400 : 250);
+
+        const result = await this.resolve(target, { allowPercentage: false });
+        if (result.matchedBy !== 'percentage') {
+          resolverLog('INFO', 'Hover discovery resolved', {
+            matchedBy: result.matchedBy,
+            probeX: probe.x,
+            probeY: probe.y,
+          });
+          return result;
+        }
+      } catch {
+        // Resolution still failed, try next probe
+      }
+    }
+
+    resolverLog('INFO', 'Hover discovery failed after all probes');
+    return null;
+  }
+
+  /**
+   * LLM Vision Locate: capture screenshot and ask an LLM to find the element.
+   * Last-resort fallback when semantic resolution and hover discovery both fail.
+   *
+   * @param captureScreenshot - Callback to capture viewport as base64
+   * @param askLlm - Callback to send image+prompt to LLM, returns {x, y, confidence}
+   */
+  async resolveWithLlmVision(
+    target: ElementTarget,
+    captureScreenshot: () => Promise<string | null>,
+    askLlm: (base64: string, description: string) => Promise<{ x: number; y: number; confidence: number } | null>,
+  ): Promise<ResolvedElement | null> {
+    const desc = target.description || target.ariaLabel || target.textContent || target.placeholder;
+    if (!desc) return null;
+
+    try {
+      const base64 = await captureScreenshot();
+      if (!base64) return null;
+
+      const result = await askLlm(base64, desc);
+      if (!result || result.confidence < 0.5) return null;
+
+      resolverLog('INFO', 'LLM vision located element', {
+        x: result.x, y: result.y, confidence: result.confidence,
+      });
+
+      return {
+        matchedBy: 'llmVision' as any,
+        matchedValue: desc,
+        position: {
+          left: Math.round(result.x - 10),
+          top: Math.round(result.y - 10),
+          width: 20,
+          height: 20,
+        },
+        boundsValid: null,
+      };
+    } catch {
+      return null;
+    }
+  }
 }
 
 interface BridgeElementResult {
@@ -444,7 +610,7 @@ interface BridgeElementResult {
 export class AccessibilityResolver {
   constructor(private bridge: BridgeInterface) {}
 
-  async resolve(target: ElementTarget): Promise<ResolvedElement> {
+  async resolve(target: ElementTarget, { allowPercentage = true }: { allowPercentage?: boolean } = {}): Promise<ResolvedElement> {
     // 1. Accessibility query — role:button[name:Submit]
     if (target.accessibilityQuery) {
       const result = await this.tryAccessibilityQuery(target);
@@ -512,7 +678,7 @@ export class AccessibilityResolver {
     }
 
     // 9. Percentage-based fallback
-    if (target.expectedBounds?.pctX != null && target.expectedBounds?.pctY != null) {
+    if (allowPercentage && target.expectedBounds?.pctX != null && target.expectedBounds?.pctY != null) {
       const pctPosition = await this.resolveByPercentage(target.expectedBounds);
       if (pctPosition) {
         return {
@@ -810,5 +976,67 @@ export class AccessibilityResolver {
       result.boundsValid = null;
     }
     return result;
+  }
+
+  /** Hover Discovery (same interface as ElementResolver) */
+  async resolveWithHoverDiscovery(
+    target: ElementTarget,
+    hoverAtViewport: (x: number, y: number) => Promise<void>,
+    sleepMs: (ms: number) => Promise<void>,
+  ): Promise<ResolvedElement | null> {
+    const eb = target.expectedBounds;
+    // 0 is a valid percentage (edge-anchored elements) — check for null, not falsy.
+    if (eb?.pctX == null || eb?.pctY == null) return null;
+
+    const pctPosition = await this.resolveByPercentage(eb);
+    if (!pctPosition) return null;
+
+    const cx = pctPosition.left + pctPosition.width / 2;
+    const cy = pctPosition.top + pctPosition.height / 2;
+    const probes = [
+      { x: cx, y: cy },
+      { x: cx, y: cy - 40 },
+      { x: cx, y: cy + 40 },
+      { x: cx - 30, y: cy },
+      { x: cx + 30, y: cy },
+    ];
+
+    for (const probe of probes) {
+      try {
+        await hoverAtViewport(probe.x, probe.y);
+        await sleepMs(probe === probes[0] ? 400 : 250);
+        const result = await this.resolve(target, { allowPercentage: false });
+        if (result.matchedBy !== 'percentage') return result;
+      } catch { /* try next probe */ }
+    }
+    return null;
+  }
+
+  /** LLM Vision Locate (same interface as ElementResolver) */
+  async resolveWithLlmVision(
+    target: ElementTarget,
+    captureScreenshot: () => Promise<string | null>,
+    askLlm: (base64: string, description: string) => Promise<{ x: number; y: number; confidence: number } | null>,
+  ): Promise<ResolvedElement | null> {
+    const desc = target.description || target.ariaLabel || target.textContent || target.placeholder;
+    if (!desc) return null;
+
+    try {
+      const base64 = await captureScreenshot();
+      if (!base64) return null;
+      const result = await askLlm(base64, desc);
+      if (!result || result.confidence < 0.5) return null;
+      return {
+        matchedBy: 'llmVision',
+        matchedValue: desc,
+        position: {
+          left: Math.round(result.x - 10),
+          top: Math.round(result.y - 10),
+          width: 20,
+          height: 20,
+        },
+        boundsValid: null,
+      };
+    } catch { return null; }
   }
 }

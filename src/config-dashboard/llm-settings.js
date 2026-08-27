@@ -162,6 +162,23 @@ const MODELS = [
 
 let _selectedModel = 'claude-sonnet-4-20250514';
 let _proxyEnabled = false;
+let _ollamaInfo = null; // { baseURL, models } from the server when Ollama is reachable
+
+/** Build a combined MODELS list with dynamically-discovered Ollama entries appended. */
+function getModelsWithOllama() {
+  const base = [...MODELS];
+  if (_ollamaInfo && Array.isArray(_ollamaInfo.models)) {
+    for (const tag of _ollamaInfo.models) {
+      base.push({
+        id: `ollama/${tag}`,
+        label: tag,
+        provider: 'Ollama',
+        backend: 'ollama',
+      });
+    }
+  }
+  return base;
+}
 
 async function fetchProxyStatus() {
   try {
@@ -180,6 +197,7 @@ async function fetchProxyStatus() {
 
 function renderStatus(data) {
   _proxyEnabled = data.enabled;
+  _ollamaInfo = data.ollama || null;
 
   // Status badge
   const badge = document.getElementById('llm-proxy-status');
@@ -238,19 +256,38 @@ function renderStatusOffline() {
 function renderBackends(backends) {
   const el = document.getElementById('llm-backends');
   if (!el) return;
-  el.innerHTML = Object.entries(backends).map(([name, hasKey]) => `
-    <div class="llm-backend-item ${hasKey ? 'llm-backend-item--active' : ''}">
-      <span class="llm-backend-icon">${hasKey ? '✅' : '❌'}</span>
-      <span class="llm-backend-name">${name.charAt(0).toUpperCase() + name.slice(1)}</span>
-      <span class="llm-backend-key">${hasKey ? 'API key set' : 'No API key'}</span>
-    </div>
-  `).join('');
+  el.innerHTML = Object.entries(backends).map(([name, active]) => {
+    // Ollama status text — show the reachable host instead of a bogus "API key" label
+    let statusText;
+    if (name === 'ollama') {
+      if (active) {
+        const host = _ollamaInfo && _ollamaInfo.baseURL
+          ? _ollamaInfo.baseURL.replace(/^https?:\/\//, '').replace(/\/v1\/?$/, '')
+          : 'discovered';
+        const count = _ollamaInfo && Array.isArray(_ollamaInfo.models) ? _ollamaInfo.models.length : 0;
+        statusText = `${host} · ${count} model${count === 1 ? '' : 's'}`;
+      } else {
+        statusText = 'Not reachable';
+      }
+    } else {
+      statusText = active ? 'API key set' : 'No API key';
+    }
+
+    return `
+      <div class="llm-backend-item ${active ? 'llm-backend-item--active' : ''}">
+        <span class="llm-backend-icon">${active ? '✅' : '❌'}</span>
+        <span class="llm-backend-name">${name.charAt(0).toUpperCase() + name.slice(1)}</span>
+        <span class="llm-backend-key">${statusText}</span>
+      </div>
+    `;
+  }).join('');
 }
 
 function renderModels(backends) {
   const el = document.getElementById('llm-model-grid');
   if (!el) return;
-  el.innerHTML = MODELS.map(m => {
+  const models = getModelsWithOllama();
+  el.innerHTML = models.map(m => {
     const available = backends[m.backend] !== false;
     const selected = _selectedModel === m.id;
     return `

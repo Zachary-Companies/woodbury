@@ -12,6 +12,36 @@ import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import type { DashboardContext, RouteHandler } from '../types.js';
 import { sendJson, readBody } from '../utils.js';
 import { startLlmProxy } from '../server.js';
+import { resolveOllamaBaseUrl } from '../../loop/ollama-discovery.js';
+
+/**
+ * Probe for Ollama availability — honors OLLAMA_BASE_URL or mDNS discovery.
+ * When reachable, returns the baseURL and the list of installed model tags.
+ * Short timeout so startup UX isn't held up when Ollama isn't present.
+ */
+async function probeOllama(): Promise<{ baseURL: string; models: string[] } | null> {
+  let baseURL: string | undefined;
+  try {
+    baseURL = await Promise.race([
+      resolveOllamaBaseUrl(),
+      new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 3500)),
+    ]);
+  } catch {
+    return null;
+  }
+  if (!baseURL) return null;
+
+  const tagsUrl = baseURL.replace(/\/v1\/?$/, '') + '/api/tags';
+  try {
+    const resp = await fetch(tagsUrl, { signal: AbortSignal.timeout(2000) });
+    if (!resp.ok) return { baseURL, models: [] };
+    const data = await resp.json() as { models?: Array<{ name: string }> };
+    const models = Array.isArray(data.models) ? data.models.map((m) => m.name).filter(Boolean) : [];
+    return { baseURL, models };
+  } catch {
+    return { baseURL, models: [] };
+  }
+}
 
 export const handleLlmProxyRoutes: RouteHandler = async (
   req: IncomingMessage,
@@ -43,12 +73,19 @@ export const handleLlmProxyRoutes: RouteHandler = async (
       } catch {}
     }
 
-    // Detect available API keys
+    // Probe Ollama (env var or mDNS). Keep timeout short so the endpoint stays snappy.
+    const ollama = await probeOllama();
+
+    // Detect available backends — API-key-based ones plus Ollama if reachable
     status.availableBackends = {
       anthropic: !!process.env.ANTHROPIC_API_KEY,
       openai: !!process.env.OPENAI_API_KEY,
       groq: !!process.env.GROQ_API_KEY,
+      ollama: !!ollama,
     };
+    if (ollama) {
+      status.ollama = { baseURL: ollama.baseURL, models: ollama.models };
+    }
 
     // Read current model selection
     try {
@@ -96,21 +133,31 @@ export const handleLlmProxyRoutes: RouteHandler = async (
       return true;
     }
 
-    const configDir = join(homedir(), '.woodbury', 'config');
     try {
-      await mkdir(configDir, { recursive: true });
-      const configPath = join(configDir, 'chat-config.json');
-      let config: any = {};
-      try { config = JSON.parse(await readFile(configPath, 'utf-8')); } catch {}
-
+      // Derive provider from model id. Order matters: ollama/ wins first
+      // so that tags like `ollama/llama3:8b` don't get routed to Groq.
       let provider = 'anthropic';
-      if (model.startsWith('gpt-') || model.startsWith('o1-') || model.startsWith('o3-')) provider = 'openai';
+      if (model.startsWith('ollama/')) provider = 'ollama';
+      else if (model.startsWith('gpt-') || model.startsWith('o1-') || model.startsWith('o3-')) provider = 'openai';
+      else if (model.startsWith('claude-')) provider = 'anthropic';
       else if (model.startsWith('llama') || model.startsWith('mixtral')) provider = 'groq';
 
-      config.provider = provider;
-      config.model = model;
-      config.pipelineModel = model;
-      await writeFile(configPath, JSON.stringify(config, null, 2));
+      // Write to BOTH canonical locations so both UI (/.woodbury/config/chat-config.json
+      // via /api/llm-proxy/status) and the chat agent (~/.woodbury/chat-config.json in
+      // chat.ts) see the same selection.
+      const canonicalPaths = [
+        join(homedir(), '.woodbury', 'config', 'chat-config.json'),
+        join(homedir(), '.woodbury', 'chat-config.json'),
+      ];
+      for (const configPath of canonicalPaths) {
+        await mkdir(join(configPath, '..'), { recursive: true });
+        let config: any = {};
+        try { config = JSON.parse(await readFile(configPath, 'utf-8')); } catch {}
+        config.provider = provider;
+        config.model = model;
+        config.pipelineModel = model;
+        await writeFile(configPath, JSON.stringify(config, null, 2));
+      }
       sendJson(res, 200, { success: true, model, provider });
     } catch (err: any) {
       sendJson(res, 500, { error: err.message });

@@ -40,7 +40,7 @@ export class Verifier {
   constructor(
     private toolRegistry: ToolRegistryV2,
     private adapter: ProviderAdapter,
-    private provider: 'openai' | 'anthropic' | 'groq',
+    private provider: 'openai' | 'anthropic' | 'groq' | 'ollama',
     private model: string,
     private workingDirectory: string,
     private toolTimeout: number = 30000,

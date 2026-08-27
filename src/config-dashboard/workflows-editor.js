@@ -299,6 +299,20 @@ function renderStepEditor(step, idx, totalSteps) {
       html += '</div>';
       break;
 
+    case 'clipboard':
+      html += '<div class="wf-se-row">';
+      html += '<span class="wf-se-label">Value</span>';
+      html += '<input class="wf-se-input wf-se-clip-value" type="text" value="' + escAttr(step.value || '') + '" placeholder="Text to copy (supports {{variable}})">';
+      html += '</div>';
+      html += '<div class="wf-se-row">';
+      html += '<span class="wf-se-label">Paste</span>';
+      html += '<select class="wf-se-input wf-se-clip-paste" style="max-width:140px;">';
+      html += '<option value="true"' + (step.paste !== false ? ' selected' : '') + '>Yes (Cmd+V / Ctrl+V)</option>';
+      html += '<option value="false"' + (step.paste === false ? ' selected' : '') + '>No (copy only)</option>';
+      html += '</select>';
+      html += '</div>';
+      break;
+
     case 'inject_style':
       html += '<div class="wf-se-row">';
       html += '<span class="wf-se-label">Action</span>';
@@ -606,6 +620,13 @@ function collectStepEditorValues(editor, step) {
     case 'try_catch': {
       var errVarInput = editor.querySelector('.wf-se-error-var');
       if (errVarInput) updated.errorVariable = errVarInput.value || undefined;
+      break;
+    }
+    case 'clipboard': {
+      var clipValInput = editor.querySelector('.wf-se-clip-value');
+      var clipPasteSelect = editor.querySelector('.wf-se-clip-paste');
+      if (clipValInput) updated.value = clipValInput.value;
+      if (clipPasteSelect) updated.paste = clipPasteSelect.value === 'true';
       break;
     }
     case 'inject_style': {
@@ -2726,7 +2747,7 @@ function showInsertPicker(anchorEl, wf, pathStr, filePath, source, getInsertPoin
   var pickerHtml = '<div class="wf-se-insert-picker" style="margin-top:0.5rem;padding:0.5rem;background:#1e293b;border:1px solid #334155;border-radius:6px;">';
   pickerHtml += '<div style="font-size:0.75rem;color:#94a3b8;margin-bottom:0.5rem;">Select step type to insert:</div>';
   pickerHtml += '<div style="display:flex;flex-wrap:wrap;gap:0.35rem;">';
-  var allTypes = ['navigate', 'click', 'click_selector', 'type', 'wait', 'keyboard', 'keyboard_nav', 'scroll', 'assert', 'set_variable', 'file_dialog', 'capture_download', 'move_file', 'conditional', 'loop', 'try_catch', 'inject_style'];
+  var allTypes = ['navigate', 'click', 'click_selector', 'type', 'wait', 'keyboard', 'keyboard_nav', 'scroll', 'assert', 'set_variable', 'clipboard', 'file_dialog', 'capture_download', 'move_file', 'conditional', 'loop', 'try_catch', 'inject_style'];
   for (var ti = 0; ti < allTypes.length; ti++) {
     var t = allTypes[ti];
     var tIcon = STEP_ICONS[t] || '&#x25cf;';

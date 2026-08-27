@@ -102,7 +102,9 @@ export async function createAgent(
 
     // Configure agent
     const provider = getProvider(config);
-    const apiKey = provider === 'claude-code' ? '' : (config.apiKeys?.[provider] || '');
+    const apiKey = (provider === 'claude-code' || provider === 'ollama')
+      ? ''
+      : (config.apiKeys?.[provider] || '');
     const agentConfig: AgentConfig = {
       name: 'woodbury-agent',
       provider,
@@ -283,7 +285,7 @@ export async function createClosureAgent(
     // Configure closure engine
     const provider = getProvider(config);
     if (provider === 'claude-code') {
-      throw new Error('Closure Engine does not support claude-code provider. Use anthropic, openai, or groq.');
+      throw new Error('Closure Engine does not support claude-code provider. Use anthropic, openai, groq, or ollama.');
     }
 
     const engineConfig: ClosureEngineConfig = {
@@ -330,7 +332,7 @@ export async function createClosureAgent(
   }
 }
 
-function getProvider(config: WoodburyConfig): 'openai' | 'anthropic' | 'groq' | 'claude-code' {
+function getProvider(config: WoodburyConfig): 'openai' | 'anthropic' | 'groq' | 'claude-code' | 'ollama' {
   // If explicitly specified, use it
   if (config.provider) {
     return config.provider;
@@ -351,7 +353,7 @@ function getProvider(config: WoodburyConfig): 'openai' | 'anthropic' | 'groq' | 
   return 'anthropic';
 }
 
-function getDefaultModel(provider: 'openai' | 'anthropic' | 'groq' | 'claude-code'): string {
+function getDefaultModel(provider: 'openai' | 'anthropic' | 'groq' | 'claude-code' | 'ollama'): string {
   switch (provider) {
     case 'anthropic':
       return 'claude-opus-4-5-20251101';
@@ -361,6 +363,8 @@ function getDefaultModel(provider: 'openai' | 'anthropic' | 'groq' | 'claude-cod
       return 'llama-3.1-70b-versatile';
     case 'claude-code':
       return 'claude-sonnet-4-5-20250514';
+    case 'ollama':
+      return 'ollama/llama3.1';  // caller should override via config.model with the tag installed on their Ollama server
     default:
       return 'claude-opus-4-5-20251101';
   }
