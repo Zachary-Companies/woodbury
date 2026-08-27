@@ -5,6 +5,10 @@ publish:
   provider: github
   owner: Zachary-Companies
   repo: woodbury
+  # Publish straight to a real release. The default (draft) is why v1.1.2-v1.2.3
+  # left their installers sitting in unpublished drafts while the public release
+  # for the same tag stayed empty and the site's download link 404'd.
+  releaseType: release
 
 protocols:
   - name: Woodbury Extension Install

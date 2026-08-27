@@ -1,10 +1,12 @@
 {
-  "version": "1.4.2",
-  "releaseDate": "2026-03-26",
+  "version": "1.5.0",
+  "releaseDate": "2026-08-27",
   "downloadUrls": {
-    "mac": "https://github.com/Zachary-Companies/woodbury/releases/latest/download/Woodbury-1.4.2-arm64.dmg",
-    "windows": "https://github.com/Zachary-Companies/woodbury/releases/latest/download/Woodbury-Setup-1.4.2.exe"
+    "mac": "https://github.com/Zachary-Companies/woodbury/releases/latest/download/Woodbury-1.5.0-arm64.dmg",
+    "windows": "https://github.com/Zachary-Companies/woodbury/releases/latest/download/Woodbury-Setup-1.5.0.exe"
   },
-  "releaseNotes": "One-click pipeline installation from the website or dashboard. Paste a link or click Install in Woodbury — no git or npm required.",
-  "releaseUrl": "https://github.com/Zachary-Companies/woodbury/releases/latest"
+  "releaseNotes": "Local models via Ollama, agent sessions with resume, graduated tool permissions and pre/post tool-use hooks, vision-based page checks, and a new schedules view.",
+  "releaseUrl": "https://github.com/Zachary-Companies/woodbury/releases/latest",
+  "macUnsigned": true,
+  "macInstallNote": "The macOS build is not yet notarized. On first launch, right-click Woodbury in Applications and choose Open, then confirm."
 }

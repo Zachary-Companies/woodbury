@@ -46,6 +46,14 @@ export default function Hero() {
           {versionInfo && (
             <span className="text-xs text-slate-500">v{versionInfo.version}</span>
           )}
+          {/* The mac build is not notarized yet, so Gatekeeper blocks a plain
+              double-click. Show the one-time workaround to Mac visitors rather
+              than letting the app look broken on first launch. */}
+          {os === 'Mac' && versionInfo?.macUnsigned && versionInfo.macInstallNote && (
+            <p className="max-w-md text-center text-xs leading-relaxed text-slate-500">
+              {versionInfo.macInstallNote}
+            </p>
+          )}
           <a
             href="#how-it-works"
             className="flex w-full max-w-md items-center justify-center rounded-xl border border-white/10 px-10 py-5 text-lg font-medium text-slate-300 transition-all hover:border-white/25 hover:text-white"
