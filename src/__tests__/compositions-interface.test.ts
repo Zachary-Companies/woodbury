@@ -1,5 +1,6 @@
 import { describe, expect, it } from '@jest/globals';
-import { inferCompositionInputs } from '../dashboard/routes/compositions.js';
+// Moved out of routes/compositions.ts into its own module; import from the source.
+import { inferCompositionInputs } from '../dashboard/composition-interface.js';
 
 describe('inferCompositionInputs', () => {
   it('includes unconnected junction ports alongside script inputs', () => {

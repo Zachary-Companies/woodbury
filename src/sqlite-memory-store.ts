@@ -466,9 +466,19 @@ export class SQLiteMemoryStore {
   private readonly closureMemories = new Map<string, StoredClosureMemory>();
   private readonly embeddings = new Map<string, StoredEmbeddingRecord>();
   private meta: Record<string, string> = {};
+  /**
+   * While set, the per-record persist* calls are suppressed and the caller
+   * flushes once at the end. Each persist* rewrites the WHOLE corpus, so
+   * importing N records with persistence on is O(N^2) file writes — that alone
+   * made constructing a store take ~36s against a 500-record legacy file.
+   */
+  private bulkWriteDepth = 0;
+  /** True only for the machine-global store at DEFAULT_STORE_PATH. */
+  private readonly isDefaultStore: boolean;
 
   constructor(private readonly dbPath: string = resolveConfiguredStorePath()) {
     const basePath = resolveStoreBasePath(this.dbPath);
+    this.isDefaultStore = basePath === resolveStoreBasePath(DEFAULT_STORE_PATH);
     this.storeRootDir = basePath;
     this.generalRootDir = join(this.storeRootDir, 'general');
     this.closureRootDir = join(this.storeRootDir, 'closure');
@@ -850,10 +860,34 @@ export class SQLiteMemoryStore {
     return record ? this.getClosureRecordPaths(record) : null;
   }
 
+  /** Run `fn` with per-record persistence suppressed, then flush everything once. */
+  private bulkWrite(fn: () => void): void {
+    this.bulkWriteDepth += 1;
+    try {
+      fn();
+    } finally {
+      this.bulkWriteDepth -= 1;
+    }
+    if (this.bulkWriteDepth === 0) {
+      this.persistGeneralMemories();
+      this.persistClosureMemories();
+      this.persistEmbeddings();
+    }
+  }
+
   private initialize(): void {
     this.loadState();
-    this.importLegacyGlobalMemories();
-    this.importLegacyClosureMemories();
+    // Legacy migration reads files under the user's home directory. Only the
+    // default/global store should do that — a store opened at an explicit path
+    // (per-project stores, and every test using WOODBURY_MEMORY_DB_PATH) must
+    // not inherit the machine's global memories, or it isn't isolated at all.
+    if (!this.isDefaultStore) {
+      return;
+    }
+    this.bulkWrite(() => {
+      this.importLegacyGlobalMemories();
+      this.importLegacyClosureMemories();
+    });
   }
 
   private loadState(): void {
@@ -926,6 +960,7 @@ export class SQLiteMemoryStore {
   }
 
   private persistGeneralMemories(): void {
+    if (this.bulkWriteDepth > 0) return;
     const records = Array.from(this.generalMemories.values())
       .sort((left, right) => new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime());
     resetDirectory(this.generalRootDir);
@@ -957,6 +992,7 @@ export class SQLiteMemoryStore {
   }
 
   private persistClosureMemories(): void {
+    if (this.bulkWriteDepth > 0) return;
     const records = Array.from(this.closureMemories.values())
       .sort((left, right) => new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime());
     resetDirectory(this.closureRootDir);
@@ -989,6 +1025,7 @@ export class SQLiteMemoryStore {
   }
 
   private persistEmbeddings(): void {
+    if (this.bulkWriteDepth > 0) return;
     const records = Array.from(this.embeddings.values())
       .sort((left, right) => left.scope.localeCompare(right.scope) || left.memoryId.localeCompare(right.memoryId));
     resetDirectory(this.embeddingsRootDir);

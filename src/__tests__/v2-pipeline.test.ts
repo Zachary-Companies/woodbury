@@ -378,13 +378,13 @@ import { localThing } from './local.js';
       expect(node.workflowId).toBe('__script_file__');
       expect(node.label).toBe('Process Text');
       expect(node.scriptFile).toBeDefined();
-      expect(node.scriptFile!.file).toBe('process-text.ts');
+      expect(node.scriptFile!.file).toBe('src/process-text.ts');
       expect(node.scriptFile!.description).toBe('Processes input text');
       expect(node.scriptFile!.inputs).toEqual(inputs);
       expect(node.scriptFile!.outputs).toEqual(outputs);
 
       // Verify .ts file was created
-      const tsContent = await fs.readFile(join(pipelineDir, 'process-text.ts'), 'utf-8');
+      const tsContent = await fs.readFile(join(pipelineDir, 'src', 'process-text.ts'), 'utf-8');
       expect(tsContent).toContain('export async function execute');
       expect(tsContent).toContain('@input text: string');
       expect(tsContent).toContain('@output result: string');
@@ -408,7 +408,7 @@ import { localThing } from './local.js';
 
       await addScriptFileNode(pipelineDir, pipeline, 'Doubler', 'Doubles a value', [], [], customCode);
 
-      const written = await fs.readFile(join(pipelineDir, 'doubler.ts'), 'utf-8');
+      const written = await fs.readFile(join(pipelineDir, 'src', 'doubler.ts'), 'utf-8');
       expect(written).toBe(customCode);
     });
 
@@ -427,7 +427,7 @@ import { localThing } from './local.js';
       };
 
       const node = await addScriptFileNode(pipelineDir, pipeline, 'My Great Node', '', [], []);
-      expect(node.scriptFile!.file).toBe('my-great-node.ts');
+      expect(node.scriptFile!.file).toBe('src/my-great-node.ts');
     });
   });
 

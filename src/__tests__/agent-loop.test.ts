@@ -223,15 +223,134 @@ describe('Agent loop improvements', () => {
   });
 
   describe('parameter validation', () => {
-    it('should return error for tool calls with _parseError', async () => {
-      // The LLM returns a tool call with invalid JSON that will produce _parseError
+    // The agent mutates a single messages array in place across iterations, so
+    // jest's recorded mock.calls all alias the same (final) array. Snapshot the
+    // last message at call time to see what the model actually received.
+    let lastMessagePerCall: string[] = [];
+
+    beforeEach(() => {
+      lastMessagePerCall = [];
+    });
+
+    /** Queue the fake LLM's responses in order, recording each prompt as it lands. */
+    function respondWith(...contents: string[]) {
+      for (const content of contents) {
+        mockRunPrompt.mockImplementationOnce(async (messages: any[]) => {
+          lastMessagePerCall.push(messages[messages.length - 1]?.content ?? '');
+          return { content, usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 } };
+        });
+      }
+    }
+
+    /** The tool-result message the agent fed back on iteration 2. */
+    function toolResultSentToModel(): string {
+      return lastMessagePerCall[1] ?? '';
+    }
+
+    it('reports a JSON parse error back to the model instead of invoking the tool', async () => {
+      // Without this guard the parser's {_parseError, _raw} object is handed to
+      // the tool as its arguments, and the model sees an opaque crash
+      // (ERR_INVALID_ARG_TYPE) instead of something it can correct.
+      const handler = jest.fn();
+      registry.register(
+        { name: 'strict', description: 'x', parameters: { type: 'object', properties: {}, required: [] } },
+        handler
+      );
+
+      respondWith(
+        '<tool_call><name>strict</name><parameters>completely invalid json here!!!</parameters></tool_call>',
+        '<final_answer>Handled error</final_answer>'
+      );
+
+      const agent = new Agent(
+        { name: 'test', provider: 'anthropic', model: 'test-model', maxIterations: 5 },
+        registry
+      );
+      await agent.run('Bad params');
+
+      expect(handler).not.toHaveBeenCalled();
+      const sent = toolResultSentToModel();
+      expect(sent).toContain('Invalid parameters');
+      expect(sent).toContain('error');
+    });
+
+    it('rejects missing required parameters before the handler runs', async () => {
+      const handler = jest.fn().mockResolvedValue('should not happen');
+      registry.register(
+        {
+          name: 'needs_arg',
+          description: 'x',
+          parameters: {
+            type: 'object',
+            properties: { required_field: { type: 'string', description: 'r' } },
+            required: ['required_field']
+          }
+        },
+        handler
+      );
+
+      respondWith(
+        '<tool_call><name>needs_arg</name><parameters>{}</parameters></tool_call>',
+        '<final_answer>Handled</final_answer>'
+      );
+
+      const agent = new Agent(
+        { name: 'test', provider: 'anthropic', model: 'test-model', maxIterations: 5 },
+        registry
+      );
+      await agent.run('Missing required');
+
+      expect(handler).not.toHaveBeenCalled();
+      expect(toolResultSentToModel()).toContain('Parameter validation failed');
+    });
+
+    it('rejects wrong parameter types before the handler runs', async () => {
+      respondWith(
+        '<tool_call><name>add</name><parameters>{"a": "not-a-number", "b": 2}</parameters></tool_call>',
+        '<final_answer>Type error handled</final_answer>'
+      );
+
+      const agent = new Agent(
+        { name: 'test', provider: 'anthropic', model: 'test-model', maxIterations: 5 },
+        registry
+      );
+      await agent.run('Wrong types');
+
+      expect(toolResultSentToModel()).toContain('Parameter validation failed');
+    });
+
+    it('lets a well-formed call through untouched', async () => {
+      respondWith(
+        '<tool_call><name>add</name><parameters>{"a": 2, "b": 3}</parameters></tool_call>',
+        '<final_answer>5</final_answer>'
+      );
+
+      const agent = new Agent(
+        { name: 'test', provider: 'anthropic', model: 'test-model', maxIterations: 5 },
+        registry
+      );
+      await agent.run('Add them');
+
+      const sent = toolResultSentToModel();
+      expect(sent).not.toContain('validation failed');
+      expect(sent).toContain('5');
+    });
+  });
+
+  describe('tool calls vs final answer ordering', () => {
+    it('executes tool calls even when the same response also emits a final answer', async () => {
+      // Models sometimes emit both in one turn. Honouring the premature
+      // final_answer first drops the tool calls entirely and the agent answers
+      // from a guess instead of from the tool result.
       mockRunPrompt
         .mockResolvedValueOnce({
-          content: '<tool_call><name>echo</name><parameters>completely invalid json here!!!</parameters></tool_call>',
+          content:
+            '<tool_call><name>echo</name><parameters>{"message": "from the tool"}</parameters></tool_call>\n' +
+            '<final_answer>I guessed without looking</final_answer>',
           usage: { promptTokens: 10, completionTokens: 10, totalTokens: 20 }
         })
         .mockResolvedValueOnce({
-          content: '<final_answer>Handled error</final_answer>',
+          content: '<final_answer>Echo: from the tool</final_answer>',
           usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 }
         });
 
@@ -239,51 +358,45 @@ describe('Agent loop improvements', () => {
         { name: 'test', provider: 'anthropic', model: 'test-model', maxIterations: 5 },
         registry
       );
+      const result = await agent.run('Do it');
 
-      const result = await agent.run('Bad params');
-      expect(result.success).toBe(true);
-      // The tool call should still be recorded
+      // The tool ran, and the premature answer was not returned.
       expect(result.toolCalls).toHaveLength(1);
+      expect(result.toolCalls[0].name).toBe('echo');
+      expect(result.content).not.toContain('I guessed without looking');
+      expect(mockRunPrompt).toHaveBeenCalledTimes(2);
     });
 
-    it('should return error for missing required parameters', async () => {
-      mockRunPrompt
-        .mockResolvedValueOnce({
-          content: '<tool_call><name>echo</name><parameters>{}</parameters></tool_call>',
-          usage: { promptTokens: 10, completionTokens: 10, totalTokens: 20 }
-        })
-        .mockResolvedValueOnce({
-          content: '<final_answer>Handled</final_answer>',
-          usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 }
-        });
+    it('returns the final answer when there are no tool calls', async () => {
+      mockRunPrompt.mockResolvedValueOnce({
+        content: '<final_answer>All done</final_answer>',
+        usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 }
+      });
 
       const agent = new Agent(
         { name: 'test', provider: 'anthropic', model: 'test-model', maxIterations: 5 },
         registry
       );
+      const result = await agent.run('Just answer');
 
-      const result = await agent.run('Missing required');
-      expect(result.success).toBe(true);
+      expect(result.content).toBe('All done');
+      expect(result.toolCalls).toHaveLength(0);
+      expect(mockRunPrompt).toHaveBeenCalledTimes(1);
     });
 
-    it('should return error for wrong parameter types', async () => {
-      mockRunPrompt
-        .mockResolvedValueOnce({
-          content: '<tool_call><name>add</name><parameters>{"a": "not-a-number", "b": 2}</parameters></tool_call>',
-          usage: { promptTokens: 10, completionTokens: 10, totalTokens: 20 }
-        })
-        .mockResolvedValueOnce({
-          content: '<final_answer>Type error handled</final_answer>',
-          usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 }
-        });
+    it('treats a bare response with no tags as the final answer', async () => {
+      mockRunPrompt.mockResolvedValueOnce({
+        content: 'Just some prose with no tags at all.',
+        usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 }
+      });
 
       const agent = new Agent(
         { name: 'test', provider: 'anthropic', model: 'test-model', maxIterations: 5 },
         registry
       );
+      const result = await agent.run('Answer plainly');
 
-      const result = await agent.run('Wrong types');
-      expect(result.success).toBe(true);
+      expect(result.content).toBe('Just some prose with no tags at all.');
     });
   });
 

@@ -32,6 +32,22 @@ const mockLoadExtension = jest.fn();
 jest.mock('../extension-loader.js', () => ({
   discoverExtensions: (...args: any[]) => mockDiscoverExtensions(...args),
   loadExtension: (...args: any[]) => mockLoadExtension(...args),
+  // ExtensionManager.loadAll() calls the static ExtensionRegistry.toManifest()
+  // on each enabled entry, so the mocked module has to provide it.
+  ExtensionRegistry: {
+    toManifest: (entry: any) => ({
+      packageName: entry.packageName,
+      name: entry.name,
+      displayName: entry.displayName,
+      description: entry.description,
+      version: entry.version,
+      provides: entry.provides,
+      entryPoint: entry.entryPoint,
+      source: entry.source,
+      directory: entry.directory,
+      envDeclarations: entry.envDeclarations,
+    }),
+  },
   parseEnvFile: jest.requireActual('../extension-loader.js').parseEnvFile ?? ((content: string) => {
     const env: Record<string, string> = {};
     for (const line of content.split('\n')) {
@@ -70,12 +86,49 @@ function makeManifest(name: string, overrides?: Partial<ExtensionManifest>): Ext
   };
 }
 
+/**
+ * Minimal stand-in for ExtensionRegistry. loadAll() consumes getEnabled();
+ * enable/disable/hotInstall touch the rest.
+ */
+function makeFakeRegistry() {
+  const entries = new Map<string, any>();
+  return {
+    entries,
+    /** Seed the registry with manifests as if they were installed + enabled. */
+    seed(manifests: ExtensionManifest[], enabled = true) {
+      for (const m of manifests) {
+        entries.set(m.name, { ...m, enabled, registeredAt: '2024-01-01T00:00:00.000Z' });
+      }
+    },
+    getEnabled: () => [...entries.values()].filter(e => e.enabled),
+    get: (name: string) => entries.get(name),
+    getAll: () => [...entries.values()],
+    registerFromManifest: (manifest: ExtensionManifest, enabled: boolean) => {
+      entries.set(manifest.name, { ...manifest, enabled, registeredAt: '2024-01-01T00:00:00.000Z' });
+    },
+    setEnabled: (name: string, enabled: boolean) => {
+      const entry = entries.get(name);
+      if (entry) entry.enabled = enabled;
+    },
+    remove: (name: string) => entries.delete(name),
+    save: jest.fn().mockResolvedValue(undefined),
+    load: jest.fn().mockResolvedValue(undefined),
+  };
+}
+
 describe('ExtensionManager', () => {
   let manager: ExtensionManager;
+  let registry: ReturnType<typeof makeFakeRegistry>;
+
+  /** Register manifests as enabled entries so loadAll() picks them up. */
+  function givenInstalled(...manifests: ExtensionManifest[]) {
+    registry.seed(manifests);
+  }
 
   beforeEach(() => {
     jest.clearAllMocks();
-    manager = new ExtensionManager('/tmp/test-project', false);
+    registry = makeFakeRegistry();
+    manager = new ExtensionManager(registry as any, '/tmp/test-project', false);
   });
 
   afterEach(async () => {
@@ -94,7 +147,7 @@ describe('ExtensionManager', () => {
 
   describe('loadAll', () => {
     it('should return empty arrays when no extensions found', async () => {
-      mockDiscoverExtensions.mockResolvedValue([]);
+      givenInstalled();
 
       const result = await manager.loadAll();
       expect(result.loaded).toEqual([]);
@@ -105,7 +158,7 @@ describe('ExtensionManager', () => {
       const manifest = makeManifest('alpha');
       const activateFn = jest.fn();
 
-      mockDiscoverExtensions.mockResolvedValue([manifest]);
+      givenInstalled(manifest);
       mockLoadExtension.mockResolvedValue({
         manifest,
         module: { activate: activateFn },
@@ -120,7 +173,7 @@ describe('ExtensionManager', () => {
     it('should collect errors for failed extensions', async () => {
       const manifest = makeManifest('broken');
 
-      mockDiscoverExtensions.mockResolvedValue([manifest]);
+      givenInstalled(manifest);
       mockLoadExtension.mockRejectedValue(new Error('import failed'));
 
       const result = await manager.loadAll();
@@ -134,7 +187,7 @@ describe('ExtensionManager', () => {
       const good = makeManifest('good');
       const bad = makeManifest('bad');
 
-      mockDiscoverExtensions.mockResolvedValue([good, bad]);
+      givenInstalled(good, bad);
       mockLoadExtension
         .mockResolvedValueOnce({ manifest: good, module: { activate: jest.fn() } })
         .mockRejectedValueOnce(new Error('bad module'));
@@ -156,7 +209,7 @@ describe('ExtensionManager', () => {
       };
       const toolHandler = jest.fn();
 
-      mockDiscoverExtensions.mockResolvedValue([manifest]);
+      givenInstalled(manifest);
       mockLoadExtension.mockResolvedValue({
         manifest,
         module: {
@@ -177,7 +230,7 @@ describe('ExtensionManager', () => {
       const m1 = makeManifest('ext1');
       const m2 = makeManifest('ext2');
 
-      mockDiscoverExtensions.mockResolvedValue([m1, m2]);
+      givenInstalled(m1, m2);
       mockLoadExtension
         .mockResolvedValueOnce({
           manifest: m1,
@@ -214,7 +267,7 @@ describe('ExtensionManager', () => {
     it('should aggregate commands via getAllCommands()', async () => {
       const manifest = makeManifest('cmdext');
 
-      mockDiscoverExtensions.mockResolvedValue([manifest]);
+      givenInstalled(manifest);
       mockLoadExtension.mockResolvedValue({
         manifest,
         module: {
@@ -241,7 +294,7 @@ describe('ExtensionManager', () => {
       const manifest = makeManifest('cmdext2');
       const innerHandler = jest.fn();
 
-      mockDiscoverExtensions.mockResolvedValue([manifest]);
+      givenInstalled(manifest);
       mockLoadExtension.mockResolvedValue({
         manifest,
         module: {
@@ -284,7 +337,7 @@ describe('ExtensionManager', () => {
     it('should aggregate prompt sections via getAllPromptSections()', async () => {
       const manifest = makeManifest('promptext');
 
-      mockDiscoverExtensions.mockResolvedValue([manifest]);
+      givenInstalled(manifest);
       mockLoadExtension.mockResolvedValue({
         manifest,
         module: {
@@ -308,7 +361,7 @@ describe('ExtensionManager', () => {
       const manifest = makeManifest('wdext');
       let capturedWd = '';
 
-      mockDiscoverExtensions.mockResolvedValue([manifest]);
+      givenInstalled(manifest);
       mockLoadExtension.mockResolvedValue({
         manifest,
         module: {
@@ -328,7 +381,7 @@ describe('ExtensionManager', () => {
       const manifest = makeManifest('logext');
       let hasLog = false;
 
-      mockDiscoverExtensions.mockResolvedValue([manifest]);
+      givenInstalled(manifest);
       mockLoadExtension.mockResolvedValue({
         manifest,
         module: {
@@ -352,7 +405,7 @@ describe('ExtensionManager', () => {
       const manifest = makeManifest('bridgeext');
       let hasBridge = false;
 
-      mockDiscoverExtensions.mockResolvedValue([manifest]);
+      givenInstalled(manifest);
       mockLoadExtension.mockResolvedValue({
         manifest,
         module: {
@@ -374,7 +427,7 @@ describe('ExtensionManager', () => {
       const manifest = makeManifest('deactext');
       const deactivateFn = jest.fn();
 
-      mockDiscoverExtensions.mockResolvedValue([manifest]);
+      givenInstalled(manifest);
       mockLoadExtension.mockResolvedValue({
         manifest,
         module: {
@@ -398,7 +451,7 @@ describe('ExtensionManager', () => {
     it('should remove the extension from all aggregation methods', async () => {
       const manifest = makeManifest('removeext');
 
-      mockDiscoverExtensions.mockResolvedValue([manifest]);
+      givenInstalled(manifest);
       mockLoadExtension.mockResolvedValue({
         manifest,
         module: {
@@ -436,7 +489,7 @@ describe('ExtensionManager', () => {
       const deact1 = jest.fn();
       const deact2 = jest.fn();
 
-      mockDiscoverExtensions.mockResolvedValue([m1, m2]);
+      givenInstalled(m1, m2);
       mockLoadExtension
         .mockResolvedValueOnce({
           manifest: m1,
@@ -465,7 +518,7 @@ describe('ExtensionManager', () => {
         source: 'npm',
       });
 
-      mockDiscoverExtensions.mockResolvedValue([manifest]);
+      givenInstalled(manifest);
       mockLoadExtension.mockResolvedValue({
         manifest,
         module: {
@@ -512,7 +565,7 @@ describe('ExtensionManager', () => {
     it('should return true after loading an extension', async () => {
       const manifest = makeManifest('hasext');
 
-      mockDiscoverExtensions.mockResolvedValue([manifest]);
+      givenInstalled(manifest);
       mockLoadExtension.mockResolvedValue({
         manifest,
         module: { activate: jest.fn() },
@@ -525,7 +578,7 @@ describe('ExtensionManager', () => {
     it('should return false after deactivating all', async () => {
       const manifest = makeManifest('hasext2');
 
-      mockDiscoverExtensions.mockResolvedValue([manifest]);
+      givenInstalled(manifest);
       mockLoadExtension.mockResolvedValue({
         manifest,
         module: { activate: jest.fn() },
@@ -542,7 +595,7 @@ describe('ExtensionManager', () => {
       const manifest = makeManifest('noenv');
       let capturedEnv: any;
 
-      mockDiscoverExtensions.mockResolvedValue([manifest]);
+      givenInstalled(manifest);
       mockLoadExtension.mockResolvedValue({
         manifest,
         module: {
@@ -567,7 +620,7 @@ describe('ExtensionManager', () => {
       const manifest = makeManifest('envext', { directory: tmpDir });
       let capturedEnv: any;
 
-      mockDiscoverExtensions.mockResolvedValue([manifest]);
+      givenInstalled(manifest);
       mockLoadExtension.mockResolvedValue({
         manifest,
         module: {
@@ -600,7 +653,7 @@ describe('ExtensionManager', () => {
 
       let envA: any, envB: any;
 
-      mockDiscoverExtensions.mockResolvedValue([mA, mB]);
+      givenInstalled(mA, mB);
       mockLoadExtension
         .mockResolvedValueOnce({
           manifest: mA,
@@ -641,7 +694,7 @@ describe('ExtensionManager', () => {
 
       const warnSpy = jest.spyOn(console, 'warn').mockImplementation();
 
-      mockDiscoverExtensions.mockResolvedValue([manifest]);
+      givenInstalled(manifest);
       mockLoadExtension.mockResolvedValue({
         manifest,
         module: { activate: jest.fn() },
@@ -669,7 +722,7 @@ describe('ExtensionManager', () => {
 
       const warnSpy = jest.spyOn(console, 'warn').mockImplementation();
 
-      mockDiscoverExtensions.mockResolvedValue([manifest]);
+      givenInstalled(manifest);
       mockLoadExtension.mockResolvedValue({
         manifest,
         module: { activate: jest.fn() },
@@ -700,7 +753,7 @@ describe('ExtensionManager', () => {
       const tmpDir = await fsPromises.mkdtemp(join(require('node:os').tmpdir(), 'wb-webui-'));
       await fsPromises.writeFile(join(tmpDir, 'index.html'), '<h1>Test</h1>');
 
-      mockDiscoverExtensions.mockResolvedValue([manifest]);
+      givenInstalled(manifest);
       mockLoadExtension.mockResolvedValue({
         manifest,
         module: {
@@ -739,7 +792,7 @@ describe('ExtensionManager', () => {
       const tmpDir = await fsPromises.mkdtemp(join(require('node:os').tmpdir(), 'wb-webui2-'));
       await fsPromises.writeFile(join(tmpDir, 'index.html'), '<h1>Test2</h1>');
 
-      mockDiscoverExtensions.mockResolvedValue([manifest]);
+      givenInstalled(manifest);
       mockLoadExtension.mockResolvedValue({
         manifest,
         module: {
@@ -769,7 +822,7 @@ describe('ExtensionManager', () => {
       const tmpDir = await fsPromises.mkdtemp(join(require('node:os').tmpdir(), 'wb-webui3-'));
       await fsPromises.writeFile(join(tmpDir, 'index.html'), '<h1>Test3</h1>');
 
-      mockDiscoverExtensions.mockResolvedValue([manifest]);
+      givenInstalled(manifest);
       mockLoadExtension.mockResolvedValue({
         manifest,
         module: {
